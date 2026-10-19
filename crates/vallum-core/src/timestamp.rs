@@ -102,23 +102,6 @@ impl Tai64n {
     pub fn unix_seconds(&self) -> u64 {
         self.seconds().wrapping_sub(TAI64_OFFSET)
     }
-
-    /// The current time, from the host clock.
-    ///
-    /// This is the one place in `vallum-core` that reads a clock. It exists so
-    /// the daemon has something to put in `InitHello`; every test drives the
-    /// timestamps explicitly instead.
-    ///
-    /// # Errors
-    ///
-    /// [`TimestampError::Clock`] if the host clock is before the Unix epoch,
-    /// where there is no sensible stamp to send.
-    pub fn now() -> Result<Self, TimestampError> {
-        let elapsed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| TimestampError::Clock)?;
-        Ok(Self::from_unix(elapsed.as_secs(), elapsed.subsec_nanos()))
-    }
 }
 
 impl fmt::Display for Tai64n {
@@ -133,15 +116,12 @@ pub enum TimestampError {
     /// The stamp is not newer than the newest one already committed — almost
     /// certainly a replayed handshake.
     Stale,
-    /// The host clock could not produce a timestamp.
-    Clock,
 }
 
 impl fmt::Display for TimestampError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stale => f.write_str("TimestampError: timestamp is not newer than the last one"),
-            Self::Clock => f.write_str("TimestampError: host clock is unusable"),
         }
     }
 }

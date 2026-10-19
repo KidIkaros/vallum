@@ -40,6 +40,12 @@ pub const PROTOCOL_VERSION: u8 = 0x01;
 /// Length of a handshake header, in bytes.
 pub const HEADER_LEN: usize = 8;
 
+/// Length of one TLV field header, in bytes: a 16-bit tag and a 16-bit length.
+///
+/// The same header prefixes every field, including `COUNTER` and `DATA_CT` in a
+/// data message, which is why the daemon's `DATA_OVERHEAD` is derived from it.
+pub const FIELD_HEADER_LEN: usize = 4;
+
 /// Hard cap on a single handshake message, in bytes.
 ///
 /// The largest message the default tri-hybrid suite produces is well under this

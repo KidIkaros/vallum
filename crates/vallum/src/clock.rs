@@ -60,11 +60,16 @@ impl TimeSource for SystemClock {
     }
 
     fn wall(&self) -> Tai64n {
-        // The host clock is the only source of a `Tai64n` in the daemon. If it
-        // is before the Unix epoch there is no sensible stamp; sending `ZERO`
+        // The host clock is the only source of a `Tai64n` in the daemon, and it
+        // lives here rather than in `vallum-core`: the protocol takes a
+        // caller-supplied stamp, so the inner circle stays clock-free. If the
+        // clock is before the Unix epoch there is no sensible stamp; `ZERO`
         // makes the peer see a stale timestamp and refuse the handshake, which
         // is the correct outcome and is visible in the log rather than silent.
-        Tai64n::now().unwrap_or(Tai64n::ZERO)
+        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(elapsed) => Tai64n::from_unix(elapsed.as_secs(), elapsed.subsec_nanos()),
+            Err(_) => Tai64n::ZERO,
+        }
     }
 }
 

@@ -541,3 +541,35 @@ pub mod mock {
         (parts, handle)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::DATA_OVERHEAD;
+    use vallum_core::keys::COUNTER_SIZE;
+    use vallum_core::wire::{FIELD_HEADER_LEN, HEADER_LEN};
+    use vallum_core::PAYLOAD_LEN_SIZE;
+    use vallum_crypto::CryptoSuite;
+    use vallum_crypto_sdk::SdkSuite;
+
+    #[test]
+    fn the_data_overhead_is_the_protocols_own_arithmetic() {
+        // A data message is: the 8-byte message header, a COUNTER field (4-byte
+        // TLV header + 8-byte counter), a DATA_CT field (4-byte TLV header + a
+        // 2-byte payload length + the payload + the AEAD tag). The adapter's
+        // constant must equal that sum for every shipped suite, so a change to
+        // the tag size or counter width cannot drift silently.
+        for id in [0x0001u16, 0x0002, 0x0003] {
+            let Ok(suite) = SdkSuite::from_id(id) else {
+                continue;
+            };
+            let expected = HEADER_LEN
+                + FIELD_HEADER_LEN
+                + COUNTER_SIZE
+                + FIELD_HEADER_LEN
+                + PAYLOAD_LEN_SIZE
+                + suite.sizes().aead_tag;
+            assert_eq!(DATA_OVERHEAD, expected, "suite {id:#06x}");
+        }
+    }
+}
