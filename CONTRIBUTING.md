@@ -39,4 +39,11 @@ Protocol changes also need the relevant proof artefact and, for the PSK path,
 ## Commits and reviews
 
 Keep commits focused and explain the *why*. The private repository uses
-`main`; CI must be green and branch protection requires the checks.
+`main`; CI must be green.
+
+Branch protection is a GitHub Pro feature for private repositories, so this
+repository relies on the same required checks running on every push and pull
+request. If the repository is upgraded or made public, require `test (stable)`,
+`test (1.95.0)`, `end-to-end (two namespaces, real kernel)`,
+`advisories and supply chain`, and `macOS check (protocol crates)`, and block
+force pushes.
