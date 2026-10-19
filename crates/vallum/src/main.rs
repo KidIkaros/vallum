@@ -197,6 +197,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             parts,
             socket,
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
+            budget: resolved.outer_budget,
         },
         &mut rng,
         log,

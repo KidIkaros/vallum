@@ -72,7 +72,7 @@ secondary.
 The budget is therefore stated as a datagram size, not as a message size:
 
 ```text
-1500  path MTU we assume, as the whole product does
+1500  path MTU we assume by default (configurable since H6, see mtu.md)
  - 40  IPv6 header (the worst case; IPv4 has 20 bytes of slack)
  -  8  UDP header
 =1452  MAX_OUTER_DATAGRAM, the largest UDP payload Vallum puts on the wire
@@ -308,12 +308,11 @@ new dependency and no new configuration.
    and nothing should — the layer above (handshake retransmission, or the inner
    transport's own loss recovery) is the right place for that, and duplicating it
    here would fight it.
-2. **No path MTU discovery.** The budget assumes a 1500-byte path, exactly as the
-   inner-MTU policy does. On a narrower *outer* path the handshake now takes 2
-   datagrams instead of 2 IP fragments — which is still the fix, since both have
-   UDP headers — but a full-size data message there is still one datagram the
-   kernel must fragment, or drop. Discovering and honouring a smaller outer path
-   is a separate feature, and it needs the MTU feedback P6.4 does not have.
+2. **No path MTU discovery.** The budget assumed a 1500-byte path, exactly as the
+   inner-MTU policy did. H6 makes it configurable (`interface.outer_mtu`), so a
+   narrower path is honoured rather than fragmented — but the operator states it;
+   nothing probes. See [`mtu.md`](mtu.md). Discovery remains a separate feature,
+   and it needs the MTU feedback P6.4 does not have.
 3. **No authenticity in the envelope.** It is framing, not a security boundary. A
    fragment carries no MAC; the message it delivers is checked by the same code
    that checks a whole one. An attacker who can inject fragments can waste a slot

@@ -611,5 +611,63 @@ grep -q "tunnel down:" "$A_LOG" || bad "A did not shut down cleanly"
 grep -q "tunnel down:" "$B_LOG" || bad "B did not shut down cleanly"
 ok "both daemons logged their counters as they stopped"
 
+# ── a narrow outer path ──────────────────────────────────────────────
+#
+# Everything above ran at the default 1500-byte assumption. This restates the
+# same two daemons on a 1000-byte path (PPPoE-sized) and proves the kernel still
+# sees no fragment and the tunnel still carries a packet. The budget is a
+# startup property, so this is a second lifecycle rather than a live change.
+
+say "restarting on a 1000-byte outer path (outer_mtu = 1000)"
+sed -i '/^listen = /a outer_mtu = 1000' "$WORK/a.toml" "$WORK/b.toml"
+grep -q '^outer_mtu = 1000$' "$WORK/a.toml" || bad "the narrow config was not written"
+
+FRAG_A_NARROW_BEFORE=$(snmp_here FragCreates)
+FRAG_B_NARROW_BEFORE=$(snmp_ns2 FragCreates)
+
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
+B_JOB=$!
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
+A_JOB=$!
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the narrow path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s on the narrow path"
+    fi
+    sleep 0.1
+done
+
+if ping -c2 -W5 -i0.3 -q -s 700 "$INNER_B"; then
+    ok "a 728-byte inner packet crossed a 952-byte outer budget"
+else
+    bad "the narrow path did not carry traffic"
+fi
+
+FRAG_A_NARROW=$(snmp_here FragCreates)
+FRAG_B_NARROW=$(snmp_ns2 FragCreates)
+if [ "$((FRAG_A_NARROW - FRAG_A_NARROW_BEFORE))" -ne 0 ] \
+    || [ "$((FRAG_B_NARROW - FRAG_B_NARROW_BEFORE))" -ne 0 ]; then
+    bad "the kernel fragmented on the narrow path"
+fi
+ok "no IP fragment was created on the narrow path either"
+
+say "shutting the narrow-path daemons down"
+kill_pidfile "$A_PIDFILE"
+kill_pidfile "$B_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the narrow path"
+wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the narrow path"
+ok "the narrow-path daemons exited on SIGTERM"
+
 printf '\n== PASS\n'
 INNER

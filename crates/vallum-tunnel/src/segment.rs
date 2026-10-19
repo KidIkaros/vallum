@@ -78,6 +78,8 @@ pub struct Segments {
     table: Vec<Partial>,
     dropped: u64,
     reassembled: u64,
+    /// The largest UDP payload this path carries, in bytes.
+    budget: usize,
 }
 
 impl Default for Segments {
@@ -90,10 +92,32 @@ impl Segments {
     /// An empty segmenter for a 1500-byte outer path.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_budget(MAX_OUTER_DATAGRAM)
+    }
+
+    /// An empty segmenter for a path whose largest UDP payload is `budget`.
+    ///
+    /// `budget` is `path_mtu - 48` (IPv6 header + UDP header). The default is
+    /// [`MAX_OUTER_DATAGRAM`]; a narrower path passes less. The receiver does not
+    /// need to know it: the envelope carries explicit offsets.
+    ///
+    /// # Panics
+    ///
+    /// If `budget` is outside `FRAGMENT_HEADER_LEN + 1 ..= MAX_OUTER_DATAGRAM`.
+    /// A budget that cannot carry an envelope is a construction bug, like an
+    /// empty shaping machine — the config validates it before this is reached,
+    /// and silently clamping would hide the one value the caller got wrong.
+    #[must_use]
+    pub fn with_budget(budget: usize) -> Self {
+        assert!(
+            (vallum_core::segment::FRAGMENT_HEADER_LEN + 1..=MAX_OUTER_DATAGRAM).contains(&budget),
+            "fragment budget {budget} cannot carry an envelope"
+        );
         Self {
             table: Vec::with_capacity(MAX_REASSEMBLIES),
             dropped: 0,
             reassembled: 0,
+            budget,
         }
     }
 
@@ -103,7 +127,7 @@ impl Segments {
     /// cut into fragments no larger than it.
     #[must_use]
     pub fn budget(&self) -> usize {
-        MAX_OUTER_DATAGRAM
+        self.budget
     }
 
     /// Fragments refused, and half-assembled messages abandoned.
@@ -148,7 +172,7 @@ impl Segments {
         message: Vec<u8>,
         rng: &mut R,
     ) -> Vec<Vec<u8>> {
-        if message.len() <= MAX_OUTER_DATAGRAM {
+        if message.len() <= self.budget {
             return vec![message];
         }
 
@@ -156,7 +180,7 @@ impl Segments {
         rng.fill(&mut id_bytes);
         let message_id = u32::from_be_bytes(id_bytes);
 
-        match segment::split(message_id, &message) {
+        match segment::split_with_budget(message_id, &message, self.budget) {
             Ok(datagrams) => datagrams,
             Err(_) => {
                 self.dropped += 1;
@@ -546,5 +570,39 @@ mod tests {
             .outbound(message(MAX_HANDSHAKE_MESSAGE + 1), &mut Counting(0))
             .is_empty());
         assert_eq!(segments.dropped(), 1);
+    }
+
+    #[test]
+    fn a_narrow_budget_is_honoured_on_the_way_out() {
+        // A 1000-byte path: every datagram must fit it, including the ones that
+        // would have been whole at the default budget.
+        let mut segments = Segments::with_budget(1_000);
+        assert_eq!(segments.budget(), 1_000);
+
+        let datagrams = segments.outbound(message(1_200), &mut Counting(0));
+        assert!(datagrams.len() > 1, "a 1200-byte message must be cut");
+        for datagram in &datagrams {
+            assert!(
+                datagram.len() <= 1_000,
+                "a datagram exceeded the narrow budget: {}",
+                datagram.len()
+            );
+        }
+
+        // And the receiver, which does not know the budget, still reassembles it.
+        let mut receiver = Segments::new();
+        let mut whole = None;
+        for datagram in datagrams {
+            if let Some(message) = receiver.inbound(0, "10.0.0.1:1".parse().unwrap(), datagram) {
+                whole = Some(message);
+            }
+        }
+        assert_eq!(whole, Some(message(1_200)));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot carry an envelope")]
+    fn a_budget_too_small_for_the_envelope_is_a_construction_bug() {
+        let _ = Segments::with_budget(vallum_core::segment::FRAGMENT_HEADER_LEN);
     }
 }

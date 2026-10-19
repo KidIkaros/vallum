@@ -70,9 +70,21 @@ impl UdpTransport {
     ///
     /// If the address is in use, or cannot be bound.
     pub fn bind(address: SocketAddr) -> io::Result<Self> {
-        Ok(Self {
-            socket: UdpSocket::bind(address)?,
-        })
+        let socket = UdpSocket::bind(address)?;
+        // On a v6 path, ask the kernel to report an oversize datagram instead of
+        // fragmenting it. Best effort: a kernel that refuses the option is not a
+        // reason to refuse to run, and the `outer_mtu` knob already bounds what
+        // is emitted. IPv4 has no safe equivalent in `nix`; the knob is the
+        // control there.
+        #[cfg(target_os = "linux")]
+        if address.is_ipv6() {
+            let _ = nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6DontFrag,
+                &true,
+            );
+        }
+        Ok(Self { socket })
     }
 }
 

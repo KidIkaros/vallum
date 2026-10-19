@@ -251,10 +251,22 @@ fn launch(
 ) -> Host {
     let key_path = dir.join(format!("{}.key", prepared.name));
     let text = config_text(&prepared.name, &key_path, address, listen, level, peers);
+    launch_from_text(dir, net, prepared, text, listen)
+}
+
+/// As [`launch`], from a config the test wrote itself.
+fn launch_from_text(
+    dir: &Path,
+    net: &MemoryNetwork,
+    prepared: &Prepared,
+    text: String,
+    listen: SocketAddr,
+) -> Host {
     let resolved = resolve_text(dir, &prepared.name, &text).expect("the config must resolve");
     for warning in &resolved.warnings {
         eprintln!("config warning: {warning}");
     }
+    let level = resolved.level;
 
     let clock = Arc::new(MockClock::new());
     clock.set(0, WALL_SECS, 0);
@@ -290,6 +302,7 @@ fn launch(
                     parts,
                     socket,
                     clock: thread_clock as Arc<dyn TimeSource>,
+                    budget: resolved.outer_budget,
                 },
                 &mut rng,
                 Logger::new(level),
@@ -392,6 +405,61 @@ fn two_daemons_establish_and_carry_traffic_both_ways() {
         stats_b.reassembled >= 1,
         "B assembled no message, so A sent no fragments: {stats_b:?}"
     );
+}
+
+#[test]
+fn a_narrow_outer_mtu_carries_the_handshake_and_segments_data() {
+    // The same two daemons on a path the config says is 1000 bytes: the budget
+    // is 952, the derived inner MTU is 894, and a 900-byte payload therefore
+    // crosses as two fragments. This is the wiring from `interface.outer_mtu`
+    // through `Resolved` into the segmenter, which no unit test covers end to
+    // end.
+    let dir = TempDir::new("narrow");
+    let net = MemoryNetwork::new();
+    let a = prepare(dir.path(), "a", A_SEED);
+    let b = prepare(dir.path(), "b", B_SEED);
+    let peers_a = peer_entry("b", &b.public, Some(socket_address(B_EP)), &["10.7.0.2/32"]);
+    let peers_b = peer_entry("a", &a.public, None, &["10.7.0.1/32"]);
+
+    let narrow = |text: String| text.replace("[interface]", "[interface]\nouter_mtu = 1000");
+    let key_a = dir.path().join("a.key");
+    let key_b = dir.path().join("b.key");
+    let text_a = narrow(config_text(
+        "a",
+        &key_a,
+        &format!("{A_IP}/24"),
+        socket_address(A_EP),
+        Level::Warn,
+        &peers_a,
+    ));
+    let text_b = narrow(config_text(
+        "b",
+        &key_b,
+        &format!("{B_IP}/24"),
+        socket_address(B_EP),
+        Level::Warn,
+        &peers_b,
+    ));
+
+    let mut host_a = launch_from_text(dir.path(), &net, &a, text_a, socket_address(A_EP));
+    let mut host_b = launch_from_text(dir.path(), &net, &b, text_b, socket_address(B_EP));
+
+    let packet = a_packet(A_IP, B_IP, &[0x42u8; 900]);
+    host_a.send(packet.clone());
+    assert_eq!(
+        host_b
+            .receive(PATIENT)
+            .expect("the narrow path carried nothing"),
+        packet
+    );
+
+    let stats = host_a.stop();
+    assert!(stats.established >= 1, "no handshake: {stats:?}");
+    assert!(
+        stats.reassembled >= 1,
+        "the handshake was not segmented: {stats:?}"
+    );
+    host_b.stop();
 }
 
 #[test]

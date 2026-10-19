@@ -46,11 +46,19 @@ use vallum_tunnel::{IpNet, PeerConfig};
 use crate::error::Error;
 use crate::keys::{self, SecretFile};
 use crate::logging::Level;
-use crate::tun::{DEFAULT_MTU, MIN_MTU, SAFE_MTU_IPV6_OUTER};
+use crate::tun::{DATA_OVERHEAD, DEFAULT_MTU, MIN_MTU};
+use vallum_core::segment::MAX_OUTER_DATAGRAM;
 
 /// The port a Vallum daemon listens on unless told otherwise. The same number
 /// WireGuard chose, so a firewall rule is memorable rather than arbitrary.
 pub const DEFAULT_PORT: u16 = 51820;
+
+/// What an outer path spends before the UDP payload: an IPv6 header (40) and a
+/// UDP header (8). The same arithmetic [`MAX_OUTER_DATAGRAM`] is built on.
+pub const OUTER_HEADER_LEN: u16 = 48;
+
+/// The outer MTU assumed when the operator does not name one.
+pub const DEFAULT_OUTER_MTU: u16 = 1500;
 
 /// A parsed configuration file.
 #[derive(Debug, Deserialize)]
@@ -89,6 +97,16 @@ pub struct Interface {
     /// The UDP address to listen on.
     #[serde(default)]
     pub listen: Option<String>,
+    /// The outer path's MTU. Defaults to 1500.
+    ///
+    /// This is how a narrower path — PPPoE at 1492, an IPsec tunnel at 1400 — is
+    /// supported: every datagram is cut to `outer_mtu - 48` so the kernel is
+    /// never asked to fragment. It does **not** discover anything; the operator
+    /// states the path. Values above 1500 are refused, because the protocol's
+    /// parse cap and the segmentation budget are both built on
+    /// [`MAX_OUTER_DATAGRAM`].
+    #[serde(default)]
+    pub outer_mtu: Option<u16>,
     /// The user to become after the interface and socket are open.
     ///
     /// Absent means "keep the privileges the process started with", which is
@@ -211,6 +229,8 @@ pub struct Resolved {
     /// Who to become after the privileged setup. `None` keeps the process as it
     /// started.
     pub privileges: Option<crate::privileges::Privileges>,
+    /// The largest UDP payload the outer path can carry: `outer_mtu - 48`.
+    pub outer_budget: usize,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -227,6 +247,7 @@ impl std::fmt::Debug for Resolved {
             .field("level", &self.level)
             .field("warnings", &self.warnings)
             .field("privileges", &self.privileges)
+            .field("outer_budget", &self.outer_budget)
             .finish_non_exhaustive()
     }
 }
@@ -298,27 +319,77 @@ impl Config {
             None => SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
         };
 
-        let mtu = self.interface.mtu.unwrap_or(DEFAULT_MTU);
-        // An explicit `0` used to be silently replaced by the default, which is
-        // the kind of quiet coercion this config refuses everywhere else: the
-        // operator asked for something incoherent and got a working tunnel with
-        // a different MTU than the file says. Below IPv4's minimum reassembly
-        // buffer the request is incoherent too.
-        if mtu < MIN_MTU {
+        // The outer path's budget. 1500 is the assumption the product was built
+        // on; a narrower path names its MTU here and every datagram is cut to
+        // fit, so the kernel is never asked to fragment one.
+        let outer_mtu = self.interface.outer_mtu.unwrap_or(DEFAULT_OUTER_MTU);
+        let budget = usize::from(outer_mtu)
+            .checked_sub(usize::from(OUTER_HEADER_LEN))
+            .ok_or_else(|| Error::Invalid {
+                path: path.to_path_buf(),
+                what: format!(
+                    "interface.outer_mtu {outer_mtu} is below the {OUTER_HEADER_LEN}-byte \
+                     outer header"
+                ),
+            })?;
+        // A budget must still hold the smallest legal inner packet plus the data
+        // plane's overhead, or no configuration could work on this path.
+        let minimum_budget = usize::from(MIN_MTU) + DATA_OVERHEAD;
+        if budget < minimum_budget {
             return Err(Error::Invalid {
                 path: path.to_path_buf(),
                 what: format!(
-                    "interface.mtu {mtu} is below the IPv4 minimum of {MIN_MTU} bytes; \
-                     omit it for the default {DEFAULT_MTU}"
+                    "interface.outer_mtu {outer_mtu} leaves a {budget}-byte budget, but the \
+                     smallest inner MTU ({MIN_MTU}) plus the {DATA_OVERHEAD}-byte data \
+                     overhead needs {minimum_budget}; use an outer_mtu of at least {}",
+                    minimum_budget + usize::from(OUTER_HEADER_LEN)
                 ),
             });
         }
-        if mtu > SAFE_MTU_IPV6_OUTER {
-            warnings.push(format!(
-                "interface.mtu {mtu} is above {SAFE_MTU_IPV6_OUTER}: an inner packet \
-                 will not fit a 1500-byte IPv6 outer path and will be fragmented"
-            ));
+        if budget > MAX_OUTER_DATAGRAM {
+            return Err(Error::Invalid {
+                path: path.to_path_buf(),
+                what: format!(
+                    "interface.outer_mtu {outer_mtu} is above {DEFAULT_OUTER_MTU}: the \
+                     protocol's {MAX_OUTER_DATAGRAM}-byte budget and parse cap assume a \
+                     1500-byte path, and this knob adapts downward only"
+                ),
+            });
         }
+
+        // The inner MTU: explicit, or derived so a data packet still fits one
+        // datagram on this path.
+        let mtu = match self.interface.mtu {
+            Some(mtu) => {
+                // An explicit `0` used to be silently replaced by the default,
+                // which is the kind of quiet coercion this config refuses
+                // everywhere else: the operator asked for something incoherent
+                // and got a working tunnel with a different MTU than the file
+                // says. Below IPv4's minimum reassembly buffer the request is
+                // incoherent too.
+                if mtu < MIN_MTU {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "interface.mtu {mtu} is below the IPv4 minimum of {MIN_MTU} \
+                             bytes; omit it for the default {DEFAULT_MTU}"
+                        ),
+                    });
+                }
+                if usize::from(mtu) + DATA_OVERHEAD > budget {
+                    warnings.push(format!(
+                        "interface.mtu {mtu} plus the {DATA_OVERHEAD}-byte data overhead \
+                         exceeds the {budget}-byte outer budget: data packets will be \
+                         segmented (and still correct, but no longer one datagram each)"
+                    ));
+                }
+                mtu
+            }
+            None => {
+                let fits = u16::try_from(budget - DATA_OVERHEAD).unwrap_or(DEFAULT_MTU);
+                fits.min(DEFAULT_MTU)
+            }
+        };
 
         // Read the key file before anything else: it is the one thing whose
         // absence makes every other check pointless. A relative path is taken
@@ -490,6 +561,7 @@ impl Config {
             level,
             warnings,
             privileges,
+            outer_budget: budget,
         })
     }
 }

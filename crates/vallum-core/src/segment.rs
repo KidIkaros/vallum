@@ -193,15 +193,44 @@ pub fn parse(datagram: &[u8]) -> Result<(Fragment, &[u8]), HandshakeError> {
 
 /// Cut a message into fragment datagrams, each at most [`MAX_OUTER_DATAGRAM`].
 ///
-/// `message_id` is the caller's, because the caller is what knows whether two
-/// calls carry the same message (a retransmission) or different ones.
+/// The fixed-budget form; [`split_with_budget`] is what a path narrower than
+/// 1500 needs.
+///
+/// # Errors
+///
+/// As [`split_with_budget`].
+pub fn split(message_id: u32, message: &[u8]) -> Result<Vec<Vec<u8>>, HandshakeError> {
+    split_with_budget(message_id, message, MAX_OUTER_DATAGRAM)
+}
+
+/// Cut a message into fragment datagrams, each at most `budget` bytes.
+///
+/// `budget` is the largest UDP payload this path can carry, so it is
+/// `path_mtu - 48` (IPv6 header + UDP header). It defaults to
+/// [`MAX_OUTER_DATAGRAM`]; a narrower path — PPPoE at 1492, an IPsec tunnel at
+/// 1400 — passes a smaller one. The receiver does not need to know: offsets are
+/// explicit and the parse cap stays [`MAX_FRAGMENT_DATA`], which a smaller
+/// budget is always below.
 ///
 /// # Errors
 ///
 /// [`HandshakeError::Wire`] if `message` is empty or longer than
-/// [`MAX_HANDSHAKE_MESSAGE`]. A message that already fits makes exactly one
-/// fragment; callers that want it unfragmented should not call this at all.
-pub fn split(message_id: u32, message: &[u8]) -> Result<Vec<Vec<u8>>, HandshakeError> {
+/// [`MAX_HANDSHAKE_MESSAGE`], or if `budget` is outside
+/// `FRAGMENT_HEADER_LEN + 1 ..= MAX_OUTER_DATAGRAM`. A message that already fits
+/// makes exactly one fragment; callers that want it unfragmented should not call
+/// this at all.
+pub fn split_with_budget(
+    message_id: u32,
+    message: &[u8],
+    budget: usize,
+) -> Result<Vec<Vec<u8>>, HandshakeError> {
+    if !(FRAGMENT_HEADER_LEN + 1..=MAX_OUTER_DATAGRAM).contains(&budget) {
+        return Err(HandshakeError::Wire(format!(
+            "fragment budget {budget} is outside {}..={MAX_OUTER_DATAGRAM}",
+            FRAGMENT_HEADER_LEN + 1
+        )));
+    }
+    let fragment_data = budget - FRAGMENT_HEADER_LEN;
     if message.is_empty() {
         return Err(HandshakeError::Wire(
             "refusing to fragment an empty message".into(),
@@ -220,11 +249,11 @@ pub fn split(message_id: u32, message: &[u8]) -> Result<Vec<Vec<u8>>, HandshakeE
         )));
     };
 
-    let mut datagrams = Vec::with_capacity(message.len().div_ceil(MAX_FRAGMENT_DATA));
-    for (index, chunk) in message.chunks(MAX_FRAGMENT_DATA).enumerate() {
-        // `chunks` yields at most `ceil(total / MAX_FRAGMENT_DATA)`, so this is
+    let mut datagrams = Vec::with_capacity(message.len().div_ceil(fragment_data));
+    for (index, chunk) in message.chunks(fragment_data).enumerate() {
+        // `chunks` yields at most `ceil(total / fragment_data)`, so this is
         // below `total` and inside a `u16` for any message the cap admits.
-        let offset = u16::try_from(index * MAX_FRAGMENT_DATA).map_err(|_| {
+        let offset = u16::try_from(index * fragment_data).map_err(|_| {
             HandshakeError::Wire(format!("fragment {index} offset does not fit 16 bits"))
         })?;
         let fragment = Fragment {
@@ -371,5 +400,40 @@ mod tests {
             assert!(datagram.len() <= MAX_OUTER_DATAGRAM);
             parse(datagram).expect("every fragment we build parses");
         }
+    }
+
+    #[test]
+    fn a_smaller_budget_cuts_more_and_reassembles_the_same() {
+        let message = vec![0x5Au8; 3_000];
+        let narrow = split_with_budget(9, &message, 1_000).expect("a 1000-byte budget");
+        let wide = split(9, &message).expect("the default budget");
+
+        assert!(narrow.len() > wide.len(), "a narrower budget must cut more");
+        for datagram in &narrow {
+            assert!(
+                datagram.len() <= 1_000,
+                "a fragment exceeded the budget: {}",
+                datagram.len()
+            );
+            parse(datagram).expect("a narrow fragment still parses");
+        }
+
+        let mut out = vec![0u8; message.len()];
+        for datagram in narrow.iter().rev() {
+            let (head, data) = parse(datagram).expect("parse");
+            out[usize::from(head.offset)..usize::from(head.offset) + data.len()]
+                .copy_from_slice(data);
+        }
+        assert_eq!(out, message);
+    }
+
+    #[test]
+    fn a_budget_that_cannot_carry_an_envelope_is_refused() {
+        assert!(split_with_budget(1, &[1, 2, 3], FRAGMENT_HEADER_LEN).is_err());
+        assert!(split_with_budget(1, &[1, 2, 3], 0).is_err());
+        assert!(split_with_budget(1, &[1, 2, 3], MAX_OUTER_DATAGRAM + 1).is_err());
+        // The smallest legal budget carries one byte per fragment.
+        let datagrams = split_with_budget(1, &[1, 2, 3], FRAGMENT_HEADER_LEN + 1).expect("tiny");
+        assert_eq!(datagrams.len(), 3);
     }
 }

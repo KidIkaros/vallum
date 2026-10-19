@@ -33,6 +33,7 @@
 //! The count is advisory and can be wrong for one tick; it exists to make the
 //! device's own fail-closed behaviour engage, not to be a measurement.
 
+use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -166,6 +167,8 @@ pub struct Attached {
     pub socket: Arc<dyn DatagramSocket>,
     /// The two clocks.
     pub clock: Arc<dyn TimeSource>,
+    /// The largest UDP payload the outer path can carry (`outer_mtu - 48`).
+    pub budget: usize,
 }
 
 impl std::fmt::Debug for Attached {
@@ -206,6 +209,7 @@ pub fn run(
         parts,
         socket,
         clock,
+        budget,
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
@@ -213,7 +217,7 @@ pub fn run(
     // not fit a datagram into fragments, inbound it puts them back together, so
     // the device below only ever sees whole messages and nothing depends on IP
     // fragmentation to get a handshake across.
-    let mut segments = Segments::new();
+    let mut segments = Segments::with_budget(budget);
 
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
@@ -228,6 +232,10 @@ pub fn run(
 
     let mut writer = parts.writer;
     let tick = Duration::from_millis(policy.tick_ms);
+    // One warning per destination for a too-large datagram: the condition is a
+    // configuration mistake, not a per-packet event, and a log line per packet
+    // would bury it.
+    let mut mtu_warned: HashSet<SocketAddr> = HashSet::new();
 
     loop {
         if shutdown.is_triggered() {
@@ -270,7 +278,18 @@ pub fn run(
                             Ok(()) => stats.datagrams_sent += 1,
                             Err(error) => {
                                 stats.datagrams_failed += 1;
-                                log_debug!(log, "send to {destination} failed: {error}");
+                                if is_message_too_long(&error) {
+                                    if mtu_warned.insert(destination) {
+                                        log_warn!(
+                                            log,
+                                            "send to {destination} exceeded the path MTU; \
+                                             lower interface.outer_mtu (currently a \
+                                             {budget}-byte datagram budget)"
+                                        );
+                                    }
+                                } else {
+                                    log_debug!(log, "send to {destination} failed: {error}");
+                                }
                             }
                         }
                     }
@@ -312,6 +331,23 @@ pub fn run(
         stats.fragments_dropped,
     );
     Ok(stats)
+}
+
+/// Did the kernel refuse a datagram because it is larger than the path?
+///
+/// `EMSGSIZE` on a UDP send is the one error that means "the operator's
+/// `interface.outer_mtu` is larger than this path", so it gets its own warning
+/// rather than a debug line. On platforms without the Linux backend the check
+/// is false; the daemon is Linux-only this effort.
+#[cfg(target_os = "linux")]
+fn is_message_too_long(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(nix::errno::Errno::EMSGSIZE as i32)
+}
+
+/// See the Linux definition; no equivalent is claimed elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn is_message_too_long(_error: &io::Error) -> bool {
+    false
 }
 
 /// One thread reading the interface.
