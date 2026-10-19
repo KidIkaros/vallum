@@ -149,9 +149,9 @@ jobs:
         working-directory: vallum
         run: cargo build -p vallum
 
-      - name: Ensure the daemon is executable
+      - name: Stage the daemon for the netns gate
         working-directory: vallum
-        run: chmod +x target/debug/vallum
+        run: install -m 755 target/debug/vallum /tmp/vallum-e2e
 
       - name: Run the netns gate
         working-directory: vallum
@@ -159,7 +159,7 @@ jobs:
         # restrict unprivileged user namespaces (Ubuntu 24.04's AppArmor
         # default); there, the same script runs under sudo. A failure is never
         # skipped — it either passes one way or fails the job.
-        run: bash scripts/e2e-netns.sh || sudo -E bash scripts/e2e-netns.sh
+        run: bash scripts/e2e-netns.sh /tmp/vallum-e2e || sudo -E bash scripts/e2e-netns.sh /tmp/vallum-e2e
 
   audit:
     name: advisories and supply chain
