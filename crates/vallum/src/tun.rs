@@ -100,7 +100,7 @@ pub struct InterfaceSpec {
     /// command at all. Both families may be present: a dual-stack tunnel names
     /// one of each, and every address is assigned over netlink after the device
     /// exists.
-    pub addresses: Vec<ipnet::IpNet>,
+    pub addresses: Vec<vallum_tunnel::Prefix>,
     /// The inner MTU.
     pub mtu: u16,
 }
@@ -223,7 +223,7 @@ mod platform {
     /// Pure, so the layout is testable without `CAP_NET_ADMIN`: both bugs this
     /// gate found were here — the family and flags were hard-coded to IPv6, and
     /// `IFA_ADDRESS` was missing, which the v4 kernel rejects with `ERANGE`.
-    fn address_request(net: &ipnet::IpNet, index: u32) -> Vec<u8> {
+    fn address_request(net: &vallum_tunnel::Prefix, index: u32) -> Vec<u8> {
         use netlink_packet_core::{
             NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL,
             NLM_F_REQUEST,
@@ -233,7 +233,7 @@ mod platform {
         };
         use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 
-        let (family, address, flags) = match net {
+        let (family, address, flags) = match net.as_ipnet() {
             ipnet::IpNet::V4(net) => (
                 AddressFamily::Inet,
                 std::net::IpAddr::V4(net.addr()),
@@ -291,7 +291,7 @@ mod platform {
     /// normal prefix they are the same address, and the v4 kernel path requires
     /// the second (`ERANGE` otherwise). `IFA_F_NODAD` is set for IPv6 only —
     /// see the comment on `flags` below.
-    fn assign_address(name: &str, net: &ipnet::IpNet) -> io::Result<()> {
+    fn assign_address(name: &str, net: &vallum_tunnel::Prefix) -> io::Result<()> {
         use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
         use netlink_packet_route::RouteNetlinkMessage;
         use netlink_sys::{protocols::NETLINK_ROUTE, Socket};

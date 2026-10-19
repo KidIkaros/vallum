@@ -21,7 +21,7 @@ use std::time::Duration;
 use vallum_core::identity::PeerIdentity;
 use vallum_core::shaping::Machine;
 
-use crate::routing::{AllowedIps, IpNet};
+use crate::routing::{AllowedIps, Prefix};
 
 /// A handle to a configured peer.
 ///
@@ -62,11 +62,11 @@ impl fmt::Display for PeerId {
 /// use std::net::SocketAddr;
 /// use std::str::FromStr;
 /// use vallum_core::PeerIdentity;
-/// use vallum_tunnel::{IpNet, PeerConfig};
+/// use vallum_tunnel::{PeerConfig, Prefix};
 ///
 /// # fn peer_identity() -> PeerIdentity { unimplemented!() }
 /// let config = PeerConfig::new("laptop", peer_identity())
-///     .with_allowed_ips([IpNet::from_str("10.0.0.2/32").unwrap()])
+///     .with_allowed_ips(["10.0.0.2/32".parse::<Prefix>().unwrap()])
 ///     .with_endpoint(SocketAddr::from(([203, 0, 113, 7], 51820)));
 /// assert_eq!(config.name(), "laptop");
 /// ```
@@ -101,7 +101,7 @@ impl PeerConfig {
 
     /// The addresses this peer may send from and receive to.
     #[must_use]
-    pub fn with_allowed_ips(mut self, nets: impl IntoIterator<Item = IpNet>) -> Self {
+    pub fn with_allowed_ips(mut self, nets: impl IntoIterator<Item = Prefix>) -> Self {
         self.allowed_ips = AllowedIps::new(nets.into_iter().collect());
         self
     }

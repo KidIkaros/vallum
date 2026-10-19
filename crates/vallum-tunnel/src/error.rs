@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use crate::routing::IpNet;
+use crate::routing::Prefix;
 
 /// A configuration that cannot be honoured.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub enum ConfigError {
         /// The later peer, by name.
         second: String,
         /// The overlapping prefix.
-        network: IpNet,
+        network: Prefix,
     },
     /// The same peer identity was configured twice.
     DuplicatePeer {

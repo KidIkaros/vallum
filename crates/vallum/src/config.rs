@@ -41,7 +41,7 @@ use serde::Deserialize;
 use vallum_core::identity::StaticIdentity;
 use vallum_core::shaping::Machine;
 use vallum_crypto::CryptoSuite;
-use vallum_tunnel::{IpNet, PeerConfig};
+use vallum_tunnel::{PeerConfig, Prefix};
 
 use crate::error::Error;
 use crate::keys::{self, SecretFile};
@@ -236,7 +236,7 @@ pub struct Resolved {
     /// The interface name, or `None` to let the kernel pick.
     pub interface_name: Option<String>,
     /// The addresses to assign, in config order.
-    pub addresses: Vec<IpNet>,
+    pub addresses: Vec<Prefix>,
     /// The inner MTU.
     pub mtu: u16,
     /// The UDP address to bind.
@@ -329,7 +329,7 @@ impl Config {
         // `address` is the single-address shorthand; `addresses` is the list.
         // Both may be used, and the result is de-duplicated so a config that
         // repeats an address is not an error, just noisy.
-        let mut addresses: Vec<IpNet> = Vec::new();
+        let mut addresses: Vec<Prefix> = Vec::new();
         if let Some(text) = self.interface.address.as_deref() {
             addresses.push(parse_net(path, "interface.address", text)?);
         }
@@ -340,7 +340,7 @@ impl Config {
                 text,
             )?);
         }
-        let mut unique: Vec<IpNet> = Vec::with_capacity(addresses.len());
+        let mut unique: Vec<Prefix> = Vec::with_capacity(addresses.len());
         for net in addresses {
             if unique.contains(&net) {
                 warnings.push(format!(
@@ -351,7 +351,9 @@ impl Config {
             unique.push(net);
         }
         let addresses = unique;
-        let has_v6 = addresses.iter().any(|net| matches!(net, IpNet::V6(_)));
+        let has_v6 = addresses
+            .iter()
+            .any(|net| matches!(net.as_ipnet(), ipnet::IpNet::V6(_)));
 
         let listen = match self.interface.listen.as_deref() {
             Some(text) => text.parse::<SocketAddr>().map_err(|e| Error::Invalid {
@@ -611,7 +613,7 @@ impl Config {
                     .collect::<Vec<_>>()
                     .join(", ");
                 for allowed in &nets {
-                    if !addresses.iter().any(|net| net.contains(allowed)) {
+                    if !addresses.iter().any(|net| net.contains(&allowed.addr())) {
                         warnings.push(format!(
                             "{}: allowed_ips {allowed} is outside the interface's \
                              {prefixes}; a route to it is needed \
@@ -646,12 +648,12 @@ impl Config {
 /// in `allowed_ips` and never routes a v4 packet. An operator who writes it
 /// means `10.0.0.1/32`, and the error says so. Used for both the interface
 /// addresses and each peer's `allowed_ips` — the trap is the same in both.
-fn parse_net(path: &Path, field: &str, text: &str) -> Result<IpNet, Error> {
-    let net: IpNet = text.parse().map_err(|e| Error::Invalid {
+fn parse_net(path: &Path, field: &str, text: &str) -> Result<Prefix, Error> {
+    let net: Prefix = text.parse().map_err(|e| Error::Invalid {
         path: path.to_path_buf(),
         what: format!("{field} `{text}`: {e}"),
     })?;
-    if let IpNet::V6(net6) = net {
+    if let ipnet::IpNet::V6(net6) = net.as_ipnet() {
         if let Some(v4) = net6.addr().to_ipv4_mapped() {
             return Err(Error::Invalid {
                 path: path.to_path_buf(),

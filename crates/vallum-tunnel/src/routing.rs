@@ -20,9 +20,90 @@
 //! of "obviously correct" arithmetic that turns into a routing bug, and a routing
 //! bug in a VPN is a security bug.
 
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
-pub use ipnet::IpNet;
+use ipnet::IpNet;
+
+/// An IP prefix, as the peer table stores it.
+///
+/// A newtype rather than a re-export: `ipnet` is an implementation detail of
+/// this crate, so the public API does not change if it is replaced. The daemon
+/// still needs the underlying `IpNet` for netlink, which is what
+/// [`Prefix::as_ipnet`] is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Prefix(IpNet);
+
+impl Prefix {
+    /// Wrap an `IpNet`.
+    #[must_use]
+    pub fn new(net: IpNet) -> Self {
+        Self(net)
+    }
+
+    /// The underlying `IpNet`, for the daemon's netlink path.
+    #[must_use]
+    pub fn as_ipnet(&self) -> IpNet {
+        self.0
+    }
+
+    /// Whether `ip` falls inside this prefix.
+    #[must_use]
+    pub fn contains(&self, ip: &IpAddr) -> bool {
+        self.0.contains(ip)
+    }
+
+    /// The prefix length, in bits.
+    #[must_use]
+    pub fn prefix_len(&self) -> u8 {
+        self.0.prefix_len()
+    }
+
+    /// The network address.
+    #[must_use]
+    pub fn addr(&self) -> IpAddr {
+        self.0.addr()
+    }
+
+    /// The netmask.
+    #[must_use]
+    pub fn netmask(&self) -> IpAddr {
+        self.0.netmask()
+    }
+
+    /// The overlap with `other`, if any.
+    #[must_use]
+    pub fn overlaps(&self, other: &Self) -> Option<Self> {
+        intersection(&self.0, &other.0).map(Self)
+    }
+}
+
+impl From<IpNet> for Prefix {
+    fn from(net: IpNet) -> Self {
+        Self(net)
+    }
+}
+
+impl From<Prefix> for IpNet {
+    fn from(prefix: Prefix) -> Self {
+        prefix.0
+    }
+}
+
+impl FromStr for Prefix {
+    type Err = ipnet::AddrParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.parse::<IpNet>().map(Self)
+    }
+}
+
+impl fmt::Display for Prefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// The set of addresses one peer is responsible for.
 ///
@@ -32,13 +113,13 @@ pub use ipnet::IpNet;
 /// an empty set can still complete a handshake; it just carries no packets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AllowedIps {
-    nets: Vec<IpNet>,
+    nets: Vec<Prefix>,
 }
 
 impl AllowedIps {
     /// Build from a list of prefixes.
     #[must_use]
-    pub fn new(nets: Vec<IpNet>) -> Self {
+    pub fn new(nets: Vec<Prefix>) -> Self {
         Self { nets }
     }
 
@@ -50,7 +131,7 @@ impl AllowedIps {
 
     /// The prefixes, in configuration order.
     #[must_use]
-    pub fn nets(&self) -> &[IpNet] {
+    pub fn nets(&self) -> &[Prefix] {
         &self.nets
     }
 
@@ -67,10 +148,10 @@ impl AllowedIps {
     /// peer with another, and resolving it by configuration order would make
     /// routing depend on file order. [`crate::Device::new`] refuses it.
     #[must_use]
-    pub fn overlaps(&self, other: &Self) -> Option<IpNet> {
+    pub fn overlaps(&self, other: &Self) -> Option<Prefix> {
         for left in &self.nets {
             for right in &other.nets {
-                if let Some(net) = intersection(left, right) {
+                if let Some(net) = left.overlaps(right) {
                     return Some(net);
                 }
             }
@@ -79,15 +160,15 @@ impl AllowedIps {
     }
 }
 
-impl FromIterator<IpNet> for AllowedIps {
-    fn from_iter<I: IntoIterator<Item = IpNet>>(iter: I) -> Self {
+impl FromIterator<Prefix> for AllowedIps {
+    fn from_iter<I: IntoIterator<Item = Prefix>>(iter: I) -> Self {
         Self::new(iter.into_iter().collect())
     }
 }
 
 impl IntoIterator for AllowedIps {
-    type Item = IpNet;
-    type IntoIter = std::vec::IntoIter<IpNet>;
+    type Item = Prefix;
+    type IntoIter = std::vec::IntoIter<Prefix>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.nets.into_iter()
@@ -189,8 +270,8 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn net(s: &str) -> IpNet {
-        IpNet::from_str(s).unwrap()
+    fn net(s: &str) -> Prefix {
+        Prefix::from_str(s).unwrap()
     }
 
     fn ip(s: &str) -> IpAddr {

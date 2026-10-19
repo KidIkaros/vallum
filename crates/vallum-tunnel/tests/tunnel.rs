@@ -34,7 +34,7 @@ use vallum_crypto::{
     KEM_ENCAPS_RANDOMNESS,
 };
 use vallum_crypto_sdk::SdkSuite;
-use vallum_tunnel::{Action, Clock, Device, Event, IpNet, PeerConfig, PeerId, Randomness};
+use vallum_tunnel::{Action, Clock, Device, Event, PeerConfig, PeerId, Prefix, Randomness};
 
 // ── test doubles ─────────────────────────────────────────────────────
 
@@ -343,8 +343,8 @@ impl Net {
 // ── fixtures ─────────────────────────────────────────────────────────
 
 /// A prefix, from its text form.
-fn net(prefix: &str) -> IpNet {
-    IpNet::from_str(prefix).expect("a valid prefix")
+fn net(prefix: &str) -> Prefix {
+    Prefix::from_str(prefix).expect("a valid prefix")
 }
 
 /// An endpoint, from its text form.

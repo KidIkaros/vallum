@@ -79,5 +79,5 @@ pub use device::{
 pub use error::ConfigError;
 pub use peer::{PeerConfig, PeerId};
 pub use rng::Randomness;
-pub use routing::{packet_destination, packet_source, AllowedIps, IpNet};
+pub use routing::{packet_destination, packet_source, AllowedIps, Prefix};
 pub use segment::{Segments, MAX_REASSEMBLIES};
