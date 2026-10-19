@@ -59,9 +59,15 @@ outer_mtu = 1000   # default 1500
 - `EMSGSIZE` on a send is logged once per destination at warn level, naming
   `interface.outer_mtu` and the current budget — the one error that means "the
   configured path is too large for the real one".
-- On an IPv6 socket, `IPV6_DONTFRAG` is set (best effort) so the kernel reports
-  instead of fragmenting. IPv4 has no safe equivalent in `nix`; there the knob is
-  the control, and the artefact says so.
+- **Both families ask the kernel to report, not fragment.** On an IPv4 socket
+  `IP_MTU_DISCOVER = IP_PMTUDISC_DO`; on an IPv6 socket `IPV6_DONTFRAG`. Both are
+  set in `UdpTransport::bind` and both are **fatal** if they fail: a daemon that
+  cannot make the guarantee should not pretend it did.
+  - The v4 option is set through `rustix` (`set_ip_mtu_discover`), the one safe
+    wrapper that exposes it — `nix` 0.31 has `IpMtu` as a getter only and
+    `socket2` 0.6 not at all. This is why no `unsafe` crate was needed.
+  - A unit test reads the option back (`a_v4_socket_asks_the_kernel_not_to_fragment`),
+    so the test asserts the kernel state rather than the call.
 
 ---
 
@@ -96,6 +102,25 @@ bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
 `an_inner_mtu_over_the_outer_budget_warns`, `a_smaller_budget_cuts_more_and_reassembles_the_same`,
 `a_narrow_budget_is_honoured_on_the_way_out`).
 
+### Measured: a path narrower than the knob is loud
+
+The e2e lowers the veth pair to 1200 bytes and runs with the default 1500-byte
+assumption:
+
+```text
+── narrowing the outer path to 1200 bytes without telling the daemon
+   ok    the kernel reported the oversize datagram instead of fragmenting it
+   ok    nothing was fragmented
+   ok    the handshake failed loudly rather than crossing in fragments
+── naming the real MTU (outer_mtu = 1200) makes the same path work
+   ok    a 1200-byte path with outer_mtu = 1200 carries traffic
+   ok    and no oversize datagram was reported
+```
+
+This is the property stated as a measurement: with `IP_MTU_DISCOVER = DO` the
+kernel returns `EMSGSIZE` and `FragCreates` stays flat, so the operator sees the
+misconfiguration instead of a silently fragmented (or black-holed) path.
+
 ---
 
 ## 5. What this does **not** claim
@@ -103,19 +128,13 @@ bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
 1. **No discovery.** Nothing probes, pads, or learns a path MTU. DPLPMTUD would
    need probe sizes, a feedback signal, black-hole detection, and timers — a
    protocol feature, not a knob. The operator states the path.
-2. **No per-destination budget.** One daemon, one outer path. A peer reached over
-   a different path needs a different deployment.
-3. **No IPv4 `DF` control — accepted by design.** `IPV6_DONTFRAG` is set on v6
-   sockets. Neither `nix` 0.31 (`IpMtu` is a getter) nor `socket2` 0.6 exposes
-   `IP_MTU_DISCOVER`, and setting it through `libc` would need `unsafe`, which
-   every Vallum-owned crate forbids. So an overstated `outer_mtu` on a v4 path
-   can still be fragmented by the kernel. The knob is the control, `EMSGSIZE` is
-   logged when the kernel does report it, and this is recorded rather than
-   papered over.
-4. **No upward adaptation.** Jumbo paths are not used; the cap is 1452.
-5. **No change to the receiver's bounds.** `MAX_FRAGMENT_DATA` still caps a
+2. **No per-path budget.** The budget follows the destination *family*, not a
+   discovered path; two peers behind different path MTUs need different
+   `outer_mtu` values, which means different deployments.
+3. **No upward adaptation.** Jumbo paths are not used; the cap is 1452.
+4. **No change to the receiver's bounds.** `MAX_FRAGMENT_DATA` still caps a
    fragment at 1442; a smaller budget is always below it.
-6. **The configured budget is the IPv6 worst case, deliberately.** One daemon
+5. **The configured budget is the IPv6 worst case, deliberately.** One daemon
    has one configured budget (`outer_mtu − 48`) because a peer's endpoint can
    roam to the other family, so `listen` is not a safe predictor. The
    **segmenter** then chooses per message: `budget_for(destination)` gives a v4

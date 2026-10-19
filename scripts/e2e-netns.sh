@@ -830,5 +830,137 @@ wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the dual-stack path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the dual-stack path"
 ok "the dual-stack daemons exited on SIGTERM"
 
+# ── IPv4 DF: a path narrower than the knob is loud, not silent ───────
+#
+# `IP_MTU_DISCOVER = DO` makes the kernel report EMSGSIZE instead of
+# fragmenting. A 1200-byte path with the default 1500-byte assumption must
+# therefore fail loudly; naming the real MTU must make the tunnel work. Without
+# DF the kernel would fragment silently and the misconfiguration would look like
+# a slow path.
+
+say "narrowing the outer path to 1200 bytes without telling the daemon"
+ip link set veth-a mtu 1200
+in_ns ip link set veth-b mtu 1200
+: > "$A_PIDFILE"
+: > "$B_PIDFILE"
+
+# A single v4 inner address with a connected route, and a v4 outer path.
+sed -i -e 's|^addresses = .*|address = "10.9.0.1/24"|' \
+       -e 's|^listen = .*|listen = "10.99.0.1:51820"|' \
+       -e 's|^endpoint = .*|endpoint = "10.99.0.2:51820"|' \
+       -e 's|^allowed_ips = .*|allowed_ips = ["10.9.0.2/32"]|' \
+       -e '/^outer_mtu/d' "$WORK/a.toml"
+sed -i -e 's|^addresses = .*|address = "10.9.0.2/24"|' \
+       -e 's|^listen = .*|listen = "10.99.0.2:51820"|' \
+       -e 's|^allowed_ips = .*|allowed_ips = ["10.9.0.1/32"]|' \
+       -e '/^outer_mtu/d' "$WORK/b.toml"
+
+FRAG_A_DF_BEFORE=$(snmp_here FragCreates)
+FRAG_B_DF_BEFORE=$(snmp_ns2 FragCreates)
+
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
+B_JOB=$!
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
+A_JOB=$!
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the DF path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s on the DF path"
+    fi
+    sleep 0.1
+done
+
+# A packet from A is what starts the handshake. It cannot arrive, and that is
+# the point: the `InitHello` it triggers is too large for the path.
+ping -c1 -W2 -q 10.9.0.2 >/dev/null 2>&1 || true
+
+DEADLINE=$((SECONDS + 8))
+while :; do
+    if grep -q "exceeded the path MTU" "$A_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the DF path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "no EMSGSIZE warning after 8 s on a 1200-byte path"
+    fi
+    sleep 0.1
+done
+ok "the kernel reported the oversize datagram instead of fragmenting it"
+
+FRAG_A_DF=$(snmp_here FragCreates)
+FRAG_B_DF=$(snmp_ns2 FragCreates)
+if [ "$((FRAG_A_DF - FRAG_A_DF_BEFORE))" -ne 0 ] \
+    || [ "$((FRAG_B_DF - FRAG_B_DF_BEFORE))" -ne 0 ]; then
+    bad "the kernel fragmented a datagram despite IP_MTU_DISCOVER=DO"
+fi
+ok "nothing was fragmented"
+
+kill_pidfile "$A_PIDFILE"
+kill_pidfile "$B_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the DF path"
+wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the DF path"
+grep -q "0 handshakes" "$A_LOG" || bad "a handshake completed on an impossible path"
+ok "the handshake failed loudly rather than crossing in fragments"
+
+say "naming the real MTU (outer_mtu = 1200) makes the same path work"
+sed -i '/^listen = /a outer_mtu = 1200' "$WORK/a.toml" "$WORK/b.toml"
+: > "$A_PIDFILE"
+: > "$B_PIDFILE"
+
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
+B_JOB=$!
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
+A_JOB=$!
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the corrected path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s on the corrected path"
+    fi
+    sleep 0.1
+done
+
+if ping -c2 -W5 -i0.3 -q 10.9.0.2; then
+    ok "a 1200-byte path with outer_mtu = 1200 carries traffic"
+else
+    bad "the corrected path did not carry traffic"
+fi
+if grep -q "exceeded the path MTU" "$A_LOG"; then
+    bad "the corrected path still reported an oversize datagram"
+fi
+ok "and no oversize datagram was reported"
+
+say "shutting the DF-path daemons down"
+kill_pidfile "$A_PIDFILE"
+kill_pidfile "$B_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the corrected path"
+wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the corrected path"
+ok "the DF-path daemons exited on SIGTERM"
+
 printf '\n== PASS\n'
 INNER

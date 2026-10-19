@@ -47,6 +47,9 @@ nix = { version = "0.31", features = ["user", "process", "socket", "net"] }
 netlink-packet-core = "0.9"
 netlink-packet-route = "0.33"
 netlink-sys = "0.9"
+# `IP_MTU_DISCOVER = DO` for IPv4, which neither nix nor socket2 exposes. Safe
+# wrappers, so the `unsafe_code = "forbid"` invariant survives.
+rustix = { version = "1", features = ["net", "time"] }
 
 [dev-dependencies]
 # The gate drives the real stack: it builds the config from TOML, expands keys

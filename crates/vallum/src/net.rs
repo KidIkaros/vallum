@@ -71,18 +71,27 @@ impl UdpTransport {
     /// If the address is in use, or cannot be bound.
     pub fn bind(address: SocketAddr) -> io::Result<Self> {
         let socket = UdpSocket::bind(address)?;
-        // On a v6 path, ask the kernel to report an oversize datagram instead of
-        // fragmenting it. Best effort: a kernel that refuses the option is not a
-        // reason to refuse to run, and the `outer_mtu` knob already bounds what
-        // is emitted. IPv4 has no safe equivalent in `nix`; the knob is the
-        // control there.
+        // Ask the kernel to report an oversize datagram with `EMSGSIZE` instead
+        // of fragmenting it. This is the other half of H6's "loud failure": the
+        // `outer_mtu` knob bounds what is emitted, and this makes a path that
+        // disagrees say so rather than silently splitting the datagram.
+        //
+        // Both are fatal: the daemon is Linux-only, the options are old, and a
+        // daemon that cannot make the guarantee should not pretend it did.
+        #[cfg(target_os = "linux")]
+        if address.is_ipv4() {
+            // `rustix` is the safe wrapper; `nix` exposes `IP_MTU_DISCOVER` as
+            // a getter only, and `socket2` not at all.
+            rustix::net::sockopt::set_ip_mtu_discover(
+                &socket,
+                rustix::net::sockopt::Ipv4PathMtuDiscovery::DO,
+            )
+            .map_err(|e| io::Error::other(format!("IP_MTU_DISCOVER: {e}")))?;
+        }
         #[cfg(target_os = "linux")]
         if address.is_ipv6() {
-            let _ = nix::sys::socket::setsockopt(
-                &socket,
-                nix::sys::socket::sockopt::Ipv6DontFrag,
-                &true,
-            );
+            nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Ipv6DontFrag, &true)
+                .map_err(|e| io::Error::other(format!("IPV6_DONTFRAG: {e}")))?;
         }
         Ok(Self { socket })
     }
@@ -258,4 +267,25 @@ impl DatagramSocket for MemorySocket {
 /// becoming a panic in a reader thread.
 fn poisoned<T>(_: T) -> io::Error {
     io::Error::other("memory network lock poisoned")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_v4_socket_asks_the_kernel_not_to_fragment() {
+        // The option is set in `bind`; read it back rather than trust the call.
+        let transport = UdpTransport::bind("127.0.0.1:0".parse().expect("a v4 address"))
+            .expect("bind a v4 socket");
+        let value = rustix::net::sockopt::ip_mtu_discover(&transport.socket)
+            .expect("IP_MTU_DISCOVER is readable");
+        assert_eq!(
+            value.as_raw(),
+            rustix::net::sockopt::Ipv4PathMtuDiscovery::DO.as_raw(),
+            "a v4 socket must report an oversize datagram, not fragment it"
+        );
+    }
 }
