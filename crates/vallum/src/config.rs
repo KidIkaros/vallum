@@ -40,7 +40,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use vallum_core::identity::StaticIdentity;
 use vallum_core::shaping::Machine;
-use vallum_crypto::CryptoSuite;
+use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_tunnel::{PeerConfig, Prefix};
 
 use crate::error::Error;
@@ -298,6 +298,9 @@ pub struct Resolved {
     pub fwmark: u32,
     /// The daemon's own identity, expanded from the key file.
     pub identity: StaticIdentity,
+    /// The seed the identity was expanded from, for the control plane and an
+    /// export. Redacted by `SharedSecret`'s `Debug` and erased on drop.
+    pub seed: SharedSecret,
     /// The peer table.
     pub peers: Vec<PeerConfig>,
     /// The log threshold.
@@ -321,6 +324,7 @@ impl std::fmt::Debug for Resolved {
             .field("addresses", &self.addresses)
             .field("mtu", &self.mtu)
             .field("listen", &self.listen)
+            .field("seed", &self.seed)
             .field("control", &self.control)
             .field("fwmark", &self.fwmark)
             .field("peer_count", &self.peers.len())
@@ -556,6 +560,17 @@ impl Config {
             &mut warnings,
         )?;
         let identity = keys::identity(suite, &secret)?;
+        let seed_bytes: [u8; 32] = keys::hex_decode(&secret.seed)
+            .map_err(|why| Error::Invalid {
+                path: key_path.clone(),
+                what: format!("private key seed is not hex: {why}"),
+            })?
+            .try_into()
+            .map_err(|_| Error::Invalid {
+                path: key_path.clone(),
+                what: "private key seed is not 32 bytes".to_owned(),
+            })?;
+        let seed = SharedSecret::new(seed_bytes);
 
         let mut peers = Vec::with_capacity(self.peers.len());
         for (index, entry) in self.peers.iter().enumerate() {
@@ -747,6 +762,7 @@ impl Config {
             control,
             fwmark: self.interface.fwmark.unwrap_or(0),
             identity,
+            seed,
             peers,
             level,
             warnings,

@@ -24,7 +24,7 @@ use vallum::net::{DatagramSocket, SharedSocket, UdpTransport};
 use vallum::privileges;
 use vallum::run::{self, Shutdown};
 use vallum::tun::{self, InterfaceSpec};
-use vallum::uapi::errno;
+use vallum::uapi::{errno, field as uapi_field};
 use vallum::{log_info, log_warn, Error};
 use vallum_core::{Role, SessionKeys};
 use vallum_crypto::SharedSecret;
@@ -262,20 +262,6 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
 
     let suite: Arc<dyn vallum_crypto::CryptoSuite> = Arc::new(suite);
 
-    // The control plane needs the seed for `get private_key`; the key file is
-    // re-read rather than threading a secret through `Resolved`.
-    let secret = keys::load_secret(&key_path)?;
-    let seed: [u8; 32] = keys::hex_decode(&secret.seed)
-        .map_err(|why| Error::Invalid {
-            path: key_path.clone(),
-            what: format!("private key seed is not hex: {why}"),
-        })?
-        .try_into()
-        .map_err(|_| Error::Invalid {
-            path: key_path.clone(),
-            what: "private key seed is not 32 bytes".to_owned(),
-        })?;
-
     let device = Device::new(
         Arc::clone(&suite),
         resolved.identity,
@@ -312,7 +298,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
                 context: control::ControlContext {
                     interface: interface_name,
                     addresses: resolved.addresses.clone(),
-                    private_key: SharedSecret::new(seed),
+                    private_key: resolved.seed.clone(),
                     private_key_path: key_path.clone(),
                     listen: bound,
                     fwmark: resolved.fwmark,
@@ -474,26 +460,27 @@ fn showconf(args: &ShowconfArgs) -> Result<(), Error> {
     Ok(())
 }
 
-fn print_field(reply: &str, field: &str) {
-    let prefix = match field {
-        "endpoints" => "endpoint=",
-        "allowed-ips" => "allowed_ip=",
-        "latest-handshakes" => "last_handshake_time_sec=",
-        "transfer" => "tx_bytes=",
-        "persistent-keepalive" => "persistent_keepalive_interval=",
-        "preshared-keys" => "preshared_key=",
-        "public-key" | "peers" => "public_key=",
-        "private-key" => "private_key=",
-        "listen-port" => "listen_port=",
-        "fwmark" => "fwmark=",
+fn print_field(reply: &str, name: &str) {
+    let key = match name {
+        "endpoints" => uapi_field::ENDPOINT,
+        "allowed-ips" => uapi_field::ALLOWED_IP,
+        "latest-handshakes" => uapi_field::LAST_HANDSHAKE_TIME_SEC,
+        "transfer" => uapi_field::TX_BYTES,
+        "persistent-keepalive" => uapi_field::PERSISTENT_KEEPALIVE_INTERVAL,
+        "preshared-keys" => uapi_field::PRESHARED_KEY,
+        "public-key" | "peers" => uapi_field::PUBLIC_KEY,
+        "private-key" => uapi_field::PRIVATE_KEY,
+        "listen-port" => uapi_field::LISTEN_PORT,
+        "fwmark" => uapi_field::FWMARK,
         "dump" => {
             print!("{reply}");
             return;
         }
-        _ => field,
+        other => other,
     };
+    let prefix = format!("{key}=");
     for line in reply.lines() {
-        if let Some(value) = line.strip_prefix(prefix) {
+        if let Some(value) = line.strip_prefix(&prefix) {
             println!("{value}");
         }
     }
@@ -534,41 +521,25 @@ fn resolve_config(config_path: &Path) -> Result<vallum::config::Resolved, Error>
     config.resolve(config_path, &suite)
 }
 
-fn private_seed(config_path: &Path) -> Result<[u8; 32], Error> {
-    let config = Config::load(config_path)?;
-    let key_path = config::resolve_key_path(config_path, &config.interface.private_key);
-    let secret = keys::load_secret(&key_path)?;
-    keys::hex_decode(&secret.seed)
-        .map_err(|why| Error::Invalid {
-            path: key_path.clone(),
-            what: format!("private key seed is not hex: {why}"),
-        })?
-        .try_into()
-        .map_err(|_| Error::Invalid {
-            path: key_path.clone(),
-            what: "private key seed is not 32 bytes".to_owned(),
-        })
-}
-
 /// The device fields that differ from the running daemon.
 ///
 /// A `listen_port` of 0 in the config means "any"; a running daemon already has
 /// one, so it is not a requested change. `fwmark = 0` means unset.
-fn device_lines(desired: &vallum::config::Resolved, seed: &[u8; 32], current: &str) -> String {
+fn device_lines(desired: &vallum::config::Resolved, seed: &SharedSecret, current: &str) -> String {
     let response = vallum::uapi::parse_response(current);
     let mut out = String::new();
-    let seed_hex = keys::hex_encode(seed);
-    if response.field("private_key") != Some(seed_hex.as_str()) {
+    let seed_hex = keys::hex_encode(seed.as_bytes());
+    if response.field(uapi_field::PRIVATE_KEY) != Some(seed_hex.as_str()) {
         out.push_str(&format!("private_key={seed_hex}\n"));
     }
     let current_port = response
-        .field("listen_port")
+        .field(uapi_field::LISTEN_PORT)
         .and_then(|value| value.parse::<u16>().ok());
     if desired.listen.port() != 0 && current_port != Some(desired.listen.port()) {
         out.push_str(&format!("listen_port={}\n", desired.listen.port()));
     }
     let current_mark = response
-        .field("fwmark")
+        .field(uapi_field::FWMARK)
         .and_then(|value| value.parse::<u32>().ok());
     if desired.fwmark != 0 && current_mark != Some(desired.fwmark) {
         out.push_str(&format!("fwmark={}\n", desired.fwmark));
@@ -582,11 +553,7 @@ fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {
     let mut body = String::from("set=1\n");
     if replace {
         let current = control::request(&path, "get=1\n")?;
-        body.push_str(&device_lines(
-            &resolved,
-            &private_seed(args.config.as_path())?,
-            &current,
-        ));
+        body.push_str(&device_lines(&resolved, &resolved.seed, &current));
         body.push_str("replace_peers=true\n");
     }
     for peer in &resolved.peers {
@@ -620,11 +587,7 @@ fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
         .collect();
 
     let mut body = String::from("set=1\n");
-    body.push_str(&device_lines(
-        &resolved,
-        &private_seed(args.config.as_path())?,
-        &current,
-    ));
+    body.push_str(&device_lines(&resolved, &resolved.seed, &current));
     for key in &current_peers {
         if !desired.contains(key) {
             body.push_str(&format!("public_key={key}\nremove=true\n"));

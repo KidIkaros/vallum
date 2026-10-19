@@ -39,6 +39,78 @@ pub mod errno {
     pub const ETIMEDOUT: i32 = 110;
 }
 
+/// The wire field names, shared by the parser, the renderers, and the CLI.
+///
+/// A typo here is a compile error; a typo in a literal was a silent mismatch.
+pub mod field {
+    /// Device fields.
+    pub const PRIVATE_KEY: &str = "private_key";
+    /// Device fields.
+    pub const VALLUM_PRIVATE_KEY_PATH: &str = "vallum_private_key_path";
+    /// Device fields.
+    pub const LISTEN_PORT: &str = "listen_port";
+    /// Device fields.
+    pub const FWMARK: &str = "fwmark";
+    /// Device and peer.
+    pub const PUBLIC_KEY: &str = "public_key";
+    /// Device fields.
+    pub const VALLUM_INTERFACE: &str = "vallum_interface";
+    /// Device and peer.
+    pub const VALLUM_PUBLIC_LINE: &str = "vallum_public_line";
+    /// Device and peer.
+    pub const VALLUM_FINGERPRINT: &str = "vallum_fingerprint";
+    /// Device fields.
+    pub const VALLUM_LISTEN: &str = "vallum_listen";
+    /// Device fields.
+    pub const VALLUM_OFFLOAD: &str = "vallum_offload";
+    /// Device fields.
+    pub const VALLUM_BATCHING: &str = "vallum_batching";
+    /// Device fields.
+    pub const VALLUM_CAN_SET_PRIVATE_KEY: &str = "vallum_can_set_private_key";
+    /// Device fields.
+    pub const VALLUM_CAN_SET_LISTEN_PORT: &str = "vallum_can_set_listen_port";
+    /// Device fields.
+    pub const VALLUM_CAN_SET_FWMARK: &str = "vallum_can_set_fwmark";
+    /// Device fields.
+    pub const VALLUM_SUITE: &str = "vallum_suite";
+    /// Device fields.
+    pub const VALLUM_ADDRESS: &str = "vallum_address";
+    /// Peer fields.
+    pub const VALLUM_NAME: &str = "vallum_name";
+    /// Peer fields.
+    pub const PRESHARED_KEY: &str = "preshared_key";
+    /// Peer fields.
+    pub const ENDPOINT: &str = "endpoint";
+    /// Peer fields.
+    pub const LAST_HANDSHAKE_TIME_SEC: &str = "last_handshake_time_sec";
+    /// Peer fields.
+    pub const LAST_HANDSHAKE_TIME_NSEC: &str = "last_handshake_time_nsec";
+    /// Peer fields.
+    pub const TX_BYTES: &str = "tx_bytes";
+    /// Peer fields.
+    pub const RX_BYTES: &str = "rx_bytes";
+    /// Peer fields.
+    pub const PERSISTENT_KEEPALIVE_INTERVAL: &str = "persistent_keepalive_interval";
+    /// Peer fields.
+    pub const ALLOWED_IP: &str = "allowed_ip";
+    /// Peer fields.
+    pub const VALLUM_EPOCH: &str = "vallum_epoch";
+    /// Request markers and flags.
+    pub const GET: &str = "get=1";
+    /// Request markers and flags.
+    pub const SET: &str = "set=1";
+    /// Request markers and flags.
+    pub const REPLACE_PEERS: &str = "replace_peers";
+    /// Request markers and flags.
+    pub const REMOVE: &str = "remove";
+    /// Request markers and flags.
+    pub const UPDATE_ONLY: &str = "update_only";
+    /// Request markers and flags.
+    pub const REPLACE_ALLOWED_IPS: &str = "replace_allowed_ips";
+    /// The error line.
+    pub const ERRNO: &str = "errno";
+}
+
 /// A parsed request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -102,13 +174,13 @@ pub fn parse(text: &str) -> Result<Request, String> {
 
     let first = lines.next().ok_or_else(|| "empty request".to_owned())?;
     match first {
-        "get=1" => {
+        field::GET => {
             if lines.next().is_some() {
                 return Err("`get=1` must be the only line".to_owned());
             }
             Ok(Request::Get)
         }
-        "set=1" => {
+        field::SET => {
             let mut set = Set::default();
             let mut current: Option<Peer> = None;
             let mut seen_peer = false;
@@ -117,7 +189,7 @@ pub fn parse(text: &str) -> Result<Request, String> {
                     .split_once('=')
                     .ok_or_else(|| format!("`{line}` is not `key=value`"))?;
                 match key {
-                    "public_key" => {
+                    field::PUBLIC_KEY => {
                         if let Some(peer) = current.take() {
                             set.peers.push(peer);
                         }
@@ -127,41 +199,43 @@ pub fn parse(text: &str) -> Result<Request, String> {
                             ..Peer::default()
                         });
                     }
-                    "private_key" if !seen_peer => {
+                    field::PRIVATE_KEY if !seen_peer => {
                         set.private_key = Some(parse_fixed_key(value)?);
                     }
-                    "listen_port" if !seen_peer => {
+                    field::LISTEN_PORT if !seen_peer => {
                         set.listen_port = Some(
                             value
                                 .parse()
                                 .map_err(|_| format!("listen_port `{value}` is not a port"))?,
                         );
                     }
-                    "fwmark" if !seen_peer => {
+                    field::FWMARK if !seen_peer => {
                         set.fwmark = Some(
                             value
                                 .parse()
                                 .map_err(|_| format!("fwmark `{value}` is not a u32"))?,
                         );
                     }
-                    "replace_peers" if !seen_peer => set.replace_peers = parse_bool(value)?,
+                    field::REPLACE_PEERS if !seen_peer => {
+                        set.replace_peers = parse_bool(value)?;
+                    }
                     // Peer fields require an open peer block.
-                    "preshared_key"
-                    | "endpoint"
-                    | "persistent_keepalive_interval"
-                    | "allowed_ip"
-                    | "remove"
-                    | "update_only"
-                    | "replace_allowed_ips" => {
+                    field::PRESHARED_KEY
+                    | field::ENDPOINT
+                    | field::PERSISTENT_KEEPALIVE_INTERVAL
+                    | field::ALLOWED_IP
+                    | field::REMOVE
+                    | field::UPDATE_ONLY
+                    | field::REPLACE_ALLOWED_IPS => {
                         let peer = current
                             .as_mut()
                             .ok_or_else(|| format!("`{key}` before any `public_key`"))?;
                         match key {
-                            "preshared_key" => {
+                            field::PRESHARED_KEY => {
                                 let parsed = parse_fixed_key(value)?;
                                 peer.preshared_key = Some((parsed != [0u8; 32]).then_some(parsed));
                             }
-                            "endpoint" => {
+                            field::ENDPOINT => {
                                 peer.endpoint = Some(if value == "(none)" {
                                     None
                                 } else {
@@ -170,20 +244,20 @@ pub fn parse(text: &str) -> Result<Request, String> {
                                     })?)
                                 });
                             }
-                            "persistent_keepalive_interval" => {
+                            field::PERSISTENT_KEEPALIVE_INTERVAL => {
                                 peer.keepalive =
                                     Some(value.parse().map_err(|_| {
                                         format!("keepalive `{value}` is not a u16")
                                     })?);
                             }
-                            "allowed_ip" => peer.allowed_ips.push(
+                            field::ALLOWED_IP => peer.allowed_ips.push(
                                 value
                                     .parse()
                                     .map_err(|_| format!("allowed_ip `{value}` is not a prefix"))?,
                             ),
-                            "remove" => peer.remove = parse_bool(value)?,
-                            "update_only" => peer.update_only = parse_bool(value)?,
-                            "replace_allowed_ips" => {
+                            field::REMOVE => peer.remove = parse_bool(value)?,
+                            field::UPDATE_ONLY => peer.update_only = parse_bool(value)?,
+                            field::REPLACE_ALLOWED_IPS => {
                                 peer.replace_allowed_ips = parse_bool(value)?;
                             }
                             // A key listed in the outer pattern but not here is
@@ -307,72 +381,100 @@ pub struct PeerState {
 pub fn render_get(state: &DeviceState) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "private_key={}\n",
+        "{}={}\n",
+        field::PRIVATE_KEY,
         hex_encode(state.private_key.as_bytes())
     ));
     out.push_str(&format!(
-        "vallum_private_key_path={}\n",
+        "{}={}\n",
+        field::VALLUM_PRIVATE_KEY_PATH,
         state.private_key_path
     ));
-    out.push_str(&format!("listen_port={}\n", state.listen.port()));
-    out.push_str(&format!("fwmark={}\n", state.fwmark));
-    out.push_str(&format!("public_key={}\n", hex_encode(&state.public_key)));
-    out.push_str(&format!("vallum_interface={}\n", state.interface));
-    out.push_str(&format!("vallum_public_line={}\n", state.public_line));
+    out.push_str(&format!("{}={}\n", field::LISTEN_PORT, state.listen.port()));
+    out.push_str(&format!("{}={}\n", field::FWMARK, state.fwmark));
     out.push_str(&format!(
-        "vallum_fingerprint={}\n",
+        "{}={}\n",
+        field::PUBLIC_KEY,
+        hex_encode(&state.public_key)
+    ));
+    out.push_str(&format!(
+        "{}={}\n",
+        field::VALLUM_INTERFACE,
+        state.interface
+    ));
+    out.push_str(&format!(
+        "{}={}\n",
+        field::VALLUM_PUBLIC_LINE,
+        state.public_line
+    ));
+    out.push_str(&format!(
+        "{}={}\n",
+        field::VALLUM_FINGERPRINT,
         hex_encode(&state.fingerprint)
     ));
-    out.push_str(&format!("vallum_listen={}\n", state.listen));
-    out.push_str(&format!("vallum_offload={}\n", state.offload));
-    out.push_str(&format!("vallum_batching={}\n", state.batching));
+    out.push_str(&format!("{}={}\n", field::VALLUM_LISTEN, state.listen));
+    out.push_str(&format!("{}={}\n", field::VALLUM_OFFLOAD, state.offload));
+    out.push_str(&format!("{}={}\n", field::VALLUM_BATCHING, state.batching));
     for address in &state.addresses {
-        out.push_str(&format!("vallum_address={address}\n"));
+        out.push_str(&format!("{}={address}\n", field::VALLUM_ADDRESS));
     }
     out.push_str(&format!(
-        "vallum_can_set_private_key={}\n",
+        "{}={}\n",
+        field::VALLUM_CAN_SET_PRIVATE_KEY,
         state.capabilities.set_private_key
     ));
     out.push_str(&format!(
-        "vallum_can_set_listen_port={}\n",
+        "{}={}\n",
+        field::VALLUM_CAN_SET_LISTEN_PORT,
         state.capabilities.set_listen_port
     ));
     out.push_str(&format!(
-        "vallum_can_set_fwmark={}\n",
+        "{}={}\n",
+        field::VALLUM_CAN_SET_FWMARK,
         state.capabilities.set_fwmark
     ));
-    out.push_str(&format!("vallum_suite={:#06x}\n", state.suite));
+    out.push_str(&format!("{}={:#06x}\n", field::VALLUM_SUITE, state.suite));
     for peer in &state.peers {
-        out.push_str(&format!("\npublic_key={}\n", hex_encode(&peer.public_key)));
-        out.push_str(&format!("vallum_name={}\n", peer.name));
         out.push_str(&format!(
-            "vallum_fingerprint={}\n",
+            "\n{}={}\n",
+            field::PUBLIC_KEY,
+            hex_encode(&peer.public_key)
+        ));
+        out.push_str(&format!("{}={}\n", field::VALLUM_NAME, peer.name));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::VALLUM_FINGERPRINT,
             hex_encode(&peer.fingerprint)
         ));
-        out.push_str(&format!("vallum_public_line={}\n", peer.public_line));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::VALLUM_PUBLIC_LINE,
+            peer.public_line
+        ));
         if let Some(psk) = peer.preshared_key {
-            out.push_str(&format!("preshared_key={}\n", hex_encode(&psk)));
+            out.push_str(&format!("{}={}\n", field::PRESHARED_KEY, hex_encode(&psk)));
         }
         match peer.endpoint {
-            Some(endpoint) => out.push_str(&format!("endpoint={endpoint}\n")),
-            None => out.push_str("endpoint=(none)\n"),
+            Some(endpoint) => out.push_str(&format!("{}={endpoint}\n", field::ENDPOINT)),
+            None => out.push_str(&format!("{}=(none)\n", field::ENDPOINT)),
         }
         if let Some((sec, nsec)) = peer.last_handshake {
-            out.push_str(&format!("last_handshake_time_sec={sec}\n"));
-            out.push_str(&format!("last_handshake_time_nsec={nsec}\n"));
+            out.push_str(&format!("{}={sec}\n", field::LAST_HANDSHAKE_TIME_SEC));
+            out.push_str(&format!("{}={nsec}\n", field::LAST_HANDSHAKE_TIME_NSEC));
         }
-        out.push_str(&format!("tx_bytes={}\n", peer.tx_bytes));
-        out.push_str(&format!("rx_bytes={}\n", peer.rx_bytes));
+        out.push_str(&format!("{}={}\n", field::TX_BYTES, peer.tx_bytes));
+        out.push_str(&format!("{}={}\n", field::RX_BYTES, peer.rx_bytes));
         out.push_str(&format!(
-            "persistent_keepalive_interval={}\n",
+            "{}={}\n",
+            field::PERSISTENT_KEEPALIVE_INTERVAL,
             peer.keepalive.unwrap_or(0)
         ));
         for prefix in &peer.allowed_ips {
-            out.push_str(&format!("allowed_ip={prefix}\n"));
+            out.push_str(&format!("{}={prefix}\n", field::ALLOWED_IP));
         }
-        out.push_str(&format!("vallum_epoch={}\n", peer.epoch));
+        out.push_str(&format!("{}={}\n", field::VALLUM_EPOCH, peer.epoch));
     }
-    out.push_str("errno=0\n");
+    out.push_str(&format!("{}=0\n", field::ERRNO));
     out
 }
 
@@ -442,7 +544,7 @@ pub fn parse_response(text: &str) -> Response {
 #[must_use]
 pub fn render_human(response: &Response) -> String {
     let mut out = String::new();
-    let fingerprint = response.field("vallum_fingerprint").unwrap_or("?");
+    let fingerprint = response.field(field::VALLUM_FINGERPRINT).unwrap_or("?");
     out.push_str(&format!("interface {fingerprint}\n"));
     for (key, value) in &response.device {
         if hidden(key) {
@@ -451,8 +553,8 @@ pub fn render_human(response: &Response) -> String {
         out.push_str(&format!("  {key}={value}\n"));
     }
     for peer in &response.peers {
-        let fingerprint = field(peer, "vallum_fingerprint").unwrap_or("?");
-        let name = field(peer, "vallum_name").unwrap_or("");
+        let fingerprint = field(peer, field::VALLUM_FINGERPRINT).unwrap_or("?");
+        let name = field(peer, field::VALLUM_NAME).unwrap_or("");
         out.push_str(&format!("\npeer {fingerprint} ({name})\n"));
         for (key, value) in peer {
             if hidden(key) {
@@ -467,13 +569,13 @@ pub fn render_human(response: &Response) -> String {
 fn hidden(key: &str) -> bool {
     matches!(
         key,
-        "private_key"
-            | "preshared_key"
-            | "public_key"
-            | "vallum_public_line"
-            | "vallum_fingerprint"
-            | "vallum_name"
-            | "errno"
+        field::PRIVATE_KEY
+            | field::PRESHARED_KEY
+            | field::PUBLIC_KEY
+            | field::VALLUM_PUBLIC_LINE
+            | field::VALLUM_FINGERPRINT
+            | field::VALLUM_NAME
+            | field::ERRNO
     )
 }
 
@@ -491,20 +593,20 @@ pub fn render_config(response: &Response, include_secrets: bool) -> String {
     );
     out.push_str(&format!(
         "name = \"{}\"\n",
-        escape(response.field("vallum_interface").unwrap_or("vallum0"))
+        escape(response.field(field::VALLUM_INTERFACE).unwrap_or("vallum0"))
     ));
     let key_path = if include_secrets {
         response
-            .field("vallum_private_key_path")
+            .field(field::VALLUM_PRIVATE_KEY_PATH)
             .unwrap_or("private.key")
     } else {
         "private.key"
     };
     out.push_str(&format!("private_key = \"{}\"\n", escape(key_path)));
-    if let Some(listen) = response.field("vallum_listen") {
+    if let Some(listen) = response.field(field::VALLUM_LISTEN) {
         out.push_str(&format!("listen = \"{listen}\"\n"));
     }
-    if let Some(fwmark) = response.field("fwmark") {
+    if let Some(fwmark) = response.field(field::FWMARK) {
         if fwmark != "0" {
             out.push_str(&format!("fwmark = {fwmark}\n"));
         }
@@ -512,7 +614,7 @@ pub fn render_config(response: &Response, include_secrets: bool) -> String {
     let addresses: Vec<String> = response
         .device
         .iter()
-        .filter(|(key, _)| key == "vallum_address")
+        .filter(|(key, _)| key == field::VALLUM_ADDRESS)
         .map(|(_, value)| format!("\"{}\"", escape(value)))
         .collect();
     if !addresses.is_empty() {
@@ -520,31 +622,31 @@ pub fn render_config(response: &Response, include_secrets: bool) -> String {
     }
     for peer in &response.peers {
         out.push_str("\n[[peer]]\n");
-        if let Some(name) = field(peer, "vallum_name") {
+        if let Some(name) = field(peer, field::VALLUM_NAME) {
             out.push_str(&format!("name = \"{}\"\n", escape(name)));
         }
-        if let Some(line) = field(peer, "vallum_public_line") {
+        if let Some(line) = field(peer, field::VALLUM_PUBLIC_LINE) {
             out.push_str(&format!("public_key = \"{}\"\n", escape(line)));
         }
-        if let Some(endpoint) = field(peer, "endpoint") {
+        if let Some(endpoint) = field(peer, field::ENDPOINT) {
             if endpoint != "(none)" {
                 out.push_str(&format!("endpoint = \"{endpoint}\"\n"));
             }
         }
         let allowed: Vec<String> = peer
             .iter()
-            .filter(|(key, _)| key == "allowed_ip")
+            .filter(|(key, _)| key == field::ALLOWED_IP)
             .map(|(_, value)| format!("\"{}\"", escape(value)))
             .collect();
         if !allowed.is_empty() {
             out.push_str(&format!("allowed_ips = [{}]\n", allowed.join(", ")));
         }
-        if let Some(keepalive) = field(peer, "persistent_keepalive_interval") {
+        if let Some(keepalive) = field(peer, field::PERSISTENT_KEEPALIVE_INTERVAL) {
             if keepalive != "0" {
                 out.push_str(&format!("persistent_keepalive = {keepalive}\n"));
             }
         }
-        match (include_secrets, field(peer, "preshared_key")) {
+        match (include_secrets, field(peer, field::PRESHARED_KEY)) {
             (true, Some(psk)) => out.push_str(&format!("preshared_key = \"{psk}\"\n")),
             _ => out.push_str("# preshared_key is not exported\n"),
         }
@@ -707,8 +809,8 @@ mod tests {
             let fwmark = state.fwmark.to_string();
             prop_assert_eq!(response.peers.len(), state.peers.len());
             prop_assert_eq!(response.field("listen_port"), Some(port.as_str()));
-            prop_assert_eq!(response.field("vallum_interface"), Some(state.interface.as_str()));
-            prop_assert_eq!(response.field("fwmark"), Some(fwmark.as_str()));
+            prop_assert_eq!(response.field(field::VALLUM_INTERFACE), Some(state.interface.as_str()));
+            prop_assert_eq!(response.field(field::FWMARK), Some(fwmark.as_str()));
             for (index, peer) in state.peers.iter().enumerate() {
                 let tx = peer.tx_bytes.to_string();
                 prop_assert_eq!(response.peer_field(index, "vallum_name"), Some(peer.name.as_str()));
@@ -853,7 +955,7 @@ mod tests {
             }],
         };
         let response = parse_response(&render_get(&state));
-        assert_eq!(response.field("vallum_interface"), Some("vallum0"));
+        assert_eq!(response.field(field::VALLUM_INTERFACE), Some("vallum0"));
         assert_eq!(response.peers.len(), 1);
         assert_eq!(response.peer_field(0, "vallum_name"), Some("laptop"));
     }
