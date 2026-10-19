@@ -1,0 +1,127 @@
+# Vallum's CI: the gates that were run by hand through P6.8, now repeatable.
+#
+# Two checkouts, as siblings, because the workspace pins the SDK by path
+# (`origin-crypto-sdk = { path = "../origin-crypto-sdk" }`). If the SDK
+# repository is private, add a `SDK_TOKEN` secret; otherwise the workflow uses
+# the run's own token, which works for a public repository.
+#
+# The e2e job needs unprivileged user namespaces. GitHub's Ubuntu runners
+# normally allow them; where they do not, the step falls back to `sudo`, which
+# the script supports because it creates its own namespaces either way.
+
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stable is the working toolchain; 1.95.0 is the declared MSRV.
+        toolchain: [stable, "1.95.0"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vallum
+      - uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vallum
+
+      - name: Format (scoped to the Vallum crates)
+        working-directory: vallum
+        # Never `--all`: the SDK is a path dependency and is not ours to format.
+        run: >
+          cargo fmt
+          -p vallum-core -p vallum-tunnel -p vallum
+          -p vallum-crypto -p vallum-crypto-sdk -p vallum-crypto-contract
+          -- --check
+
+      - name: Clippy
+        working-directory: vallum
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        working-directory: vallum
+        run: cargo test --workspace
+
+  e2e:
+    name: end-to-end (two namespaces, real kernel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vallum
+      - uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vallum
+
+      - name: Build the daemon
+        working-directory: vallum
+        run: cargo build -p vallum
+
+      - name: Run the netns gate
+        working-directory: vallum
+        # The script creates its own user and network namespaces. Some runners
+        # restrict unprivileged user namespaces (Ubuntu 24.04's AppArmor
+        # default); there, the same script runs under sudo. A failure is never
+        # skipped — it either passes one way or fails the job.
+        run: bash scripts/e2e-netns.sh || sudo -E bash scripts/e2e-netns.sh
+
+  audit:
+    name: advisories and supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vallum
+      - uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: vallum
+
+      - uses: taiki-e/install-action@cargo-deny
+      - name: deny.toml (licenses, sources, bans, advisories)
+        working-directory: vallum
+        run: cargo deny check
