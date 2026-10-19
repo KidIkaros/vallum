@@ -1,0 +1,49 @@
+[package]
+name = "vallum"
+description = "Vallum's daemon: TOML configuration, key management, a TUN interface, and the UDP transport loop."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vallum-core.workspace = true
+vallum-crypto.workspace = true
+vallum-crypto-sdk.workspace = true
+vallum-tunnel.workspace = true
+ipnet.workspace = true
+
+# Configuration is the operator's surface, so the parser is a hard dependency
+# rather than a hand-rolled one: a mis-parse here is a security bug.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# The CLI. A binary may exit on a bad argument; `clap` does that and prints why.
+clap = { version = "4", features = ["derive"] }
+
+# The one place randomness is allowed to come from the operating system. The
+# transport takes a `Randomness`, so the daemon is the only crate that binds that
+# trait to a real source.
+getrandom = "0.4"
+
+# Signal handling, so a `SIGTERM` stops the loop rather than killing the process
+# mid-write. The handler sets one flag and does nothing else.
+signal-hook = "0.3"
+
+# Linux only, for now. `tun2` is the TUN backend behind this crate's own trait;
+# default features are off so no async runtime is pulled in.
+[target.'cfg(target_os = "linux")'.dependencies]
+tun2 = { version = "4.0", default-features = false }
+
+[dev-dependencies]
+# The gate drives the real stack: it builds the config from TOML, expands keys
+# the way the CLI does, and runs two daemons against an in-process network. That
+# means the test names the same lower crates the daemon does.
+vallum-core.workspace = true
+vallum-crypto.workspace = true
+vallum-tunnel.workspace = true
+vallum-crypto-sdk.workspace = true

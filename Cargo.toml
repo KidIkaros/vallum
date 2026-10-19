@@ -6,6 +6,7 @@ members = [
     "crates/vallum-crypto-sdk",
     "crates/vallum-crypto-contract",
     "crates/vallum-tunnel",
+    "crates/vallum",
 ]
 
 [workspace.package]
@@ -20,6 +21,7 @@ description = "Vallum — hybrid post-quantum layer-3 tunnel"
 vallum-crypto = { path = "crates/vallum-crypto" }
 vallum-crypto-sdk = { path = "crates/vallum-crypto-sdk" }
 vallum-core = { path = "crates/vallum-core" }
+vallum-tunnel = { path = "crates/vallum-tunnel" }
 
 # The only non-Vallum dependency of a library crate: prefix matching for
 # cryptokey routing. Small, safe, and `no_std`-friendly; hand-rolling CIDR
