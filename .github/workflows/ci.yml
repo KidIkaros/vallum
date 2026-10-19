@@ -149,6 +149,10 @@ jobs:
         working-directory: vallum
         run: cargo build -p vallum
 
+      - name: Ensure the daemon is executable
+        working-directory: vallum
+        run: chmod +x target/debug/vallum
+
       - name: Run the netns gate
         working-directory: vallum
         # The script creates its own user and network namespaces. Some runners
