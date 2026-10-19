@@ -24,14 +24,14 @@ with the private question "how much of the tag matched".
 The fix is the whole methodology: hold the post-verification work constant and
 vary only the thing under test. `aead_tag_compare` now flips the **first** tag
 byte against the **last**, so both messages fail and only the comparison's early
-exit can differ. It reports `max |t| = 3.1`. The success-vs-failure case is kept
+exit can differ. It reports `max |t| = 2.5`. The success-vs-failure case is kept
 as an explicitly informational benchmark, so the benign difference is documented
 rather than hidden by a better-chosen class.
 
 **(b) A harness with no positive control proves nothing.** `ct_control` is a
 deliberately early-exit byte comparison. It must report a leak; if it does not,
 the machine is too noisy, the classes are not different, or the optimizer removed
-the work, and no other result is trusted. It reports `max |t| ≈ 1050`.
+the work, and no other result is trusted. It reports `max |t| ≈ 1186`.
 `scripts/ct.sh` fails when the control does not leak.
 
 **(c) The NTRU leg holds under both failure classes.** The custom sntrup761
@@ -86,12 +86,12 @@ Machine: Intel Core i7-10750H @ 2.60 GHz, Linux 7.0.0-38-generic, rustc 1.97.1,
 ```text
 benchmark                    kind      max |t|  verdict
 ---------------------------- ------ ----------  -------
-aead_failure_causes          gate        1.652  ok
-aead_success_vs_failure      info      570.429  informational (expected to differ)
-aead_tag_compare             gate        3.147  ok
-control                      control   1050.409  leaked as required
-ntru_decaps_bitflip          gate        2.403  ok
-ntru_decaps_wrong_key        gate        2.548  ok
+aead_failure_causes          gate        2.245  ok
+aead_success_vs_failure      info      543.489  informational (expected to differ)
+aead_tag_compare             gate        2.548  ok
+control                      control   1186.269  leaked as required
+ntru_decaps_bitflip          gate        2.873  ok
+ntru_decaps_wrong_key        gate        2.791  ok
 
 ct: PASS
 ```
