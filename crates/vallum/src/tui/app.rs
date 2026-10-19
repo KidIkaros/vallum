@@ -225,11 +225,18 @@ pub struct Field {
 }
 
 #[derive(Debug, Clone)]
+pub struct FormError {
+    pub field: Option<&'static str>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Form {
     pub title: String,
     pub fields: Vec<Field>,
     pub focus: usize,
     pub cursor: usize,
+    pub error: Option<FormError>,
     pub kind: FormKind,
 }
 
@@ -272,6 +279,7 @@ impl Form {
             ],
             focus: 0,
             cursor: 0,
+            error: None,
             kind: FormKind::AddPeer,
         }
     }
@@ -300,6 +308,7 @@ impl Form {
                 .collect(),
             focus: 0,
             cursor,
+            error: None,
             kind: FormKind::Interface,
         }
     }
@@ -315,6 +324,7 @@ impl Form {
             }],
             focus: 0,
             cursor: device.listen.chars().count(),
+            error: None,
             kind: FormKind::ExportBundle,
         }
     }
@@ -342,6 +352,7 @@ impl Form {
             ],
             focus: 0,
             cursor,
+            error: None,
             kind: FormKind::Device,
         }
     }
@@ -379,6 +390,7 @@ impl Form {
             ],
             focus: 0,
             cursor: peer.name.chars().count(),
+            error: None,
             kind: FormKind::EditPeer(index),
         }
     }

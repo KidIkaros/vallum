@@ -87,6 +87,42 @@ fn form_text_can_be_corrected_without_erasing_the_whole_field() {
 }
 
 #[test]
+fn form_validation_stays_visible_and_points_to_the_invalid_field() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Vec::new());
+    let device = DeviceView {
+        listen: "0.0.0.0:51820".to_owned(),
+        ..DeviceView::default()
+    };
+    let mut form = Form::device(&device);
+    form.fields[0].value = "not-a-port".to_owned();
+    app.form = Some(form);
+
+    super::actions::submit_form(&mut app);
+
+    let form = app.form.as_ref().expect("invalid form remains open");
+    let error = form.error.as_ref().expect("field error remains visible");
+    assert_eq!(error.field, Some("listen port"));
+    assert_eq!(error.message, "listen port is not a number");
+    assert_eq!(form.field("listen port"), "not-a-port");
+    assert!(app.toast.is_none());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw invalid form");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("! listen port is not a number"));
+}
+
+#[test]
 fn masked_form_fields_hide_values_and_do_not_reveal_length() {
     use ratatui::{backend::TestBackend, Terminal};
 

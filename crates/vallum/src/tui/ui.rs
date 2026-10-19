@@ -464,6 +464,10 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
     let mut lines = Vec::new();
     for (index, field) in form.fields.iter().enumerate() {
         let focused = index == form.focus;
+        let invalid = form
+            .error
+            .as_ref()
+            .is_some_and(|error| error.field == Some(field.label));
         let marker = if focused { ">" } else { " " };
         let mut value = if field.masked && !field.value.is_empty() {
             "************".to_owned()
@@ -481,7 +485,9 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
                 value.insert(byte_index, '|');
             }
         }
-        let style = if focused {
+        let style = if invalid {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else if focused {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
@@ -492,6 +498,12 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
             Span::styled(format!("{marker} {:<22} ", field.label), style),
             Span::styled(value, style),
         ]));
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::from(Span::styled(
+            format!("! {}", error.message),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(

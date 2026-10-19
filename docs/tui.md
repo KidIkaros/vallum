@@ -42,7 +42,9 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not
-  displayed.
+  displayed. Validation errors persist in the form, identify the invalid field
+  when possible, and retain entered values until a corrected submission or
+  cancellation.
 - **Empty state**: when no interface is discoverable, the TUI shows direct
   commands and flags for connecting to or starting a tunnel instead of empty
   peers/details panes.

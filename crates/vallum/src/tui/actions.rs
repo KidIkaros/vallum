@@ -13,7 +13,7 @@ use crate::entropy;
 use crate::keys;
 use crate::uapi::{self, Peer, Set};
 
-use super::app::{App, ConfirmAction, FormKind, View};
+use super::app::{App, ConfirmAction, FormError, FormKind, View};
 use super::bundle;
 use super::client;
 use super::qr;
@@ -45,27 +45,54 @@ pub fn submit_form(app: &mut App) {
             app.notify(message);
             refresh(app);
         }
-        Err(error) => app.notify(error),
+        Err(error) => {
+            let mut form = form;
+            form.error = Some(error);
+            app.form = Some(form);
+            app.toast = None;
+        }
     }
 }
 
-fn add_peer(app: &mut App, form: &super::app::Form) -> Result<String, String> {
-    let device = app.current_device().ok_or("no device")?;
-    let (suite, identity) =
-        keys::decode_public(form.field("public line")).map_err(|error| error.to_string())?;
+type FormResult = Result<String, FormError>;
+
+fn form_error(field: Option<&'static str>, message: impl Into<String>) -> FormError {
+    FormError {
+        field,
+        message: message.into(),
+    }
+}
+
+fn field_error(field: &'static str, message: impl Into<String>) -> FormError {
+    form_error(Some(field), message)
+}
+
+fn add_peer(app: &mut App, form: &super::app::Form) -> FormResult {
+    let device = app
+        .current_device()
+        .ok_or_else(|| form_error(None, "no device"))?;
+    let (suite, identity) = keys::decode_public(form.field("public line"))
+        .map_err(|error| field_error("public line", error.to_string()))?;
     if suite != device.suite_id {
-        return Err(format!(
-            "peer suite 0x{suite:04x} does not match device 0x{:04x}",
-            device.suite_id
+        return Err(field_error(
+            "public line",
+            format!(
+                "peer suite 0x{suite:04x} does not match device 0x{:04x}",
+                device.suite_id
+            ),
         ));
     }
-    let endpoint = parse_endpoint(form.field("endpoint"))?;
-    let allowed = parse_prefixes(form.field("allowed IPs"))?;
+    let endpoint =
+        parse_endpoint(form.field("endpoint")).map_err(|error| field_error("endpoint", error))?;
+    let allowed = parse_prefixes(form.field("allowed IPs"))
+        .map_err(|error| field_error("allowed IPs", error))?;
     if allowed.is_empty() {
-        return Err("allowed IPs is empty".to_owned());
+        return Err(field_error("allowed IPs", "allowed IPs is empty"));
     }
-    let keepalive = parse_keepalive(form.field("keepalive"))?;
-    let psk = parse_psk(form.field("PSK (hex, optional)"))?;
+    let keepalive = parse_keepalive(form.field("keepalive"))
+        .map_err(|error| field_error("keepalive", error))?;
+    let psk = parse_psk(form.field("PSK (hex, optional)"))
+        .map_err(|error| field_error("PSK (hex, optional)", error))?;
     let peer = Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
         name: optional_name(form.field("name")),
@@ -84,21 +111,21 @@ fn add_peer(app: &mut App, form: &super::app::Form) -> Result<String, String> {
         replace_peers: false,
         peers: vec![peer],
     };
-    apply(app, &set)?;
+    apply(app, &set).map_err(|error| form_error(None, error))?;
     Ok("peer added".to_owned())
 }
 
-fn apply_device(app: &mut App, form: &super::app::Form) -> Result<String, String> {
+fn apply_device(app: &mut App, form: &super::app::Form) -> FormResult {
     let port: u16 = form
         .field("listen port")
         .trim()
         .parse()
-        .map_err(|_| "listen port is not a number".to_owned())?;
+        .map_err(|_| field_error("listen port", "listen port is not a number"))?;
     let mark: u32 = form
         .field("fwmark")
         .trim()
         .parse()
-        .map_err(|_| "fwmark is not a number".to_owned())?;
+        .map_err(|_| field_error("fwmark", "fwmark is not a number"))?;
     let set = Set {
         private_key: None,
         listen_port: Some(port),
@@ -106,29 +133,35 @@ fn apply_device(app: &mut App, form: &super::app::Form) -> Result<String, String
         replace_peers: false,
         peers: Vec::new(),
     };
-    apply(app, &set)?;
+    apply(app, &set).map_err(|error| form_error(None, error))?;
     Ok("runtime device updated".to_owned())
 }
 
-fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> Result<String, String> {
+fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> FormResult {
     let peer = app
         .current_device()
         .and_then(|device| device.peers.get(index))
         .cloned()
-        .ok_or("peer disappeared")?;
-    let (suite, identity) =
-        keys::decode_public(&peer.public_line).map_err(|error| error.to_string())?;
-    let device = app.current_device().ok_or("no device")?;
+        .ok_or_else(|| form_error(None, "peer disappeared"))?;
+    let (suite, identity) = keys::decode_public(&peer.public_line)
+        .map_err(|error| form_error(None, error.to_string()))?;
+    let device = app
+        .current_device()
+        .ok_or_else(|| form_error(None, "no device"))?;
     if suite != device.suite_id {
-        return Err("peer suite does not match device".to_owned());
+        return Err(form_error(None, "peer suite does not match device"));
     }
-    let endpoint = parse_endpoint(form.field("endpoint"))?;
-    let allowed = parse_prefixes(form.field("allowed IPs"))?;
+    let endpoint =
+        parse_endpoint(form.field("endpoint")).map_err(|error| field_error("endpoint", error))?;
+    let allowed = parse_prefixes(form.field("allowed IPs"))
+        .map_err(|error| field_error("allowed IPs", error))?;
     if allowed.is_empty() {
-        return Err("allowed IPs is empty".to_owned());
+        return Err(field_error("allowed IPs", "allowed IPs is empty"));
     }
-    let keepalive = parse_keepalive(form.field("keepalive"))?;
-    let psk = parse_psk(form.field("PSK (hex, blank = keep)"))?;
+    let keepalive = parse_keepalive(form.field("keepalive"))
+        .map_err(|error| field_error("keepalive", error))?;
+    let psk = parse_psk(form.field("PSK (hex, blank = keep)"))
+        .map_err(|error| field_error("PSK (hex, blank = keep)", error))?;
     let peer = Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
         name: optional_name(form.field("name")),
@@ -147,7 +180,7 @@ fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> Result<Str
         replace_peers: false,
         peers: vec![peer],
     };
-    apply(app, &set)?;
+    apply(app, &set).map_err(|error| form_error(None, error))?;
     Ok("peer updated".to_owned())
 }
 
@@ -510,21 +543,22 @@ pub fn interface_form(app: &mut App) {
     app.form = Some(super::app::Form::interface(values));
 }
 
-fn apply_interface_form(app: &mut App, form: &super::app::Form) -> Result<String, String> {
+fn apply_interface_form(app: &mut App, form: &super::app::Form) -> FormResult {
     let path = app
         .current()
         .and_then(|interface| interface.config_path.clone())
-        .ok_or("no config path")?;
-    let text = std::fs::read_to_string(&path).map_err(|error| format!("read config: {error}"))?;
+        .ok_or_else(|| form_error(None, "no config path"))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| form_error(None, format!("read config: {error}")))?;
     let mut doc: toml_edit::DocumentMut = text
         .parse()
-        .map_err(|error| format!("parse config: {error}"))?;
+        .map_err(|error| form_error(None, format!("parse config: {error}")))?;
     if doc.get("interface").is_none() {
         doc["interface"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     let interface = doc["interface"]
         .as_table_mut()
-        .ok_or("interface is not a table")?;
+        .ok_or_else(|| form_error(None, "interface is not a table"))?;
     let set_string = |table: &mut toml_edit::Table, key: &str, value: &str| {
         let value = value.trim();
         if value.is_empty() {
@@ -541,7 +575,7 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> Result<String
         } else {
             let parsed: i64 = value
                 .parse()
-                .map_err(|_| format!("{label} is not a number"))?;
+                .map_err(|_| field_error(label, format!("{label} is not a number")))?;
             interface[key] = toml_edit::value(parsed);
         }
     }
@@ -560,7 +594,7 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> Result<String
         }
         let table = doc[table_name]
             .as_table_mut()
-            .ok_or_else(|| format!("{table_name} is not a table"))?;
+            .ok_or_else(|| form_error(None, format!("{table_name} is not a table")))?;
         if entries.is_empty() {
             table.remove(key);
         } else {
@@ -579,14 +613,17 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> Result<String
     }
 
     let candidate = path.with_extension("toml.new");
-    std::fs::write(&candidate, doc.to_string()).map_err(|error| format!("write: {error}"))?;
-    crate::config::Config::load(&candidate).map_err(|error| format!("invalid config: {error}"))?;
+    std::fs::write(&candidate, doc.to_string())
+        .map_err(|error| form_error(None, format!("write: {error}")))?;
+    crate::config::Config::load(&candidate)
+        .map_err(|error| form_error(None, format!("invalid config: {error}")))?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     let backup = path.with_extension(format!("toml.bak.{stamp}"));
-    std::fs::copy(&path, &backup).map_err(|error| format!("backup: {error}"))?;
-    std::fs::rename(&candidate, &path).map_err(|error| format!("replace: {error}"))?;
+    std::fs::copy(&path, &backup).map_err(|error| form_error(None, format!("backup: {error}")))?;
+    std::fs::rename(&candidate, &path)
+        .map_err(|error| form_error(None, format!("replace: {error}")))?;
     app.confirm = Some(super::app::Confirm {
         action: ConfirmAction::ApplyConfig,
     });
@@ -609,13 +646,31 @@ pub fn export_bundle(app: &mut App) {
     app.form = Some(super::app::Form::export_bundle(&device));
 }
 
-fn finish_export(app: &mut App, form: &super::app::Form) -> Result<String, String> {
-    let device = app.current_device().cloned().ok_or("no device")?;
-    let peer = app.current_peer().cloned().ok_or("no peer")?;
-    let key_path = app.pending_key.clone().ok_or("no generated key")?;
-    let (bundle, path) = bundle::build(&device, &peer, &key_path, form.field("server endpoint"))?;
-    let json = serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())?;
-    let state = qr::encode(&json, &path.display().to_string())?;
+fn finish_export(app: &mut App, form: &super::app::Form) -> FormResult {
+    let device = app
+        .current_device()
+        .cloned()
+        .ok_or_else(|| form_error(None, "no device"))?;
+    let peer = app
+        .current_peer()
+        .cloned()
+        .ok_or_else(|| form_error(None, "no peer"))?;
+    let key_path = app
+        .pending_key
+        .clone()
+        .ok_or_else(|| form_error(None, "no generated key"))?;
+    let (bundle, path) = bundle::build(&device, &peer, &key_path, form.field("server endpoint"))
+        .map_err(|error| {
+            if error.starts_with("server endpoint") {
+                field_error("server endpoint", error)
+            } else {
+                form_error(None, error)
+            }
+        })?;
+    let json = serde_json::to_string_pretty(&bundle)
+        .map_err(|error| form_error(None, error.to_string()))?;
+    let state =
+        qr::encode(&json, &path.display().to_string()).map_err(|error| form_error(None, error))?;
     app.qr = Some(state);
     Ok(format!("bundle written to {}", path.display()))
 }
