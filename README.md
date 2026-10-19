@@ -100,6 +100,7 @@ crates/
   vallum-core/                    handshake · key schedule · TLV wire · data plane
                                   · epoch · shaping · segmentation · identity
   vallum-tunnel/                  sans-IO transport: peers, routing, handshakes
+  vallum-protocol-tests/          suite-dependent tests and benchmarks
   vallum/                         the daemon: TOML, TUN, UDP, privileges, CLI
 fuzz/                             cargo-fuzz workspace (four targets)
 docs/proof/                       one artefact per gate
@@ -123,14 +124,14 @@ cargo deny check            # licenses, sources, bans, advisories
 bash scripts/e2e-netns.sh   # two namespaces, a real kernel, four lifecycles
 bash scripts/ct.sh          # DudeCT constant-time gate
 bash scripts/fuzz.sh 60     # four cargo-fuzz targets
-cargo bench -p vallum-core  # handshake and data-plane baselines
+cargo bench -p vallum-protocol-tests  # handshake and data-plane baselines
 ```
 
-Byte-exact handshake vectors are frozen in `crates/vallum-core/tests/interop.rs`
+Byte-exact handshake vectors are frozen in `crates/vallum-protocol-tests/tests/interop.rs`
 and regenerate with:
 
 ```sh
-cargo test -p vallum-core --test interop -- --ignored --nocapture
+cargo test -p vallum-protocol-tests --test interop -- --ignored --nocapture
 ```
 
 The contract tests (`crates/vallum-crypto-contract`) exercise KEM keygen/round-

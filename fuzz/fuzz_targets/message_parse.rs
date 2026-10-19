@@ -10,7 +10,7 @@
 //! non-canonical encoding a second implementation could disagree with.
 
 use libfuzzer_sys::fuzz_target;
-use vallum_core::segment;
+use vallum_tunnel::segment;
 use vallum_core::wire::{Message, MessageBuilder};
 
 fuzz_target!(|data: &[u8]| {

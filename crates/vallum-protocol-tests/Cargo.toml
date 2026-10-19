@@ -1,0 +1,30 @@
+[package]
+name = "vallum-protocol-tests"
+description = "Suite-dependent tests and benchmarks for Vallum's protocol and transport."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# This is the test boundary: it depends *outward* on the concrete suite so that
+# `vallum-core` and `vallum-tunnel` do not have to. Their libraries depend on the
+# abstraction only, and their unit tests stay suite-free.
+[lints]
+workspace = true
+
+[dev-dependencies]
+vallum-core = { path = "../vallum-core", features = ["test-internals"] }
+vallum-tunnel.workspace = true
+vallum-crypto.workspace = true
+vallum-crypto-sdk.workspace = true
+criterion = "0.8"
+
+[[bench]]
+name = "handshake"
+harness = false
+
+[[bench]]
+name = "dataplane"
+harness = false

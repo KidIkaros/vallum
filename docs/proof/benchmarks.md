@@ -25,8 +25,8 @@ the point estimates; a wide interval (the tri-hybrid `responder_accept`) is
 reported as measured, not smoothed.
 
 ```sh
-cargo bench -p vallum-core --bench handshake -- --warm-up-time 0.5 --measurement-time 2
-cargo bench -p vallum-core --bench dataplane -- --warm-up-time 0.5 --measurement-time 2
+cargo bench -p vallum-protocol-tests --bench handshake -- --warm-up-time 0.5 --measurement-time 2
+cargo bench -p vallum-protocol-tests --bench dataplane -- --warm-up-time 0.5 --measurement-time 2
 ```
 
 ---

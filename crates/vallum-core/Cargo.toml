@@ -13,17 +13,12 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the transcript-signing primitives to the external test component.
+# Never enabled by the daemon or by any library build; it exists so the protocol
+# tests can live outside the inner circle without making the primitives public
+# API in a normal build.
+test-internals = []
+
 [dependencies]
 vallum-crypto.workspace = true
-
-[dev-dependencies]
-vallum-crypto-sdk.workspace = true
-criterion = "0.8"
-
-[[bench]]
-name = "handshake"
-harness = false
-
-[[bench]]
-name = "dataplane"
-harness = false

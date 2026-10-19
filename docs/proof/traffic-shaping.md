@@ -2,7 +2,7 @@
 
 **Status:** P5 gate artefact. Covers `crates/vallum-core/src/shaping.rs`, the
 padded payload of `crates/vallum-core/src/data.rs`, and the measurement harness
-in `crates/vallum-core/tests/shaping.rs`.
+in `crates/vallum-protocol-tests/tests/shaping.rs`.
 **Depends on:** plan §7 obligation 7 (traffic-analysis shaping), obligation 6
 (`docs/proof/committing-aead-multikey.md`, whose data-plane format this amends),
 and the SDK's AEAD.
@@ -152,7 +152,7 @@ the assertions are relations between the numbers (same size, more bytes, bounded
 delay), not magic constants. Reproduce with:
 
 ```
-cargo test -p vallum-core --test shaping -- --nocapture
+cargo test -p vallum-protocol-tests --test shaping -- --nocapture
 ```
 
 **Baseline (`Shaper::new(vec![])`):** 7 packets, **1190 bytes**, **5 distinct

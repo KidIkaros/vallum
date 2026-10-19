@@ -2330,9 +2330,7 @@ dependencies = [
 name = "vallum-core"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "vallum-crypto",
- "vallum-crypto-sdk",
 ]
 
 [[package]]
@@ -2357,13 +2355,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vallum-protocol-tests"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "vallum-core",
+ "vallum-crypto",
+ "vallum-crypto-sdk",
+ "vallum-tunnel",
+]
+
+[[package]]
 name = "vallum-tunnel"
 version = "0.1.0"
 dependencies = [
  "ipnet",
  "vallum-core",
  "vallum-crypto",
- "vallum-crypto-sdk",
 ]
 
 [[package]]

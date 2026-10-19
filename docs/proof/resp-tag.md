@@ -203,7 +203,7 @@ Covering the serialized message means:
 | distinct error, not `Wire`/`Confirmation` | `HandshakeError::RespTag` | the forged/tampered cases above |
 
 The two zero-KEM tests use a delegating `CountingSuite` (in
-`vallum-core/tests/interop.rs` and `vallum-tunnel/tests/tunnel.rs`) so the claim
+`vallum-protocol-tests/tests/interop.rs` and `vallum-protocol-tests/tests/tunnel.rs`) so the claim
 is *measured*: an outcome-only assertion would pass with the decapsulations still
 running.
 
@@ -239,8 +239,8 @@ Vallum fragments (`⌈4414/1442⌉ = 4`, the same count as 4378), the captured
 live adversary still draws no reply.
 
 **Tests:** **265** workspace tests green (266 total, 1 ignored = the frozen-vector
-regen harness), up from 258: five in `vallum-core/tests/interop.rs` (zero KEM
+regen harness), up from 258: five in `vallum-protocol-tests/tests/interop.rs` (zero KEM
 work, missing tag, tampered field, cross-handshake tag replay, retransmission),
 one in `vallum-core/tests/identity.rs` (mutated signature fails the tag), one in
-`vallum-tunnel/tests/tunnel.rs` (zero KEM work at the transport, handshake
+`vallum-protocol-tests/tests/tunnel.rs` (zero KEM work at the transport, handshake
 preserved). Clippy clean across all targets, scoped `cargo fmt` clean.

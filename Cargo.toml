@@ -6,6 +6,7 @@ members = [
     "crates/vallum-crypto-sdk",
     "crates/vallum-crypto-contract",
     "crates/vallum-tunnel",
+    "crates/vallum-protocol-tests",
     "crates/vallum",
 ]
 

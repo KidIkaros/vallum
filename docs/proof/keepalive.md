@@ -203,7 +203,7 @@ the wire** before any shaper pads it. At 25 s that is 3.4 B/s; at 1 s, 86 B/s �
 | `crates/vallum-tunnel/src/device.rs` | `Peer.next_keepalive_ms`, `keepalive_millis`, `Device::persistent_keepalive`, tick step (4), `tear_down` |
 | `crates/vallum-core/src/timer.rs` | `begin_handshake`, `on_torn_down` |
 | `crates/vallum/src/config.rs` | `PeerEntry.persistent_keepalive`, range check, `with_persistent_keepalive` |
-| `crates/vallum-tunnel/tests/tunnel.rs` | the eight device-level tests in §3 |
+| `crates/vallum-protocol-tests/tests/tunnel.rs` | the eight device-level tests in §3 |
 | `crates/vallum-core/src/timer.rs` (tests) | the two timer tests in §3 |
 | `crates/vallum/tests/gate.rs` | the config test in §3 |
 | `scripts/e2e-netns.sh` | B's field, the idle window, and the live count in §4 |
