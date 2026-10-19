@@ -46,6 +46,9 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
   terminals, and the dashboard stacks peers and details below 100 columns.
   If the control socket drops, the UI marks retained data as stale and `r`
   retries instead of presenting it as live.
+- **Branding**: a compact `Vallum / section` wordmark appears in panel titles;
+  semantic status colors supplement explicit text labels. There is no large
+  startup banner, so the operator's live state remains the visual focus.
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not

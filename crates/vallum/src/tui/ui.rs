@@ -64,7 +64,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             Style::default().fg(Color::Yellow),
         ))];
         frame.render_widget(
-            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Vallum")),
+            Paragraph::new(text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(brand_title("TUNNEL CONTROL")),
+            ),
             area,
         );
         return;
@@ -123,11 +127,26 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         ))),
     }
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Vallum")),
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(brand_title("TUNNEL CONTROL")),
+        ),
         area,
     );
+}
+
+fn brand_title(section: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "Vallum".to_owned(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" / "),
+        Span::styled(section.into(), Style::default().fg(Color::Gray)),
+    ])
 }
 
 fn control_health_line(interface: &Interface) -> Line<'static> {
@@ -209,9 +228,11 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
         Line::from("Or pass --config /path/to/config.toml or --config-dir DIR."),
     ];
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().borders(Borders::ALL).title("Get started")),
+        Paragraph::new(text).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(brand_title("GET STARTED")),
+        ),
         area,
     );
 }
@@ -303,7 +324,11 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(table_title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(brand_title(table_title)),
+        )
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     let mut state = TableState::default().with_selected(Some(app.peer_selected));
     frame.render_stateful_widget(table, area, &mut state);
@@ -385,7 +410,11 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(brand_title("PEER DETAILS")),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -428,7 +457,11 @@ fn draw_compact_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(brand_title("PEER DETAILS")),
+            )
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -466,13 +499,6 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn draw_help(frame: &mut Frame<'_>, _app: &App) {
     let text = vec![
-        Line::from(Span::styled(
-            "Vallum TUI",
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::Cyan),
-        )),
-        Line::from(""),
         Line::from("Tab / Shift-Tab   switch interface"),
         Line::from("j / k, arrows     select peer"),
         Line::from("a                 add peer"),
@@ -496,7 +522,11 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
     ];
     frame.render_widget(
         Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Help"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(brand_title("QUICK GUIDE")),
+            )
             .wrap(Wrap { trim: false }),
         frame.area(),
     );
@@ -531,7 +561,7 @@ fn draw_diff(frame: &mut Frame<'_>, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Config diff (Enter apply, Esc keep)"),
+                    .title(brand_title("CONFIG DIFF · ENTER APPLY / ESC KEEP")),
             )
             .wrap(Wrap { trim: false }),
         frame.area(),
@@ -554,11 +584,11 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(if app.logs_follow {
+                    .title(brand_title(if app.logs_follow {
                         "Logs (follow, f off, r refresh, Esc)"
                     } else {
                         "Logs (f follow, r refresh, Esc)"
-                    }),
+                    })),
             )
             .wrap(Wrap { trim: false }),
         frame.area(),
@@ -584,7 +614,11 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
     lines.push(Line::from(format!("saved: {}", qr.path)));
     lines.push(Line::from("n/p frame  Esc close"));
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("QR")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(brand_title("CLIENT BUNDLE QR")),
+        ),
         popup,
     );
 }
@@ -645,7 +679,7 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(form.title.clone()),
+                    .title(brand_title(format!("FORM · {}", form.title))),
             )
             .wrap(Wrap { trim: false }),
         popup,
@@ -669,7 +703,11 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(message)
-            .block(Block::default().borders(Borders::ALL).title("Confirm"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(brand_title("CONFIRM ACTION")),
+            )
             .wrap(Wrap { trim: false }),
         popup,
     );

@@ -199,6 +199,7 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
+    assert!(text.contains("Vallum / TUNNEL CONTROL"));
     assert!(text.contains("offload on"));
     assert!(text.contains("UDP batching off"));
     assert!(text.contains("CONTROL LIVE"));
@@ -299,12 +300,15 @@ fn narrow_dashboard_keeps_peer_traffic_and_security_state_visible() {
 fn expanded_peer_table_fits_ipv6_endpoints_and_transfer_totals() {
     use ratatui::{backend::TestBackend, Terminal};
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
     let peers = vec![super::app::PeerView {
         name: "field-laptop".to_owned(),
         fingerprint: "7766554433221100".to_owned(),
         endpoint: "[2001:db8::12]:51820".to_owned(),
         allowed_ips: vec!["10.7.0.3/32".to_owned()],
-        last_handshake: Some((1_792_446_590, 0)),
+        last_handshake: Some((now.saturating_sub(10 * 60), 0)),
         tx_bytes: 72_000,
         rx_bytes: 543_210,
         epoch: 2,
