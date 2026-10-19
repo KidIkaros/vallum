@@ -54,6 +54,21 @@ fn the_device_form_prefills_the_port() {
 }
 
 #[test]
+fn escape_closes_the_qr_modal() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut app = App::new(Vec::new());
+    app.qr = Some(qr::QrState {
+        frames: vec!["frame".to_owned()],
+        index: 0,
+        last: std::time::Instant::now(),
+        hash: "hash".to_owned(),
+        path: "/tmp/x".to_owned(),
+    });
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.qr.is_none());
+}
+
+#[test]
 fn a_bundle_splits_into_qr_frames() {
     let data = format!("{{\"version\":1,\"config\":\"{}\"}}", "x".repeat(2500));
     let state = qr::encode(&data, "/tmp/test.vallum-bundle").expect("encode");
