@@ -41,9 +41,20 @@ private_key=<hex seed>
 listen_port=<port>
 fwmark=<decimal>
 public_key=<suite-sized KEM key, hex>
+vallum_interface=<name>
+vallum_public_line=<vallum1:…>
+vallum_fingerprint=<16 hex>
+vallum_listen=<addr:port>
+vallum_address=<prefix>       (repeated)
+vallum_can_set_private_key=true
+vallum_can_set_listen_port=false
+vallum_can_set_fwmark=false
 vallum_suite=0x0003
 # per peer:
 public_key=<hex>
+vallum_name=<config name>
+vallum_fingerprint=<16 hex>
+vallum_public_line=<vallum1:…>
 preshared_key=<hex>            (only when set)
 endpoint=<addr> | (none)
 last_handshake_time_sec=<u64>
@@ -87,10 +98,17 @@ vallum syncconf <config>     # diff: remove absent, update present, add new
 vallum genpsk
 ```
 
-`show` prints a small human view; `--dump` prints the raw `get` response;
-`--field` accepts `endpoints`, `allowed-ips`, `latest-handshakes`, `transfer`,
+`show` prints a small human view with short fingerprints and peer names; it
+**hides `private_key` and `preshared_key`**, as `wg show` does. `--field
+private-key` or `--dump` are the explicit ways to see them. `--field` accepts
+`endpoints`, `allowed-ips`, `latest-handshakes`, `transfer`,
 `persistent-keepalive`, `preshared-keys`, `public-key`, `private-key`,
 `listen-port`, `fwmark`, `peers`.
+
+`showconf` exports the running device as a config: the interface name, listen
+address, addresses, fwmark, and each peer's name, public line, endpoint,
+allowed IPs and keepalive. It does **not** export secrets: `private_key` is a
+placeholder path and PSKs are omitted with a comment.
 
 `syncconf` reads `get`, removes peers the config no longer names, and updates the
 rest with `replace_allowed_ips=true`; a peer whose key and endpoint are unchanged
@@ -114,16 +132,19 @@ keeps its session.
 
 1. **`listen_port` changes are `EOPNOTSUPP`.** They need a socket rebind; the
    plan's next cut is the `SocketHandle` swap. `fwmark` is applied at startup and
-   reported, but a *runtime* change is also `EOPNOTSUPP` (see `socket-ops.md`). A
-   `set` that repeats the current value is accepted, so `syncconf` is
-   idempotent.
+   reported, but a *runtime* change is also `EOPNOTSUPP` (see `socket-ops.md`).
+   `syncconf` and `setconf` now send the device fields, so a changed port is a
+   **refusal with a remedy**, not a silent no-op; a value that already matches is
+   skipped, which keeps `syncconf` idempotent. The capabilities are stated in
+   `get` (`vallum_can_set_*`).
 2. **`private_key` changes are accepted** and tear down every session and
    handshake, because they were authenticated as the old key.
 3. **A PSK change applies to the next handshake.** The live session keeps
    running, as WireGuard does.
 4. **No `set` with `wg`'s argv syntax.** The UAPI is complete; the CLI is
    config-based (`setconf`/`addconf`/`syncconf`).
-5. **No `showconf`.** `show --dump` is the machine-readable form; `vallum-quick`
-   will render a config from it.
+5. **`showconf` exports, but does not round-trip secrets.** The private key is a
+   placeholder and PSKs are omitted, by design. `vallum-quick save` is still not
+   implemented; `showconf` is the read-only export.
 6. **No authentication beyond the socket mode.** Same user or root, as with the
    private key.

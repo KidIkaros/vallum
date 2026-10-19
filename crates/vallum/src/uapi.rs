@@ -206,25 +206,52 @@ fn parse_fixed_key(value: &str) -> Result<[u8; 32], String> {
 /// The device and peers a `get` returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceState {
+    /// The kernel interface name.
+    pub interface: String,
     /// The private-key seed, as the daemon holds it.
     pub private_key: [u8; 32],
     /// The KEM public key.
     pub public_key: Vec<u8>,
-    /// The bound UDP port.
-    pub listen_port: u16,
+    /// The peer public line (`vallum1:…`), for an export that a config can use.
+    pub public_line: String,
+    /// A short fingerprint of the device key.
+    pub fingerprint: [u8; 8],
+    /// The bound UDP address.
+    pub listen: SocketAddr,
     /// The socket mark.
     pub fwmark: u32,
     /// The suite id.
     pub suite: u16,
+    /// The interface addresses.
+    pub addresses: Vec<Prefix>,
+    /// What a `set` can actually change.
+    pub capabilities: Capabilities,
     /// The peers, in configuration order.
     pub peers: Vec<PeerState>,
+}
+
+/// The writable surface, stated rather than discovered by failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// A runtime `private_key` change is accepted (and tears down sessions).
+    pub set_private_key: bool,
+    /// A runtime `listen_port` change is accepted.
+    pub set_listen_port: bool,
+    /// A runtime `fwmark` change is accepted.
+    pub set_fwmark: bool,
 }
 
 /// One peer in a `get` response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerState {
+    /// The configured name, or the generated one.
+    pub name: String,
     /// The peer's KEM public key.
     pub public_key: Vec<u8>,
+    /// The peer public line (`vallum1:…`).
+    pub public_line: String,
+    /// A short fingerprint of the peer key.
+    pub fingerprint: [u8; 8],
     /// The configured PSK, if any.
     pub preshared_key: Option<[u8; 32]>,
     /// The current endpoint.
@@ -248,12 +275,40 @@ pub struct PeerState {
 pub fn render_get(state: &DeviceState) -> String {
     let mut out = String::new();
     out.push_str(&format!("private_key={}\n", hex_encode(&state.private_key)));
-    out.push_str(&format!("listen_port={}\n", state.listen_port));
+    out.push_str(&format!("listen_port={}\n", state.listen.port()));
     out.push_str(&format!("fwmark={}\n", state.fwmark));
     out.push_str(&format!("public_key={}\n", hex_encode(&state.public_key)));
+    out.push_str(&format!("vallum_interface={}\n", state.interface));
+    out.push_str(&format!("vallum_public_line={}\n", state.public_line));
+    out.push_str(&format!(
+        "vallum_fingerprint={}\n",
+        hex_encode(&state.fingerprint)
+    ));
+    out.push_str(&format!("vallum_listen={}\n", state.listen));
+    for address in &state.addresses {
+        out.push_str(&format!("vallum_address={address}\n"));
+    }
+    out.push_str(&format!(
+        "vallum_can_set_private_key={}\n",
+        state.capabilities.set_private_key
+    ));
+    out.push_str(&format!(
+        "vallum_can_set_listen_port={}\n",
+        state.capabilities.set_listen_port
+    ));
+    out.push_str(&format!(
+        "vallum_can_set_fwmark={}\n",
+        state.capabilities.set_fwmark
+    ));
     out.push_str(&format!("vallum_suite={:#06x}\n", state.suite));
     for peer in &state.peers {
         out.push_str(&format!("\npublic_key={}\n", hex_encode(&peer.public_key)));
+        out.push_str(&format!("vallum_name={}\n", peer.name));
+        out.push_str(&format!(
+            "vallum_fingerprint={}\n",
+            hex_encode(&peer.fingerprint)
+        ));
+        out.push_str(&format!("vallum_public_line={}\n", peer.public_line));
         if let Some(psk) = peer.preshared_key {
             out.push_str(&format!("preshared_key={}\n", hex_encode(&psk)));
         }
@@ -278,6 +333,176 @@ pub fn render_get(state: &DeviceState) -> String {
     }
     out.push_str("errno=0\n");
     out
+}
+
+/// A parsed `get` response: the device section, then one section per peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Response {
+    /// Device fields, in wire order.
+    pub device: Vec<(String, String)>,
+    /// Peer sections, in wire order.
+    pub peers: Vec<Vec<(String, String)>>,
+}
+
+impl Response {
+    /// One device field.
+    #[must_use]
+    pub fn field(&self, key: &str) -> Option<&str> {
+        field(&self.device, key)
+    }
+
+    /// One peer field.
+    #[must_use]
+    pub fn peer_field(&self, index: usize, key: &str) -> Option<&str> {
+        self.peers.get(index).and_then(|peer| field(peer, key))
+    }
+}
+
+fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Parse a `get` response. Sections are separated by a blank line; the first is
+/// the device, the rest are peers.
+#[must_use]
+pub fn parse_response(text: &str) -> Response {
+    let mut sections: Vec<Vec<(String, String)>> = Vec::new();
+    let mut current: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                sections.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            current.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    if !current.is_empty() {
+        sections.push(current);
+    }
+    let mut sections = sections.into_iter();
+    let device = sections.next().unwrap_or_default();
+    Response {
+        device,
+        peers: sections.collect(),
+    }
+}
+
+/// A human view: short identifiers, and no secrets.
+///
+/// `wg show` deliberately omits the private and preshared keys; so does this.
+/// They remain available through `--field private-key` or `--dump`, which are
+/// explicit requests.
+#[must_use]
+pub fn render_human(response: &Response) -> String {
+    let mut out = String::new();
+    let fingerprint = response.field("vallum_fingerprint").unwrap_or("?");
+    out.push_str(&format!("interface {fingerprint}\n"));
+    for (key, value) in &response.device {
+        if hidden(key) {
+            continue;
+        }
+        out.push_str(&format!("  {key}={value}\n"));
+    }
+    for peer in &response.peers {
+        let fingerprint = field(peer, "vallum_fingerprint").unwrap_or("?");
+        let name = field(peer, "vallum_name").unwrap_or("");
+        out.push_str(&format!("\npeer {fingerprint} ({name})\n"));
+        for (key, value) in peer {
+            if hidden(key) {
+                continue;
+            }
+            out.push_str(&format!("  {key}={value}\n"));
+        }
+    }
+    out
+}
+
+fn hidden(key: &str) -> bool {
+    matches!(
+        key,
+        "private_key"
+            | "preshared_key"
+            | "public_key"
+            | "vallum_public_line"
+            | "vallum_fingerprint"
+            | "vallum_name"
+            | "errno"
+    )
+}
+
+/// Export a running device as a config a human can edit.
+///
+/// Secrets are not exported: `private_key` is a placeholder path and the PSK is
+/// omitted with a comment. Everything else comes from the public lines and the
+/// device state.
+#[must_use]
+pub fn render_config(response: &Response) -> String {
+    let mut out = String::from(
+        "# generated by `vallum showconf`; set private_key to your key file\n\
+         # and add any preshared keys by hand — secrets are not exported\n\
+         [interface]\n",
+    );
+    out.push_str(&format!(
+        "name = \"{}\"\n",
+        escape(response.field("vallum_interface").unwrap_or("vallum0"))
+    ));
+    out.push_str("private_key = \"private.key\"\n");
+    if let Some(listen) = response.field("vallum_listen") {
+        out.push_str(&format!("listen = \"{listen}\"\n"));
+    }
+    if let Some(fwmark) = response.field("fwmark") {
+        if fwmark != "0" {
+            out.push_str(&format!("fwmark = {fwmark}\n"));
+        }
+    }
+    let addresses: Vec<String> = response
+        .device
+        .iter()
+        .filter(|(key, _)| key == "vallum_address")
+        .map(|(_, value)| format!("\"{}\"", escape(value)))
+        .collect();
+    if !addresses.is_empty() {
+        out.push_str(&format!("addresses = [{}]\n", addresses.join(", ")));
+    }
+    for peer in &response.peers {
+        out.push_str("\n[[peer]]\n");
+        if let Some(name) = field(peer, "vallum_name") {
+            out.push_str(&format!("name = \"{}\"\n", escape(name)));
+        }
+        if let Some(line) = field(peer, "vallum_public_line") {
+            out.push_str(&format!("public_key = \"{}\"\n", escape(line)));
+        }
+        if let Some(endpoint) = field(peer, "endpoint") {
+            if endpoint != "(none)" {
+                out.push_str(&format!("endpoint = \"{endpoint}\"\n"));
+            }
+        }
+        let allowed: Vec<String> = peer
+            .iter()
+            .filter(|(key, _)| key == "allowed_ip")
+            .map(|(_, value)| format!("\"{}\"", escape(value)))
+            .collect();
+        if !allowed.is_empty() {
+            out.push_str(&format!("allowed_ips = [{}]\n", allowed.join(", ")));
+        }
+        if let Some(keepalive) = field(peer, "persistent_keepalive_interval") {
+            if keepalive != "0" {
+                out.push_str(&format!("persistent_keepalive = {keepalive}\n"));
+            }
+        }
+        out.push_str("# preshared_key is not exported\n");
+    }
+    out
+}
+
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// The success reply to a `set`.
@@ -356,13 +581,25 @@ mod tests {
     #[test]
     fn a_get_response_is_parseable_by_eye_and_ends_with_errno() {
         let state = DeviceState {
+            interface: "vallum0".to_owned(),
             private_key: [1u8; 32],
             public_key: vec![2u8; 32],
-            listen_port: 51820,
+            public_line: "vallum1:0003:02:-".to_owned(),
+            fingerprint: [4u8; 8],
+            listen: "0.0.0.0:51820".parse().unwrap(),
             fwmark: 0,
             suite: 0x0003,
+            addresses: vec!["10.7.0.1/24".parse().unwrap()],
+            capabilities: Capabilities {
+                set_private_key: true,
+                set_listen_port: false,
+                set_fwmark: false,
+            },
             peers: vec![PeerState {
+                name: "laptop".to_owned(),
                 public_key: vec![3u8; 32],
+                public_line: "vallum1:0003:03:-".to_owned(),
+                fingerprint: [5u8; 8],
                 preshared_key: None,
                 endpoint: Some("203.0.113.9:51820".parse().unwrap()),
                 last_handshake: Some((1_700_000_000, 42)),
@@ -375,8 +612,103 @@ mod tests {
         };
         let text = render_get(&state);
         assert!(text.contains("private_key=0101"));
+        assert!(text.contains("vallum_interface=vallum0"));
+        assert!(text.contains("vallum_can_set_listen_port=false"));
         assert!(text.contains("endpoint=203.0.113.9:51820"));
         assert!(text.contains("allowed_ip=10.7.0.2/32"));
         assert!(text.ends_with("errno=0\n"));
+    }
+
+    #[test]
+    fn a_response_splits_device_and_peers() {
+        let state = DeviceState {
+            interface: "vallum0".to_owned(),
+            private_key: [1u8; 32],
+            public_key: vec![2u8; 32],
+            public_line: "vallum1:0003:02:-".to_owned(),
+            fingerprint: [4u8; 8],
+            listen: "0.0.0.0:51820".parse().unwrap(),
+            fwmark: 0,
+            suite: 0x0003,
+            addresses: Vec::new(),
+            capabilities: Capabilities {
+                set_private_key: true,
+                set_listen_port: false,
+                set_fwmark: false,
+            },
+            peers: vec![PeerState {
+                name: "laptop".to_owned(),
+                public_key: vec![3u8; 32],
+                public_line: "vallum1:0003:03:-".to_owned(),
+                fingerprint: [5u8; 8],
+                preshared_key: None,
+                endpoint: None,
+                last_handshake: None,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                keepalive: None,
+                allowed_ips: Vec::new(),
+                epoch: 0,
+            }],
+        };
+        let response = parse_response(&render_get(&state));
+        assert_eq!(response.field("vallum_interface"), Some("vallum0"));
+        assert_eq!(response.peers.len(), 1);
+        assert_eq!(response.peer_field(0, "vallum_name"), Some("laptop"));
+    }
+
+    #[test]
+    fn the_human_view_hides_secrets_and_uses_short_ids() {
+        let response = Response {
+            device: vec![
+                ("private_key".to_owned(), "aa".repeat(32)),
+                (
+                    "vallum_fingerprint".to_owned(),
+                    "0011223344556677".to_owned(),
+                ),
+                ("vallum_interface".to_owned(), "vallum0".to_owned()),
+            ],
+            peers: vec![vec![
+                ("public_key".to_owned(), "bb".repeat(1187)),
+                (
+                    "vallum_fingerprint".to_owned(),
+                    "8899aabbccddeeff".to_owned(),
+                ),
+                ("vallum_name".to_owned(), "laptop".to_owned()),
+                ("preshared_key".to_owned(), "cc".repeat(32)),
+            ]],
+        };
+        let text = render_human(&response);
+        assert!(text.contains("interface 0011223344556677"));
+        assert!(text.contains("peer 8899aabbccddeeff (laptop)"));
+        assert!(!text.contains("private_key"));
+        assert!(!text.contains("preshared_key"));
+        assert!(!text.contains(&"bb".repeat(1187)));
+    }
+
+    #[test]
+    fn the_config_export_uses_the_public_line() {
+        let response = Response {
+            device: vec![
+                ("vallum_interface".to_owned(), "vallum0".to_owned()),
+                ("vallum_listen".to_owned(), "0.0.0.0:51820".to_owned()),
+                ("vallum_address".to_owned(), "10.7.0.1/24".to_owned()),
+            ],
+            peers: vec![vec![
+                ("vallum_name".to_owned(), "laptop".to_owned()),
+                (
+                    "vallum_public_line".to_owned(),
+                    "vallum1:0003:ab:-".to_owned(),
+                ),
+                ("endpoint".to_owned(), "203.0.113.9:51820".to_owned()),
+                ("allowed_ip".to_owned(), "10.7.0.2/32".to_owned()),
+                ("preshared_key".to_owned(), "cc".repeat(32)),
+            ]],
+        };
+        let text = render_config(&response);
+        assert!(text.contains("name = \"vallum0\""));
+        assert!(text.contains("public_key = \"vallum1:0003:ab:-\""));
+        assert!(text.contains("allowed_ips = [\"10.7.0.2/32\"]"));
+        assert!(!text.contains("cc".repeat(32).as_str()));
     }
 }

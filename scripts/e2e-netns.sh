@@ -377,12 +377,38 @@ grep -q '^interface ' "$WORK/show.txt" || bad "show did not report the interface
 grep -q '^peer ' "$WORK/show.txt" || bad "show did not report the peer"
 grep -q 'allowed_ip=' "$WORK/show.dump" || bad "show did not report allowed IPs"
 grep -q '^fwmark=4660$' "$WORK/show.dump" || bad "show did not report the fwmark"
+grep -q '^private_key=' "$WORK/show.dump" || bad "show --dump lost the private key"
+grep -q '^  private_key=' "$WORK/show.txt" && bad "the default show printed the private key"
+grep -q '^  preshared_key=' "$WORK/show.txt" && bad "the default show printed the PSK"
+awk '/^interface / { print length($2) }' "$WORK/show.txt" | grep -qx 16 \
+    || bad "the interface label is not a 16-hex fingerprint"
 PORT_NOW=$(sed -n 's/^listen_port=//p' "$WORK/show.dump")
 [ -n "$PORT_NOW" ] && [ "$PORT_NOW" -ne 0 ] \
     || bad "listen_port is $PORT_NOW, not the bound port"
 ok "the control socket reports the device and its peer"
 ok "the bound port ($PORT_NOW) is reported, not the configured 0"
 ok "the socket mark is reported"
+ok "the default view hides secrets and uses short identifiers"
+
+"$BIN" showconf --config "$WORK/a.toml" > "$WORK/showconf.toml" 2>&1 \
+    || bad "showconf failed"
+grep -q '^\[interface\]$' "$WORK/showconf.toml" || bad "showconf has no interface"
+grep -q '^\[\[peer\]\]$' "$WORK/showconf.toml" || bad "showconf has no peer"
+grep -q 'public_key = "vallum1:0003:' "$WORK/showconf.toml" \
+    || bad "showconf did not use the public line"
+grep -q 'private_key = "private.key"' "$WORK/showconf.toml" \
+    || bad "showconf did not use a private-key placeholder"
+ok "showconf exports a usable config without secrets"
+
+# A changed listen port cannot be applied at runtime; the CLI must say so, not
+# exit 0. This is the design fix for the silent no-op.
+cp "$WORK/a.toml" "$WORK/a.bad.toml"
+sed -i 's/^listen = .*/listen = "10.99.0.1:59999"/' "$WORK/a.bad.toml"
+if "$BIN" syncconf "$WORK/a.bad.toml" > "$WORK/bad.out" 2>&1; then
+    bad "syncconf accepted a listen_port change it cannot apply"
+fi
+grep -q 'listen_port' "$WORK/bad.out" || bad "syncconf did not name listen_port"
+ok "an unapplied interface change is refused with a remedy"
 
 "$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
 ok "syncconf applied an unchanged config idempotently"

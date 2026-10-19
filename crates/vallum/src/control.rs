@@ -45,6 +45,10 @@ const ETIMEDOUT: i32 = 110;
 pub struct ControlContext {
     /// The private-key seed, as the daemon holds it.
     pub private_key: [u8; 32],
+    /// The kernel interface name.
+    pub interface: String,
+    /// The interface addresses.
+    pub addresses: Vec<vallum_tunnel::Prefix>,
     /// The bound UDP address.
     pub listen: SocketAddr,
     /// The socket mark.
@@ -139,17 +143,16 @@ pub(crate) fn serve(
 ///
 /// If the socket cannot be reached or the reply cannot be read.
 pub fn request(path: &Path, body: &str) -> Result<String, crate::error::Error> {
-    let mut stream = UnixStream::connect(path).map_err(crate::error::Error::Io)?;
-    stream
-        .write_all(body.as_bytes())
-        .map_err(crate::error::Error::Io)?;
-    stream
-        .shutdown(NetShutdown::Write)
-        .map_err(crate::error::Error::Io)?;
+    let io_path = |source: std::io::Error| crate::error::Error::IoPath {
+        action: "control socket",
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut stream = UnixStream::connect(path).map_err(io_path)?;
+    stream.write_all(body.as_bytes()).map_err(io_path)?;
+    stream.shutdown(NetShutdown::Write).map_err(io_path)?;
     let mut reply = String::new();
-    stream
-        .read_to_string(&mut reply)
-        .map_err(crate::error::Error::Io)?;
+    stream.read_to_string(&mut reply).map_err(io_path)?;
     Ok(reply)
 }
 
@@ -170,7 +173,10 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             None => (0, 0, None),
         };
         peers.push(uapi::PeerState {
+            name: config.name().to_owned(),
             public_key: config.identity().kem().as_bytes().to_vec(),
+            public_line: crate::keys::encode_public(device.suite_id(), config.identity()),
+            fingerprint: device.fingerprint(id).unwrap_or([0u8; 8]),
             preshared_key: config.preshared_key().map(|psk| *psk.as_bytes()),
             endpoint: device.endpoint(id),
             last_handshake: last_handshake.map(|stamp| (stamp.unix_seconds(), stamp.nanos())),
@@ -184,11 +190,20 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
         });
     }
     uapi::DeviceState {
+        interface: context.interface.clone(),
         private_key: context.private_key,
         public_key: device.public_key().as_bytes().to_vec(),
-        listen_port: context.listen.port(),
+        public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
+        fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
+        listen: context.listen,
         fwmark: context.fwmark,
         suite: device.suite_id(),
+        addresses: context.addresses.clone(),
+        capabilities: uapi::Capabilities {
+            set_private_key: true,
+            set_listen_port: false,
+            set_fwmark: false,
+        },
         peers,
     }
 }
@@ -307,6 +322,8 @@ mod tests {
 
     fn context(suite: Arc<dyn CryptoSuite>) -> ControlContext {
         ControlContext {
+            interface: "vallum0".to_owned(),
+            addresses: Vec::new(),
             private_key: [9u8; 32],
             listen: "0.0.0.0:51820".parse().unwrap(),
             fwmark: 0,

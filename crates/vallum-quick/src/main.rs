@@ -48,6 +48,14 @@ enum Action {
         /// The configuration file.
         config: PathBuf,
     },
+    /// Export the running daemon as a config (via `vallum showconf`).
+    Save {
+        /// The configuration file, for its `control` path.
+        config: PathBuf,
+        /// Write to this file instead of stdout. Never the config itself.
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -56,6 +64,7 @@ fn main() -> std::process::ExitCode {
         Action::Up { config, dry_run } => up(config, *dry_run),
         Action::Down { config, dry_run } => down(config, *dry_run),
         Action::Strip { config } => strip(config),
+        Action::Save { config, output } => save(config, output.as_deref()),
     };
     match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -164,6 +173,29 @@ fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Err
 
     for hook in &config.quick.post_down {
         run_hook(hook, dry_run)?;
+    }
+    Ok(())
+}
+
+fn save(config_path: &Path, output: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    if output.is_some_and(|out| out == config_path) {
+        return Err("refusing to overwrite the config; choose a different --output".into());
+    }
+    let binary = std::env::var("VALLUM_BIN").unwrap_or_else(|_| "vallum".to_owned());
+    let result = Command::new(&binary)
+        .args(["showconf", "--config"])
+        .arg(config_path)
+        .output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "`{binary} showconf` failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        )
+        .into());
+    }
+    match output {
+        Some(path) => fs::write(path, &result.stdout)?,
+        None => print!("{}", String::from_utf8_lossy(&result.stdout)),
     }
     Ok(())
 }
@@ -343,6 +375,20 @@ mod tests {
         assert!(!out.contains("[quick]"));
         assert!(!out.contains("dns ="));
         assert!(out.contains("[[peer]]"));
+    }
+
+    #[test]
+    fn save_writes_the_export_and_refuses_the_config_itself() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-save-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("v.toml");
+        let out = dir.join("out.toml");
+        fs::write(&config, "[interface]\nname = \"v0\"\n").unwrap();
+        std::env::set_var("VALLUM_BIN", "/bin/echo");
+        save(&config, Some(&out)).unwrap();
+        assert!(fs::read_to_string(&out).unwrap().contains("showconf"));
+        assert!(save(&config, Some(&config)).is_err());
+        std::env::remove_var("VALLUM_BIN");
     }
 
     #[test]

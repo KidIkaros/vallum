@@ -41,6 +41,9 @@ vallum-quick strip <config>
   pidfile, and runs `post_down`.
 - `strip` prints the config without its `[quick]` table — the form the daemon
   consumes, and the one to hand to `syncconf`.
+- `save` runs `vallum showconf` and writes the result to stdout or `--output`.
+  It refuses to overwrite the config itself: the export is a new file, not an
+  in-place rewrite.
 - `VALLUM_BIN` overrides the daemon path (tests, non-standard installs).
 
 The `[quick]` table (parsed by the daemon and ignored by it):
@@ -100,8 +103,9 @@ the explicit trade: the operator asked for a shell; a packet did not.
 
 ## 6. What this does **not** claim
 
-1. **No `save`.** Runtime state is readable with `vallum show --dump`; writing it
-   back into a config is a separate, lossy operation and is not implemented.
+1. **`save` writes a new file, never in place.** It exports `showconf` output to
+   stdout or `--output`; overwriting the running config is refused. The export
+   omits secrets, so it is not a byte-for-byte round trip.
 2. **No automatic DNS backend choice.** `resolvconf` only; without it, DNS is
    left to the host with a warning.
 3. **No firewall management in the daemon.** `vallum-quick`/the installer own

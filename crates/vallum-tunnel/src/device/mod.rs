@@ -617,6 +617,21 @@ impl Device {
         self.under_load = under_load;
     }
 
+    /// The device's own identity, for a control plane that exports a public line.
+    #[must_use]
+    pub fn identity(&self) -> &StaticIdentity {
+        &self.identity
+    }
+
+    /// A peer's short fingerprint: the same 8-byte hint the wire uses.
+    #[must_use]
+    pub fn fingerprint(&self, id: PeerId) -> Option<[u8; PEER_HINT_SIZE]> {
+        self.peers
+            .get(id.index())
+            .filter(|peer| !peer.removed)
+            .map(|peer| peer.hint)
+    }
+
     /// The suite id this device speaks.
     #[must_use]
     pub fn suite_id(&self) -> u16 {

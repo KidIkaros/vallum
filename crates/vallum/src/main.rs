@@ -33,7 +33,8 @@ use vallum_tunnel::Device;
     version,
     about = "Vallum — hybrid post-quantum layer-3 tunnel",
     long_about = "A hybrid post-quantum VPN. Keys are generated with `keygen`, exchanged \
-                  by hand, and the tunnel is started with `run`."
+                  by hand, and the tunnel is started with `run`.\n\n\
+                  The daemon is Linux-only this release; see docs/proof/platforms.md."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -67,6 +68,8 @@ enum Command {
     Addconf(SetconfArgs),
     /// Apply only the differences between a config and the running daemon.
     Syncconf(SetconfArgs),
+    /// Export a running daemon as a config (secrets are not included).
+    Showconf(ShowconfArgs),
 }
 
 #[derive(Args)]
@@ -125,6 +128,17 @@ struct ShowArgs {
 }
 
 #[derive(Args)]
+struct ShowconfArgs {
+    /// The configuration file, for its `control` path.
+    #[arg(long, short, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// The control socket path, instead of a config.
+    #[arg(long, value_name = "SOCKET")]
+    control: Option<PathBuf>,
+}
+
+#[derive(Args)]
 struct SetconfArgs {
     /// The configuration file to apply.
     #[arg(value_name = "FILE")]
@@ -146,6 +160,7 @@ fn main() -> ExitCode {
         Command::Setconf(args) => setconf(&args, true),
         Command::Addconf(args) => setconf(&args, false),
         Command::Syncconf(args) => syncconf(&args),
+        Command::Showconf(args) => showconf(&args),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -253,6 +268,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         device.peer_count(),
     );
 
+    let interface_name = parts.name.clone();
     let policy = run::Loop {
         tick_ms: args.tick_ms.unwrap_or(run::DEFAULT_TICK_MS),
         ..run::Loop::default()
@@ -267,6 +283,8 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             control: resolved.control.clone().map(|path| control::ControlServer {
                 path,
                 context: control::ControlContext {
+                    interface: interface_name,
+                    addresses: resolved.addresses.clone(),
                     private_key: seed,
                     listen: bound,
                     fwmark: resolved.fwmark,
@@ -330,22 +348,20 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
         print_field(&reply, field);
         return Ok(());
     }
-    // A small human view: the device line, then each peer's fields indented.
-    let mut first = true;
-    for line in reply.lines() {
-        if let Some(key) = line.strip_prefix("public_key=") {
-            if first {
-                println!("interface {key}");
-                first = false;
-            } else {
-                println!("peer {key}");
-            }
-        } else if line == "errno=0" {
-            continue;
-        } else {
-            println!("  {line}");
-        }
-    }
+    print!(
+        "{}",
+        vallum::uapi::render_human(&vallum::uapi::parse_response(&reply))
+    );
+    Ok(())
+}
+
+fn showconf(args: &ShowconfArgs) -> Result<(), Error> {
+    let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    let reply = control::request(&path, "get=1\n")?;
+    print!(
+        "{}",
+        vallum::uapi::render_config(&vallum::uapi::parse_response(&reply))
+    );
     Ok(())
 }
 
@@ -409,11 +425,59 @@ fn resolve_config(config_path: &Path) -> Result<vallum::config::Resolved, Error>
     config.resolve(config_path, &suite)
 }
 
+fn private_seed(config_path: &Path) -> Result<[u8; 32], Error> {
+    let config = Config::load(config_path)?;
+    let key_path = config::resolve_key_path(config_path, &config.interface.private_key);
+    let secret = keys::load_secret(&key_path)?;
+    keys::hex_decode(&secret.seed)
+        .map_err(|why| Error::Invalid {
+            path: key_path.clone(),
+            what: format!("private key seed is not hex: {why}"),
+        })?
+        .try_into()
+        .map_err(|_| Error::Invalid {
+            path: key_path.clone(),
+            what: "private key seed is not 32 bytes".to_owned(),
+        })
+}
+
+/// The device fields that differ from the running daemon.
+///
+/// A `listen_port` of 0 in the config means "any"; a running daemon already has
+/// one, so it is not a requested change. `fwmark = 0` means unset.
+fn device_lines(desired: &vallum::config::Resolved, seed: &[u8; 32], current: &str) -> String {
+    let response = vallum::uapi::parse_response(current);
+    let mut out = String::new();
+    let seed_hex = keys::hex_encode(seed);
+    if response.field("private_key") != Some(seed_hex.as_str()) {
+        out.push_str(&format!("private_key={seed_hex}\n"));
+    }
+    let current_port = response
+        .field("listen_port")
+        .and_then(|value| value.parse::<u16>().ok());
+    if desired.listen.port() != 0 && current_port != Some(desired.listen.port()) {
+        out.push_str(&format!("listen_port={}\n", desired.listen.port()));
+    }
+    let current_mark = response
+        .field("fwmark")
+        .and_then(|value| value.parse::<u32>().ok());
+    if desired.fwmark != 0 && current_mark != Some(desired.fwmark) {
+        out.push_str(&format!("fwmark={}\n", desired.fwmark));
+    }
+    out
+}
+
 fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {
     let path = control_path(Some(args.config.as_path()), args.control.as_deref())?;
     let resolved = resolve_config(args.config.as_path())?;
     let mut body = String::from("set=1\n");
     if replace {
+        let current = control::request(&path, "get=1\n")?;
+        body.push_str(&device_lines(
+            &resolved,
+            &private_seed(args.config.as_path())?,
+            &current,
+        ));
         body.push_str("replace_peers=true\n");
     }
     for peer in &resolved.peers {
@@ -447,6 +511,11 @@ fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
         .collect();
 
     let mut body = String::from("set=1\n");
+    body.push_str(&device_lines(
+        &resolved,
+        &private_seed(args.config.as_path())?,
+        &current,
+    ));
     for key in &current_peers {
         if !desired.contains(key) {
             body.push_str(&format!("public_key={key}\nremove=true\n"));
@@ -464,9 +533,22 @@ fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
     if reply.lines().any(|line| line == "errno=0") {
         return Ok(());
     }
+    let errno = reply
+        .lines()
+        .find_map(|line| line.strip_prefix("errno="))
+        .and_then(|value| value.parse::<i32>().ok());
+    let what = match errno {
+        Some(95) => "the daemon cannot change listen_port or fwmark at runtime; \
+                     restart it, or run `vallum-quick down` then `up`"
+            .to_owned(),
+        Some(2) => "update_only named a peer that is not configured".to_owned(),
+        Some(22) => "the request was malformed, or two peers claim the same prefix".to_owned(),
+        Some(17) => "the peer already exists".to_owned(),
+        _ => format!("control request failed: {}", reply.trim()),
+    };
     Err(Error::Invalid {
         path: path.to_path_buf(),
-        what: format!("control request failed: {}", reply.trim()),
+        what,
     })
 }
 
