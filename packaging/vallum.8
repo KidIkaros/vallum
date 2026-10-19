@@ -1,4 +1,4 @@
-.TH VALLUM 8 "2026-10-19" "vallum 0.1.2" "System Administration"
+.TH VALLUM 8 "2026-10-19" "vallum 0.1.3" "System Administration"
 .SH NAME
 vallum \- hybrid post-quantum layer-3 tunnel
 .SH SYNOPSIS
@@ -48,6 +48,9 @@ Check the platform, config, control socket, and helper tools.
 .TP
 .B completions SHELL
 Print a completion script for bash, zsh, fish, or PowerShell.
+.TP
+.B import-bundle FILE [--output-dir DIR] [--force]
+Import a client `.vallum-bundle` as a config and a 0600 key file.
 .TP
 .B tui [--config FILE | --control SOCKET | --config-dir DIR] [--snapshot]
 Open the terminal operations console. `--snapshot` renders one frame headlessly.

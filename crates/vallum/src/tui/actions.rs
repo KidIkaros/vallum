@@ -36,6 +36,8 @@ pub fn submit_form(app: &mut App) {
         FormKind::AddPeer => add_peer(app, &form),
         FormKind::EditPeer(index) => edit_peer(app, &form, index),
         FormKind::Device => apply_device(app, &form),
+        FormKind::ExportBundle => finish_export(app, &form),
+        FormKind::Interface => apply_interface_form(app, &form),
     };
     match result {
         Ok(message) => {
@@ -149,11 +151,14 @@ fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> Result<Str
     Ok("peer updated".to_owned())
 }
 
-pub fn confirm_remove(app: &mut App) {
+pub fn confirm(app: &mut App) {
     let Some(confirm) = app.confirm.take() else {
         return;
     };
-    let ConfirmAction::RemovePeer(index) = confirm.action;
+    let ConfirmAction::RemovePeer(index) = confirm.action else {
+        restart_service(app);
+        return;
+    };
     let Some(peer) = app
         .current_device()
         .and_then(|device| device.peers.get(index))
@@ -199,11 +204,12 @@ pub fn keygen(app: &mut App) {
     };
     let suite = device.suite_id;
     let interface = device.interface.clone();
-    let directory = app
+    let preferred = app
         .current()
         .and_then(|current| current.config_path.as_ref())
         .and_then(|path| path.parent())
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let directory = writable_directory(preferred);
     let mut path = directory.join(format!("{interface}.key"));
     let mut counter = 1;
     while path.exists() {
@@ -243,7 +249,257 @@ pub fn edit_config(app: &mut App) {
         app.notify("no config path; start the daemon from a config file");
         return;
     };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let backup = path.with_extension(format!("toml.bak.{stamp}"));
+    if let Err(error) = std::fs::copy(&path, &backup) {
+        app.notify(format!("cannot back up config: {error}"));
+        return;
+    }
+    app.editor_backup = Some(backup);
     app.editor = Some(path);
+}
+
+pub fn finish_edit_config(app: &mut App, path: &std::path::Path) {
+    let backup = app.editor_backup.take();
+    let backup_note = backup
+        .as_ref()
+        .map_or_else(String::new, |path| format!("; backup {}", path.display()));
+    match crate::config::Config::load(path) {
+        Ok(_) => {
+            app.notify(format!(
+                "config parsed{backup_note}; Enter applies, Esc keeps the file"
+            ));
+            app.confirm = Some(super::app::Confirm {
+                action: ConfirmAction::ApplyConfig,
+            });
+        }
+        Err(error) => app.notify(format!("invalid config: {error}{backup_note}")),
+    }
+}
+
+fn restart_service(app: &mut App) {
+    let Some(interface) = app.current() else {
+        return;
+    };
+    let Some(config) = &interface.config_path else {
+        app.notify("no config path to restart");
+        return;
+    };
+    let stem = config
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0");
+    let unit = format!("vallum@{stem}.service");
+    if Command::new("systemctl")
+        .args(["cat", &unit])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        match Command::new("systemctl").args(["restart", &unit]).status() {
+            Ok(status) if status.success() => {
+                app.notify(format!("systemctl restart {unit}"));
+                refresh(app);
+                return;
+            }
+            _ => {}
+        }
+    }
+    if nix::unistd::geteuid().is_root() {
+        let down = Command::new("vallum-quick")
+            .arg("down")
+            .arg(config)
+            .status();
+        let up = Command::new("vallum-quick").arg("up").arg(config).status();
+        if down.is_ok_and(|status| status.success()) && up.is_ok_and(|status| status.success()) {
+            app.notify("vallum-quick down && up");
+            refresh(app);
+            return;
+        }
+    }
+    app.notify(format!(
+        "sudo vallum-quick down {} && sudo vallum-quick up {}",
+        config.display(),
+        config.display()
+    ));
+}
+
+fn writable_directory(preferred: PathBuf) -> PathBuf {
+    if is_writable(&preferred) {
+        return preferred;
+    }
+    let fallback = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("vallum");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
+}
+
+fn is_writable(directory: &std::path::Path) -> bool {
+    let probe = directory.join(format!(".vallum-write-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+pub fn interface_form(app: &mut App) {
+    let Some(path) = app
+        .current()
+        .and_then(|interface| interface.config_path.clone())
+    else {
+        app.notify("no config path to edit");
+        return;
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            app.notify(format!("read config: {error}"));
+            return;
+        }
+    };
+    let doc: toml_edit::DocumentMut = match text.parse() {
+        Ok(doc) => doc,
+        Err(error) => {
+            app.notify(format!("parse config: {error}"));
+            return;
+        }
+    };
+    let string = |table: &toml_edit::DocumentMut, key: &str| {
+        table
+            .get("interface")
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let integer = |table: &toml_edit::DocumentMut, key: &str| {
+        table
+            .get("interface")
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_integer())
+            .map_or_else(String::new, |value| value.to_string())
+    };
+    let list = |table: &toml_edit::DocumentMut, table_name: &str, key: &str| {
+        table
+            .get(table_name)
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    let values = [
+        string(&doc, "listen"),
+        integer(&doc, "mtu"),
+        integer(&doc, "fwmark"),
+        list(&doc, "interface", "addresses"),
+        list(&doc, "quick", "dns"),
+        doc.get("quick")
+            .and_then(|item| item.get("table"))
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_owned(),
+    ];
+    app.form = Some(super::app::Form::interface(values));
+}
+
+fn apply_interface_form(app: &mut App, form: &super::app::Form) -> Result<String, String> {
+    let path = app
+        .current()
+        .and_then(|interface| interface.config_path.clone())
+        .ok_or("no config path")?;
+    let text = std::fs::read_to_string(&path).map_err(|error| format!("read config: {error}"))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("parse config: {error}"))?;
+    if doc.get("interface").is_none() {
+        doc["interface"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let interface = doc["interface"]
+        .as_table_mut()
+        .ok_or("interface is not a table")?;
+    let set_string = |table: &mut toml_edit::Table, key: &str, value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            table.remove(key);
+        } else {
+            table[key] = toml_edit::value(value);
+        }
+    };
+    set_string(interface, "listen", form.field("listen"));
+    for (key, label) in [("mtu", "mtu"), ("fwmark", "fwmark")] {
+        let value = form.field(label).trim();
+        if value.is_empty() {
+            interface.remove(key);
+        } else {
+            let parsed: i64 = value
+                .parse()
+                .map_err(|_| format!("{label} is not a number"))?;
+            interface[key] = toml_edit::value(parsed);
+        }
+    }
+    for (table_name, key, label) in [
+        ("interface", "addresses", "addresses (comma)"),
+        ("quick", "dns", "dns (comma)"),
+    ] {
+        let entries: Vec<&str> = form
+            .field(label)
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if doc.get(table_name).is_none() {
+            doc[table_name] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let table = doc[table_name]
+            .as_table_mut()
+            .ok_or_else(|| format!("{table_name} is not a table"))?;
+        if entries.is_empty() {
+            table.remove(key);
+        } else {
+            let mut array = toml_edit::Array::new();
+            for entry in entries {
+                array.push(entry);
+            }
+            table[key] = toml_edit::Item::Value(toml_edit::Value::Array(array));
+        }
+    }
+    if doc.get("quick").is_none() {
+        doc["quick"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(table) = doc["quick"].as_table_mut() {
+        set_string(table, "table", form.field("table"));
+    }
+
+    let candidate = path.with_extension("toml.new");
+    std::fs::write(&candidate, doc.to_string()).map_err(|error| format!("write: {error}"))?;
+    crate::config::Config::load(&candidate).map_err(|error| format!("invalid config: {error}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let backup = path.with_extension(format!("toml.bak.{stamp}"));
+    std::fs::copy(&path, &backup).map_err(|error| format!("backup: {error}"))?;
+    std::fs::rename(&candidate, &path).map_err(|error| format!("replace: {error}"))?;
+    app.confirm = Some(super::app::Confirm {
+        action: ConfirmAction::ApplyConfig,
+    });
+    Ok(format!("config written; backup {}", backup.display()))
 }
 
 pub fn export_bundle(app: &mut App) {
@@ -251,32 +507,63 @@ pub fn export_bundle(app: &mut App) {
         app.notify("no device to export");
         return;
     };
-    let Some(peer) = app.current_peer().cloned() else {
+    if app.current_peer().is_none() {
         app.notify("select a peer first");
         return;
-    };
-    let Some(key_path) = app.pending_key.clone() else {
+    }
+    if app.pending_key.is_none() {
         app.notify("generate a key first (g), then add the peer");
         return;
-    };
-    match bundle::build(&device, &peer, &key_path) {
-        Ok((bundle, path)) => {
-            let json = match serde_json::to_string_pretty(&bundle) {
-                Ok(json) => json,
-                Err(error) => {
-                    app.notify(error.to_string());
-                    return;
-                }
-            };
-            match qr::encode(&json, &path.display().to_string()) {
-                Ok(state) => {
-                    app.notify(format!("bundle written to {}", path.display()));
-                    app.qr = Some(state);
-                }
-                Err(error) => app.notify(error),
-            }
+    }
+    app.form = Some(super::app::Form::export_bundle(&device));
+}
+
+fn finish_export(app: &mut App, form: &super::app::Form) -> Result<String, String> {
+    let device = app.current_device().cloned().ok_or("no device")?;
+    let peer = app.current_peer().cloned().ok_or("no peer")?;
+    let key_path = app.pending_key.clone().ok_or("no generated key")?;
+    let (bundle, path) = bundle::build(&device, &peer, &key_path, form.field("server endpoint"))?;
+    let json = serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())?;
+    let state = qr::encode(&json, &path.display().to_string())?;
+    app.qr = Some(state);
+    Ok(format!("bundle written to {}", path.display()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServicePlan {
+    Systemd {
+        unit: String,
+        action: &'static str,
+    },
+    Quick {
+        action: &'static str,
+        config: PathBuf,
+    },
+    Command(String),
+}
+
+pub fn service_plan(
+    config: &std::path::Path,
+    running: bool,
+    systemd: bool,
+    root: bool,
+) -> ServicePlan {
+    let stem = config
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0");
+    let unit = format!("vallum@{stem}.service");
+    let action = if running { "stop" } else { "start" };
+    let quick = if running { "down" } else { "up" };
+    if systemd {
+        ServicePlan::Systemd { unit, action }
+    } else if root {
+        ServicePlan::Quick {
+            action: quick,
+            config: config.to_path_buf(),
         }
-        Err(error) => app.notify(error),
+    } else {
+        ServicePlan::Command(format!("sudo vallum-quick {quick} {}", config.display()))
     }
 }
 
@@ -293,28 +580,47 @@ pub fn toggle_service(app: &mut App) {
         .and_then(|stem| stem.to_str())
         .unwrap_or("vallum0");
     let unit = format!("vallum@{stem}.service");
-    let running = interface.device.is_some();
-    let action = if running { "stop" } else { "start" };
-    let status = Command::new("systemctl").args([action, &unit]).status();
-    match status {
-        Ok(status) if status.success() => {
-            app.notify(format!("systemctl {action} {unit}"));
-            refresh(app);
-        }
-        Ok(_) | Err(_) => {
-            let quick = if running { "down" } else { "up" };
-            if nix::unistd::geteuid().is_root() {
-                match Command::new("vallum-quick").arg(quick).arg(config).status() {
-                    Ok(status) if status.success() => {
-                        app.notify(format!("vallum-quick {quick}"));
-                        refresh(app);
-                    }
-                    _ => app.notify(format!("sudo vallum-quick {quick} {}", config.display())),
+    let systemd = Command::new("systemctl")
+        .args(["cat", &unit])
+        .status()
+        .is_ok_and(|status| status.success());
+    let plan = service_plan(
+        config,
+        interface.device.is_some(),
+        systemd,
+        nix::unistd::geteuid().is_root(),
+    );
+    match plan {
+        ServicePlan::Systemd { unit, action } => {
+            match Command::new("systemctl").args([action, &unit]).status() {
+                Ok(status) if status.success() => {
+                    app.notify(format!("systemctl {action} {unit}"));
+                    refresh(app);
                 }
-            } else {
-                app.notify(format!("sudo vallum-quick {quick} {}", config.display()));
+                _ => {
+                    let quick = if interface.device.is_some() {
+                        "down"
+                    } else {
+                        "up"
+                    };
+                    app.notify(format!("sudo vallum-quick {quick} {}", config.display()));
+                }
             }
         }
+        ServicePlan::Quick { action, config } => {
+            match Command::new("vallum-quick")
+                .arg(action)
+                .arg(&config)
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    app.notify(format!("vallum-quick {action}"));
+                    refresh(app);
+                }
+                _ => app.notify(format!("sudo vallum-quick {action} {}", config.display())),
+            }
+        }
+        ServicePlan::Command(command) => app.notify(command),
     }
 }
 
@@ -336,13 +642,29 @@ pub fn load_logs(app: &mut App) {
         .output()
     {
         Ok(output) if output.status.success() => {
-            app.logs = String::from_utf8_lossy(&output.stdout)
+            let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(str::to_owned)
                 .collect();
+            app.logs = if lines.is_empty() {
+                vec![format!("journald returned no lines for {unit}")]
+            } else {
+                lines
+            };
             app.view = View::Logs;
+            app.last_logs = std::time::Instant::now();
         }
-        _ => app.notify(format!("no journal for {unit}; see the daemon log")),
+        Ok(output) => {
+            let error = String::from_utf8_lossy(&output.stderr);
+            app.logs = vec![format!("journal unavailable for {unit}: {}", error.trim())];
+            app.view = View::Logs;
+            app.last_logs = std::time::Instant::now();
+        }
+        Err(error) => {
+            app.logs = vec![format!("journal unavailable for {unit}: {error}")];
+            app.view = View::Logs;
+            app.last_logs = std::time::Instant::now();
+        }
     }
 }
 
@@ -407,4 +729,93 @@ fn parse_psk(text: &str) -> Result<Option<[u8; 32]>, String> {
     keys::parse_psk(value)
         .map(|psk| Some(*psk.as_bytes()))
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn the_interface_form_writes_and_validates() {
+        let dir = std::env::temp_dir().join(format!("vallum-interface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vallum0.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"key\"\naddress = \"10.7.0.1/24\"\nlisten = \"0.0.0.0:51820\"\n",
+        )
+        .unwrap();
+        let mut app = App::new(vec![super::super::app::Interface::new(
+            "vallum0".to_owned(),
+            Some(path.clone()),
+            dir.join("control.sock"),
+        )]);
+        let form = super::super::app::Form::interface([
+            "0.0.0.0:51821".to_owned(),
+            "1400".to_owned(),
+            "7".to_owned(),
+            "10.7.0.1/24, fd00:7::1/64".to_owned(),
+            "9.9.9.9".to_owned(),
+            "auto".to_owned(),
+        ]);
+        apply_interface_form(&mut app, &form).expect("apply");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("listen = \"0.0.0.0:51821\""));
+        assert!(text.contains("mtu = 1400"));
+        assert!(text.contains("10.7.0.1/24"));
+        assert!(text.contains("9.9.9.9"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_service_plan_prefers_systemd() {
+        let plan = service_plan(
+            std::path::Path::new("/etc/vallum/vallum0.toml"),
+            true,
+            true,
+            true,
+        );
+        assert_eq!(
+            plan,
+            ServicePlan::Systemd {
+                unit: "vallum@vallum0.service".to_owned(),
+                action: "stop",
+            }
+        );
+    }
+
+    #[test]
+    fn the_service_plan_uses_quick_as_root() {
+        let plan = service_plan(
+            std::path::Path::new("/etc/vallum/vallum0.toml"),
+            false,
+            false,
+            true,
+        );
+        assert!(matches!(plan, ServicePlan::Quick { action: "up", .. }));
+        let plan = service_plan(
+            std::path::Path::new("/etc/vallum/vallum0.toml"),
+            true,
+            false,
+            true,
+        );
+        assert!(matches!(plan, ServicePlan::Quick { action: "down", .. }));
+    }
+
+    #[test]
+    fn the_service_plan_shows_a_sudo_command_when_unprivileged() {
+        let plan = service_plan(
+            std::path::Path::new("/etc/vallum/vallum0.toml"),
+            false,
+            false,
+            false,
+        );
+        let ServicePlan::Command(command) = plan else {
+            panic!("expected a command");
+        };
+        assert!(command.starts_with("sudo vallum-quick up "));
+    }
 }

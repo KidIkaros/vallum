@@ -4,7 +4,7 @@ _vallum() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor completions tui help"
+    commands="run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor completions import-bundle tui help"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )

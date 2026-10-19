@@ -28,7 +28,9 @@ preshared_key_file = "laptop.psk"
 One or both families; every address is assigned over netlink.
 .TP
 .B control
-A 0600 Unix socket for the UAPI. Absent means no control plane.
+A 0600 Unix socket for the UAPI. Absent means no control plane. Use a unique
+path per config; a relative path is resolved against the config directory, so
+two configs in one directory with the same relative name collide.
 .TP
 .B fwmark
 An \fBSO_MARK\fR for policy routing; applied before the privilege drop.

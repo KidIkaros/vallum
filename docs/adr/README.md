@@ -12,3 +12,4 @@
 | [0008](0008-tui.md) | A feature-gated `vallum tui` operations console | accepted | 2026-10-19 |
 | [0009](0009-client-bundle-qr.md) | A versioned client bundle and animated multi-frame QR | accepted | 2026-10-19 |
 | [0010](0010-default-suite.md) | Keep the tri-hybrid default and document a fast profile | accepted | 2026-10-19 |
+| [0011](0011-macos-out-of-scope.md) | macOS is out of scope for v0.1 | accepted | 2026-10-19 |

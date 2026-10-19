@@ -80,7 +80,8 @@ the explicit trade: the operator asked for a shell; a packet did not.
 
 `scripts/install.sh` supports Debian/Ubuntu and Fedora/RHEL:
 
-- installs `qrencode` and `nftables`, the binaries, and `/etc/vallum`;
+- installs `nftables`, the binaries, and `/etc/vallum`; a client QR is shown only
+  when `qrencode` is already present;
 - generates the server key and a config with a control socket and `fwmark`;
 - installs and enables the template unit;
 - adds a NAT table for the tunnel subnet;

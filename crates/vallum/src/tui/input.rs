@@ -35,7 +35,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     }
     if app.confirm.is_some() {
         match key.code {
-            KeyCode::Enter => actions::confirm_remove(app),
+            KeyCode::Enter => actions::confirm(app),
             KeyCode::Esc => app.confirm = None,
             _ => {}
         }
@@ -81,6 +81,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         KeyCode::Char('g') => actions::keygen(app),
         KeyCode::Char('q') => actions::export_bundle(app),
         KeyCode::Char('E') => actions::edit_config(app),
+        KeyCode::Char('C') => actions::interface_form(app),
         KeyCode::Char('c') => {
             if let Some(device) = app.current_device().cloned() {
                 app.form = Some(Form::device(&device));

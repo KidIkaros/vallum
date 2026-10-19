@@ -5,6 +5,7 @@
 pub mod bench;
 pub mod control;
 pub mod doctor;
+pub mod import;
 pub mod keys;
 pub mod run;
 #[cfg(feature = "tui")]

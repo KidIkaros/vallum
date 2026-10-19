@@ -23,9 +23,11 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 | `g` | generate a key and prefill the add form |
 | `q` | export the client bundle and show its animated QR |
 | `c` | edit the runtime listen port and fwmark |
-| `E` | edit the TOML in `$EDITOR` |
+| `C` | edit listen/MTU/fwmark/addresses/DNS/table |
+| `E` | edit the TOML in `$EDITOR` (backup + validation + apply prompt) |
 | `s` | start/stop: systemd first, then `vallum-quick` |
 | `l` | load journald logs |
+| `f` | toggle log follow (in the Logs view) |
 | `r` | refresh |
 | `?` | help |
 | `Q` / Ctrl-C | quit |
@@ -39,14 +41,22 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 - **Peer CRUD** through the UAPI. The public line is decoded and checked against
   the device suite; endpoint hostnames are resolved; allowed IPs are validated.
 - **Key generation** writes a 0600 key file and prefills the add form with the
-  public line.
-- **Bundle export** writes a versioned JSON bundle (config + key file) as a
-  `.vallum-bundle` file and an animated multi-frame QR. The QR contains the
-  private key; the modal says so and is cleared on close.
+  public line. If the config directory is not writable (for example
+  `/etc/vallum` for a non-root operator), it falls back to
+  `$XDG_CONFIG_HOME/vallum` or `~/.config/vallum`.
+- **Bundle export** asks for the server endpoint (defaulting to the daemon's
+  listen address; an unspecified `0.0.0.0`/`[::]` is rejected), writes a
+  versioned JSON bundle (config + key file) as a `.vallum-bundle` file, and
+  shows an animated multi-frame QR. The QR contains the private key; the modal
+  says so and is cleared on close.
+- **Bundle import** is `vallum import-bundle <file> --output-dir DIR`; it writes
+  the config and a 0600 key, refusing to overwrite without `--force`.
 - **Service control**: `systemctl start/stop vallum@<stem>.service` when the
   unit exists; otherwise `vallum-quick up/down` if already root, or the exact
   `sudo` command when not. No sudo prompt is opened by the TUI.
-- **Logs**: `journalctl -u vallum@<stem> -n 200 --no-pager -o cat`.
+- **Logs**: `journalctl -u vallum@<stem> -n 200 --no-pager -o cat`; `r`
+  refreshes, `f` polls every second, and an empty/unavailable journal is shown
+  as a message rather than a blank pane.
 
 ## Security
 
@@ -55,7 +65,9 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 - No shell: `systemctl`, `journalctl`, `vallum-quick`, and `$EDITOR` are spawned
   with argument arrays, never `sh -c`.
 - The control socket is the same trust boundary as the private key (0600,
-  same user).
+  same user). Each config must use a unique `control` path; relative paths are
+  resolved against the config directory, so two configs with
+  `control = "control.sock"` in one directory collide.
 - Config edits through `$EDITOR` are not auto-applied; restart or `syncconf`
   after reviewing the diff.
 

@@ -65,8 +65,8 @@ detect_os() {
 }
 install_deps() {
     case "$OS" in
-        debian) run apt-get update; run apt-get install -y qrencode nftables ;;
-        rhel) run dnf install -y qrencode nftables ;;
+        debian) run apt-get update; run apt-get install -y nftables ;;
+        rhel) run dnf install -y nftables ;;
     esac
 }
 bin_src() {

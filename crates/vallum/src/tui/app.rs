@@ -191,6 +191,8 @@ pub enum FormKind {
     AddPeer,
     EditPeer(usize),
     Device,
+    ExportBundle,
+    Interface,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +244,46 @@ impl Form {
             ],
             focus: 0,
             kind: FormKind::AddPeer,
+        }
+    }
+
+    #[must_use]
+    pub fn interface(values: [String; 6]) -> Self {
+        let labels = [
+            "listen",
+            "mtu",
+            "fwmark",
+            "addresses (comma)",
+            "dns (comma)",
+            "table",
+        ];
+        Self {
+            title: "Interface config".to_owned(),
+            fields: labels
+                .into_iter()
+                .zip(values)
+                .map(|(label, value)| Field {
+                    label,
+                    value,
+                    masked: false,
+                })
+                .collect(),
+            focus: 0,
+            kind: FormKind::Interface,
+        }
+    }
+
+    #[must_use]
+    pub fn export_bundle(device: &DeviceView) -> Self {
+        Self {
+            title: "Export client bundle".to_owned(),
+            fields: vec![Field {
+                label: "server endpoint",
+                value: device.listen.clone(),
+                masked: false,
+            }],
+            focus: 0,
+            kind: FormKind::ExportBundle,
         }
     }
 
@@ -312,6 +354,7 @@ impl Form {
 #[derive(Debug, Clone, Copy)]
 pub enum ConfirmAction {
     RemovePeer(usize),
+    ApplyConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -341,6 +384,9 @@ pub struct App {
     pub pending_key: Option<PathBuf>,
     pub qr: Option<QrState>,
     pub editor: Option<PathBuf>,
+    pub editor_backup: Option<PathBuf>,
+    pub logs_follow: bool,
+    pub last_logs: Instant,
 }
 
 impl App {
@@ -361,6 +407,9 @@ impl App {
             pending_key: None,
             qr: None,
             editor: None,
+            editor_backup: None,
+            logs_follow: false,
+            last_logs: Instant::now(),
         }
     }
 

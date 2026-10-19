@@ -72,10 +72,16 @@ fn event_loop(
         if let Some(qr) = app.qr.as_mut() {
             qr.tick();
         }
+        if app.view == app::View::Logs
+            && app.logs_follow
+            && app.last_logs.elapsed() >= Duration::from_secs(1)
+        {
+            actions::load_logs(app);
+        }
         if let Some(path) = app.editor.take() {
             open_editor(terminal, &path)?;
+            actions::finish_edit_config(app, &path);
             actions::refresh(app);
-            app.notify("config edited; restart or syncconf to apply");
         }
         terminal
             .draw(|frame| ui::draw(frame, app))

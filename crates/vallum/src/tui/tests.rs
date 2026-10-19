@@ -69,6 +69,26 @@ fn escape_closes_the_qr_modal() {
 }
 
 #[test]
+fn an_unspecified_endpoint_is_rejected() {
+    let device = DeviceView {
+        listen: "0.0.0.0:51820".to_owned(),
+        public_line: "vallum1:0003:00:-".to_owned(),
+        ..DeviceView::default()
+    };
+    let peer = super::app::PeerView {
+        allowed_ips: vec!["10.7.0.2/32".to_owned()],
+        ..super::app::PeerView::default()
+    };
+    assert!(super::bundle::build(
+        &device,
+        &peer,
+        std::path::Path::new("/tmp/none"),
+        "0.0.0.0:51820"
+    )
+    .is_err());
+}
+
+#[test]
 fn a_bundle_splits_into_qr_frames() {
     let data = format!("{{\"version\":1,\"config\":\"{}\"}}", "x".repeat(2500));
     let state = qr::encode(&data, "/tmp/test.vallum-bundle").expect("encode");

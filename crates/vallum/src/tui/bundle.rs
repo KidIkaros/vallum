@@ -4,17 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+
+pub use crate::bundle::Bundle;
 
 use super::app::{DeviceView, PeerView};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Bundle {
-    pub version: u32,
-    pub name: String,
-    pub config: String,
-    pub key: String,
-}
 
 /// Build a client bundle for a generated key and one server-side peer.
 ///
@@ -26,7 +20,20 @@ pub fn build(
     device: &DeviceView,
     peer: &PeerView,
     key_path: &Path,
+    endpoint: &str,
 ) -> Result<(Bundle, PathBuf), String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("server endpoint is empty".to_owned());
+    }
+    if endpoint
+        .parse::<SocketAddr>()
+        .is_ok_and(|address| address.ip().is_unspecified())
+        || endpoint.starts_with("0.0.0.0:")
+        || endpoint.starts_with("[::]:")
+    {
+        return Err("server endpoint is unspecified; use a reachable host:port".to_owned());
+    }
     let address = peer
         .allowed_ips
         .first()
@@ -53,7 +60,7 @@ pub fn build(
          endpoint = \"{}\"\n\
          allowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n\
          persistent_keepalive = 25\n",
-        device.public_line, device.listen
+        device.public_line, endpoint
     );
     let bundle = Bundle {
         version: 1,

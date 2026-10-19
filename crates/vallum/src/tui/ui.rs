@@ -236,7 +236,7 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let hint = "Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device  E edit config  s start/stop  l logs  ? help  Q quit";
+    let hint = "Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device  E edit config  C interface  s start/stop  l logs  ? help  Q quit";
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
         area,
@@ -262,6 +262,7 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
         Line::from("q                 export the client bundle and show its QR"),
         Line::from("c                 edit the runtime listen port and fwmark"),
         Line::from("E                 edit the TOML in $EDITOR"),
+        Line::from("C                 edit listen/MTU/fwmark/addresses/DNS/table"),
         Line::from("s                 start/stop via systemd, then vallum-quick"),
         Line::from("l                 show journald logs"),
         Line::from("r                 refresh"),
@@ -291,7 +292,15 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Logs (Esc)"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if app.logs_follow {
+                        "Logs (follow, f off, r refresh, Esc)"
+                    } else {
+                        "Logs (f follow, r refresh, Esc)"
+                    }),
+            )
             .wrap(Wrap { trim: false }),
         frame.area(),
     );
@@ -355,6 +364,9 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
         match confirm.action {
             super::app::ConfirmAction::RemovePeer(_) => {
                 "Remove this peer?  Enter confirms, Esc cancels."
+            }
+            super::app::ConfirmAction::ApplyConfig => {
+                "Config parsed. Apply now? Enter restarts, Esc keeps the file."
             }
         }
     } else {

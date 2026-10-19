@@ -153,12 +153,14 @@ needs no root for status or peer changes.
 │laptop       1a0888aca6183e92 (none)     10.7.0.2/32    —         0B/0B     ││allowed  10.7.0.2/32 │
 └──────────────────────────────────────────────────────────────────────────┘└─────────────────────┘
 Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device
-E edit config  s start/stop  l logs  ? help  Q quit
+C interface  E edit config  s start/stop  l logs  f follow  ? help  Q quit
 ```
 
 Generate that frame yourself with
-`vallum tui --config <file> --snapshot --width 160 --height 30`. See
-[`docs/tui.md`](docs/tui.md) for the key map, QR bundle format, and limits.
+`vallum tui --config <file> --snapshot --width 160 --height 30`. The QR export
+asks for the server endpoint (an unspecified `0.0.0.0`/`[::]` is rejected);
+`vallum import-bundle <file> --output-dir DIR` unpacks a bundle into a config
+and a 0600 key. See [`docs/tui.md`](docs/tui.md) for the key map and limits.
 
 ## Test
 
