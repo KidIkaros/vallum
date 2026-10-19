@@ -1,0 +1,20 @@
+[package]
+name = "vallum-crypto-sdk"
+description = "Vallum's origin-crypto-sdk adapter — the only crate that names SDK types."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["ml-kem"]
+# Enables the ML-KEM-768 leg and therefore suites 0x0002 and 0x0003.
+ml-kem = ["origin-crypto-sdk/ml-kem"]
+
+[dependencies]
+vallum-crypto.workspace = true
+origin-crypto-sdk.workspace = true

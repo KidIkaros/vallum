@@ -1,0 +1,21 @@
+[package]
+name = "vallum-crypto-contract"
+description = "Suite-agnostic contract tests for Vallum's cryptographic boundary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# This crate depends on `vallum-crypto` ONLY. That is the point: the contract is
+# defined purely in terms of the `CryptoSuite` trait, so it applies unchanged to
+# any provider adapter.
+
+[lints]
+workspace = true
+
+[dependencies]
+vallum-crypto.workspace = true
+
+[dev-dependencies]
+vallum-crypto-sdk.workspace = true

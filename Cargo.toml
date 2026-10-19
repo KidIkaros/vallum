@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vallum-crypto",
+    "crates/vallum-crypto-sdk",
+    "crates/vallum-crypto-contract",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+authors = ["Vallum contributors"]
+description = "Vallum — hybrid post-quantum layer-3 tunnel"
+
+[workspace.dependencies]
+vallum-crypto = { path = "crates/vallum-crypto" }
+vallum-crypto-sdk = { path = "crates/vallum-crypto-sdk" }
+
+# The SDK is pinned by path (never a floating crates.io version). See the plan's
+# disruption playbook: an SDK bump only recompiles the adapter.
+origin-crypto-sdk = { path = "../origin-crypto-sdk" }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
