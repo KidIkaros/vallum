@@ -8,3 +8,5 @@
 | [0004](0004-vallum-config.md) | Extract the TOML schema into vallum-config | accepted | 2026-10-19 |
 | [0005](0005-linux-only-platform-scope.md) | Linux-only platform scope for this release | accepted | 2026-10-19 |
 | [0006](0006-udp-batching.md) | Batch UDP sends with sendmmsg; defer GSO/GRO | accepted | 2026-10-19 |
+| [0007](0007-psk-init-tag.md) | Authenticate InitHello with a configured-PSK admission tag | accepted | 2026-10-19 |
+| [0010](0010-default-suite.md) | Keep the tri-hybrid default and document a fast profile | accepted | 2026-10-19 |

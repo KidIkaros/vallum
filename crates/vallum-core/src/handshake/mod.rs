@@ -146,6 +146,7 @@ use crate::wire::{
 mod admission;
 mod hint;
 mod keyschedule;
+mod psk_tag;
 
 pub use admission::{resp_tag, verify_resp_tag, RESP_TAG_SIZE};
 pub use hint::{peer_hint, PEER_HINT_SIZE};
@@ -405,7 +406,13 @@ pub fn initiator_hello_with_psk(
     builder.field(tag::EPHEMERAL_PK, ephemeral_public.as_bytes())?;
     builder.field(tag::TIMESTAMP, &timestamp)?;
     builder.field(tag::PEER_HINT, &sealed_hint)?;
-    let init_hello = builder.finish()?;
+    let init_hello = if let Some(psk) = psk {
+        let tag = psk_tag::compute_psk_tag(suite, psk, &builder.psk_tag_input())?;
+        builder.field(tag::PSK_TAG, &tag)?;
+        builder.finish()?
+    } else {
+        builder.finish()?
+    };
 
     let state = InitiatorState {
         suite_id,
@@ -441,6 +448,10 @@ pub struct InitHelloInfo {
     ephemeral_public: KemPublicKey,
     static_ct: Vec<u8>,
     peer_hint: [u8; PEER_HINT_SIZE],
+    /// The configured-PSK admission tag, if the initiator sent one.
+    psk_tag: Option<[u8; crate::wire::PSK_TAG_SIZE]>,
+    /// The bytes the tag covers: `InitHello` minus `PSK_TAG`.
+    psk_tag_input: Vec<u8>,
     /// Op A's per-leg secrets, recovered by decapsulation.
     static_legs: Vec<SharedSecret>,
 }
@@ -535,6 +546,14 @@ pub fn responder_identify(
         sender_index: message.sender_index(),
     };
     let plain = suite.aead_open(&hint_key, &hint_nonce, &header.encode(), sealed_hint)?;
+    let psk_tag = message
+        .get(tag::PSK_TAG)
+        .map(|bytes| {
+            <[u8; crate::wire::PSK_TAG_SIZE]>::try_from(bytes)
+                .map_err(|_| HandshakeError::Wire("PSK_TAG has the wrong length".to_owned()))
+        })
+        .transpose()?;
+    let psk_tag_input = message.psk_tag_input();
     let peer_hint = <[u8; PEER_HINT_SIZE]>::try_from(plain.as_slice()).map_err(|_| {
         HandshakeError::Wire(format!("unsealed peer hint is {} bytes", plain.len()))
     })?;
@@ -546,6 +565,8 @@ pub fn responder_identify(
         ephemeral_public: KemPublicKey::new(ephemeral_pk.to_vec()),
         static_ct: static_ct.to_vec(),
         peer_hint,
+        psk_tag,
+        psk_tag_input,
         static_legs,
     })
 }
@@ -603,6 +624,16 @@ pub fn responder_accept_with_psk(
     // than trusted: it must name the peer the caller resolved.
     if info.peer_hint != peer_hint(suite, peer_public) {
         return Err(HandshakeError::PeerHintMismatch);
+    }
+
+    // The configured-PSK admission tag, checked before the responder does any
+    // encapsulation. A forged InitHello that lacks the PSK cannot get past this
+    // point; a tag without a configured PSK is a configuration mismatch.
+    match (psk, info.psk_tag) {
+        (None, None) => {}
+        (Some(psk), Some(tag))
+            if psk_tag::verify_psk_tag(suite, psk, &info.psk_tag_input, &tag) => {}
+        _ => return Err(HandshakeError::PskTag),
     }
 
     // Op B: responder → initiator ephemeral, plain fresh randomness (the

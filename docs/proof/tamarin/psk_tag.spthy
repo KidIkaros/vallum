@@ -1,0 +1,129 @@
+/*
+ * The configured-PSK admission tag, DoS, and replay (G1 / ADR-0007).
+ *
+ * This is a focused symbolic model, not a replacement for vallum.spthy:
+ * - the responder only sends RespHello for an InitHello carrying a tag under
+ *   the configured PSK;
+ * - a forged InitHello therefore requires the PSK, which is the paper's
+ *   dos_mitigation property;
+ * - a timestamp is accepted at most once (replay resistance);
+ * - identity hiding and the KEM IK assumption are deliberately not modelled.
+ *
+ * Run:
+ *   PATH="$PWD/maude:$PATH" ./tamarin-prover --prove \
+ *     docs/proof/tamarin/psk_tag.spthy +RTS -M3G -RTS
+ */
+
+theory PskTag
+begin
+
+builtins: hashing
+
+functions: pk/1, enc/2, dec/2, kdf/2, mac/2
+
+equations: dec(enc(pk(sk), r), sk) = r
+
+/* ── keys and the shared PSK ───────────────────────────────────────── */
+
+rule Register_key:
+  [ Fr(~ltk) ]
+  -->
+  [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Register_psk:
+  [ Fr(~psk) ]
+  -->
+  [ !Psk($I, $R, ~psk) ]
+
+rule Reveal_Psk:
+  [ !Psk($I, $R, psk) ]
+  --[ RevealPsk($I, $R) ]->
+  [ Out(psk) ]
+
+/* ── InitHello: op A, MEX-bound, plus the PSK admission tag ────────── */
+
+rule InitHello:
+  let rA   = h(<~freshA, ltkI>)
+      ctA  = enc(pkR, rA)
+      epkI = pk(~ephI)
+      tag  = mac(psk, <'InitHello', $I, $R, ctA, epkI, ~ts>)
+  in
+  [ !Ltk($I, ltkI), !Pk($R, pkR), !Psk($I, $R, psk),
+    Fr(~freshA), Fr(~ephI), Fr(~ts) ]
+  --[ SentInit($I, $R, ~ts) ]->
+  [ StInit1($I, $R, ltkI, ~ephI, rA, ctA, epkI, ~ts),
+    Out(<'InitHello', $I, $R, ctA, epkI, ~ts, tag>) ]
+
+/* ── RespHello: the tag is checked before ops B/C ──────────────────── */
+
+rule RespHello:
+  let rA    = dec(ctA, ltkR)
+      rB    = ~freshB
+      ctB   = enc(epkI, rB)
+      rC    = h(<~freshC, ltkR>)
+      ctC   = enc(pkI, rC)
+      TR    = h(<'TR', ctA, epkI, ts, ctB, ctC>)
+      psk0  = h(<pkI, pkR>)
+      key   = kdf(TR, <rA, rB, rC, psk0, psk>)
+      confR = kdf(key, TR)
+      confI = kdf(key, <TR, confR>)
+  in
+  [ !Ltk($R, ltkR), !Pk($I, pkI), !Pk($R, pkR), !Psk($I, $R, psk),
+    Fr(~freshB), Fr(~freshC),
+    In(<'InitHello', $I, $R, ctA, epkI, ts,
+        mac(psk, <'InitHello', $I, $R, ctA, epkI, ts>)>) ]
+  --[ RunningResp($I, $R, ts, key), AcceptInit($I, $R, ts),
+      OnlyOnce($I, $R, ts) ]->
+  [ StResp1($I, $R, key, confI),
+    Out(<'RespHello', $I, $R, ctB, ctC, confR>) ]
+
+/* ── InitConf and RespConf: the session completes ──────────────────── */
+
+rule InitConf:
+  let rB    = dec(ctB, ephI)
+      rC    = dec(ctC, ltkI)
+      TR    = h(<'TR', ctA, epkI, ts, ctB, ctC>)
+      psk0  = h(<pkI, pkR>)
+      key   = kdf(TR, <rA, rB, rC, psk0, psk>)
+      confR = kdf(key, TR)
+      confI = kdf(key, <TR, confR>)
+  in
+  [ StInit1($I, $R, ltkI, ephI, rA, ctA, epkI, ts),
+    !Pk($I, pkI), !Pk($R, pkR), !Psk($I, $R, psk),
+    In(<'RespHello', $I, $R, ctB, ctC, confR>) ]
+  --[ CommitInit($I, $R, key) ]->
+  [ StInitDone($I, $R, key),
+    Out(<'InitConf', $I, $R, confI>) ]
+
+rule RespConf:
+  [ StResp1($I, $R, key, confI),
+    In(<'InitConf', $I, $R, confI>) ]
+  --[ CommitResp($I, $R, key) ]->
+  [ StRespDone($I, $R, key) ]
+
+/* ── restrictions and lemmas ───────────────────────────────────────── */
+
+restriction OnlyOnce:
+  "All I R ts #i #j. OnlyOnce(I, R, ts) @ i & OnlyOnce(I, R, ts) @ j ==> #i = #j"
+
+lemma executable:
+  exists-trace
+  "Ex I R ts #i. AcceptInit(I, R, ts) @ i"
+
+/*
+ * If the responder answers an InitHello with a timestamp that no honest
+ * initiator sent, the configured PSK must have been revealed first. This is
+ * the paper's dos_mitigation property for the tag.
+ */
+lemma dos_mitigation:
+  "All I R ts key #i.
+     RunningResp(I, R, ts, key) @ i
+   & not (Ex #j. SentInit(I, R, ts) @ j & #j < #i)
+   ==> (Ex #j. RevealPsk(I, R) @ j & #j < #i)"
+
+/* A timestamp is accepted at most once. */
+lemma replay_once:
+  "All I R ts #i #j.
+     AcceptInit(I, R, ts) @ i & AcceptInit(I, R, ts) @ j ==> #i = #j"
+
+end

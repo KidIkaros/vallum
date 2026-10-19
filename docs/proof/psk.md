@@ -3,8 +3,9 @@
 **Status:** adds the one protocol capability WireGuard has that Vallum did not:
 an operator-supplied per-peer PSK.
 **Depends on:** P1 (`eck-pfs-psk.md`) for the schedule this extends.
-**Wire change:** none. The PSK is a key-schedule input, never a message field;
-the default (`None`) path is byte-identical to every frozen vector.
+**Wire change:** the default (`None`) path is byte-identical to every frozen
+vector. A configured PSK adds a 32-byte admission tag to `InitHello` (+36 B with
+the field header); the key schedule itself is unchanged.
 
 ---
 
@@ -45,6 +46,14 @@ knows the two public keys can compute it. This phase adds the real one.
   in `initiator_process_resp` uses the same one. A PSK changed between
   `InitHello` and `RespHello` makes that handshake fail and the next one use the
   new value — the same posture WireGuard takes.
+- **Admission tag (DoS).** A configured PSK also authenticates the initiation:
+  `PSK_TAG` is a 32-byte KDF over `InitHello` minus the tag and the cookie MACs,
+  keyed by the PSK (`vallum/init-psk-tag/v1`). The responder checks it after op A
+  and **before ops B/C**. Wrong, missing, or unexpected tags return
+  `HandshakeError::PskTag` with no reply, so a forged `InitHello` costs the
+  responder one op-A decapsulation, not two hybrid encapsulations. This is the
+  PQ-WireGuard DoS property; without a PSK, the cookie gate and the sealed hint
+  remain the mitigations. The tag is admission-only and not folded into `TR`.
 
 ---
 
@@ -76,8 +85,10 @@ preshared_key_file = "laptop.psk"   # 64 hex characters, mode 0600
 - a different PSK, and a one-sided PSK in either direction, fail with
   `Confirmation`;
 - the PSK never appears in any handshake message;
-- `InitHello` is byte-identical with and without a PSK (it is not a message
-  field); only `RespHello`'s confirmation changes.
+- a configured PSK adds exactly 36 bytes to `InitHello`; the default path is
+  unchanged and the frozen interop vectors still pass;
+- a wrong, missing, or unexpected tag fails with `PskTag`, and a `CountingSuite`
+  proves the responder performs **zero** encapsulations after the rejection.
 
 The e2e generates one PSK with `genpsk`, writes it into both configs, and runs
 **every** lifecycle with it — default, narrow MTU, v6 inner, dual-stack, and the
@@ -89,10 +100,13 @@ DF path.
 
 1. **Not post-quantum.** The hybrid KEM is the PQ leg; the PSK is an extra
    symmetric secret.
-2. **No runtime rotation yet.** G2's UAPI adds `set preshared_key`; until then a
-   change means a restart.
+2. **Rotation is live.** The UAPI `set preshared_key` updates the peer; the
+   current session keeps running and the next handshake uses the new value.
 3. **No per-direction PSK.** One key per peer, as WireGuard has.
 4. **No PSK in the identity document.** It is local configuration, never
    published.
 5. **No protection against a compromised PSK file.** The permission policy
    covers accidental exposure, as with the private key.
+6. **No identity hiding from the tag.** The tag authenticates the initiation to
+   the responder; it is not a proof of the initiator's identity and does not
+   hide the KEM ciphertexts.

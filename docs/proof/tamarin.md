@@ -1,7 +1,9 @@
 # Obligation 4 — the Tamarin symbolic model (handshake + epoch axis)
 
-**Status:** obligation 4, the last unstarted item in the plan's §7. Model:
-[`tamarin/vallum.spthy`](tamarin/vallum.spthy).
+**Status:** obligation 4, the last unstarted item in the plan's §7. Models:
+[`tamarin/vallum.spthy`](tamarin/vallum.spthy) (handshake + epoch) and
+[`tamarin/psk_tag.spthy`](tamarin/psk_tag.spthy) (configured-PSK admission,
+DoS, replay).
 **Depends on:** P1 (`docs/proof/eck-pfs-psk.md`) for the handshake the model
 mirrors, P4 (`docs/proof/ratchet-pcs.md`) for the epoch axis it encodes, P6.8
 (`docs/proof/resp-tag.md`) for the `PRE_TAG` pattern it includes.
@@ -97,6 +99,30 @@ pcs_root_independence (all-traces):            verified (109 steps)
 
 ---
 
+## 2.1 The configured-PSK admission model
+
+`psk_tag.spthy` is a focused model of ADR-0007, not a replacement for the main
+model. It adds a shared PSK, the `PSK_TAG` on `InitHello`, and the responder's
+check **before** ops B/C:
+
+| Lemma | Result |
+|---|---|
+| `executable` | verified (11 steps) |
+| `dos_mitigation` | verified (14 steps) |
+| `replay_once` | verified (2 steps) |
+
+`dos_mitigation` says: if the responder sends `RespHello` for a timestamp no
+honest initiator sent, the PSK was revealed first. `replay_once` says a
+timestamp is accepted at most once. The model deliberately omits identity
+hiding, the KEM IK assumption, segmentation, shaping, and the full eCK game.
+
+Run it with the same toolchain:
+
+```sh
+PATH="$PWD/maude:$PATH" ./tamarin-prover --prove \
+  docs/proof/tamarin/psk_tag.spthy +RTS -M3G -RTS
+```
+
 ## 3. Why the lemmas are phrased the way they are
 
 **"Clean session" is explicit, not implicit.** Tamarin checks a lemma against
@@ -158,8 +184,10 @@ exhaust memory. Per-lemma runs (`--prove=<lemma>`) are the cheap way to iterate.
    keys; there is no ephemeral-reveal oracle, no session-state reveal, and no
    matching of the full eCK-PFS-PSK game. The model is a sanity/agreement model,
    not a re-derivation of P1's computational proof.
-5. **No DoS, cookies, timestamps, shaping, segmentation, or identity.** Each is
-   another phase's obligation; `PRE_TAG` appears only as the pattern the
-   initiator requires.
+5. **No DoS, cookies, timestamps, shaping, segmentation, or identity in the
+   main model.** The PSK-tag model covers the configured-PSK DoS path and
+   timestamp replay; cookies, segmentation, shaping, and identity hiding remain
+   outside both models. `PRE_TAG` appears only as the pattern the initiator
+   requires.
 6. **No claim that the model matches the code byte for byte.** §1 maps rules to
    functions; a wire change must be reflected here by hand.

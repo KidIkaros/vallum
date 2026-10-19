@@ -86,6 +86,13 @@ pub enum HandshakeError {
     /// not an authentication one: the tag is checked before any decapsulation,
     /// and [`Self::Confirmation`] still gates session acceptance afterwards.
     RespTag,
+    /// An `InitHello` did not carry a valid configured-PSK admission tag.
+    ///
+    /// Raised when a PSK is configured but the tag is missing, when a tag is
+    /// present but the responder has no PSK, or when the tag does not verify.
+    /// It is an *admission* failure checked before ops B/C, not an
+    /// authentication one; [`Self::Confirmation`] still gates the session.
+    PskTag,
     /// An operation needed a signing identity and this endpoint has none.
     NoSigningIdentity,
     /// A hybrid-KEM operation failed.
@@ -147,6 +154,10 @@ impl fmt::Display for HandshakeError {
             Self::RespTag => write!(
                 f,
                 "HandshakeError: the RespHello admission tag did not verify"
+            ),
+            Self::PskTag => write!(
+                f,
+                "HandshakeError: the configured-PSK InitHello admission tag did not verify"
             ),
             Self::NoSigningIdentity => {
                 write!(f, "HandshakeError: this endpoint has no signing identity")

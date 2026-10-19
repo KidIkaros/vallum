@@ -116,6 +116,22 @@ scripts/
   ct.sh · fuzz.sh                 the measurement and fuzzing gates
 ```
 
+## Build
+
+The workspace pins the SDK by path, so clone both repositories as siblings:
+
+```sh
+git clone https://github.com/KidIkaros/vallum.git
+git clone https://github.com/KidIkaros/OriginSDK.git origin-crypto-sdk
+cd vallum
+cargo test --workspace
+```
+
+`scripts/bootstrap.sh` does the sibling clone for you. The `fast` profile is
+suite `0x0002` (X25519+ML-KEM-768): generate a key with `vallum keygen --suite 2`.
+It completes a handshake in ~1.81 ms versus ~54 ms for the default tri-hybrid;
+the default stays tri-hybrid for KEM diversity.
+
 ## Test
 
 ```sh

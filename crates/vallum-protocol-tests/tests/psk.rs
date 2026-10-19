@@ -8,11 +8,17 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use vallum_core::{
     initiator_hello_with_psk, initiator_process_resp, responder_process_conf,
     responder_process_init_with_psk, HandshakeError, PeerIdentity, SessionKeys, StaticIdentity,
 };
-use vallum_crypto::{CryptoSuite, SharedSecret};
+
+use vallum_crypto::{
+    AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole, KemSecretKey,
+    LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    KEM_ENCAPS_RANDOMNESS,
+};
 use vallum_crypto_sdk::SdkSuite;
 
 const TIMESTAMP: [u8; 12] = [
@@ -25,6 +31,101 @@ fn psk(byte: u8) -> SharedSecret {
 
 fn peer(identity: &StaticIdentity) -> PeerIdentity {
     PeerIdentity::from_identity(identity)
+}
+
+/// A suite wrapper that counts KEM operations, so a rejection can be shown to
+/// happen **before** the responder's expensive ops B/C.
+struct CountingSuite {
+    inner: SdkSuite,
+    encaps: AtomicUsize,
+}
+
+impl CountingSuite {
+    fn new(inner: SdkSuite) -> Self {
+        Self {
+            inner,
+            encaps: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CryptoSuite for CountingSuite {
+    fn suite_id(&self) -> u16 {
+        self.inner.suite_id()
+    }
+
+    fn sizes(&self) -> WireSizes {
+        self.inner.sizes()
+    }
+
+    fn leg_kinds(&self) -> &'static [LegKind] {
+        self.inner.leg_kinds()
+    }
+
+    fn kem_keygen(
+        &self,
+        seed: &[u8; 32],
+        role: KemRole,
+    ) -> Result<(KemPublicKey, KemSecretKey), KemError> {
+        self.inner.kem_keygen(seed, role)
+    }
+
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError> {
+        self.encaps.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_encaps(pk, randomness)
+    }
+
+    fn kem_decaps(
+        &self,
+        sk: &KemSecretKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<SharedSecret>, KemError> {
+        self.inner.kem_decaps(sk, ciphertext)
+    }
+
+    fn kdf(&self, salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<(), KdfError> {
+        self.inner.kdf(salt, ikm, info, out)
+    }
+
+    fn hash(&self, domain: &[u8], data: &[u8]) -> [u8; 32] {
+        self.inner.hash(domain, data)
+    }
+
+    fn aead_seal(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        pt: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_seal(key, nonce, ad, pt)
+    }
+
+    fn aead_open(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        ct: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_open(key, nonce, ad, ct)
+    }
+
+    fn sign_keygen(&self, seed: &[u8; 32]) -> Result<(SignPublicKey, SignSecretKey), SigError> {
+        self.inner.sign_keygen(seed)
+    }
+
+    fn sign(&self, sk: &SignSecretKey, msg: &[u8]) -> Result<Vec<u8>, SigError> {
+        self.inner.sign(sk, msg)
+    }
+
+    fn verify(&self, pk: &SignPublicKey, msg: &[u8], sig: &[u8]) -> bool {
+        self.inner.verify(pk, msg, sig)
+    }
 }
 
 struct Exchange {
@@ -111,25 +212,25 @@ fn a_matching_psk_produces_the_same_keys() {
 }
 
 #[test]
-fn a_mismatched_psk_fails_the_confirmation() {
+fn a_mismatched_psk_fails_the_admission_tag() {
     let suite = SdkSuite::tri_hybrid();
     let result = run(&suite, Some(&psk(0x01)), Some(&psk(0x02)));
     assert!(
-        matches!(result, Err(HandshakeError::Confirmation)),
+        matches!(result, Err(HandshakeError::PskTag)),
         "a different PSK must not produce a session"
     );
 }
 
 #[test]
-fn a_one_sided_psk_fails() {
+fn a_one_sided_psk_fails_the_admission_tag() {
     let suite = SdkSuite::tri_hybrid();
     assert!(matches!(
         run(&suite, Some(&psk(0x03)), None),
-        Err(HandshakeError::Confirmation)
+        Err(HandshakeError::PskTag)
     ));
     assert!(matches!(
         run(&suite, None, Some(&psk(0x03))),
-        Err(HandshakeError::Confirmation)
+        Err(HandshakeError::PskTag)
     ));
 }
 
@@ -147,13 +248,50 @@ fn the_psk_never_appears_on_the_wire() {
 }
 
 #[test]
-fn the_psk_does_not_change_init_hello() {
-    // The PSK is a key-schedule input, not a message field: the initiator's
-    // first message must be byte-identical with and without one.
+fn a_bad_tag_is_rejected_before_responder_encapsulation() {
+    let inner = SdkSuite::tri_hybrid();
+    let counting = CountingSuite::new(SdkSuite::tri_hybrid());
+    let initiator = StaticIdentity::generate(&inner, &[0x11; 32]).expect("initiator");
+    let responder = StaticIdentity::generate(&inner, &[0x22; 32]).expect("responder");
+
+    let (init_hello, _) = initiator_hello_with_psk(
+        &inner,
+        &initiator,
+        &peer(&responder),
+        0x0A0B_0C0D,
+        TIMESTAMP,
+        &[0x33; 32],
+        Some(&psk(0x01)),
+    )
+    .expect("initiator hello");
+
+    let result = responder_process_init_with_psk(
+        &counting,
+        &responder,
+        &peer(&initiator),
+        &init_hello,
+        0xE0E1_E2E3,
+        &[0x44; 32],
+        Some(&psk(0x02)),
+    );
+
+    assert!(matches!(result, Err(HandshakeError::PskTag)));
+    assert_eq!(
+        counting.encaps.load(Ordering::Relaxed),
+        0,
+        "a rejected InitHello performed a responder encapsulation"
+    );
+}
+
+#[test]
+fn the_psk_adds_an_admission_tag_to_init_hello() {
+    // The default path is unchanged (the frozen interop vectors cover it); a
+    // configured PSK adds the 32-byte tag and its 4-byte field header.
     let suite = SdkSuite::tri_hybrid();
     let plain = run(&suite, None, None).expect("no PSK");
     let key = psk(0x5A);
     let with_psk = run(&suite, Some(&key), Some(&key)).expect("with PSK");
-    assert_eq!(plain.init_hello, with_psk.init_hello);
+    assert_eq!(with_psk.init_hello.len(), plain.init_hello.len() + 36);
+    assert_ne!(plain.init_hello, with_psk.init_hello);
     assert_ne!(plain.resp_hello, with_psk.resp_hello);
 }

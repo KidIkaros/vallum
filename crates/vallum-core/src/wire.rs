@@ -75,6 +75,9 @@ pub const INDEX_SIZE: usize = 4;
 /// Length of a key-confirmation value.
 pub const CONFIRMATION_SIZE: usize = 32;
 
+/// The configured-PSK admission tag on `InitHello`.
+pub const PSK_TAG_SIZE: usize = 32;
+
 /// Handshake message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
@@ -176,6 +179,8 @@ pub mod tag {
     /// It is an admission token, not authentication: `CONFIRMATION` still gates
     /// session acceptance.
     pub const PRE_TAG: u16 = 0x0008;
+    /// A configured-PSK admission tag on `InitHello` (G1/DoS).
+    pub const PSK_TAG: u16 = 0x0009;
     /// A key-confirmation value ([`super::CONFIRMATION_SIZE`] bytes).
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).
@@ -371,6 +376,15 @@ impl MessageBuilder {
         self.serialize(&[tag::PRE_TAG])
     }
 
+    /// The bytes a configured-PSK admission tag covers: the header and every
+    /// field except `PSK_TAG` itself.
+    #[must_use]
+    pub fn psk_tag_input(&self) -> Vec<u8> {
+        // The tag is computed before the cookie MACs are attached and checked
+        // after they are parsed, so the MAC fields are not part of its input.
+        self.serialize(&[tag::PSK_TAG, tag::MAC1, tag::MAC2])
+    }
+
     /// Serialize header plus fields in order, skipping `exclude`.
     fn serialize(&self, exclude: &[u16]) -> Vec<u8> {
         serialize_fields(self.header, &self.fields, exclude)
@@ -540,6 +554,17 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn resp_tag_input(&self) -> Vec<u8> {
         serialize_fields(self.header, &self.fields, &[tag::PRE_TAG])
+    }
+
+    /// The bytes a configured-PSK admission tag covers: the header and every
+    /// field except `PSK_TAG` itself.
+    #[must_use]
+    pub fn psk_tag_input(&self) -> Vec<u8> {
+        serialize_fields(
+            self.header,
+            &self.fields,
+            &[tag::PSK_TAG, tag::MAC1, tag::MAC2],
+        )
     }
 
     /// Assert the message type.

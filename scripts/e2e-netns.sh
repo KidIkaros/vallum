@@ -425,7 +425,7 @@ CAPTURED=$(wc -c < "$WORK/inithello.bin" | tr -d ' ')
 # 4609 B of message (the frozen `init_hello_len`, hint included) plus a 20 B
 # `mac1` field: a 16 B MAC under a 4 B tag and length. Pinning the number here is
 # what turns the size table in docs/proof/daemon.md into a live check.
-[ "$CAPTURED" = 4629 ] || bad "captured $CAPTURED bytes of InitHello, expected 4629"
+[ "$CAPTURED" = 4665 ] || bad "captured $CAPTURED bytes of InitHello, expected 4665"
 read -r SEGMENTS LARGEST SEEN < "$WORK/segments.txt"
 printf '   captured %s bytes after reassembly: 4609 B message + 20 B mac1 field\n' "$CAPTURED"
 printf '   it crossed as %s Vallum fragments, the largest UDP payload being %s B\n' \
@@ -435,7 +435,7 @@ printf '   it crossed as %s Vallum fragments, the largest UDP payload being %s B
 [ "$SEGMENTS" -gt 1 ] \
     || bad "the InitHello crossed in one datagram; the segmentation envelope never engaged"
 [ "$SEGMENTS" -eq 4 ] \
-    || printf '   note   %s fragments for 4629 B at a 1442 B payload (ceil(4629/1442) = 4)\n' "$SEGMENTS"
+    || printf '   note   %s fragments for 4665 B at a 1442 B payload (ceil(4665/1442) = 4)\n' "$SEGMENTS"
 ok "the InitHello crossed as whole UDP datagrams and reassembled byte for byte"
 
 # ── the other direction, over the session A started ──────────────────
@@ -619,12 +619,12 @@ def fragment(message_id, offset, total, data=b""):
 # which is a candidate slot in the 16-entry reassembly table, which is the thing
 # this probe is really measuring: whether a flood can exhaust it or draw an
 # answer.
-fragments = probe(b_address, fragment(1, 0, 4629, os.urandom(1442)), 0.25)
+fragments = probe(b_address, fragment(1, 0, 4665, os.urandom(1442)), 0.25)
 fragments += probe(b_address, fragment(2, 0, 65535, os.urandom(64)), 0.25)
-fragments += probe(b_address, fragment(3, 9000, 4629, os.urandom(64)), 0.25)
+fragments += probe(b_address, fragment(3, 9000, 4665, os.urandom(64)), 0.25)
 for _ in range(64):
     ident = int.from_bytes(os.urandom(4), "big")
-    sock.sendto(fragment(ident, 0, 4629, os.urandom(1442)), (b_address, port))
+    sock.sendto(fragment(ident, 0, 4665, os.urandom(1442)), (b_address, port))
 fragments += drain(0.5)
 
 # The genuine article, from a different source address.
