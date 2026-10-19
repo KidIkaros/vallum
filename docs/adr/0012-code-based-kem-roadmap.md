@@ -15,7 +15,10 @@ current SDK.
 The research literature supports hybrid deployment and use-case-specific KEM
 selection. NIST selected HQC for standardization in March 2025 as a
 non-lattice backup to ML-KEM; FIPS 207 is still in draft/finalization. BIKE was
-not selected, and SIDH/SIKE was broken by a practical key-recovery attack.
+not selected, and its IND-CCA security depends on a probabilistic decoder's
+failure rate: weak-key and m-gathering analyses can push static-key security
+below target unless the decoder, key binding, and key filtering are fixed.
+SIDH/SIKE was broken by a practical key-recovery attack.
 
 Classic McEliece is the conservative code-based candidate, but its very large
 public key only fits Vallum if that key is provisioned or cached out of band.
@@ -60,12 +63,17 @@ tri-hybrid handshake single-packet.
 - **Why not**: wait for a stable standard and a reviewable implementation.
 
 ### Alternative 4: Use BIKE
-- **Pros**: code-based; competitive bandwidth in some settings.
-- **Cons**: NIST selected HQC instead in IR 8545; BIKE has had
-  decryption-failure/multi-target analysis and implementation side-channel
-  findings.
-- **Why not**: it is not the selected standard and is not a candidate for this
-  project.
+- **Pros**: code-based; competitive bandwidth in some settings; a fresh
+  ephemeral key can rely on IND-CPA rather than IND-CCA.
+- **Cons**: NIST selected HQC instead in IR 8545. BIKE's IND-CCA security for
+  long-term static keys depends on the decoder's low failure rate; weak-key and
+  m-gathering analyses can exceed the allowed contribution, and the BIKE team's
+  2024 material still lists weak-key/error-floor open questions. Vallum's
+  code-based leg would be a long-term static KEM, so the ephemeral/IND-CPA
+  shortcut does not fit.
+- **Why not**: not safe for Vallum's static-key model, not the selected
+  standard, and would require decoder, key-binding, weak-key-filtering, DFR,
+  and side-channel proof work before it could be reconsidered.
 
 ### Alternative 5: Use Classic McEliece in the normal public line
 - **Pros**: the most conservative code-based candidate.
@@ -88,6 +96,8 @@ tri-hybrid handshake single-packet.
 - Public-key size is treated as an operational design constraint, not just a
   KEM parameter.
 - BIKE and SIDH are explicitly excluded rather than left as vague options.
+- BIKE's weak-key/decoder-failure constraint is recorded as a static-key
+  mismatch, not merely as a NIST selection result.
 
 ### Negative
 - Vallum still has no non-lattice post-quantum leg.
@@ -99,6 +109,10 @@ tri-hybrid handshake single-packet.
 - HQC parameters may still change before FIPS 207 is final. Mitigation: track the
   draft, pin a final parameter set, and require vectors and audit before
   enabling it.
+- BIKE weak-key analyses may evolve. Mitigation: BIKE may only be reconsidered
+  if a standardized implementation demonstrates a decoder with an adequately
+  bounded failure rate, binds the public key into the ciphertext, filters weak
+  keys, and passes side-channel review; it remains excluded now.
 - A future code-based primitive may receive damaging cryptanalysis. Mitigation:
   keep it optional, keep the current tri-hybrid default, and require vectors,
   benchmarks, audit, and Tamarin review before enabling it by default.

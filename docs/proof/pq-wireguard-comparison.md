@@ -68,8 +68,10 @@ the handshake.
 2. **KEM family diversity.** No code-based leg. sntrup761 and ML-KEM are both
    NTRU/lattice. [ADR-0012](../adr/0012-code-based-kem-roadmap.md) plans HQC for
    a future standardized code-based suite,
-   and Classic McEliece only as a provisioned/static profile; BIKE and SIDH are
-   excluded. A code-based suite is roadmap work, not v0.1.0.
+   and Classic McEliece only as a provisioned/static profile. BIKE is excluded
+   because its static-key IND-CCA security depends on a probabilistic decoder
+   and weak-key/DFR behavior; SIDH is excluded after the practical break. A
+   code-based suite is roadmap work, not v0.1.0.
 3. **PSK mix count.** The paper mixes the PSK twice; Vallum mixes it once after
    the UKS psk. D3 in `eck-pfs-psk.md` records this as a **margin loss**, not a
    property break. The `PSK_TAG` is a separate admission check, not a second
