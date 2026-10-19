@@ -61,7 +61,7 @@ jobs:
           (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS)
 
       - name: Publish the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: vallum/dist/*
           generate_release_notes: true
