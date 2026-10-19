@@ -1,8 +1,8 @@
 name: release
 
+# Hosted Actions is unavailable on the private/free plan. Releases are built and
+# uploaded locally; re-enable the tag trigger when Actions is available.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:

@@ -10,13 +10,9 @@
 
 name: fuzz
 
+# Hosted Actions is unavailable on the private/free plan. Run locally with
+# scripts/fuzz.sh; re-enable the schedule when Actions is available.
 on:
-  pull_request:
-  push:
-    branches: [master, main]
-  schedule:
-    # 03:17 UTC — off the hour, so it does not race every other nightly job.
-    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:

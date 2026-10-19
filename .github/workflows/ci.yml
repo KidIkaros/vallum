@@ -11,10 +11,9 @@
 
 name: ci
 
+# Hosted Actions is unavailable on the private/free plan. The gate of record is
+# scripts/verify.sh; re-enable push/pull_request when Actions is available.
 on:
-  push:
-    branches: [master, main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
