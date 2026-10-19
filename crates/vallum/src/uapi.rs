@@ -144,6 +144,8 @@ pub struct Peer {
     /// key is 2 374 bytes. The control layer validates the length against the
     /// suite.
     pub public_key: Option<Vec<u8>>,
+    /// A human-readable name for the peer; omitted leaves it unchanged.
+    pub name: Option<String>,
     /// `Some(None)` clears the PSK; `Some(Some(k))` sets it.
     pub preshared_key: Option<Option<[u8; 32]>>,
     /// `Some(None)` clears the endpoint (roam); `Some(Some(a))` sets it.
@@ -220,7 +222,8 @@ pub fn parse(text: &str) -> Result<Request, String> {
                         set.replace_peers = parse_bool(value)?;
                     }
                     // Peer fields require an open peer block.
-                    field::PRESHARED_KEY
+                    field::VALLUM_NAME
+                    | field::PRESHARED_KEY
                     | field::ENDPOINT
                     | field::PERSISTENT_KEEPALIVE_INTERVAL
                     | field::ALLOWED_IP
@@ -231,6 +234,9 @@ pub fn parse(text: &str) -> Result<Request, String> {
                             .as_mut()
                             .ok_or_else(|| format!("`{key}` before any `public_key`"))?;
                         match key {
+                            field::VALLUM_NAME => {
+                                peer.name = Some(value.to_owned());
+                            }
                             field::PRESHARED_KEY => {
                                 let parsed = parse_fixed_key(value)?;
                                 peer.preshared_key = Some((parsed != [0u8; 32]).then_some(parsed));
@@ -682,6 +688,9 @@ pub fn render_set(set: &Set) -> String {
                 hex_encode(public_key)
             ));
         }
+        if let Some(name) = &peer.name {
+            out.push_str(&format!("{}={name}\n", field::VALLUM_NAME));
+        }
         if let Some(psk) = peer.preshared_key {
             let value = psk.map_or_else(|| "00".repeat(32), |key| hex_encode(&key));
             out.push_str(&format!("{}={value}\n", field::PRESHARED_KEY));
@@ -999,6 +1008,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tri_hybrid_set_with_a_name_parses() {
+        let key = "ab".repeat(2374);
+        let text = format!("set=1\npublic_key={key}\nvallum_name=third\nallowed_ip=10.7.0.3/32\n");
+        let request = parse(&text).expect("parse");
+        let Request::Set(set) = request else {
+            panic!("not a set");
+        };
+        assert_eq!(set.peers[0].public_key.as_ref().unwrap().len(), 2374);
+        assert_eq!(set.peers[0].name.as_deref(), Some("third"));
+        assert_eq!(set.peers[0].allowed_ips.len(), 1);
+    }
+
+    #[test]
     fn a_set_renders_and_parses_back() {
         let set = Set {
             private_key: Some([0x11; 32]),
@@ -1007,6 +1029,7 @@ mod tests {
             replace_peers: true,
             peers: vec![Peer {
                 public_key: Some(vec![0x22; 32]),
+                name: Some("laptop".to_owned()),
                 preshared_key: Some(Some([0x33; 32])),
                 endpoint: Some(Some("203.0.113.9:51820".parse().unwrap())),
                 keepalive: Some(25),

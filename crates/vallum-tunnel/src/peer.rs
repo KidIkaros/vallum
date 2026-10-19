@@ -103,6 +103,11 @@ impl PeerConfig {
         }
     }
 
+    /// Rename the peer without changing its identity or sessions.
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     /// The addresses this peer may send from and receive to.
     #[must_use]
     pub fn with_allowed_ips(mut self, nets: impl IntoIterator<Item = Prefix>) -> Self {

@@ -66,6 +66,7 @@ fn add_peer(app: &mut App, form: &super::app::Form) -> Result<String, String> {
     let psk = parse_psk(form.field("PSK (hex, optional)"))?;
     let peer = Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
+        name: optional_name(form.field("name")),
         preshared_key: psk.map(Some),
         endpoint: endpoint.map(Some),
         keepalive,
@@ -128,6 +129,7 @@ fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> Result<Str
     let psk = parse_psk(form.field("PSK (hex, blank = keep)"))?;
     let peer = Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
+        name: optional_name(form.field("name")),
         preshared_key: psk.map(Some),
         endpoint: endpoint.map(Some),
         keepalive,
@@ -170,6 +172,7 @@ pub fn confirm_remove(app: &mut App) {
         replace_peers: false,
         peers: vec![Peer {
             public_key: Some(identity.kem().as_bytes().to_vec()),
+            name: None,
             preshared_key: None,
             endpoint: None,
             keepalive: None,
@@ -219,6 +222,7 @@ pub fn keygen(app: &mut App) {
     ) {
         Ok(identity) => {
             let line = keys::encode_public(suite, &identity.to_peer());
+            app.pending_key = Some(path.clone());
             app.notify(format!(
                 "wrote {} (public line copied to add form)",
                 path.display()
@@ -352,6 +356,11 @@ fn apply(app: &App, set: &Set) -> Result<(), String> {
     } else {
         Err(format!("control error: {}", reply.trim()))
     }
+}
+
+fn optional_name(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {

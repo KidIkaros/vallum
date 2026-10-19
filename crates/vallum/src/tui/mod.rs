@@ -10,7 +10,7 @@ pub mod input;
 pub mod qr;
 pub mod ui;
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
@@ -29,6 +29,12 @@ use app::App;
 pub fn run(args: &TuiArgs) -> Result<(), Error> {
     if args.snapshot {
         return snapshot(args);
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(Error::Usage(
+            "`vallum tui` needs a terminal; use `vallum show` or `vallum tui --snapshot`"
+                .to_owned(),
+        ));
     }
     let mut app = App::new(client::discover(args));
     actions::refresh(&mut app);

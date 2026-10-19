@@ -124,8 +124,12 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         },
         None => checks.push(Check::new(
             "control",
-            Status::Warn,
-            "no control socket configured; the daemon may be down",
+            if args.config.is_none() && args.control.is_none() {
+                Status::Fail
+            } else {
+                Status::Warn
+            },
+            "no control socket configured; give --control or a config with `control`",
         )),
     }
 

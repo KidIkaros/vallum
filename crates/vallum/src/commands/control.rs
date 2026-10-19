@@ -81,10 +81,9 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
         return Ok(path.to_path_buf());
     }
     let Some(config_path) = config else {
-        return Err(Error::Invalid {
-            path: PathBuf::from("-"),
-            what: "give --control <socket>, or --config <file> with a `control` field".to_owned(),
-        });
+        return Err(Error::Usage(
+            "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+        ));
     };
     let config = Config::load(config_path)?;
     config

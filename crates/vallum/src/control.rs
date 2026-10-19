@@ -259,6 +259,7 @@ fn errno_for(error: &io::Error) -> i32 {
 }
 
 fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) -> Result<(), i32> {
+    let name = update.name.clone();
     let Some(public_key) = update.public_key else {
         return Err(EINVAL);
     };
@@ -278,7 +279,7 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
         None if update.update_only => return Err(ENOENT),
         None => {
             let identity = PeerIdentity::kem_only(KemPublicKey::new(public_key.to_vec()));
-            let name = format!(
+            let generated = format!(
                 "peer-{}",
                 crate::keys::hex_encode(
                     public_key
@@ -290,11 +291,14 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
                 )
             );
             device
-                .add_peer(PeerConfig::new(name, identity))
+                .add_peer(PeerConfig::new(name.unwrap_or(generated), identity))
                 .map_err(|_| EEXIST)?
         }
     };
 
+    if let Some(name) = update.name {
+        device.set_name(id, name);
+    }
     if let Some(endpoint) = update.endpoint {
         device.set_endpoint(id, endpoint);
     }

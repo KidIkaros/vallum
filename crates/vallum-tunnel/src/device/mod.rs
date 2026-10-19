@@ -408,6 +408,15 @@ impl Device {
         }
     }
 
+    /// Rename a peer at runtime.
+    pub fn set_name(&mut self, id: PeerId, name: impl Into<String>) {
+        if let Some(peer) = self.peers.get_mut(id.index()) {
+            if !peer.removed {
+                peer.config.set_name(name);
+            }
+        }
+    }
+
     /// Remove a peer at runtime.
     ///
     /// The table is append-only so a [`PeerId`] never comes to mean a different

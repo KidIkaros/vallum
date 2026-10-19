@@ -13,6 +13,7 @@ use vallum::commands::run::RunArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::{bench, control, doctor, keys, run};
+use vallum::Error;
 
 #[derive(Parser)]
 #[command(
@@ -103,6 +104,9 @@ fn main() -> ExitCode {
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             eprintln!("vallum: {error}");
             ExitCode::FAILURE
