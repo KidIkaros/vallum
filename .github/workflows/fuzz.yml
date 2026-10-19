@@ -48,7 +48,8 @@ jobs:
           token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       - name: Restore the corpus
         uses: actions/cache@v4
