@@ -276,6 +276,11 @@ impl PeerIdentity {
     pub fn preshared_key(&self) -> Option<&SharedSecret> {
         self.preshared_key.as_ref()
     }
+
+    /// Replace the configured PSK, as a runtime `set` does.
+    pub fn set_preshared_key(&mut self, psk: Option<SharedSecret>) {
+        self.preshared_key = psk;
+    }
 }
 
 // ── signatures over the transcript ───────────────────────────────────

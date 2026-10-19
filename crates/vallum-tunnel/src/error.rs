@@ -29,6 +29,8 @@ pub enum ConfigError {
         /// The overlapping prefix.
         network: Prefix,
     },
+    /// A runtime operation named a peer that is not present.
+    UnknownPeer,
     /// The same peer identity was configured twice.
     DuplicatePeer {
         /// The peer whose key was already present, by name.
@@ -54,6 +56,7 @@ impl fmt::Display for ConfigError {
                 existing,
                 duplicate,
             } => write!(f, "peer `{duplicate}` duplicates `{existing}`"),
+            Self::UnknownPeer => write!(f, "no such peer"),
         }
     }
 }

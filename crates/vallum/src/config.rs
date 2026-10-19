@@ -120,6 +120,12 @@ pub struct Interface {
     /// The UDP address to listen on.
     #[serde(default)]
     pub listen: Option<String>,
+    /// A Unix socket to serve the control UAPI on.
+    ///
+    /// Absent means no control plane. The socket is `0600`; a relative path is
+    /// resolved against the config, like the key file.
+    #[serde(default)]
+    pub control: Option<PathBuf>,
     /// The outer path's MTU. Defaults to 1500.
     ///
     /// This is how a narrower path — PPPoE at 1492, an IPsec tunnel at 1400 — is
@@ -254,6 +260,8 @@ pub struct Resolved {
     pub mtu: u16,
     /// The UDP address to bind.
     pub listen: SocketAddr,
+    /// The control socket, if configured.
+    pub control: Option<PathBuf>,
     /// The daemon's own identity, expanded from the key file.
     pub identity: StaticIdentity,
     /// The peer table.
@@ -279,6 +287,7 @@ impl std::fmt::Debug for Resolved {
             .field("addresses", &self.addresses)
             .field("mtu", &self.mtu)
             .field("listen", &self.listen)
+            .field("control", &self.control)
             .field("peer_count", &self.peers.len())
             .field("level", &self.level)
             .field("warnings", &self.warnings)
@@ -500,6 +509,12 @@ impl Config {
 
         // Privilege separation is resolved here, but applied by the daemon after
         // the interface and socket exist — see `privileges::drop_to`.
+        let control = self
+            .interface
+            .control
+            .as_ref()
+            .map(|declared| resolve_key_path(path, declared));
+
         let privileges = crate::privileges::resolve(
             self.interface.user.as_deref(),
             self.interface.group.as_deref(),
@@ -694,6 +709,7 @@ impl Config {
             addresses,
             mtu,
             listen,
+            control,
             identity,
             peers,
             level,

@@ -119,11 +119,12 @@ use vallum_core::wire::{
 use vallum_core::{PAYLOAD_LEN_SIZE, PEER_HINT_SIZE};
 use vallum_crypto::suite::CryptoSuite;
 use vallum_crypto::KemPublicKey;
+use vallum_crypto::SharedSecret;
 
 use crate::error::ConfigError;
 use crate::peer::{PeerConfig, PeerId};
 use crate::rng::Randomness;
-use crate::routing::{packet_destination, packet_source};
+use crate::routing::{packet_destination, packet_source, AllowedIps, Prefix};
 
 mod data;
 mod datagram;
@@ -135,7 +136,7 @@ mod timer;
 #[cfg(test)]
 mod tests;
 
-use state::Peer;
+use state::{keepalive_millis, Handshake, Peer};
 
 /// The most packets held for one peer while it has no usable session, or while a
 /// shaping machine is holding its queue.
@@ -250,6 +251,12 @@ pub struct PeerStats {
     pub rejected: u64,
     /// Packets currently held awaiting a session or a shaping window.
     pub queued: usize,
+    /// Wire bytes sent for this peer.
+    pub tx_bytes: u64,
+    /// Wire bytes received for this peer.
+    pub rx_bytes: u64,
+    /// When the last handshake completed, if one has.
+    pub last_handshake: Option<vallum_core::Tai64n>,
 }
 
 // ── the device ───────────────────────────────────────────────────────
@@ -355,13 +362,16 @@ impl Device {
     /// How many peers are configured.
     #[must_use]
     pub fn peer_count(&self) -> usize {
-        self.peers.len()
+        self.peers.iter().filter(|peer| !peer.removed).count()
     }
 
     /// A peer's configuration.
     #[must_use]
     pub fn peer(&self, id: PeerId) -> Option<&PeerConfig> {
-        self.peers.get(id.index()).map(|peer| &peer.config)
+        self.peers
+            .get(id.index())
+            .filter(|peer| !peer.removed)
+            .map(|peer| &peer.config)
     }
 
     /// Every peer and its handle, in configuration order.
@@ -372,19 +382,189 @@ impl Device {
         self.peers
             .iter()
             .enumerate()
+            .filter(|(_, peer)| !peer.removed)
             .map(|(index, peer)| (PeerId::from_index(index), &peer.config))
     }
 
     /// A peer's current address: configured, or learned by roaming.
     #[must_use]
     pub fn endpoint(&self, id: PeerId) -> Option<SocketAddr> {
-        self.peers.get(id.index()).and_then(|peer| peer.endpoint)
+        self.peers
+            .get(id.index())
+            .filter(|peer| !peer.removed)
+            .and_then(|peer| peer.endpoint)
     }
 
     /// Set a peer's address explicitly, as a management interface would.
     pub fn set_endpoint(&mut self, id: PeerId, endpoint: Option<SocketAddr>) {
         if let Some(peer) = self.peers.get_mut(id.index()) {
-            peer.endpoint = endpoint;
+            if !peer.removed {
+                peer.endpoint = endpoint;
+            }
+        }
+    }
+
+    /// Remove a peer at runtime.
+    ///
+    /// The table is append-only so a [`PeerId`] never comes to mean a different
+    /// peer; removal marks the slot dead and clears everything that could still
+    /// route to it.
+    pub fn remove_peer(&mut self, id: PeerId) {
+        let index = id.index();
+        let Some(peer) = self.peers.get_mut(index) else {
+            return;
+        };
+        if peer.removed {
+            return;
+        }
+        peer.removed = true;
+        let indices = std::mem::take(&mut peer.indices);
+        for index in indices {
+            self.index.remove(&index);
+        }
+        peer.session = None;
+        peer.handshake = Handshake::Idle;
+        peer.pending.clear();
+        peer.pending_bytes = 0;
+        peer.pending_conf = None;
+        peer.previous_own_index = None;
+        peer.next_keepalive_ms = None;
+    }
+
+    /// Remove every peer, as `replace_peers` does.
+    pub fn remove_all_peers(&mut self) {
+        for index in 0..self.peers.len() {
+            self.remove_peer(PeerId::from_index(index));
+        }
+    }
+
+    /// Replace a peer's allowed addresses, refusing an overlap.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::OverlappingAllowedIps`] if another active peer claims any
+    /// of them; routing must never depend on configuration order.
+    pub fn set_allowed_ips(&mut self, id: PeerId, nets: Vec<Prefix>) -> Result<(), ConfigError> {
+        let index = id.index();
+        let Some(peer) = self.peers.get(index) else {
+            return Err(ConfigError::UnknownPeer);
+        };
+        if peer.removed {
+            return Err(ConfigError::UnknownPeer);
+        }
+        let candidate = AllowedIps::new(nets.clone());
+        for (other_index, other) in self.peers.iter().enumerate() {
+            if other_index == index || other.removed {
+                continue;
+            }
+            if let Some(network) = other.config.allowed_ips().overlaps(&candidate) {
+                return Err(ConfigError::OverlappingAllowedIps {
+                    first: other.config.name().to_owned(),
+                    second: peer.config.name().to_owned(),
+                    network,
+                });
+            }
+        }
+        self.peers[index].config.set_allowed_ips(nets);
+        Ok(())
+    }
+
+    /// Append allowed addresses, refusing an overlap.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::OverlappingAllowedIps`] if another active peer claims any
+    /// of them.
+    pub fn add_allowed_ips(&mut self, id: PeerId, nets: Vec<Prefix>) -> Result<(), ConfigError> {
+        let index = id.index();
+        let Some(peer) = self.peers.get(index) else {
+            return Err(ConfigError::UnknownPeer);
+        };
+        if peer.removed {
+            return Err(ConfigError::UnknownPeer);
+        }
+        let mut candidate = peer.config.allowed_ips().nets().to_vec();
+        candidate.extend(nets.clone());
+        let candidate = AllowedIps::new(candidate);
+        for (other_index, other) in self.peers.iter().enumerate() {
+            if other_index == index || other.removed {
+                continue;
+            }
+            if let Some(network) = other.config.allowed_ips().overlaps(&candidate) {
+                return Err(ConfigError::OverlappingAllowedIps {
+                    first: other.config.name().to_owned(),
+                    second: peer.config.name().to_owned(),
+                    network,
+                });
+            }
+        }
+        self.peers[index].config.add_allowed_ips(nets);
+        Ok(())
+    }
+
+    /// Find a peer by its KEM public key, as the UAPI does.
+    #[must_use]
+    pub fn peer_by_kem(&self, kem: &[u8]) -> Option<PeerId> {
+        self.peers()
+            .find(|(_, config)| config.identity().kem().as_bytes() == kem)
+            .map(|(id, _)| id)
+    }
+
+    /// Whether this device's identity carries a signing half.
+    #[must_use]
+    pub fn has_signing(&self) -> bool {
+        self.identity.signing_public().is_some()
+    }
+
+    /// Replace a peer's configured PSK. The current session keeps running; the
+    /// next handshake uses the new value.
+    pub fn set_preshared_key(&mut self, id: PeerId, psk: Option<SharedSecret>) {
+        let index = id.index();
+        let Some(peer) = self.peers.get_mut(index) else {
+            return;
+        };
+        if peer.removed {
+            return;
+        }
+        peer.config.set_preshared_key(psk);
+        // An in-flight handshake was started under the old value and cannot
+        // complete; the next attempt uses the new one.
+        peer.handshake = Handshake::Idle;
+        self.remap(index);
+    }
+
+    /// Replace a peer's persistent keepalive interval.
+    pub fn set_keepalive(&mut self, id: PeerId, interval: Option<Duration>) {
+        let index = id.index();
+        let Some(peer) = self.peers.get_mut(index) else {
+            return;
+        };
+        if peer.removed {
+            return;
+        }
+        peer.config.set_persistent_keepalive(interval);
+        peer.next_keepalive_ms =
+            interval.map(|interval| self.now_ms.saturating_add(keepalive_millis(interval)));
+    }
+
+    /// Replace the device's own identity. Every session and handshake is torn
+    /// down: they were authenticated as the old key.
+    pub fn set_identity(&mut self, identity: StaticIdentity) {
+        self.identity = identity;
+        for index in 0..self.peers.len() {
+            if self.peers[index].removed {
+                continue;
+            }
+            let indices = std::mem::take(&mut self.peers[index].indices);
+            for index in indices {
+                self.index.remove(&index);
+            }
+            self.peers[index].session = None;
+            self.peers[index].handshake = Handshake::Idle;
+            self.peers[index].pending_conf = None;
+            self.peers[index].previous_own_index = None;
+            self.peers[index].pending.clear();
+            self.peers[index].pending_bytes = 0;
         }
     }
 
@@ -413,12 +593,17 @@ impl Device {
     /// Counters for a peer.
     #[must_use]
     pub fn stats(&self, id: PeerId) -> Option<PeerStats> {
-        self.peers.get(id.index()).map(|peer| PeerStats {
-            sent: peer.sent,
-            delivered: peer.delivered,
-            dropped: peer.dropped,
-            rejected: peer.rejected,
-            queued: peer.pending.len(),
+        self.peers.get(id.index()).and_then(|peer| {
+            (!peer.removed).then_some(PeerStats {
+                sent: peer.sent,
+                delivered: peer.delivered,
+                dropped: peer.dropped,
+                rejected: peer.rejected,
+                queued: peer.pending.len(),
+                tx_bytes: peer.tx_bytes,
+                rx_bytes: peer.rx_bytes,
+                last_handshake: peer.last_handshake,
+            })
         })
     }
 

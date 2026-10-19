@@ -8,13 +8,14 @@
 //! pair and no control socket, because this phase has no live-reconfiguration
 //! story and inventing one would be a second source of truth for the peer table.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use vallum::clock::{SystemClock, TimeSource};
 use vallum::config::{self, Config};
+use vallum::control;
 use vallum::entropy;
 use vallum::keys;
 use vallum::logging::Logger;
@@ -58,6 +59,14 @@ enum Command {
     Pubkey(PubkeyArgs),
     /// Generate a 32-byte preshared key as 64 hex characters.
     Genpsk,
+    /// Show a running daemon's device and peers.
+    Show(ShowArgs),
+    /// Apply a configuration file, replacing every peer.
+    Setconf(SetconfArgs),
+    /// Add the peers from a configuration file.
+    Addconf(SetconfArgs),
+    /// Apply only the differences between a config and the running daemon.
+    Syncconf(SetconfArgs),
 }
 
 #[derive(Args)]
@@ -96,6 +105,36 @@ struct PubkeyArgs {
     private_key: PathBuf,
 }
 
+#[derive(Args)]
+struct ShowArgs {
+    /// The configuration file, for its `control` path.
+    #[arg(long, short, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// The control socket path, instead of a config.
+    #[arg(long, value_name = "SOCKET")]
+    control: Option<PathBuf>,
+
+    /// Print the raw UAPI response.
+    #[arg(long)]
+    dump: bool,
+
+    /// Print only one field (endpoints, allowed-ips, transfer, ...).
+    #[arg(long, value_name = "FIELD")]
+    field: Option<String>,
+}
+
+#[derive(Args)]
+struct SetconfArgs {
+    /// The configuration file to apply.
+    #[arg(value_name = "FILE")]
+    config: PathBuf,
+
+    /// The control socket path, instead of the config's `control` field.
+    #[arg(long, value_name = "SOCKET")]
+    control: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.command {
@@ -103,6 +142,10 @@ fn main() -> ExitCode {
         Command::Keygen(args) => keygen(&args),
         Command::Pubkey(args) => pubkey(&args, cli.allow_insecure_key_permissions),
         Command::Genpsk => genpsk(),
+        Command::Show(args) => show(&args),
+        Command::Setconf(args) => setconf(&args, true),
+        Command::Addconf(args) => setconf(&args, false),
+        Command::Syncconf(args) => syncconf(&args),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -171,8 +214,24 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_info!(log, "dropped privileges to {}", privileges.describe());
     }
 
+    let suite: Arc<dyn vallum_crypto::CryptoSuite> = Arc::new(suite);
+
+    // The control plane needs the seed for `get private_key`; the key file is
+    // re-read rather than threading a secret through `Resolved`.
+    let secret = keys::load_secret(&key_path)?;
+    let seed: [u8; 32] = keys::hex_decode(&secret.seed)
+        .map_err(|why| Error::Invalid {
+            path: key_path.clone(),
+            what: format!("private key seed is not hex: {why}"),
+        })?
+        .try_into()
+        .map_err(|_| Error::Invalid {
+            path: key_path.clone(),
+            what: "private key seed is not 32 bytes".to_owned(),
+        })?;
+
     let device = Device::new(
-        Arc::new(suite),
+        Arc::clone(&suite),
         resolved.identity,
         resolved.peers,
         &mut rng,
@@ -198,9 +257,18 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         device,
         run::Attached {
             parts,
-            socket,
+            socket: Arc::clone(&socket),
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
             budget: resolved.outer_budget,
+            control: resolved.control.clone().map(|path| control::ControlServer {
+                path,
+                context: control::ControlContext {
+                    private_key: seed,
+                    listen: socket.local_addr().unwrap_or(resolved.listen),
+                    fwmark: 0,
+                    suite,
+                },
+            }),
         },
         &mut rng,
         log,
@@ -224,6 +292,180 @@ fn install_signal_handlers(shutdown: &Shutdown) -> Result<(), Error> {
 }
 
 /// `keygen`.
+/// The control socket: the explicit path, or the config's `control` field.
+fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBuf, Error> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    let Some(config_path) = config else {
+        return Err(Error::Invalid {
+            path: PathBuf::from("-"),
+            what: "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+        });
+    };
+    let config = Config::load(config_path)?;
+    config
+        .interface
+        .control
+        .as_ref()
+        .map(|declared| config::resolve_key_path(config_path, declared))
+        .ok_or_else(|| Error::Invalid {
+            path: config_path.to_path_buf(),
+            what: "interface.control is not set, so there is no socket to query".to_owned(),
+        })
+}
+
+fn show(args: &ShowArgs) -> Result<(), Error> {
+    let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    let reply = control::request(&path, "get=1\n")?;
+    if args.dump {
+        print!("{reply}");
+        return Ok(());
+    }
+    if let Some(field) = args.field.as_deref() {
+        print_field(&reply, field);
+        return Ok(());
+    }
+    // A small human view: the device line, then each peer's fields indented.
+    let mut first = true;
+    for line in reply.lines() {
+        if let Some(key) = line.strip_prefix("public_key=") {
+            if first {
+                println!("interface {key}");
+                first = false;
+            } else {
+                println!("peer {key}");
+            }
+        } else if line == "errno=0" {
+            continue;
+        } else {
+            println!("  {line}");
+        }
+    }
+    Ok(())
+}
+
+fn print_field(reply: &str, field: &str) {
+    let prefix = match field {
+        "endpoints" => "endpoint=",
+        "allowed-ips" => "allowed_ip=",
+        "latest-handshakes" => "last_handshake_time_sec=",
+        "transfer" => "tx_bytes=",
+        "persistent-keepalive" => "persistent_keepalive_interval=",
+        "preshared-keys" => "preshared_key=",
+        "public-key" | "peers" => "public_key=",
+        "private-key" => "private_key=",
+        "listen-port" => "listen_port=",
+        "fwmark" => "fwmark=",
+        "dump" => {
+            print!("{reply}");
+            return;
+        }
+        _ => field,
+    };
+    for line in reply.lines() {
+        if let Some(value) = line.strip_prefix(prefix) {
+            println!("{value}");
+        }
+    }
+}
+
+/// The peer lines of a `set=1` body.
+fn peer_lines(peer: &vallum_tunnel::PeerConfig) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "public_key={}\n",
+        keys::hex_encode(peer.identity().kem().as_bytes())
+    ));
+    if let Some(psk) = peer.preshared_key() {
+        out.push_str(&format!(
+            "preshared_key={}\n",
+            keys::hex_encode(psk.as_bytes())
+        ));
+    }
+    if let Some(endpoint) = peer.endpoint() {
+        out.push_str(&format!("endpoint={endpoint}\n"));
+    }
+    if let Some(keepalive) = peer.persistent_keepalive() {
+        out.push_str(&format!(
+            "persistent_keepalive_interval={}\n",
+            keepalive.as_secs()
+        ));
+    }
+    for prefix in peer.allowed_ips().nets() {
+        out.push_str(&format!("allowed_ip={prefix}\n"));
+    }
+    out
+}
+
+fn resolve_config(config_path: &Path) -> Result<vallum::config::Resolved, Error> {
+    let config = Config::load(config_path)?;
+    let suite = SdkSuite::from_id(config.suite_id(config_path)?)
+        .map_err(|e| Error::Suite(format!("key file names a suite this build cannot use: {e}")))?;
+    config.resolve(config_path, &suite)
+}
+
+fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {
+    let path = control_path(Some(args.config.as_path()), args.control.as_deref())?;
+    let resolved = resolve_config(args.config.as_path())?;
+    let mut body = String::from("set=1\n");
+    if replace {
+        body.push_str("replace_peers=true\n");
+    }
+    for peer in &resolved.peers {
+        body.push_str(&peer_lines(peer));
+    }
+    let reply = control::request(&path, &body)?;
+    expect_ok(path.as_path(), &reply)
+}
+
+fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
+    let path = control_path(Some(args.config.as_path()), args.control.as_deref())?;
+    let resolved = resolve_config(args.config.as_path())?;
+    let current = control::request(&path, "get=1\n")?;
+
+    // The first `public_key` is the device's; every later one is a peer.
+    let mut current_peers = Vec::new();
+    let mut first = true;
+    for line in current.lines() {
+        if let Some(key) = line.strip_prefix("public_key=") {
+            if first {
+                first = false;
+            } else {
+                current_peers.push(key.to_owned());
+            }
+        }
+    }
+    let desired: Vec<String> = resolved
+        .peers
+        .iter()
+        .map(|peer| keys::hex_encode(peer.identity().kem().as_bytes()))
+        .collect();
+
+    let mut body = String::from("set=1\n");
+    for key in &current_peers {
+        if !desired.contains(key) {
+            body.push_str(&format!("public_key={key}\nremove=true\n"));
+        }
+    }
+    for peer in &resolved.peers {
+        body.push_str(&peer_lines(peer));
+        body.push_str("replace_allowed_ips=true\n");
+    }
+    let reply = control::request(&path, &body)?;
+    expect_ok(path.as_path(), &reply)
+}
+
+fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
+    if reply.lines().any(|line| line == "errno=0") {
+        return Ok(());
+    }
+    Err(Error::Invalid {
+        path: path.to_path_buf(),
+        what: format!("control request failed: {}", reply.trim()),
+    })
+}
+
 fn genpsk() -> Result<(), Error> {
     let mut psk = [0u8; 32];
     getrandom::fill(&mut psk)

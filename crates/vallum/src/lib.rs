@@ -41,6 +41,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod control;
 pub mod entropy;
 pub mod error;
 pub mod keys;
@@ -49,5 +50,6 @@ pub mod net;
 pub mod privileges;
 pub mod run;
 pub mod tun;
+pub mod uapi;
 
 pub use error::Error;

@@ -131,6 +131,34 @@ impl PeerConfig {
         self.identity.preshared_key()
     }
 
+    /// Replace the PSK, as a runtime `set` does.
+    pub fn set_preshared_key(&mut self, psk: Option<SharedSecret>) {
+        self.identity.set_preshared_key(psk);
+    }
+
+    /// Replace the allowed addresses, as a runtime `set` does.
+    pub fn set_allowed_ips(&mut self, nets: Vec<Prefix>) {
+        self.allowed_ips = AllowedIps::new(nets);
+    }
+
+    /// Append allowed addresses, as a runtime `set` without
+    /// `replace_allowed_ips` does.
+    pub fn add_allowed_ips(&mut self, nets: impl IntoIterator<Item = Prefix>) {
+        let mut all = self.allowed_ips.nets().to_vec();
+        all.extend(nets);
+        self.allowed_ips = AllowedIps::new(all);
+    }
+
+    /// Replace the dialled endpoint, or clear it to roam.
+    pub fn set_endpoint(&mut self, endpoint: Option<SocketAddr>) {
+        self.endpoint = endpoint;
+    }
+
+    /// Replace the persistent keepalive interval.
+    pub fn set_persistent_keepalive(&mut self, interval: Option<Duration>) {
+        self.persistent_keepalive = interval;
+    }
+
     /// Send an empty packet every `interval`, even with nothing to send.
     ///
     /// A peer is silent until it has something to say, and silence is what a NAT

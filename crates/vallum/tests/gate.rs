@@ -303,6 +303,7 @@ fn launch_from_text(
                     socket,
                     clock: thread_clock as Arc<dyn TimeSource>,
                     budget: resolved.outer_budget,
+                    control: None,
                 },
                 &mut rng,
                 Logger::new(level),

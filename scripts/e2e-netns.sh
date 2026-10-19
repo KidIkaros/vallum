@@ -199,6 +199,8 @@ write_config() { # $1 name  $2 inner CIDR  $3 listen  $4 peer endpoint  $5 peer 
 # few seconds this script runs for.
 write_config a "$INNER_A/24" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
 write_config b "$INNER_B/24" "$OUTER_B:$PORT" ""                 "$INNER_A/32" "$PUB_A" 1
+# G2: A serves the control UAPI on a socket beside its config.
+sed -i '/^listen = /a control = "control.sock"' "$WORK/a.toml"
 
 # G1: a configured PSK on both ends. Every lifecycle below inherits it, so the
 # whole gate runs with a PSK rather than one special case.
@@ -358,6 +360,22 @@ grep -q "established at epoch" "$B_LOG" || bad "B never logged an establishment"
 grep -q "as Initiator" "$A_LOG" || bad "A did not take the initiator role"
 grep -q "as Responder" "$B_LOG" || bad "B did not take the responder role"
 ok "A established as Initiator, B as Responder"
+
+# ── the control plane ────────────────────────────────────────────────
+say "querying the control socket"
+[ -S "$WORK/control.sock" ] || bad "A did not create the control socket"
+"$BIN" show --control "$WORK/control.sock" --dump > "$WORK/show.dump" 2>&1 \
+    || bad "show --dump failed"
+grep -q '^errno=0$' "$WORK/show.dump" || bad "show did not end with errno=0"
+"$BIN" show --control "$WORK/control.sock" > "$WORK/show.txt" 2>&1 \
+    || bad "show failed"
+grep -q '^interface ' "$WORK/show.txt" || bad "show did not report the interface"
+grep -q '^peer ' "$WORK/show.txt" || bad "show did not report the peer"
+grep -q 'allowed_ip=' "$WORK/show.dump" || bad "show did not report allowed IPs"
+ok "the control socket reports the device and its peer"
+
+"$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
+ok "syncconf applied an unchanged config idempotently"
 
 # B was never configured with A's address. If B answers pings on the session, it
 # learned the address from traffic that proved A's key — nothing else could have.

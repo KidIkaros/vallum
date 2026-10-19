@@ -108,6 +108,14 @@ pub(super) struct Peer {
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     pub(super) rejected: u64,
+    /// Wire bytes sent and received for this peer (G2 counters).
+    pub(super) tx_bytes: u64,
+    pub(super) rx_bytes: u64,
+    /// When the last handshake completed, for `show`.
+    pub(super) last_handshake: Option<Tai64n>,
+    /// A runtime `remove` marks the peer dead rather than shifting the table,
+    /// so a `PeerId` never comes to mean a different peer.
+    pub(super) removed: bool,
 }
 
 impl Peer {
@@ -139,6 +147,10 @@ impl Peer {
             delivered: 0,
             dropped: 0,
             rejected: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+            last_handshake: None,
+            removed: false,
         }
     }
 

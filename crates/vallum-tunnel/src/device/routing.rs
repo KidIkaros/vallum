@@ -13,6 +13,9 @@ impl Device {
     pub(super) fn route(&self, destination: &IpAddr) -> Option<usize> {
         let mut best: Option<(u8, usize)> = None;
         for (index, peer) in self.peers.iter().enumerate() {
+            if peer.removed {
+                continue;
+            }
             let mut longest: Option<u8> = None;
             for net in peer.config.allowed_ips().nets() {
                 if net.contains(destination) {
@@ -33,7 +36,7 @@ impl Device {
     pub(super) fn peer_owning_endpoint(&self, source: SocketAddr) -> Option<PeerId> {
         self.peers
             .iter()
-            .position(|peer| peer.config.endpoint() == Some(source))
+            .position(|peer| !peer.removed && peer.config.endpoint() == Some(source))
             .map(PeerId::from_index)
     }
 

@@ -565,6 +565,7 @@ impl Device {
 
         self.peers[index].handshake = Handshake::Idle;
         self.peers[index].previous_own_index = previous;
+        self.peers[index].last_handshake = Some(clock.wall);
         self.peers[index].timers.on_established(clock.monotonic_ms);
         self.remap(index);
 

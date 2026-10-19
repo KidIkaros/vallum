@@ -45,6 +45,7 @@ use std::time::Duration;
 use vallum_tunnel::{Action, Clock, Device, Event, Randomness, Segments};
 
 use crate::clock::TimeSource;
+use crate::control::{self, ControlServer};
 use crate::error::Error;
 use crate::logging::Logger;
 use crate::net::DatagramSocket;
@@ -169,6 +170,8 @@ pub struct Attached {
     pub clock: Arc<dyn TimeSource>,
     /// The largest UDP payload the outer path can carry (`outer_mtu - 48`).
     pub budget: usize,
+    /// The control socket, if configured.
+    pub control: Option<ControlServer>,
 }
 
 impl std::fmt::Debug for Attached {
@@ -181,9 +184,14 @@ impl std::fmt::Debug for Attached {
 
 /// One thing waiting for the device.
 #[derive(Debug)]
-enum Input {
+pub(crate) enum Input {
     Ip(Vec<u8>),
     Datagram(SocketAddr, Vec<u8>),
+    /// A control request, answered on the loop thread.
+    Control {
+        request: crate::uapi::Request,
+        reply: mpsc::Sender<String>,
+    },
 }
 
 /// Run the tunnel until the shutdown flag is raised.
@@ -210,6 +218,7 @@ pub fn run(
         socket,
         clock,
         budget,
+        control,
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
@@ -222,10 +231,15 @@ pub fn run(
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
 
+    // The control socket holds its own sender, so the channel is not closed by
+    // the readers going away; the loop still exits on the shutdown flag.
+    let control_context = control.as_ref().map(|server| server.context.clone());
+    if let Some(server) = &control {
+        control::serve(server.path.clone(), tx.clone(), shutdown.clone())?;
+    }
+
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
     spawn_udp_reader(&tx, Arc::clone(&queued), Arc::clone(&socket), &log)?;
-    // The loop holds no sender: when both readers stop, the channel closes and
-    // the loop notices.
     drop(tx);
 
     log_info!(log, "tunnel up on interface `{}`", parts.name);
@@ -243,6 +257,14 @@ pub fn run(
         }
 
         let event = match rx.recv_timeout(tick) {
+            Ok(Input::Control { request, reply }) => {
+                let body = match &control_context {
+                    Some(context) => control::handle(&mut device, context, request),
+                    None => crate::uapi::render_errno(38), // ENOSYS
+                };
+                let _ = reply.send(body);
+                continue;
+            }
             Ok(Input::Ip(packet)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
                 Some(Event::OutboundIp { packet })
@@ -315,6 +337,9 @@ pub fn run(
         }
     }
 
+    if let Some(server) = &control {
+        let _ = std::fs::remove_file(&server.path);
+    }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();
 

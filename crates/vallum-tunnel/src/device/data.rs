@@ -48,6 +48,9 @@ impl Device {
         // it holds the session — nothing left to retransmit.
         self.peers[index].endpoint = Some(source);
         self.peers[index].pending_conf = None;
+        self.peers[index].rx_bytes = self.peers[index]
+            .rx_bytes
+            .saturating_add(bytes.len() as u64);
         self.peers[index].timers.on_received(clock.monotonic_ms);
 
         if plaintext.is_empty() {
@@ -238,6 +241,9 @@ impl Device {
         };
 
         self.peers[index].sent += 1;
+        self.peers[index].tx_bytes = self.peers[index]
+            .tx_bytes
+            .saturating_add(packet.len() as u64);
         self.peers[index].timers.on_sent(clock.monotonic_ms);
         out.push(Action::Send {
             destination: endpoint,
