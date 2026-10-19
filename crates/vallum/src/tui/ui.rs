@@ -114,13 +114,8 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
                     Span::raw(device.fingerprint.clone()),
                 ]));
                 lines.push(Line::from(format!(
-                    "addresses {}  offload={} batching={}  can_set listen={} fwmark={} key={}",
-                    device.addresses.join(", "),
-                    device.offload,
-                    device.batching,
-                    device.can_set_listen_port,
-                    device.can_set_fwmark,
-                    device.can_set_private_key,
+                    "addresses {}",
+                    device.addresses.join(", ")
                 )));
             }
         }
@@ -293,6 +288,11 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             lines.push(Line::from(format!(
                 "rates      rx {:.1} B/s / tx {:.1} B/s",
                 interface.rx_rate, interface.tx_rate
+            )));
+            lines.push(Line::from(format!(
+                "dataplane  offload {} · UDP batching {}",
+                on_off(device.offload),
+                on_off(device.batching)
             )));
             lines.push(Line::from(format!("device     {}", device.interface)));
         }
@@ -566,5 +566,13 @@ fn bytes(value: u64) -> String {
         format!("{:.1}K", value as f64 / 1024.0)
     } else {
         format!("{:.1}M", value as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
     }
 }

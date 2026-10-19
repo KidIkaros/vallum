@@ -169,6 +169,41 @@ fn empty_dashboard_explains_how_to_connect_or_start_an_interface() {
 }
 
 #[test]
+fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        listen: "[::]:51820".to_owned(),
+        suite: "0x0003".to_owned(),
+        fingerprint: "0011223344556677".to_owned(),
+        offload: true,
+        batching: false,
+        ..DeviceView::default()
+    });
+    let app = App::new(vec![interface]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("offload on"));
+    assert!(text.contains("UDP batching off"));
+    assert!(!text.contains("can_set"));
+}
+
+#[test]
 fn escape_closes_the_qr_modal() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = App::new(Vec::new());

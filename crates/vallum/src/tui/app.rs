@@ -38,9 +38,6 @@ pub struct DeviceView {
     pub addresses: Vec<String>,
     pub offload: bool,
     pub batching: bool,
-    pub can_set_private_key: bool,
-    pub can_set_listen_port: bool,
-    pub can_set_fwmark: bool,
     pub peers: Vec<PeerView>,
 }
 
@@ -111,9 +108,6 @@ impl DeviceView {
             addresses,
             offload: flag(field::VALLUM_OFFLOAD),
             batching: flag(field::VALLUM_BATCHING),
-            can_set_private_key: flag(field::VALLUM_CAN_SET_PRIVATE_KEY),
-            can_set_listen_port: flag(field::VALLUM_CAN_SET_LISTEN_PORT),
-            can_set_fwmark: flag(field::VALLUM_CAN_SET_FWMARK),
             peers,
         }
     }
