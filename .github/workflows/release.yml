@@ -43,7 +43,7 @@ jobs:
         working-directory: vallum
         run: |
           cargo deb -p vallum --no-build
-          cargo rpm build -p vallum
+          cargo rpm build -p vallum --release
 
       - name: Assemble the tarball
         working-directory: vallum
