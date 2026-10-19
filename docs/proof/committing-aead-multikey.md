@@ -209,9 +209,11 @@ This gate references them and does not duplicate them — a second copy would ro
    demultiplexing event, resolved by the tag check and never by trust.
 5. **No timing/constant-time claim.** `mac_equal` and the AEAD's tag comparison
    are delegated to the suite; the `dudect`-style work is plan §8.
-6. **No cookie-reply wire framing.** `seal_cookie_reply`/`open_cookie_reply`
-   exist and are tested, but the `CookieReply` message type and its scheduling
-   are P6; P2 supplies the crypto halves only.
+6. **No cookie policy.** P2 supplied the cookie crypto halves and P6 added the
+   `CookieReply` wire framing (`cookie::{build_cookie_reply, read_cookie_reply}`),
+   but *when* to issue a cookie — the rotation schedule and the `under_load`
+   signal — is the transport's decision, not this crate's. There is no clock
+   here.
 7. **No ratchet.** `establish_epoch` takes an `epoch` value; monotonicity is
    P4's obligation and is documented as the caller's responsibility.
 8. **No length privacy on its own.** As written in P2, a data packet's ciphertext
@@ -270,6 +272,7 @@ tests, are the gate's durable output.
 | fail closed under load with no cookie facility | `cookie.rs::admit_handshake` | `under_load_without_a_cookie_gets_a_cookie_and_nothing_more` |
 | cookie survives one rotation, not two | `cookie.rs::CookieSecret` | `a_cookie_keeps_working_across_a_rotation_but_not_forever` |
 | cookie reply needs the request it answers | `cookie.rs::seal/open_cookie_reply` | `a_cookie_reply_is_readable_only_with_the_request_it_answers` |
+| cookie reply wire form, and no `mac1` on it | `cookie.rs::{build,read}_cookie_reply`, `wire.rs` | `a_cookie_reply_round_trips_through_the_wire`, `a_cookie_reply_is_unreadable_without_our_own_request`, `a_cookie_reply_asserts_its_type_and_suite`, `a_truncated_cookie_reply_is_a_framing_error_not_a_panic` |
 | payload length is a chosen target, not a leak | `data.rs::{seal_padded, strip_padding}` (P5) | `padding_hides_the_payload_length_and_is_recovered_exactly`, `a_forged_length_prefix_fails_the_tag` (unit); `tests/shaping.rs` |
 | no key ambiguity across the whole surface | all of the above | the §4 matrix |
 

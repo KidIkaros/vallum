@@ -31,6 +31,22 @@
 //! from reading the cookie — and only that. An attacker who saw the request
 //! (and so its `mac1`) can decrypt the reply too, which is why a cookie is
 //! never treated as a secret key, only as an address probe.
+//!
+//! # Wire form
+//!
+//! [`build_cookie_reply`] frames a sealed cookie as a `CookieReply`
+//! ([`MessageType::CookieReply`]): the request's `sender_index` echoed in
+//! `RECEIVER_INDEX`, a fresh `COOKIE_NONCE`, and the sealed cookie in
+//! `COOKIE_CT`. It carries **no** `mac1` — a MAC would prove nothing (the reader
+//! must already possess the request's `mac1` to unseal it) — and it is 96 bytes
+//! against a multi-kilobyte `InitHello`, so it is not a reflection amplifier.
+//! [`read_cookie_reply`] is the requester's mirror: it checks the type and
+//! suite, unseals with the `mac1` it sent, and returns the echoed index so the
+//! retry can be routed to the right handshake.
+//!
+//! *When* to answer with a cookie is the transport's decision (the
+//! [`CookieSecret`] rotation schedule and the `under_load` signal); this module
+//! supplies the mechanism, not the policy.
 
 use core::fmt;
 
@@ -38,7 +54,9 @@ use vallum_crypto::{AeadError, CryptoSuite, KdfError};
 
 use crate::error::HandshakeError;
 use crate::keys::NONCE_SIZE;
-use crate::wire::{tag, Message};
+use crate::wire::{
+    tag, Message, MessageBuilder, MessageHeader, MessageType, INDEX_SIZE, PROTOCOL_VERSION,
+};
 
 /// Size of a `mac1` or `mac2`, in bytes.
 pub const MAC_SIZE: usize = 16;
@@ -364,6 +382,84 @@ pub fn sign_with_cookies<S: CryptoSuite + ?Sized>(
     Ok(())
 }
 
+/// Build the responder's answer to a handshake that carried no valid `mac2`.
+///
+/// `request_index` is the `sender_index` from the offending `InitHello`, echoed
+/// back so the initiator can route the cookie to the right outstanding
+/// handshake. `request_mac1` is that message's `mac1`, which keys the reply: only
+/// someone who sent the request — and so saw its `mac1` — can read the cookie
+/// back. `nonce` must be fresh; the caller supplies it, as everywhere else in
+/// this crate.
+///
+/// The reply carries no `mac1` of its own. It is useless to anyone who did not
+/// see the request, and a requester already knows the responder's public key, so
+/// there is nothing for a MAC to prove. It is also far smaller than the request
+/// it answers (96 bytes against a multi-kilobyte `InitHello`), so it cannot be
+/// turned into a reflection amplifier.
+///
+/// # Errors
+///
+/// [`HandshakeError::Aead`] if the seal fails, or [`HandshakeError::Wire`] if a
+/// field is rejected.
+pub fn build_cookie_reply<S: CryptoSuite + ?Sized>(
+    suite: &S,
+    request_index: u32,
+    request_mac1: &[u8; MAC_SIZE],
+    nonce: &[u8; NONCE_SIZE],
+    cookie: &[u8; COOKIE_SIZE],
+) -> Result<Vec<u8>, HandshakeError> {
+    let sealed = seal_cookie_reply(suite, request_mac1, nonce, cookie)?;
+
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::CookieReply,
+        suite_id: suite.suite_id(),
+        // A cookie reply belongs to no session: it exists so a session can
+        // *start*. The requester is named by `RECEIVER_INDEX`, not by us.
+        sender_index: 0,
+    };
+    let mut builder = MessageBuilder::new(header);
+    builder.field(tag::RECEIVER_INDEX, &request_index.to_be_bytes())?;
+    builder.field(tag::COOKIE_NONCE, nonce)?;
+    builder.field(tag::COOKIE_CT, &sealed)?;
+    builder.finish()
+}
+
+/// Read a cookie reply that answers our own request.
+///
+/// `our_mac1` is the `mac1` we put on the `InitHello` this reply answers. Using
+/// it to unseal the cookie is also what binds the reply to that request: a
+/// cookie issued for someone else's handshake, or replayed under a different
+/// request, fails to authenticate. The caller must therefore keep the `mac1` of
+/// an outstanding handshake.
+///
+/// Returns `(request_index, cookie)`: the `sender_index` we put on the request,
+/// echoed back, so the caller can attach the cookie to the retry it is about to
+/// send.
+///
+/// # Errors
+///
+/// [`HandshakeError::WrongMessageType`] if it is not a cookie reply,
+/// [`HandshakeError::SuiteMismatch`] if it names another suite,
+/// [`HandshakeError::Wire`] if a field is missing or the wrong size, or
+/// [`HandshakeError::Aead`] if it does not authenticate under `our_mac1`.
+pub fn read_cookie_reply<S: CryptoSuite + ?Sized>(
+    suite: &S,
+    message: &Message<'_>,
+    our_mac1: &[u8; MAC_SIZE],
+) -> Result<(u32, [u8; COOKIE_SIZE]), HandshakeError> {
+    message.expect_type(MessageType::CookieReply)?;
+    // The reply key is a hash under *our* suite, so a mismatched suite could
+    // never open it anyway; checking first just names the failure.
+    message.expect_suite(suite.suite_id())?;
+
+    let index = u32::from_be_bytes(message.require_array::<INDEX_SIZE>(tag::RECEIVER_INDEX)?);
+    let nonce = message.require_array::<NONCE_SIZE>(tag::COOKIE_NONCE)?;
+    let sealed = message.require(tag::COOKIE_CT)?;
+    let cookie = open_cookie_reply(suite, our_mac1, &nonce, sealed)?;
+    Ok((index, cookie))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -474,5 +570,121 @@ mod tests {
         assert!(open_cookie_reply(&s, &request_mac1, &other_nonce, &sealed).is_err());
         // Nor does a truncated reply.
         assert!(open_cookie_reply(&s, &request_mac1, &nonce, &sealed[..sealed.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn a_cookie_reply_round_trips_through_the_wire() {
+        let s = suite();
+        let request_mac1 = mac1(&s, PK, MSG).unwrap();
+        let nonce = [7u8; NONCE_SIZE];
+        let cookie = [9u8; COOKIE_SIZE];
+        let request_index = 0xDEAD_BEEF;
+
+        let bytes = build_cookie_reply(&s, request_index, &request_mac1, &nonce, &cookie).unwrap();
+
+        // The wire form is small and fixed: a requester must not be able to make
+        // the responder emit more than it received (no reflection amplifier).
+        assert!(bytes.len() < 128, "a cookie reply is {} bytes", bytes.len());
+
+        let msg = Message::parse(&bytes).unwrap();
+        assert_eq!(msg.message_type(), MessageType::CookieReply);
+        assert_eq!(
+            msg.sender_index(),
+            0,
+            "a cookie reply belongs to no session"
+        );
+
+        let (index, got) = read_cookie_reply(&s, &msg, &request_mac1).unwrap();
+        assert_eq!(index, request_index, "the request index is echoed");
+        assert_eq!(got, cookie);
+    }
+
+    #[test]
+    fn a_cookie_reply_is_unreadable_without_our_own_request() {
+        let s = suite();
+        let ours = mac1(&s, PK, MSG).unwrap();
+        let theirs = mac1(&s, b"another key", MSG).unwrap();
+        let nonce = [7u8; NONCE_SIZE];
+
+        let bytes = build_cookie_reply(&s, 1, &theirs, &nonce, &[9u8; COOKIE_SIZE]).unwrap();
+        let msg = Message::parse(&bytes).unwrap();
+
+        // A reply issued for someone else's request does not open under ours:
+        // the cookie is bound to the request that asked for it.
+        assert!(matches!(
+            read_cookie_reply(&s, &msg, &ours),
+            Err(HandshakeError::Aead(_))
+        ));
+        assert!(read_cookie_reply(&s, &msg, &theirs).is_ok());
+    }
+
+    #[test]
+    fn a_cookie_reply_asserts_its_type_and_suite() {
+        let s = suite();
+        let mac = mac1(&s, PK, MSG).unwrap();
+        let bytes =
+            build_cookie_reply(&s, 1, &mac, &[7u8; NONCE_SIZE], &[9u8; COOKIE_SIZE]).unwrap();
+        let msg = Message::parse(&bytes).unwrap();
+        assert!(msg.expect_type(MessageType::CookieReply).is_ok());
+        assert!(msg.expect_suite(s.suite_id()).is_ok());
+
+        // A reply whose suite id was rewritten is refused before any AEAD work.
+        let mut forged = bytes.clone();
+        forged[2..4].copy_from_slice(&0x0099u16.to_be_bytes());
+        let forged = Message::parse(&forged).unwrap();
+        assert!(matches!(
+            read_cookie_reply(&s, &forged, &mac),
+            Err(HandshakeError::SuiteMismatch { .. })
+        ));
+
+        // And a data message is not a cookie reply.
+        let mut b = MessageBuilder::new(MessageHeader {
+            version: PROTOCOL_VERSION,
+            message_type: MessageType::Data,
+            suite_id: s.suite_id(),
+            sender_index: 0,
+        });
+        b.field(tag::COUNTER, &1u64.to_be_bytes()).unwrap();
+        b.field(tag::DATA_CT, b"ct").unwrap();
+        let data_bytes = b.finish().unwrap();
+        let data = Message::parse(&data_bytes).unwrap();
+        assert!(matches!(
+            read_cookie_reply(&s, &data, &mac),
+            Err(HandshakeError::WrongMessageType { .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_cookie_reply_is_a_framing_error_not_a_panic() {
+        let s = suite();
+        let mac = mac1(&s, PK, MSG).unwrap();
+        let bytes =
+            build_cookie_reply(&s, 1, &mac, &[7u8; NONCE_SIZE], &[9u8; COOKIE_SIZE]).unwrap();
+        let msg = Message::parse(&bytes).unwrap();
+
+        // Drop each field in turn and confirm the reader reports a missing field
+        // rather than unwrapping one.
+        for missing in [tag::RECEIVER_INDEX, tag::COOKIE_NONCE, tag::COOKIE_CT] {
+            let mut rebuilt = MessageBuilder::new(MessageHeader {
+                version: PROTOCOL_VERSION,
+                message_type: MessageType::CookieReply,
+                suite_id: s.suite_id(),
+                sender_index: 0,
+            });
+            for t in [tag::RECEIVER_INDEX, tag::COOKIE_NONCE, tag::COOKIE_CT] {
+                if t != missing {
+                    rebuilt.field(t, msg.require(t).unwrap()).unwrap();
+                }
+            }
+            let short_bytes = rebuilt.finish().unwrap();
+            let short = Message::parse(&short_bytes).unwrap();
+            assert!(
+                matches!(
+                    read_cookie_reply(&s, &short, &mac),
+                    Err(HandshakeError::Wire(_))
+                ),
+                "missing field {missing:#06x} should be a framing error"
+            );
+        }
     }
 }

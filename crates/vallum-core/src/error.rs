@@ -71,6 +71,12 @@ pub enum HandshakeError {
     Sign(SigError),
     /// A suite operation failed.
     Suite(SuiteError),
+    /// An AEAD operation failed.
+    ///
+    /// Only the cookie-reply layer uses the AEAD before a session exists: the
+    /// reply is sealed under a key derived from the requester's `mac1`. A data
+    /// plane failure is [`DataError`], not this.
+    Aead(AeadError),
 }
 
 impl fmt::Display for HandshakeError {
@@ -112,6 +118,7 @@ impl fmt::Display for HandshakeError {
             Self::Kdf(e) => write!(f, "HandshakeError: {e}"),
             Self::Sign(e) => write!(f, "HandshakeError: {e}"),
             Self::Suite(e) => write!(f, "HandshakeError: {e}"),
+            Self::Aead(e) => write!(f, "HandshakeError: cookie reply did not authenticate: {e}"),
         }
     }
 }
@@ -123,6 +130,7 @@ impl std::error::Error for HandshakeError {
             Self::Kdf(e) => Some(e),
             Self::Sign(e) => Some(e),
             Self::Suite(e) => Some(e),
+            Self::Aead(e) => Some(e),
             _ => None,
         }
     }
@@ -149,6 +157,12 @@ impl From<SuiteError> for HandshakeError {
 impl From<SigError> for HandshakeError {
     fn from(e: SigError) -> Self {
         Self::Sign(e)
+    }
+}
+
+impl From<AeadError> for HandshakeError {
+    fn from(e: AeadError) -> Self {
+        Self::Aead(e)
     }
 }
 

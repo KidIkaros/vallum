@@ -22,14 +22,14 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use vallum_core::cookie::{
-    admit_handshake, mac1, mac2, open_cookie_reply, seal_cookie_reply, sign_with_cookies,
-    Admission, CookieSecret, COOKIE_SIZE, MAC_SIZE,
+    admit_handshake, build_cookie_reply, mac1, mac2, open_cookie_reply, read_cookie_reply,
+    seal_cookie_reply, sign_with_cookies, Admission, CookieSecret, COOKIE_SIZE, MAC_SIZE,
 };
 use vallum_core::wire::tag;
 use vallum_core::{
     establish, establish_epoch, initiator_hello, initiator_process_resp, responder_process_conf,
     responder_process_init, DataError, HandshakeError, Message, MessageBuilder, MessageHeader,
-    MessageType, PeerIdentity, Receiver, Role, Sender, SessionKeys, StaticIdentity,
+    MessageType, PeerIdentity, Receiver, Role, Sender, SessionKeys, StaticIdentity, NONCE_SIZE,
     PAYLOAD_LEN_SIZE, PROTOCOL_VERSION, REPLAY_WINDOW,
 };
 use vallum_crypto::CryptoSuite;
@@ -640,6 +640,76 @@ fn a_cookie_is_bound_to_the_client_address() {
         admit_handshake(
             &suite,
             &message,
+            responder_pk,
+            b"198.51.100.9:51820",
+            true,
+            Some(&secret),
+        )
+        .unwrap(),
+        Admission::BadMac2
+    );
+}
+
+/// The whole point of P6's framing: the responder hands out a cookie, and the
+/// requester's *retry* — with that cookie as `mac2` — is admitted. Both ends
+/// never share a key except through the sealed reply.
+#[test]
+fn a_cookie_reply_turns_a_refusal_into_a_retry_that_is_admitted() {
+    let suite = SdkSuite::tri_hybrid();
+    let responder = StaticIdentity::generate(&suite, &[0x22u8; 32]).unwrap();
+    let responder_pk = responder.public().as_bytes();
+    let client = b"203.0.113.7:51820";
+    let secret = CookieSecret::new(&[0x55u8; 32]);
+
+    // 1. Under load, the initiator's first try carries no mac2 and is refused.
+    let first = signed_hello(&suite, responder_pk, None);
+    let first = Message::parse(&first).unwrap();
+    let mac1_of_first = <[u8; MAC_SIZE]>::try_from(first.require(tag::MAC1).unwrap()).unwrap();
+    assert_eq!(
+        admit_handshake(&suite, &first, responder_pk, client, true, Some(&secret)).unwrap(),
+        Admission::NeedCookie
+    );
+
+    // 2. The responder answers with a cookie, sealed for that request. The
+    //    request's own index comes back so the initiator knows which handshake
+    //    it is for, and the mac1 keys the reply so nobody else can read it.
+    let nonce = [0x9Au8; NONCE_SIZE];
+    let cookie = secret.cookie(&suite, client).unwrap();
+    let reply = build_cookie_reply(
+        &suite,
+        first.sender_index(),
+        &mac1_of_first,
+        &nonce,
+        &cookie,
+    )
+    .unwrap();
+
+    // 3. The initiator (which kept its mac1 and nonce) reads it back.
+    let reply = Message::parse(&reply).unwrap();
+    let (index, received) = read_cookie_reply(&suite, &reply, &mac1_of_first).unwrap();
+    assert_eq!(index, INIT_INDEX, "the echoed index names the retry");
+    assert_eq!(received, cookie);
+
+    // 4. The retry carries mac2 and is admitted.
+    let retry = signed_hello(&suite, responder_pk, Some(&received));
+    assert_eq!(
+        admit_handshake(
+            &suite,
+            &Message::parse(&retry).unwrap(),
+            responder_pk,
+            client,
+            true,
+            Some(&secret),
+        )
+        .unwrap(),
+        Admission::Accept
+    );
+
+    // ...but only from the address the cookie was issued to.
+    assert_eq!(
+        admit_handshake(
+            &suite,
+            &Message::parse(&retry).unwrap(),
             responder_pk,
             b"198.51.100.9:51820",
             true,

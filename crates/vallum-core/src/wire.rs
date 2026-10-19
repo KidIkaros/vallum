@@ -81,6 +81,12 @@ pub enum MessageType {
     /// parser and one set of caps, but it is never exchanged *inside* a
     /// handshake.
     IdentityDoc,
+    /// Responder → initiator: a cookie for the source address (P6).
+    ///
+    /// Answers an `InitHello` that carried no valid `mac2` while the responder
+    /// was under load. Not part of a handshake transcript: it is a retry
+    /// instruction, and a session that never sees one is unaffected.
+    CookieReply,
 }
 
 impl MessageType {
@@ -93,6 +99,7 @@ impl MessageType {
             Self::InitConf => 0x03,
             Self::Data => 0x04,
             Self::IdentityDoc => 0x05,
+            Self::CookieReply => 0x06,
         }
     }
 
@@ -105,6 +112,7 @@ impl MessageType {
             0x03 => Some(Self::InitConf),
             0x04 => Some(Self::Data),
             0x05 => Some(Self::IdentityDoc),
+            0x06 => Some(Self::CookieReply),
             _ => None,
         }
     }
@@ -118,6 +126,7 @@ impl MessageType {
             Self::InitConf => "InitConf",
             Self::Data => "Data",
             Self::IdentityDoc => "IdentityDoc",
+            Self::CookieReply => "CookieReply",
         }
     }
 }
@@ -153,6 +162,11 @@ pub mod tag {
     pub const MAC1: u16 = 0x0030;
     /// WireGuard-style `mac2` cookie (P2).
     pub const MAC2: u16 = 0x0031;
+    /// A cookie reply's nonce ([`crate::keys::NONCE_SIZE`] bytes, P6).
+    pub const COOKIE_NONCE: u16 = 0x0032;
+    /// A cookie reply's sealed cookie ([`crate::cookie::COOKIE_SIZE`] plus the
+    /// AEAD tag, P6).
+    pub const COOKIE_CT: u16 = 0x0033;
     /// A data message's AEAD ciphertext, tag appended (P2).
     pub const DATA_CT: u16 = 0x0040;
 }
