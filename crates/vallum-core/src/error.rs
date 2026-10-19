@@ -191,6 +191,26 @@ pub enum DataError {
         /// The index carried by the packet.
         got: u32,
     },
+    /// The epoch counter reached `u64::MAX`, so no further epoch can be
+    /// installed. Unreachable in practice — it exists so the ratchet cannot
+    /// silently wrap back onto a spent epoch.
+    EpochExhausted {
+        /// The epoch that could not be advanced past.
+        epoch: u64,
+    },
+    /// A rekey presented a different crypto suite than the session was
+    /// established with.
+    ///
+    /// A suite is fixed for the life of a session: the epoch axis rides on one
+    /// [`CryptoSuite`](vallum_crypto::CryptoSuite)'s key schedule, so changing
+    /// suites means a new session, never a new epoch. Silently mixing them would
+    /// defeat the point of binding the suite id into every derivation.
+    SuiteChanged {
+        /// The suite the session was established with.
+        expected: u16,
+        /// The suite the rekey used.
+        got: u16,
+    },
 }
 
 impl fmt::Display for DataError {
@@ -209,6 +229,13 @@ impl fmt::Display for DataError {
             Self::WrongIndex { expected, got } => write!(
                 f,
                 "DataError: packet names session {got:#010x}, this session is {expected:#010x}"
+            ),
+            Self::EpochExhausted { epoch } => {
+                write!(f, "DataError: epoch {epoch} cannot advance further")
+            }
+            Self::SuiteChanged { expected, got } => write!(
+                f,
+                "DataError: rekey changed the crypto suite (session uses {expected:#06x}, rekey uses {got:#06x})"
             ),
         }
     }

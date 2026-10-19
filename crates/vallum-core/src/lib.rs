@@ -71,6 +71,15 @@
 //! window; [`cookie`] supplies the `mac1`/`mac2` anti-flood layer; [`timestamp`]
 //! guards against a replayed handshake; [`timer`] bounds a key's lifetime.
 //! See `docs/proof/committing-aead-multikey.md`.
+//!
+//! ## Ratchet (P4)
+//!
+//! [`session`] is the epoch axis: one peer relationship keyed by a sequence of
+//! handshakes. Advancing an epoch is a fresh hybrid handshake, not a symmetric
+//! chain, so post-compromise security is by construction and the time/memory
+//! tradeoff attacks on key chains have no target. A superseded epoch is retained
+//! receive-only for in-flight packets, then erased.
+//! See `docs/proof/ratchet-pcs.md`.
 
 #![forbid(unsafe_code)]
 
@@ -81,6 +90,7 @@ pub mod handshake;
 pub mod identity;
 pub mod keys;
 pub mod replay;
+pub mod session;
 pub mod timer;
 pub mod timestamp;
 pub mod wire;
@@ -96,6 +106,7 @@ pub use handshake::{
 pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
 pub use replay::{ReplayFilter, REPLAY_WINDOW};
+pub use session::{Session, RETAIN_PREVIOUS_EPOCH_MS};
 pub use timer::{TimerAction, Timers};
 pub use timestamp::{Tai64n, Tai64nGuard, TimestampError};
 pub use wire::{

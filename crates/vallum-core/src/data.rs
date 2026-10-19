@@ -88,6 +88,12 @@ impl Sender {
         self.epoch
     }
 
+    /// The recipient's session index that outbound packets name.
+    #[must_use]
+    pub fn peer_index(&self) -> u32 {
+        self.peer_index
+    }
+
     /// Whether the caller should begin a fresh handshake at its next
     /// opportunity.
     #[must_use]
@@ -160,6 +166,12 @@ impl Receiver {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// Our own session index; an inbound packet must name it.
+    #[must_use]
+    pub fn own_index(&self) -> u32 {
+        self.own_index
     }
 
     /// One past the highest counter accepted so far.
@@ -242,10 +254,15 @@ pub fn establish<S: CryptoSuite + ?Sized>(
 
 /// As [`establish`], but from an arbitrary epoch root and index pair.
 ///
-/// P4's ratchet calls this to install a new epoch without a new handshake,
-/// passing the previous epoch's root and moving `epoch` forward. Reusing an
-/// `epoch` value with a different root is a protocol error the key schedule
-/// cannot detect — the caller owns epoch monotonicity.
+/// The epoch axis's low-level entry point. [`crate::session::Session`] is the
+/// intended caller: it installs epoch `0` from a handshake and each later epoch
+/// from a **new** handshake's result ([`crate::session::Session::advance`]).
+///
+/// Reusing an `epoch` value with a different root is a protocol error the key
+/// schedule cannot detect — the caller owns epoch monotonicity. [`Session`] is
+/// what discharges that obligation.
+///
+/// [`Session`]: crate::session::Session
 ///
 /// # Errors
 ///
