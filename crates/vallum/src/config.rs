@@ -44,7 +44,7 @@ use vallum_tunnel::{IpNet, PeerConfig};
 use crate::error::Error;
 use crate::keys::{self, SecretFile};
 use crate::logging::Level;
-use crate::tun::DEFAULT_MTU;
+use crate::tun::{DEFAULT_MTU, MIN_MTU, SAFE_MTU_IPV6_OUTER};
 
 /// The port a Vallum daemon listens on unless told otherwise. The same number
 /// WireGuard chose, so a firewall rule is memorable rather than arbitrary.
@@ -275,6 +275,26 @@ impl Config {
         };
 
         let mtu = self.interface.mtu.unwrap_or(DEFAULT_MTU);
+        // An explicit `0` used to be silently replaced by the default, which is
+        // the kind of quiet coercion this config refuses everywhere else: the
+        // operator asked for something incoherent and got a working tunnel with
+        // a different MTU than the file says. Below IPv4's minimum reassembly
+        // buffer the request is incoherent too.
+        if mtu < MIN_MTU {
+            return Err(Error::Invalid {
+                path: path.to_path_buf(),
+                what: format!(
+                    "interface.mtu {mtu} is below the IPv4 minimum of {MIN_MTU} bytes; \
+                     omit it for the default {DEFAULT_MTU}"
+                ),
+            });
+        }
+        if mtu > SAFE_MTU_IPV6_OUTER {
+            warnings.push(format!(
+                "interface.mtu {mtu} is above {SAFE_MTU_IPV6_OUTER}: an inner packet \
+                 will not fit a 1500-byte IPv6 outer path and will be fragmented"
+            ));
+        }
 
         // Read the key file before anything else: it is the one thing whose
         // absence makes every other check pointless. A relative path is taken
@@ -309,6 +329,48 @@ impl Config {
                 });
             }
 
+            // A key of the wrong length is not a key. Without this check the
+            // handshake fails later, inside `encapsulate`, and the loop has
+            // nowhere to report it: the tunnel simply never comes up and the
+            // operator sees silence. Check the length where the operator can see
+            // the mistake — at load, naming the peer.
+            //
+            // `sign_pk_max` is an upper bound by name, but every suite in the
+            // registry has exactly one signing-key size, so it is the size this
+            // suite expects. A suite with variable-size signing keys would need
+            // this check revisited.
+            let sizes = suite.sizes();
+            let kem_len = peer_identity.kem().len();
+            if kem_len != sizes.kem_pk {
+                return Err(Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: format!(
+                        "{}: KEM public key is {kem_len} bytes, but suite 0x{:04x} \
+                         ({}) uses {} bytes",
+                        where_(),
+                        suite.suite_id(),
+                        keys::describe_suite(suite.suite_id()),
+                        sizes.kem_pk,
+                    ),
+                });
+            }
+            if let Some(signing) = peer_identity.signing() {
+                let signing_len = signing.len();
+                if signing_len != sizes.sign_pk_max {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "{}: signing public key is {signing_len} bytes, but suite \
+                             0x{:04x} ({}) uses {} bytes",
+                            where_(),
+                            suite.suite_id(),
+                            keys::describe_suite(suite.suite_id()),
+                            sizes.sign_pk_max,
+                        ),
+                    });
+                }
+            }
+
             let mut nets = Vec::with_capacity(entry.allowed_ips.len());
             for text in &entry.allowed_ips {
                 let net = text.parse::<IpNet>().map_err(|e| Error::Invalid {
@@ -316,6 +378,19 @@ impl Config {
                     what: format!("{}: allowed_ips `{text}`: {e}", where_()),
                 })?;
                 nets.push(net);
+            }
+
+            if nets.is_empty() {
+                // `allowed_ips` is both the destinations routed to the peer and
+                // the sources accepted from it. Empty is not "no restriction":
+                // it is a peer that can neither send nor receive, silently.
+                return Err(Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: format!(
+                        "{}: allowed_ips is empty, so nothing can be routed to or from this peer",
+                        where_()
+                    ),
+                });
             }
 
             let mut config =

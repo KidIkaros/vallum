@@ -38,7 +38,8 @@
 # behind instead of deleting it — the fastest way to read what a failure saw.
 #
 # Exit status 0 means every check passed. Requires: Linux with unprivileged user
-# namespaces, `ip`, `nsenter`, and `ping`.
+# namespaces, `ip`, `nsenter`, `ping`, and `python3` (the adversary in the last
+# phase uses it to capture one real handshake and to send raw datagrams).
 
 set -euo pipefail
 
@@ -111,6 +112,7 @@ stop_all() {
     # exit status.
     if [ -n "${A_JOB:-}" ]; then kill -KILL "$A_JOB" 2>/dev/null || true; fi
     if [ -n "${B_JOB:-}" ]; then kill -KILL "$B_JOB" 2>/dev/null || true; fi
+    if [ -n "${SNIFF_PID:-}" ]; then kill -KILL "$SNIFF_PID" 2>/dev/null || true; fi
     kill_pidfile "$HOLDER_PIDFILE" -KILL
     wait 2>/dev/null || true
 }
@@ -187,6 +189,71 @@ write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer 
 write_config a "$INNER_A" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B" "$PUB_B"
 write_config b "$INNER_B" "$OUTER_B:$PORT" ""                 "$INNER_A" "$PUB_A"
 
+# ── arm the adversary's capture ──────────────────────────────────────
+#
+# The adversary lives in ns2, but the `InitHello` it will replay is captured on
+# veth-a, where it leaves ns1. Capturing on the sending side keeps the recorded
+# pid a plain `python3` (created with `exec` below), so the EXIT trap can kill it
+# without an `nsenter` wrapper in between. The handshake is larger than the veth
+# MTU, so the capture reassembles IP fragments before it sees a whole message —
+# which is itself the measured fact this gate reports below.
+say "arming the capture on veth-a"
+python3 - "$WORK/inithello.bin" <<'PY' > "$WORK/sniff.log" 2>&1 &
+import socket, sys, time
+
+out = sys.argv[1]
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+s.bind(("veth-a", 0))
+s.settimeout(0.5)
+deadline = time.time() + 15
+fragments = {}
+
+
+def assemble(parts):
+    """The IPv4 payload, if the fragments form a contiguous run."""
+    if 0 not in parts:
+        return None
+    data = b""
+    offset = 0
+    while True:
+        if offset not in parts:
+            return None
+        chunk, more = parts[offset]
+        data += chunk
+        offset += len(chunk)
+        if not more:
+            return data
+
+
+while time.time() < deadline:
+    try:
+        frame, _ = s.recvfrom(65535)
+    except socket.timeout:
+        continue
+    if frame[12:14] != b"\x08\x00":
+        continue
+    ip = frame[14:]
+    ihl = (ip[0] & 0xF) * 4
+    if ip[9] != 17:  # UDP
+        continue
+    key = (int.from_bytes(ip[4:6], "big"), ip[12:20])
+    flags = int.from_bytes(ip[6:8], "big")
+    offset = (flags & 0x1FFF) * 8
+    more = bool(flags & 0x2000)
+    parts = fragments.setdefault(key, {})
+    parts[offset] = (ip[ihl:], more)
+    data = assemble(parts)
+    # Reassembled IPv4 payload = UDP header (8) then the message. `01 01` is
+    # protocol version 1, message type `InitHello`.
+    if data and data[8:10] == b"\x01\x01":
+        with open(out, "wb") as handle:
+            handle.write(data[8:])
+        break
+else:
+    sys.exit("no complete InitHello appeared on veth-a")
+PY
+SNIFF_PID=$!
+
 # ── start the two daemons ────────────────────────────────────────────
 
 FRAG_A_BEFORE=$(snmp_here FragCreates)
@@ -236,6 +303,19 @@ if grep -q "endpoint" "$WORK/b.toml"; then
 fi
 ok "B learned A's address from the handshake (no endpoint in B's config)"
 
+# ── the handshake the adversary will replay ──────────────────────────
+
+say "collecting the captured InitHello"
+wait "$SNIFF_PID" 2>/dev/null || true
+SNIFF_PID=""
+[ -s "$WORK/inithello.bin" ] || bad "the capture saw no complete InitHello; see $WORK/sniff.log"
+CAPTURED=$(wc -c < "$WORK/inithello.bin" | tr -d ' ')
+# 4609 B of message (the frozen `init_hello_len`, hint included) plus a 20 B
+# `mac1` field: a 16 B MAC under a 4 B tag and length. Pinning the number here is
+# what turns the size table in docs/proof/daemon.md into a live check.
+[ "$CAPTURED" = 4629 ] || bad "captured $CAPTURED bytes of InitHello, expected 4629"
+printf '   captured %s bytes on the wire: 4609 B message + 20 B mac1 field\n' "$CAPTURED"
+
 # ── the other direction, over the session A started ──────────────────
 
 say "carrying traffic the other way: from the second namespace"
@@ -270,17 +350,108 @@ printf '   veth MTU:       1500\n'
 if [ "$((FRAG_A_AFTER - FRAG_A_BEFORE))" -gt 0 ] || [ "$((FRAG_B_AFTER - FRAG_B_BEFORE))" -gt 0 ]; then
     printf '   note   the handshake exceeded the outer MTU and was fragmented.\n'
     printf '          Frozen sizes (crates/vallum-core/tests/interop.rs): the\n'
-    printf '          tri-hybrid InitHello is 4609 B plus 32 B of mac1 = 4641 B, and\n'
-    printf '          the RespHello is 4378 B plus 32 B = 4410 B. At 1480 B of IPv4\n'
-    printf '          payload per fragment that is 4 and 3 fragments: ceil(4641/1480)\n'
-    printf '          and ceil(4410/1480). The counters above should match those two\n'
-    printf '          numbers.\n'
+    printf '          tri-hybrid InitHello is 4609 B of message (including a 40 B\n'
+    printf '          sealed peer hint) plus a 20 B mac1 field = 4629 B, and the\n'
+    printf '          RespHello is 4378 B with no mac1 (mac1 is InitHello-only).\n'
+    printf '          With 20 B of IPv4 and 8 B of UDP per datagram that is\n'
+    printf '          ceil(4657/1480) = 4 and ceil(4406/1480) = 3 fragments. The\n'
+    printf '          counters above should match those two numbers.\n'
     printf '          This is the limitation docs/proof/daemon.md records: there is no\n'
     printf '          application-layer segmentation, so the handshake depends on IP\n'
     printf '          fragmentation, and a middlebox that drops fragments drops the\n'
     printf '          tunnel.\n'
 else
     printf '   note   no outer fragmentation was observed here.\n'
+fi
+
+# ── the adversary ────────────────────────────────────────────────────
+#
+# An attacker co-located with B, on B's outer link: the position a compromised
+# peer, or anything else in the same broadcast domain, actually occupies. It can
+# send any datagram to either daemon and it holds one genuine `InitHello` it
+# captured. Everything it can do with those two things is tried here:
+#
+#   * junk of every size (0, 1, 1 KiB, 16 KiB, 65 507 bytes), to both daemons,
+#   * a well-formed header with no `mac1` (the cheapest forgery),
+#   * the real handshake, replayed from a different address.
+#
+# The invariant is one sentence: **an unauthenticated datagram never draws a
+# reply**, so there is nothing to amplify and nothing to bounce. A daemon that
+# answered any of these would print a reply count here and fail.
+say "adversary in ns2: junk, oversized datagrams, and a replayed handshake"
+
+ATTACK=$(in_ns python3 - "$WORK/inithello.bin" "$OUTER_A" "$OUTER_B" "$PORT" <<'PY'
+import os
+import socket
+import sys
+import time
+
+capture, a_address, b_address, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+with open(capture, "rb") as handle:
+    init_hello = handle.read()
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("0.0.0.0", 0))
+
+
+def probe(destination, payload, window):
+    """Send one datagram, then count and measure every reply for `window` seconds."""
+    sock.sendto(payload, (destination, port))
+    replies = []
+    deadline = time.time() + window
+    while True:
+        left = deadline - time.time()
+        if left <= 0:
+            return replies
+        sock.settimeout(left)
+        try:
+            data, _ = sock.recvfrom(70000)
+        except socket.timeout:
+            return replies
+        replies.append(len(data))
+
+
+junk = []
+for payload in (b"", b"\x00", os.urandom(1024), os.urandom(16384), os.urandom(65507)):
+    junk += probe(b_address, payload, 0.25)
+for payload in (os.urandom(2048), os.urandom(65507)):
+    junk += probe(a_address, payload, 0.25)
+
+# Version 1, `InitHello`, suite 3, a plausible index, then noise. No `mac1`, so
+# the admission gate refuses it before any KEM work.
+forged = probe(b_address, b"\x01\x01\x00\x03" + os.urandom(4600), 0.25)
+
+# The genuine article, from a different source address.
+replay = probe(b_address, init_hello, 1.0)
+
+print(f"junk={len(junk)}")
+print(f"forged={len(forged)}")
+print(f"replay={len(replay)}")
+print(f"replay_bytes={sum(replay)}")
+PY
+) || bad "the attacker script itself failed"
+
+field() { printf '%s\n' "$ATTACK" | awk -F= -v key="$1" '$1 == key { print $2 }'; }
+
+junk_replies=$(field junk)
+forged_replies=$(field forged)
+replay_replies=$(field replay)
+replay_bytes=$(field replay_bytes)
+
+[ "$junk_replies" = 0 ] || bad "junk drew $junk_replies reply datagrams"
+ok "empty, 1-byte, 1 KiB, 16 KiB and 65 507-byte datagrams drew no reply"
+[ "$forged_replies" = 0 ] || bad "a header with no mac1 drew $forged_replies replies"
+ok "a well-formed header with no mac1 drew no reply"
+[ "$replay_replies" = 0 ] || bad "a replayed InitHello drew $replay_replies replies ($replay_bytes bytes)"
+ok "a replayed InitHello drew no reply"
+
+for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+    kill -0 "$(cat "$pidfile")" 2>/dev/null || bad "$(basename "$pidfile" .pid) died under attack"
+done
+if ping -c1 -W5 -q "$INNER_B"; then
+    ok "the tunnel still carries traffic after the attack"
+else
+    bad "the tunnel stopped carrying traffic after the attack"
 fi
 
 # ── shut down ────────────────────────────────────────────────────────

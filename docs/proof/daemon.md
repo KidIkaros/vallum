@@ -29,16 +29,24 @@ permitted`.
 **(b) The handshake does not fit in a packet, and the tunnel depends on IP
 fragmentation.** There is no application-layer segmentation anywhere in the stack:
 one UDP datagram is one `Message`. A tri-hybrid `InitHello` is 4609 B of message
-plus 32 B of `mac1` = **4641 B** on the wire, and the `RespHello` is 4378 + 32 =
-**4410 B**, against a 1500 B path MTU. Both are sent as one datagram and the
-kernel fragments them.
+(including a 40 B sealed peer hint) plus a 20 B `mac1` field — a 16 B MAC under a
+4 B tag and length — for **4629 B** on the wire, and the `RespHello` is **4378 B**
+with no `mac1` at all (`mac1` is carried on `InitHello` only). Both go against a
+1500 B path MTU, as one datagram, and the kernel fragments them.
 
 This is measured, not asserted. In the two-namespace run the counters move
-`FragCreates +4` on the initiator's side and `+3` on the responder's, exactly
-`ceil(4641/1480)` and `ceil(4410/1480)` for 1480 B of IPv4 payload per fragment,
-and `ReasmReqds` mirrors them on the other side. It is recorded in §5 as a
-limitation rather than hidden: a middlebox that drops IP fragments drops the
-tunnel, and a future framing level (which is a wire change) is the fix.
+`FragCreates +4` on the initiator's side and `+3` on the responder's, which is
+`ceil((4629 + 20 + 8)/1480) = 4` and `ceil((4378 + 20 + 8)/1480) = 3` for 1480 B
+of IPv4 payload per fragment, and `ReasmReqds` mirrors them on the other side. It
+is recorded in §5 as a limitation rather than hidden: a middlebox that drops IP
+fragments drops the tunnel, and a future framing level (which is a wire change) is
+the fix.
+
+> **Corrected in P6.5.** Earlier revisions of this document said `+ 32 B of mac1`
+> and gave 4641 B and 4410 B. `MAC_SIZE` is 16, and `RespHello` carries no `mac1`.
+> The fragment counts were right for the wrong reason (both pairings round up to
+> 4 and 3), which is why the error survived: the live capture the pentest added
+> measures the actual bytes, not the arithmetic.
 
 **(c) There is no persistent keepalive, so a NAT-bound responder is silent.**
 `KEEPALIVE_TIMEOUT_MS` is WireGuard's rule — send a keepalive after 10 s of
@@ -256,9 +264,10 @@ ns1, daemon A:  FragCreates +4   ReasmReqds +3
 ns2, daemon B:  FragCreates +3   ReasmReqds +4
 ```
 
-which is `ceil(4641/1480) = 4` for the `InitHello` and `ceil(4410/1480) = 3` for
-the `RespHello`, and the same numbers mirrored. The fragmentation in §0b is
-therefore a measurement, not an inference from message sizes.
+which is `ceil((4629 + 28)/1480) = 4` for the `InitHello` and
+`ceil((4378 + 28)/1480) = 3` for the `RespHello`, and the same numbers mirrored.
+The fragmentation in §0b is therefore a measurement, not an inference from message
+sizes.
 
 A note on the round-trip times it prints: the first packet pays the handshake, and
 this is an unoptimised build in a test namespace. Those numbers are not a
@@ -285,9 +294,10 @@ performance claim and should not be quoted as one.
    keeps the TUN descriptor for its lifetime. There is no capability drop, no
    sandbox, and no per-peer isolation. Running it as root is the simple thing, not
    the safe thing, and this phase does not claim otherwise.
-6. **No performance or scale claim.** Queue depth (256 packets / 4 MiB in the
-   device), the 100 ms tick, and the under-load threshold of 64 are reasoned, not
-   tuned. Nothing here has been measured at a high packet rate.
+6. **No performance or scale claim.** The under-load threshold (64 queued
+   packets), the 100 ms tick, and the reader→loop queue bound (256 packets, ≈4 MiB
+   — enforced by the channel, see `pentest.md` F1) are reasoned, not tuned. Nothing
+   here has been measured at a high packet rate.
 7. **No drain on shutdown.** `SIGTERM` stops the loop within a tick; queued packets
    are dropped and the log line says what got through.
 8. **No defence against an on-path attacker.** The daemon moves bytes. The
@@ -301,3 +311,10 @@ performance claim and should not be quoted as one.
 11. **`tun2` is WTFPL-licensed.** Fine for use, worth knowing for distribution. It
     is an implementation detail behind `tun::TunReader` / `TunWriter`, so replacing
     it does not touch the daemon.
+
+P6.5 attacked this daemon and its operator surface directly. Its findings — four
+silent-failure bugs in configuration and queueing, one wrong size table in this
+document, and the two residual risks above it chose to accept rather than fix —
+are in [`pentest.md`](pentest.md). The queue bound in item 6 is one of its
+findings: this document claimed it before the code enforced it, and the test that
+now pins it is named there.

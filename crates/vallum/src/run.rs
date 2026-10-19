@@ -56,10 +56,26 @@ pub const DEFAULT_UNDER_LOAD_DEPTH: usize = 64;
 
 /// The largest datagram a UDP read will accept.
 ///
-/// A handshake message can be 16 KiB, and a datagram is bounded by 65 535. The
-/// buffer is the largest a datagram can be, so a message is never silently
-/// truncated before the transport can apply *its* size limit.
-pub const UDP_BUFFER: usize = 65_535;
+/// One byte past [`vallum_core::wire::MAX_HANDSHAKE_MESSAGE`], not 65 535. No
+/// valid message is longer than the cap, so a datagram that *could* be valid
+/// always fits and is never truncated; a datagram one byte over the cap survives
+/// truncation as exactly `MAX + 1` bytes, which the parser refuses. Reading only
+/// this much bounds what one unauthenticated packet can make the daemon allocate
+/// to 16 KiB, instead of 64.
+pub const UDP_BUFFER: usize = vallum_core::wire::MAX_HANDSHAKE_MESSAGE + 1;
+
+/// How many events may wait between the reader threads and the loop.
+///
+/// The channel used to be unbounded, so a sender that outran the loop — a flood
+/// of junk datagrams, each copied into the queue — could grow it until the
+/// process ran out of memory. It is bounded now, and the readers block when it
+/// is full. Blocking is the right backpressure: the kernel's socket buffer then
+/// fills and the kernel drops, which is the same decision the network would make
+/// one hop earlier, and no packet is reordered or silently discarded by us.
+///
+/// 256 is four times the under-load depth, so the device is told "under load"
+/// and starts issuing cookies well before senders are blocked.
+pub const QUEUE_CAPACITY: usize = 256;
 
 /// Timing and policy knobs for the loop.
 #[derive(Debug, Clone, Copy)]
@@ -189,7 +205,7 @@ pub fn run(
     let mut stats = LoopStats::default();
 
     let queued = Arc::new(AtomicUsize::new(0));
-    let (tx, rx) = mpsc::channel::<Input>();
+    let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
     spawn_udp_reader(&tx, Arc::clone(&queued), Arc::clone(&socket), &log)?;
@@ -275,7 +291,7 @@ pub fn run(
 
 /// One thread reading the interface.
 fn spawn_tun_reader(
-    tx: &mpsc::Sender<Input>,
+    tx: &mpsc::SyncSender<Input>,
     queued: Arc<AtomicUsize>,
     mut reader: Box<dyn crate::tun::TunReader>,
     mtu: usize,
@@ -310,7 +326,7 @@ fn spawn_tun_reader(
 
 /// One thread reading the socket.
 fn spawn_udp_reader(
-    tx: &mpsc::Sender<Input>,
+    tx: &mpsc::SyncSender<Input>,
     queued: Arc<AtomicUsize>,
     socket: Arc<dyn DatagramSocket>,
     log: &Logger,
@@ -337,4 +353,27 @@ fn spawn_udp_reader(
         })
         .map(|_| ())
         .map_err(Error::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY, UDP_BUFFER};
+
+    #[test]
+    fn the_read_buffer_is_one_byte_past_the_message_cap() {
+        // Not 65 535: one byte past the cap is what makes an over-long datagram
+        // arrive as `MAX + 1` (and be refused) while never truncating a message
+        // that could be valid. A regression to a larger buffer would not fail
+        // any other test, so pin it.
+        assert_eq!(UDP_BUFFER, vallum_core::wire::MAX_HANDSHAKE_MESSAGE + 1);
+    }
+
+    #[test]
+    fn the_queue_is_deep_enough_to_engage_under_load() {
+        // The device must be told it is under load (and start issuing cookies)
+        // before the channel blocks a reader. If this relation inverts, the
+        // first signal of a flood becomes a blocked producer instead of a
+        // cookie.
+        const { assert!(QUEUE_CAPACITY >= DEFAULT_UNDER_LOAD_DEPTH * 4) };
+    }
 }

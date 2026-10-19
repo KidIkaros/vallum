@@ -33,6 +33,19 @@ use std::io;
 /// The default inner MTU. See the module docs for the arithmetic.
 pub const DEFAULT_MTU: u16 = 1380;
 
+/// The smallest inner MTU a config may name.
+///
+/// 576 is IPv4's minimum reassembly buffer (RFC 1122 §3.3.3): an inner MTU below
+/// it can be configured but is a request to break IPv4, not to run a tunnel.
+pub const MIN_MTU: u16 = 576;
+
+/// The largest inner MTU that never fragments on an IPv6 outer path.
+///
+/// `1500 - 48 (IPv6 + UDP) - 58 (Vallum data overhead) = 1394`. Above this a
+/// data packet is still correct, but it is one IP fragment on a v6 path, which
+/// is exactly what [`DEFAULT_MTU`] exists to avoid.
+pub const SAFE_MTU_IPV6_OUTER: u16 = 1394;
+
 /// The reading half.
 pub trait TunReader: Send {
     /// Read one layer-3 packet, blocking until one arrives.
