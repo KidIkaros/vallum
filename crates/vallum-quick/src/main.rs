@@ -55,6 +55,12 @@ enum Action {
         /// Write to this file instead of stdout. Never the config itself.
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+        /// Include the private-key path and preshared keys in the export.
+        #[arg(long)]
+        include_secrets: bool,
+        /// Replace the config with the export, keeping a `.bak`.
+        #[arg(long)]
+        in_place: bool,
     },
 }
 
@@ -64,7 +70,12 @@ fn main() -> std::process::ExitCode {
         Action::Up { config, dry_run } => up(config, *dry_run),
         Action::Down { config, dry_run } => down(config, *dry_run),
         Action::Strip { config } => strip(config),
-        Action::Save { config, output } => save(config, output.as_deref()),
+        Action::Save {
+            config,
+            output,
+            include_secrets,
+            in_place,
+        } => save(config, output.as_deref(), *include_secrets, *in_place),
     };
     match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -177,15 +188,34 @@ fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn save(config_path: &Path, output: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
-    if output.is_some_and(|out| out == config_path) {
-        return Err("refusing to overwrite the config; choose a different --output".into());
+fn save(
+    config_path: &Path,
+    output: Option<&Path>,
+    include_secrets: bool,
+    in_place: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if in_place && output.is_some() {
+        return Err("--in-place and --output are mutually exclusive".into());
+    }
+    if in_place && !include_secrets {
+        return Err(
+            "--in-place needs --include-secrets: without it the export would drop the \
+             private-key path and every PSK"
+                .into(),
+        );
+    }
+    if !in_place && output.is_some_and(|out| out == config_path) {
+        return Err(
+            "refusing to overwrite the config; use --in-place, or a different --output".into(),
+        );
     }
     let binary = std::env::var("VALLUM_BIN").unwrap_or_else(|_| "vallum".to_owned());
-    let result = Command::new(&binary)
-        .args(["showconf", "--config"])
-        .arg(config_path)
-        .output()?;
+    let mut command = Command::new(&binary);
+    command.args(["showconf", "--config"]).arg(config_path);
+    if include_secrets {
+        command.arg("--include-secrets");
+    }
+    let result = command.output()?;
     if !result.status.success() {
         return Err(format!(
             "`{binary} showconf` failed: {}",
@@ -193,9 +223,22 @@ fn save(config_path: &Path, output: Option<&Path>) -> Result<(), Box<dyn std::er
         )
         .into());
     }
-    match output {
-        Some(path) => fs::write(path, &result.stdout)?,
-        None => print!("{}", String::from_utf8_lossy(&result.stdout)),
+    if in_place {
+        let new = PathBuf::from(format!("{}.new", config_path.display()));
+        let backup = PathBuf::from(format!("{}.bak", config_path.display()));
+        fs::write(&new, &result.stdout)?;
+        fs::copy(config_path, &backup)?;
+        fs::rename(&new, config_path)?;
+        println!(
+            "wrote {} (backup {})",
+            config_path.display(),
+            backup.display()
+        );
+    } else {
+        match output {
+            Some(path) => fs::write(path, &result.stdout)?,
+            None => print!("{}", String::from_utf8_lossy(&result.stdout)),
+        }
     }
     Ok(())
 }
@@ -385,9 +428,13 @@ mod tests {
         let out = dir.join("out.toml");
         fs::write(&config, "[interface]\nname = \"v0\"\n").unwrap();
         std::env::set_var("VALLUM_BIN", "/bin/echo");
-        save(&config, Some(&out)).unwrap();
+        save(&config, Some(&out), false, false).unwrap();
         assert!(fs::read_to_string(&out).unwrap().contains("showconf"));
-        assert!(save(&config, Some(&config)).is_err());
+        assert!(save(&config, Some(&config), false, false).is_err());
+        assert!(save(&config, None, false, true).is_err());
+        save(&config, None, true, true).unwrap();
+        assert!(fs::read_to_string(&config).unwrap().contains("showconf"));
+        assert!(config.with_extension("toml.bak").exists());
         std::env::remove_var("VALLUM_BIN");
     }
 

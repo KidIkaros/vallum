@@ -44,6 +44,8 @@ const ETIMEDOUT: i32 = 110;
 pub struct ControlContext {
     /// The private-key seed, as the daemon holds it.
     pub private_key: [u8; 32],
+    /// The path the seed was read from, for a config export.
+    pub private_key_path: PathBuf,
     /// The kernel interface name.
     pub interface: String,
     /// The interface addresses.
@@ -198,6 +200,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
     uapi::DeviceState {
         interface: context.interface.clone(),
         private_key: context.private_key,
+        private_key_path: context.private_key_path.display().to_string(),
         public_key: device.public_key().as_bytes().to_vec(),
         public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
         fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
@@ -205,6 +208,8 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
         fwmark,
         suite: device.suite_id(),
         addresses: context.addresses.clone(),
+        offload: false,
+        batching: false,
         capabilities: uapi::Capabilities {
             set_private_key: true,
             set_listen_port: true,
@@ -355,6 +360,7 @@ mod tests {
             interface: "vallum0".to_owned(),
             addresses: Vec::new(),
             private_key: [9u8; 32],
+            private_key_path: PathBuf::from("test.key"),
             listen: Mutex::new(listen),
             fwmark: AtomicU32::new(0),
             socket: Arc::new(crate::net::SharedSocket::new(socket)),

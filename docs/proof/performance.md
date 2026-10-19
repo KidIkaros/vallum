@@ -52,7 +52,21 @@ not a performance tweak.
 
 ---
 
-## 4. The patch path, when it is picked up
+## 4. What is visible now
+
+`vallum bench` measures the data plane's seal/open on the host and prints the
+per-packet cost and throughput, with a note that a debug build is not a
+measurement. `vallum show` reports `vallum_offload=false` and
+`vallum_batching=false`, so the state is visible rather than inferred.
+
+```text
+suite 3 (x25519+sntrup761+ml-kem-768), 1380 B payload, 2000 iterations
+  seal: 4.9µs/packet, 267 MiB/s
+  open: 4.1µs/packet, 318 MiB/s
+  crypto only; the loop adds one read/write syscall per packet
+```
+
+## 5. The patch path, when it is picked up
 
 1. `tun2`: add public `vnet_hdr(bool)` and `queues_num(usize)` (or a fork), and
    a `TUNSETOFFLOAD` call after creation.
@@ -69,7 +83,7 @@ and a recorded before/after.
 
 ---
 
-## 5. What this does **not** claim
+## 6. What this does **not** claim
 
 No throughput improvement was made. The existing crypto benchmarks stand; the
 loop is still one packet per syscall.

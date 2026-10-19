@@ -38,6 +38,7 @@ control = "control.sock"   # relative to the config; or an absolute path
 
 ```
 private_key=<hex seed>
+vallum_private_key_path=<path>
 listen_port=<port>
 fwmark=<decimal>
 public_key=<suite-sized KEM key, hex>
@@ -48,7 +49,9 @@ vallum_listen=<addr:port>
 vallum_address=<prefix>       (repeated)
 vallum_can_set_private_key=true
 vallum_can_set_listen_port=false
-vallum_can_set_fwmark=false
+vallum_can_set_fwmark=true
+vallum_offload=false
+vallum_batching=false
 vallum_suite=0x0003
 # per peer:
 public_key=<hex>
@@ -107,8 +110,9 @@ private-key` or `--dump` are the explicit ways to see them. `--field` accepts
 
 `showconf` exports the running device as a config: the interface name, listen
 address, addresses, fwmark, and each peer's name, public line, endpoint,
-allowed IPs and keepalive. It does **not** export secrets: `private_key` is a
-placeholder path and PSKs are omitted with a comment.
+allowed IPs and keepalive. By default it does **not** export secrets:
+`private_key` is a placeholder path and PSKs are omitted with a comment.
+`--include-secrets` uses the real key path and writes the PSKs, explicitly.
 
 `syncconf` reads `get`, removes peers the config no longer names, and updates the
 rest with `replace_allowed_ips=true`; a peer whose key and endpoint are unchanged
@@ -143,8 +147,9 @@ keeps its session.
    running, as WireGuard does.
 4. **No `set` with `wg`'s argv syntax.** The UAPI is complete; the CLI is
    config-based (`setconf`/`addconf`/`syncconf`).
-5. **`showconf` exports, but does not round-trip secrets.** The private key is a
-   placeholder and PSKs are omitted, by design. `vallum-quick save` is still not
-   implemented; `showconf` is the read-only export.
+5. **`showconf` hides secrets by default.** `--include-secrets` exports the
+   key *path* (never the seed) and the PSKs. `vallum-quick save --in-place
+   --include-secrets` replaces the config after writing a `.bak`; without both
+   flags it refuses, because a secret-free export would silently drop them.
 6. **No authentication beyond the socket mode.** Same user or root, as with the
    private key.
