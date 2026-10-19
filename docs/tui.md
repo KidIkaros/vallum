@@ -34,13 +34,18 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 
 ## What it does
 
-- **Dashboard**: interface name, listen address, suite, fwmark, addresses,
-  fingerprint; per peer name, fingerprint, endpoint, allowed IPs, handshake
-  age, rx/tx totals and rates, epoch, and PSK presence. Dataplane offload and
-  UDP batching appear in the details pane. The table hides secondary columns on
-  narrower terminals, and the dashboard switches to a stacked peer/detail
-  layout below 100 columns. If the control socket drops, the UI marks retained
-  data as a stale snapshot and `r` retries instead of presenting it as live.
+- **Dashboard**: interface identity and settings, a control-health band, and
+  peer name, fingerprint, endpoint, allowed IPs, handshake freshness, rx/tx
+  totals, epoch, and PSK presence. `CONTROL LIVE/STALE/UNAVAILABLE` describes
+  UAPI reachability; a systemd unit state is polled separately every 5 seconds
+  for config-backed interfaces when detectable.
+  Handshake labels are a heuristic: `RECENT` is under 5 minutes, `AGING` is
+  under 1 hour, `OLD` is at least 1 hour, and `NEVER` means no handshake is
+  recorded. They do not prove that the peer is online. Dataplane offload and
+  UDP batching appear in Details. The table hides secondary columns on narrower
+  terminals, and the dashboard stacks peers and details below 100 columns.
+  If the control socket drops, the UI marks retained data as stale and `r`
+  retries instead of presenting it as live.
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not

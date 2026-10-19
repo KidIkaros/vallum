@@ -13,7 +13,7 @@ use crate::entropy;
 use crate::keys;
 use crate::uapi::{self, Peer, Set};
 
-use super::app::{App, ConfirmAction, FormError, FormKind, View};
+use super::app::{App, ConfirmAction, FormError, FormKind, ServiceState, View};
 use super::bundle;
 use super::client;
 use super::qr;
@@ -24,8 +24,31 @@ pub fn refresh(app: &mut App) {
             Ok(device) => interface.set_device(device),
             Err(error) => interface.set_error(error),
         }
+        if interface.should_check_service(std::time::Instant::now()) {
+            let state = interface
+                .config_path
+                .as_deref()
+                .and_then(systemd_service_state);
+            interface.set_service_state(state);
+        }
     }
     app.last_refresh = std::time::Instant::now();
+}
+
+fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {
+    let stem = config.file_stem()?.to_str()?;
+    let unit = format!("vallum@{stem}.service");
+    let output = Command::new("systemctl")
+        .args(["is-active", &unit])
+        .output()
+        .ok()?;
+    ServiceState::parse(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn refresh_service_state(app: &mut App) {
+    if let Some(interface) = app.current_mut() {
+        interface.invalidate_service_state();
+    }
 }
 
 pub fn submit_form(app: &mut App) {
@@ -424,6 +447,7 @@ fn restart_service(app: &mut App) {
         match Command::new("systemctl").args(["restart", &unit]).status() {
             Ok(status) if status.success() => {
                 app.notify(format!("systemctl restart {unit}"));
+                refresh_service_state(app);
                 refresh(app);
                 return;
             }
@@ -767,6 +791,7 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
                 .is_ok()
             {
                 app.notify(format!("systemctl {action} {unit}"));
+                refresh_service_state(app);
                 refresh(app);
             } else {
                 let quick = if interface.device.is_some() {
@@ -784,6 +809,7 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
                 .is_ok()
             {
                 app.notify(format!("vallum-quick {action}"));
+                refresh_service_state(app);
                 refresh(app);
             } else {
                 app.notify(format!("sudo vallum-quick {action} {config_arg}"));

@@ -186,6 +186,7 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
         batching: false,
         ..DeviceView::default()
     });
+    interface.set_service_state(Some(super::app::ServiceState::Active));
     let app = App::new(vec![interface]);
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
     terminal
@@ -200,7 +201,55 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
         .collect();
     assert!(text.contains("offload on"));
     assert!(text.contains("UDP batching off"));
+    assert!(text.contains("CONTROL LIVE"));
+    assert!(text.contains("systemd active"));
     assert!(!text.contains("can_set"));
+}
+
+#[test]
+fn handshake_freshness_labels_use_documented_boundaries() {
+    use super::app::HandshakeFreshness;
+
+    let now = 1_800_000_000;
+    let mut peer = super::app::PeerView::default();
+    assert_eq!(
+        App::handshake_freshness_at(&peer, now),
+        HandshakeFreshness::Never
+    );
+
+    peer.last_handshake = Some((now - 299, 0));
+    assert_eq!(
+        App::handshake_freshness_at(&peer, now),
+        HandshakeFreshness::Recent
+    );
+    peer.last_handshake = Some((now - 300, 0));
+    assert_eq!(
+        App::handshake_freshness_at(&peer, now),
+        HandshakeFreshness::Aging
+    );
+    peer.last_handshake = Some((now - 3599, 0));
+    assert_eq!(
+        App::handshake_freshness_at(&peer, now),
+        HandshakeFreshness::Aging
+    );
+    peer.last_handshake = Some((now - 3600, 0));
+    assert_eq!(
+        App::handshake_freshness_at(&peer, now),
+        HandshakeFreshness::Old
+    );
+}
+
+#[test]
+fn service_state_labels_are_limited_to_known_systemd_states() {
+    use super::app::ServiceState;
+
+    assert_eq!(ServiceState::parse("active\n"), Some(ServiceState::Active));
+    assert_eq!(
+        ServiceState::parse("inactive"),
+        Some(ServiceState::Inactive)
+    );
+    assert_eq!(ServiceState::parse("failed"), Some(ServiceState::Failed));
+    assert_eq!(ServiceState::parse("unknown"), None);
 }
 
 #[test]
@@ -241,7 +290,7 @@ fn narrow_dashboard_keeps_peer_traffic_and_security_state_visible() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("keepalive 25s"));
-    assert!(text.contains("handshake"));
+    assert!(text.contains("NEVER"));
     assert!(text.contains("rx 1.0K / tx 2.0K"));
     assert!(text.contains("PSK configured"));
 }
@@ -285,6 +334,7 @@ fn expanded_peer_table_fits_ipv6_endpoints_and_transfer_totals() {
         .collect();
     assert!(text.contains("[2001:db8::12]:51820"));
     assert!(text.contains("530.5K/70.3K"));
+    assert!(text.contains("AGING"));
 }
 
 #[test]
@@ -317,7 +367,7 @@ fn disconnected_control_marks_the_retained_snapshot_as_stale() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("STALE"));
+    assert!(text.contains("CONTROL STALE"));
     assert!(text.contains("Peers (stale snapshot)"));
 }
 

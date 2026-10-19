@@ -113,6 +113,40 @@ impl DeviceView {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceState {
+    Active,
+    Inactive,
+    Failed,
+    Activating,
+    Deactivating,
+}
+
+impl ServiceState {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "active" => Some(Self::Active),
+            "inactive" => Some(Self::Inactive),
+            "failed" => Some(Self::Failed),
+            "activating" => Some(Self::Activating),
+            "deactivating" => Some(Self::Deactivating),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::Failed => "failed",
+            Self::Activating => "starting",
+            Self::Deactivating => "stopping",
+        }
+    }
+}
+
 /// One discovered interface.
 #[derive(Debug, Clone)]
 pub struct Interface {
@@ -121,9 +155,12 @@ pub struct Interface {
     pub control_path: PathBuf,
     pub device: Option<DeviceView>,
     pub error: Option<String>,
+    pub service_state: Option<ServiceState>,
     prev_tx: u64,
     prev_rx: u64,
     prev_at: Instant,
+    last_successful_poll: Option<Instant>,
+    last_service_check: Option<Instant>,
     pub tx_rate: f64,
     pub rx_rate: f64,
 }
@@ -137,9 +174,12 @@ impl Interface {
             control_path,
             device: None,
             error: None,
+            service_state: None,
             prev_tx: 0,
             prev_rx: 0,
             prev_at: Instant::now(),
+            last_successful_poll: None,
+            last_service_check: None,
             tx_rate: 0.0,
             rx_rate: 0.0,
         }
@@ -157,6 +197,7 @@ impl Interface {
         self.prev_tx = tx;
         self.prev_rx = rx;
         self.prev_at = now;
+        self.last_successful_poll = Some(now);
         self.name = device.interface.clone();
         self.device = Some(device);
         self.error = None;
@@ -164,6 +205,29 @@ impl Interface {
 
     pub fn set_error(&mut self, error: String) {
         self.error = Some(error);
+    }
+
+    #[must_use]
+    pub fn last_successful_poll_age(&self) -> Option<Duration> {
+        self.last_successful_poll
+            .map(|at| Instant::now().saturating_duration_since(at))
+    }
+
+    #[must_use]
+    pub fn should_check_service(&self, now: Instant) -> bool {
+        self.config_path.is_some()
+            && self
+                .last_service_check
+                .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(5))
+    }
+
+    pub fn set_service_state(&mut self, state: Option<ServiceState>) {
+        self.service_state = state;
+        self.last_service_check = Some(Instant::now());
+    }
+
+    pub fn invalidate_service_state(&mut self) {
+        self.last_service_check = None;
     }
 }
 
@@ -200,6 +264,26 @@ pub struct DiffView {
 pub enum Focus {
     Interfaces,
     Peers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeFreshness {
+    Never,
+    Recent,
+    Aging,
+    Old,
+}
+
+impl HandshakeFreshness {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Never => "NEVER",
+            Self::Recent => "RECENT",
+            Self::Aging => "AGING",
+            Self::Old => "OLD",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -545,6 +629,29 @@ impl App {
             format!("{}m", age / 60)
         } else {
             format!("{}h", age / 3600)
+        }
+    }
+
+    #[must_use]
+    pub fn handshake_freshness(peer: &PeerView) -> HandshakeFreshness {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        Self::handshake_freshness_at(peer, now)
+    }
+
+    #[must_use]
+    pub fn handshake_freshness_at(peer: &PeerView, now: u64) -> HandshakeFreshness {
+        let Some((sec, _)) = peer.last_handshake else {
+            return HandshakeFreshness::Never;
+        };
+        let age = now.saturating_sub(sec);
+        if age < 5 * 60 {
+            HandshakeFreshness::Recent
+        } else if age < 60 * 60 {
+            HandshakeFreshness::Aging
+        } else {
+            HandshakeFreshness::Old
         }
     }
 }

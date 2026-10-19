@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Form, View};
+use super::app::{App, Form, HandshakeFreshness, Interface, ServiceState, View};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
@@ -22,16 +22,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
 fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     let compact = area.width < 130;
-    let stale_snapshot = app
-        .current()
-        .is_some_and(|interface| interface.device.is_some() && interface.error.is_some());
-    let header_height = if app.interfaces.is_empty() {
-        3
-    } else if stale_snapshot {
-        6
-    } else {
-        5
-    };
+    let header_height = if app.interfaces.is_empty() { 3 } else { 6 };
     let chunks = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(6),
@@ -93,12 +84,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         })
         .collect();
     lines.push(Line::from(tabs));
-    if interface.device.is_some() && interface.error.is_some() {
-        lines.push(Line::from(Span::styled(
-            "STALE · control unavailable; showing last snapshot (r retries)",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )));
-    }
+    lines.push(control_health_line(interface));
     match &interface.device {
         Some(device) => {
             if compact {
@@ -142,6 +128,71 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             .block(Block::default().borders(Borders::ALL).title("Vallum")),
         area,
     );
+}
+
+fn control_health_line(interface: &Interface) -> Line<'static> {
+    let (label, color) = match (&interface.device, &interface.error) {
+        (Some(_), None) => ("CONTROL LIVE", Color::Green),
+        (Some(_), Some(_)) => ("CONTROL STALE", Color::Yellow),
+        (None, Some(_)) => ("CONTROL UNAVAILABLE", Color::Red),
+        (None, None) => ("CONTROL CONNECTING", Color::DarkGray),
+    };
+    let mut spans = vec![Span::styled(
+        label,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(age) = interface.last_successful_poll_age() {
+        spans.push(Span::raw(" · last reply "));
+        spans.push(Span::raw(duration_label(age)));
+    }
+    if let Some(state) = interface.service_state {
+        spans.push(Span::raw(" · systemd "));
+        spans.push(Span::styled(
+            state.label(),
+            Style::default().fg(service_state_color(state)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn service_state_color(state: ServiceState) -> Color {
+    match state {
+        ServiceState::Active => Color::Green,
+        ServiceState::Inactive => Color::DarkGray,
+        ServiceState::Failed => Color::Red,
+        ServiceState::Activating | ServiceState::Deactivating => Color::Yellow,
+    }
+}
+
+fn freshness_color(freshness: HandshakeFreshness) -> Color {
+    match freshness {
+        HandshakeFreshness::Never => Color::Red,
+        HandshakeFreshness::Recent => Color::Green,
+        HandshakeFreshness::Aging => Color::Yellow,
+        HandshakeFreshness::Old => Color::DarkGray,
+    }
+}
+
+fn handshake_summary(peer: &super::app::PeerView) -> String {
+    let freshness = App::handshake_freshness(peer);
+    if freshness == HandshakeFreshness::Never {
+        freshness.label().to_owned()
+    } else {
+        format!("{} · {}", freshness.label(), App::handshake_age(peer))
+    }
+}
+
+fn duration_label(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 60 * 60 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 24 * 60 * 60 {
+        format!("{}h", seconds / (60 * 60))
+    } else {
+        format!("{}d", seconds / (24 * 60 * 60))
+    }
 }
 
 fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
@@ -197,12 +248,18 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .fg(Color::Cyan),
     );
     let rows = device.peers.iter().map(|peer| {
+        let freshness = App::handshake_freshness(peer);
+        let handshake = Cell::from(freshness.label()).style(
+            Style::default()
+                .fg(freshness_color(freshness))
+                .add_modifier(Modifier::BOLD),
+        );
         if expanded {
             Row::new(vec![
                 Cell::from(peer.name.clone()),
                 Cell::from(peer.endpoint.clone()),
                 Cell::from(peer.allowed_ips.join(",")),
-                Cell::from(App::handshake_age(peer)),
+                handshake,
                 Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
                 Cell::from(peer.epoch.to_string()),
                 Cell::from(if peer.preshared_key { "yes" } else { "—" }),
@@ -211,7 +268,7 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(peer.name.clone()),
                 Cell::from(peer.endpoint.clone()),
-                Cell::from(App::handshake_age(peer)),
+                handshake,
                 Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
             ])
         }
@@ -274,10 +331,20 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             peer.keepalive
                 .map_or_else(|| "off".to_owned(), |value| format!("{value}s"))
         )));
-        lines.push(Line::from(format!(
-            "handshake  {}",
-            App::handshake_age(peer)
-        )));
+        let freshness = App::handshake_freshness(peer);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("handshake  {}", freshness.label()),
+                Style::default()
+                    .fg(freshness_color(freshness))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            if freshness == HandshakeFreshness::Never {
+                Span::raw("")
+            } else {
+                Span::raw(format!(" · {}", App::handshake_age(peer)))
+            },
+        ]));
         lines.push(Line::from(format!(
             "transfer   rx {} / tx {}",
             bytes(peer.rx_bytes),
@@ -335,7 +402,7 @@ fn draw_compact_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     .map_or_else(|| "off".to_owned(), |value| format!("{value}s"))
             )),
             Line::from(format!("allowed {}", peer.allowed_ips.join(", "))),
-            Line::from(format!("handshake {}", App::handshake_age(peer))),
+            Line::from(format!("handshake {}", handshake_summary(peer))),
             Line::from(format!(
                 "rx {} / tx {} · PSK {}",
                 bytes(peer.rx_bytes),
@@ -422,6 +489,8 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
         Line::from("?                 close help"),
         Line::from("Q / Ctrl-C        quit"),
         Line::from(""),
+        Line::from("CONTROL reports UAPI reachability; systemd unit state is separate."),
+        Line::from("Handshake tags: RECENT <5m, AGING <1h, OLD >1h, or NEVER."),
         Line::from("Forms: arrows/Home/End edit text, Ctrl-U clears the field."),
         Line::from("Secrets are masked; the private key and PSK are never shown."),
     ];
