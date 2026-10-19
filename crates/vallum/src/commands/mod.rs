@@ -7,3 +7,5 @@ pub mod control;
 pub mod doctor;
 pub mod keys;
 pub mod run;
+#[cfg(feature = "tui")]
+pub mod tui;

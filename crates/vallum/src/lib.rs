@@ -51,6 +51,9 @@ pub mod net;
 pub mod privileges;
 pub mod run;
 pub mod tun;
+
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod uapi;
 
 pub use error::Error;

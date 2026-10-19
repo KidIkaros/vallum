@@ -4,7 +4,7 @@ _vallum() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="run keygen pubkey genpsk show setconf addconf syncconf help"
+    commands="run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor completions tui help"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
@@ -21,6 +21,10 @@ _vallum() {
             ;;
         --suite)
             COMPREPLY=( $(compgen -W "1 2 3 0x0001 0x0002 0x0003" -- "${cur}") )
+            return 0
+            ;;
+        completions)
+            COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "${cur}") )
             return 0
             ;;
     esac

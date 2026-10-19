@@ -132,6 +132,30 @@ suite `0x0002` (X25519+ML-KEM-768): generate a key with `vallum keygen --suite 2
 It completes a handshake in ~1.81 ms versus ~54 ms for the default tri-hybrid;
 the default stays tri-hybrid for KEM diversity.
 
+## TUI
+
+`vallum tui` is a terminal operations console: live device and peer state, peer
+add/edit/remove, key generation, client-bundle QR export, runtime device
+changes, start/stop, and journald logs. It talks to the 0600 control socket and
+needs no root for status or peer changes.
+
+```text
+┌Vallum────────────────────────────────────────────────────────────────────────────────────────┐
+│ vallum0                                                                                      │
+│listen 127.0.0.1:41403  suite 0x0003  fwmark 0  079c12170a8fb63b                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Peers────────────────────────────────────────────────────────────────────┐┌Details──────────────┐
+│name         fingerprint      endpoint   allowed        handshake rx/tx    ││laptop               │
+│laptop       1a0888aca6183e92 (none)     10.7.0.2/32    —         0B/0B     ││allowed  10.7.0.2/32 │
+└──────────────────────────────────────────────────────────────────────────┘└─────────────────────┘
+Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device
+E edit config  s start/stop  l logs  ? help  Q quit
+```
+
+Generate that frame yourself with
+`vallum tui --config <file> --snapshot --width 160 --height 30`. See
+[`docs/tui.md`](docs/tui.md) for the key map, QR bundle format, and limits.
+
 ## Test
 
 ```sh
@@ -162,9 +186,12 @@ suite, plus an adapter-swap smoke test.
 
 Every phase is implemented and gated: **P0–P6.8** (boundary through the daemon,
 keepalive, segmentation, and the admission tag), all seven proof obligations
-(including the Tamarin model), and **H1–H9** (constant-time, benchmarks, fuzzing
-and CI, privilege separation, MTU-aware segmentation, IPv6, identity validity,
-dual-stack addressing). `docs/proof/` holds one artefact per gate, and each one
+(including the Tamarin model and the PSK-tag DoS/replay model), **H1–H9**
+(constant-time, benchmarks, fuzzing and CI, privilege separation, MTU-aware
+segmentation, IPv6, identity validity, dual-stack addressing), the **G1–G6**
+operational surface (configured PSK, UAPI, runtime rebind, `vallum-quick`,
+batching, platform tier), and the **TUI**. The architecture decisions are in
+[`docs/adr/`](docs/adr/). `docs/proof/` holds one artefact per gate, and each one
 states what it does **not** claim.
 
 Known open items are product decisions rather than missing work: a code-based

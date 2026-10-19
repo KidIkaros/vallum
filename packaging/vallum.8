@@ -24,8 +24,9 @@ Print the public line for an existing key.
 .B genpsk
 Print a fresh 32-byte preshared key as 64 hex characters.
 .TP
-.B show [--config FILE | --control SOCKET] [--dump] [--field NAME]
-Query a running daemon's control socket.
+.B show [--config FILE | --control SOCKET] [--dump] [--json] [--watch] [--field NAME]
+Query a running daemon's control socket. `--json` is secret-free; `--watch`
+refreshes until Ctrl-C.
 .TP
 .B setconf FILE
 Replace every peer with the config's peers.
@@ -35,6 +36,21 @@ Add or update the config's peers.
 .TP
 .B syncconf FILE
 Apply only the differences, preserving unchanged sessions.
+.TP
+.B showconf [--config FILE | --control SOCKET] [--include-secrets]
+Export a config; secrets are omitted unless explicitly requested.
+.TP
+.B bench [--suite ID] [--bytes N] [--iterations N]
+Measure the data plane's seal/open cost.
+.TP
+.B doctor [--config FILE | --control SOCKET] [--json]
+Check the platform, config, control socket, and helper tools.
+.TP
+.B completions SHELL
+Print a completion script for bash, zsh, fish, or PowerShell.
+.TP
+.B tui [--config FILE | --control SOCKET | --config-dir DIR] [--snapshot]
+Open the terminal operations console. `--snapshot` renders one frame headlessly.
 .SH FILES
 .TP
 .I /etc/vallum/*.toml
@@ -48,7 +64,8 @@ The private key is refused if its file is group- or world-readable, unless
 is given. The control socket is same-user only. The daemon runs no shell and
 writes no routes; use
 .BR vallum-quick (8)
-for host-level work.
+for host-level work. The TUI spawns `systemctl`, `journalctl`, `vallum-quick`,
+and `$EDITOR` with argument arrays; it does not open a shell.
 .SH SEE ALSO
 .BR vallum-quick (8),
 .BR vallum.toml (5)

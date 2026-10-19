@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Pure rendering: the frame is a function of `App`.
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::Frame;
+
+use super::app::{App, Form, View};
+
+pub fn draw(frame: &mut Frame<'_>, app: &App) {
+    match app.view {
+        View::Help => draw_help(frame, app),
+        View::Logs => draw_logs(frame, app),
+        View::Dashboard => draw_dashboard(frame, app),
+    }
+}
+
+fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    let chunks = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(6),
+        Constraint::Length(2),
+    ])
+    .split(area);
+
+    draw_header(frame, chunks[0], app);
+    let body = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(chunks[1]);
+    draw_peers(frame, body[0], app);
+    draw_details(frame, body[1], app);
+    draw_footer(frame, chunks[2], app);
+
+    if let Some(qr) = &app.qr {
+        draw_qr(frame, area, qr);
+    }
+    if let Some(form) = &app.form {
+        draw_form(frame, area, form);
+    }
+    if app.confirm.is_some() {
+        draw_confirm(frame, area, app);
+    }
+    if let Some(toast) = &app.toast {
+        let width = area.width.saturating_sub(4).min(100);
+        let popup = Rect::new(area.x + 2, area.y + area.height.saturating_sub(3), width, 1);
+        frame.render_widget(
+            Paragraph::new(toast.message.as_str()).style(Style::default().fg(Color::Yellow)),
+            popup,
+        );
+    }
+}
+
+fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(interface) = app.current() else {
+        let text = vec![
+            Line::from("No interfaces discovered."),
+            Line::from("Start one with `vallum-quick up <config>` or pass --config/--control."),
+        ];
+        frame.render_widget(
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
+            area,
+        );
+        return;
+    };
+    let mut lines = Vec::new();
+    let tabs: Vec<Span<'_>> = app
+        .interfaces
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let style = if index == app.selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Span::styled(format!(" {} ", item.name), style)
+        })
+        .collect();
+    lines.push(Line::from(tabs));
+    match &interface.device {
+        Some(device) => {
+            lines.push(Line::from(vec![
+                Span::styled("listen ", Style::default().fg(Color::DarkGray)),
+                Span::raw(device.listen.clone()),
+                Span::raw("  suite "),
+                Span::raw(device.suite.clone()),
+                Span::raw("  fwmark "),
+                Span::raw(device.fwmark.to_string()),
+                Span::raw("  "),
+                Span::raw(device.fingerprint.clone()),
+            ]));
+            lines.push(Line::from(format!(
+                "addresses {}  offload={} batching={}  can_set listen={} fwmark={} key={}",
+                device.addresses.join(", "),
+                device.offload,
+                device.batching,
+                device.can_set_listen_port,
+                device.can_set_fwmark,
+                device.can_set_private_key,
+            )));
+        }
+        None => lines.push(Line::from(Span::styled(
+            interface
+                .error
+                .clone()
+                .unwrap_or_else(|| "no data".to_owned()),
+            Style::default().fg(Color::Red),
+        ))),
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Vallum")),
+        area,
+    );
+}
+
+fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(device) = app.current_device() else {
+        frame.render_widget(
+            Paragraph::new("No device data. Press r to retry.")
+                .block(Block::default().borders(Borders::ALL).title("Peers")),
+            area,
+        );
+        return;
+    };
+    let header = Row::new(vec![
+        "name",
+        "fingerprint",
+        "endpoint",
+        "allowed",
+        "handshake",
+        "rx/tx",
+        "epoch",
+        "psk",
+    ])
+    .style(
+        Style::default()
+            .add_modifier(Modifier::BOLD)
+            .fg(Color::Cyan),
+    );
+    let rows = device.peers.iter().map(|peer| {
+        Row::new(vec![
+            Cell::from(peer.name.clone()),
+            Cell::from(peer.fingerprint.clone()),
+            Cell::from(peer.endpoint.clone()),
+            Cell::from(peer.allowed_ips.join(",")),
+            Cell::from(App::handshake_age(peer)),
+            Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
+            Cell::from(peer.epoch.to_string()),
+            Cell::from(if peer.preshared_key { "yes" } else { "—" }),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(16),
+            Constraint::Length(21),
+            Constraint::Length(18),
+            Constraint::Length(9),
+            Constraint::Length(13),
+            Constraint::Length(6),
+            Constraint::Length(4),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title("Peers"))
+    .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+    let mut state = TableState::default().with_selected(Some(app.peer_selected));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    if let Some(peer) = app.current_peer() {
+        lines.push(Line::from(Span::styled(
+            peer.name.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!("fingerprint {}", peer.fingerprint)));
+        lines.push(Line::from(format!("endpoint   {}", peer.endpoint)));
+        lines.push(Line::from(format!(
+            "allowed    {}",
+            peer.allowed_ips.join(", ")
+        )));
+        lines.push(Line::from(format!(
+            "keepalive  {}",
+            peer.keepalive
+                .map_or_else(|| "off".to_owned(), |value| format!("{value}s"))
+        )));
+        lines.push(Line::from(format!(
+            "handshake  {}",
+            App::handshake_age(peer)
+        )));
+        lines.push(Line::from(format!(
+            "transfer   rx {} / tx {}",
+            bytes(peer.rx_bytes),
+            bytes(peer.tx_bytes)
+        )));
+        lines.push(Line::from(format!("epoch      {}", peer.epoch)));
+        lines.push(Line::from(format!(
+            "PSK        {}",
+            if peer.preshared_key {
+                "configured (masked)"
+            } else {
+                "none"
+            }
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "public line",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(peer.public_line.clone()));
+    } else {
+        lines.push(Line::from("No peer selected."));
+    }
+    if let Some(interface) = app.current() {
+        if let Some(device) = &interface.device {
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!(
+                "rates      rx {:.1} B/s / tx {:.1} B/s",
+                interface.rx_rate, interface.tx_rate
+            )));
+            lines.push(Line::from(format!("device     {}", device.interface)));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let hint = "Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device  E edit config  s start/stop  l logs  ? help  Q quit";
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+    let _ = app;
+}
+
+fn draw_help(frame: &mut Frame<'_>, _app: &App) {
+    let text = vec![
+        Line::from(Span::styled(
+            "Vallum TUI",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        )),
+        Line::from(""),
+        Line::from("Tab / Shift-Tab   switch interface"),
+        Line::from("j / k, arrows     select peer"),
+        Line::from("a                 add peer"),
+        Line::from("e                 edit endpoint, allowed IPs, keepalive, PSK"),
+        Line::from("d                 remove peer (confirmation)"),
+        Line::from("g                 generate a key and prefill the add form"),
+        Line::from("q                 export the client bundle and show its QR"),
+        Line::from("c                 edit the runtime listen port and fwmark"),
+        Line::from("E                 edit the TOML in $EDITOR"),
+        Line::from("s                 start/stop via systemd, then vallum-quick"),
+        Line::from("l                 show journald logs"),
+        Line::from("r                 refresh"),
+        Line::from("?                 close help"),
+        Line::from("Q / Ctrl-C        quit"),
+        Line::from(""),
+        Line::from("Secrets are masked; the private key and PSK are never shown."),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Help"))
+            .wrap(Wrap { trim: false }),
+        frame.area(),
+    );
+}
+
+fn draw_logs(frame: &mut Frame<'_>, app: &App) {
+    let lines: Vec<Line<'_>> = if app.logs.is_empty() {
+        vec![Line::from(
+            "No log lines loaded. Press l to fetch journald.",
+        )]
+    } else {
+        app.logs
+            .iter()
+            .map(|line| Line::from(line.as_str()))
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Logs (Esc)"))
+            .wrap(Wrap { trim: false }),
+        frame.area(),
+    );
+}
+
+fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
+    let popup = centered(area, 96, 96);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![Line::from(Span::styled(
+        format!(
+            "Bundle QR  frame {}/{}  hash {}  (secret: contains the private key)",
+            qr.index + 1,
+            qr.frames.len(),
+            qr.hash
+        ),
+        Style::default().fg(Color::Yellow),
+    ))];
+    match super::qr::render(qr.current()) {
+        Ok(rendered) => lines.extend(rendered.into_iter().map(Line::from)),
+        Err(error) => lines.push(Line::from(error)),
+    }
+    lines.push(Line::from(format!("saved: {}", qr.path)));
+    lines.push(Line::from("n/p frame  Esc close"));
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("QR")),
+        popup,
+    );
+}
+
+fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
+    let popup = centered(area, 80, 60);
+    frame.render_widget(Clear, popup);
+    let mut lines = Vec::new();
+    for (index, field) in form.fields.iter().enumerate() {
+        let marker = if index == form.focus { ">" } else { " " };
+        let value = if field.masked && !field.value.is_empty() {
+            "*".repeat(field.value.len().min(32))
+        } else {
+            field.value.clone()
+        };
+        lines.push(Line::from(format!("{marker} {:<22} {value}", field.label)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("Tab next  Enter submit  Esc cancel"));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(form.title.clone()),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let popup = centered(area, 60, 20);
+    frame.render_widget(Clear, popup);
+    let message = if let Some(confirm) = app.confirm {
+        match confirm.action {
+            super::app::ConfirmAction::RemovePeer(_) => {
+                "Remove this peer?  Enter confirms, Esc cancels."
+            }
+        }
+    } else {
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(message)
+            .block(Block::default().borders(Borders::ALL).title("Confirm"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
+}
+
+fn bytes(value: u64) -> String {
+    if value < 1024 {
+        format!("{value}B")
+    } else if value < 1024 * 1024 {
+        format!("{:.1}K", value as f64 / 1024.0)
+    } else {
+        format!("{:.1}M", value as f64 / (1024.0 * 1024.0))
+    }
+}

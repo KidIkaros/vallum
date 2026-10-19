@@ -10,6 +10,8 @@ use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
 use vallum::commands::run::RunArgs;
+#[cfg(feature = "tui")]
+use vallum::commands::tui::TuiArgs;
 use vallum::commands::{bench, control, doctor, keys, run};
 
 #[derive(Parser)]
@@ -59,6 +61,9 @@ enum Command {
     Bench(BenchArgs),
     /// Check the platform, config, control socket, and helper tools.
     Doctor(DoctorArgs),
+    /// Operate a tunnel in a terminal dashboard.
+    #[cfg(feature = "tui")]
+    Tui(TuiArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
 }
@@ -84,6 +89,8 @@ fn main() -> ExitCode {
         Command::Showconf(args) => control::showconf(&args),
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),
+        #[cfg(feature = "tui")]
+        Command::Tui(args) => vallum::commands::tui::run(&args),
         Command::Completions(args) => {
             clap_complete::generate(
                 args.shell,

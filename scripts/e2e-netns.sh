@@ -404,6 +404,26 @@ grep -q 'private_key = "private.key"' "$WORK/showconf.toml" \
     || bad "showconf did not use a private-key placeholder"
 ok "showconf exports a usable config without secrets"
 
+say "querying the JSON, TUI, and doctor surfaces"
+"$BIN" show --control "$WORK/control.sock" --json > "$WORK/show.json" 2>&1 \
+    || bad "show --json failed"
+grep -q '"interface": "vallum0"' "$WORK/show.json" || bad "show --json has no interface"
+grep -q '"peers"' "$WORK/show.json" || bad "show --json has no peers"
+grep -q '"private_key":' "$WORK/show.json" && bad "show --json leaked the private key"
+ok "show --json is secret-free"
+
+"$BIN" tui --control "$WORK/control.sock" --snapshot --width 120 --height 36 \
+    > "$WORK/tui.txt" 2>&1 || bad "tui --snapshot failed"
+grep -q 'Vallum' "$WORK/tui.txt" || bad "the TUI snapshot has no header"
+grep -q 'Peers' "$WORK/tui.txt" || bad "the TUI snapshot has no peer table"
+grep -q 'listen' "$WORK/tui.txt" || bad "the TUI snapshot has no device state"
+ok "the TUI renders the live device and peer table headlessly"
+
+"$BIN" doctor --control "$WORK/control.sock" > "$WORK/doctor.txt" 2>&1 \
+    || bad "doctor reported a failure"
+grep -q 'PASS  control' "$WORK/doctor.txt" || bad "doctor did not pass the control check"
+ok "doctor checks the control socket"
+
 
 "$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
 ok "syncconf applied an unchanged config idempotently"
