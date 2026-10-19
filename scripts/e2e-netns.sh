@@ -658,7 +658,7 @@ while :; do
 done
 
 if ping -c2 -W5 -i0.3 -q -s 700 "$INNER_B"; then
-    ok "a 728-byte inner packet crossed a 952-byte outer budget"
+    ok "a 728-byte inner packet crossed a 972-byte v4 budget"
 else
     bad "the narrow path did not carry traffic"
 fi

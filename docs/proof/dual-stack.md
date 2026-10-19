@@ -42,9 +42,10 @@ addresses = ["10.7.0.1/24", "fd00:7::1/64"]
   v4 kernel path requires the second (`ERANGE` without it) — found the hard way
   by the gate.
 - `IFA_F_NODAD` for v6 only; v4 has no equivalent.
-- An **IPv4-mapped IPv6 prefix** (`::ffff:10.0.0.1/128`) is refused at load with
-  the v4 form to write instead. It is a v6 prefix, so it matches no v4 source in
-  `allowed_ips` and routes no v4 packet — a trap, not a shorthand.
+- An **IPv4-mapped IPv6 prefix** (`::ffff:10.0.0.1/128`) is refused at load — as
+  an interface address **and** in a peer's `allowed_ips` — with the v4 form to
+  write instead. It is a v6 prefix, so it matches no v4 source and routes no v4
+  packet: a trap, not a shorthand.
 - The IPv6 MTU floor (1280) applies when **any** configured address is v6; the
   v4 minimum (576) always applies.
 
@@ -81,7 +82,8 @@ assigned address (`inet6 fd00:8::1/128 scope global nodad`).
 
 Unit tests:
 `a_dual_stack_config_assigns_both_families`, `address_and_addresses_merge_and_dedupe`,
-`an_ipv4_mapped_v6_address_is_refused`; the message layout, without privileges —
+`an_ipv4_mapped_v6_address_is_refused`, `an_ipv4_mapped_v6_allowed_ip_is_refused`;
+the message layout, without privileges —
 `a_v4_request_is_af_inet_with_both_attributes` and
 `a_v6_request_is_nodad_and_carries_the_128_bit_address`; and the routing tests
 `a_default_route_covers_every_v4_destination`,
@@ -103,6 +105,8 @@ Unit tests:
 6. **No multicast routing.** A peer granted `224.0.0.0/4` will carry multicast
    the kernel routes to the interface; installing that route is the operator's
    job, and the routing layer itself has no special case (tested).
-7. **No change to the global outer budget.** It is still `outer_mtu − 48`,
-   because one daemon has one segmenter and its peers may be reached over either
-   family; the v6 header is the worst case. See `mtu.md` §5.
+7. **The configured budget is still `outer_mtu − 48`**, the v6 worst case,
+   because a peer's endpoint can roam to the other family. The *segmenter* uses
+   the destination family per message (`budget_for`), so a v4 peer gets the 20
+   header bytes back — see `mtu.md` §5. The config's derived inner MTU stays
+   conservative for the same reason.

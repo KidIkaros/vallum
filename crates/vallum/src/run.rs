@@ -273,7 +273,7 @@ pub fn run(
         for action in actions {
             match action {
                 Action::Send { destination, bytes } => {
-                    for datagram in segments.outbound(bytes, rng) {
+                    for datagram in segments.outbound(bytes, destination, rng) {
                         match socket.send_to(&datagram, destination) {
                             Ok(()) => stats.datagrams_sent += 1,
                             Err(error) => {

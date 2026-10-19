@@ -34,7 +34,9 @@ outer_mtu = 1000   # default 1500
 ```
 
 - `budget = outer_mtu - 48` (IPv6 header 40 + UDP 8), so 1500 → **1452** (the
-  old constant) and 1000 → **952**.
+  old constant) and 1000 → **952**. That is the *configured* budget, the IPv6
+  worst case; the segmenter gives a v4 destination the 20 bytes a v4 header does
+  not spend (`budget_for`), so a 1000-byte path is 972 for v4 and 952 for v6.
 - Validated at load:
   - `budget >= MIN_MTU (576) + DATA_OVERHEAD (58) = 634`, so the smallest legal
     inner packet still fits; the error prints the arithmetic and the minimum
@@ -79,7 +81,7 @@ both configs:
 
 ```text
 ── restarting on a 1000-byte outer path (outer_mtu = 1000)
-   ok    a 728-byte inner packet crossed a 952-byte outer budget
+   ok    a 728-byte inner packet crossed a 972-byte v4 budget
    ok    no IP fragment was created on the narrow path either
 ── shutting the narrow-path daemons down
    ok    the narrow-path daemons exited on SIGTERM
@@ -87,7 +89,7 @@ both configs:
 
 The in-process gate adds the wiring test:
 `a_narrow_outer_mtu_carries_the_handshake_and_segments_data` — two daemons, a
-900-byte payload (978-byte data message) over a 952-byte budget, delivered after
+900-byte payload (978-byte data message) over a 972-byte v4 budget, delivered after
 segmentation, handshake reassembled. Unit tests cover the arithmetic and the
 bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
 `an_outer_mtu_below_the_minimum_is_refused`,
@@ -113,9 +115,10 @@ bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
 4. **No upward adaptation.** Jumbo paths are not used; the cap is 1452.
 5. **No change to the receiver's bounds.** `MAX_FRAGMENT_DATA` still caps a
    fragment at 1442; a smaller budget is always below it.
-6. **The 48-byte header assumption is IPv6's, deliberately.** The budget is
-   **global**: one daemon has one segmenter, and its peers may be reached over
-   either family, so the worst-case header is the only safe constant. An IPv4
-   outer path therefore has 20 bytes of slack — conservative, not wrong. Making
-   the budget depend on `listen` would be wrong for a daemon whose peers are
-   reached over the other family.
+6. **The configured budget is the IPv6 worst case, deliberately.** One daemon
+   has one configured budget (`outer_mtu − 48`) because a peer's endpoint can
+   roam to the other family, so `listen` is not a safe predictor. The
+   **segmenter** then chooses per message: `budget_for(destination)` gives a v4
+   destination the 20 header bytes back (capped at `MAX_OUTER_DATAGRAM`), and a
+   v6 destination the configured budget. The config's derived inner MTU stays
+   conservative for the same roaming reason.

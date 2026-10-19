@@ -1757,6 +1757,33 @@ mod tests {
     }
 
     #[test]
+    fn multicast_and_broadcast_destinations_route_to_a_peer_that_owns_them() {
+        struct ZeroRng;
+        impl Randomness for ZeroRng {
+            fn fill(&mut self, out: &mut [u8]) {
+                out.fill(0);
+            }
+        }
+
+        let suite: Arc<dyn CryptoSuite> = Arc::new(SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x03; 32]).expect("identity");
+        let peer = StaticIdentity::generate(&*suite, &[0x04; 32]).expect("identity");
+        let config = PeerConfig::new("lan", peer.to_peer()).with_allowed_ips([
+            "224.0.0.0/4".parse().expect("a multicast prefix"),
+            "10.7.0.0/24".parse().expect("a LAN prefix"),
+        ]);
+        let mut rng = ZeroRng;
+        let device = Device::new(suite, me, vec![config], &mut rng, 0).expect("device");
+
+        // A multicast group and a LAN's broadcast address are ordinary prefix
+        // matches; nothing special-cases them, which is the point.
+        assert_eq!(device.route(&"224.0.0.1".parse().unwrap()), Some(0));
+        assert_eq!(device.route(&"239.255.255.250".parse().unwrap()), Some(0));
+        assert_eq!(device.route(&"10.7.0.255".parse().unwrap()), Some(0));
+        assert_eq!(device.route(&"10.8.0.1".parse().unwrap()), None);
+    }
+
+    #[test]
     fn pad_target_takes_the_largest_of_several_machines() {
         let effects = vec![
             Effect {

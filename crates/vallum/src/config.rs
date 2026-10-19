@@ -331,10 +331,10 @@ impl Config {
         // repeats an address is not an error, just noisy.
         let mut addresses: Vec<IpNet> = Vec::new();
         if let Some(text) = self.interface.address.as_deref() {
-            addresses.push(parse_interface_address(path, "interface.address", text)?);
+            addresses.push(parse_net(path, "interface.address", text)?);
         }
         for (index, text) in self.interface.addresses.iter().enumerate() {
-            addresses.push(parse_interface_address(
+            addresses.push(parse_net(
                 path,
                 &format!("interface.addresses[{index}]"),
                 text,
@@ -545,11 +545,11 @@ impl Config {
 
             let mut nets = Vec::with_capacity(entry.allowed_ips.len());
             for text in &entry.allowed_ips {
-                let net = text.parse::<IpNet>().map_err(|e| Error::Invalid {
-                    path: path.to_path_buf(),
-                    what: format!("{}: allowed_ips `{text}`: {e}", where_()),
-                })?;
-                nets.push(net);
+                nets.push(parse_net(
+                    path,
+                    &format!("{}: allowed_ips", where_()),
+                    text,
+                )?);
             }
 
             if nets.is_empty() {
@@ -640,12 +640,13 @@ impl Config {
     }
 }
 
-/// Parse one interface address, refusing the IPv4-mapped IPv6 trap.
+/// Parse one prefix, refusing the IPv4-mapped IPv6 trap.
 ///
 /// `::ffff:10.0.0.1/128` is a v6 prefix, so it never matches an inner v4 source
 /// in `allowed_ips` and never routes a v4 packet. An operator who writes it
-/// means `10.0.0.1/32`, and the error says so.
-fn parse_interface_address(path: &Path, field: &str, text: &str) -> Result<IpNet, Error> {
+/// means `10.0.0.1/32`, and the error says so. Used for both the interface
+/// addresses and each peer's `allowed_ips` — the trap is the same in both.
+fn parse_net(path: &Path, field: &str, text: &str) -> Result<IpNet, Error> {
     let net: IpNet = text.parse().map_err(|e| Error::Invalid {
         path: path.to_path_buf(),
         what: format!("{field} `{text}`: {e}"),

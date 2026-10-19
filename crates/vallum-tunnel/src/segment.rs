@@ -57,7 +57,9 @@
 
 use std::net::SocketAddr;
 
-use vallum_core::segment::{self, MAX_OUTER_DATAGRAM, REASSEMBLY_TIMEOUT_MS};
+use vallum_core::segment::{
+    self, MAX_OUTER_DATAGRAM, OUTER_HEADER_LEN_V4, OUTER_HEADER_LEN_V6, REASSEMBLY_TIMEOUT_MS,
+};
 
 use crate::rng::Randomness;
 
@@ -121,13 +123,31 @@ impl Segments {
         }
     }
 
-    /// The largest datagram this segmenter will ask a caller to send.
+    /// The conservative budget this segmenter was built with.
     ///
-    /// A message at or below it goes on the wire whole; a message above it is
-    /// cut into fragments no larger than it.
+    /// This is `outer_mtu − 48`, the IPv6 worst case, because the configured
+    /// peer set may be reached over either family. The budget actually used for
+    /// a message is [`Segments::budget_for`], which knows the destination.
     #[must_use]
     pub fn budget(&self) -> usize {
         self.budget
+    }
+
+    /// The largest datagram for a destination of this family.
+    ///
+    /// The configured budget assumes the IPv6 header (48 bytes). An IPv4
+    /// destination spends only 28, so it gets those 20 bytes back — capped by
+    /// [`MAX_OUTER_DATAGRAM`], which is the protocol's ceiling. This is
+    /// per-message rather than per-daemon, so a dual-stack peer set is handled
+    /// without guessing.
+    #[must_use]
+    pub fn budget_for(&self, destination: SocketAddr) -> usize {
+        let header = if destination.is_ipv4() {
+            OUTER_HEADER_LEN_V4
+        } else {
+            OUTER_HEADER_LEN_V6
+        };
+        (self.budget + (OUTER_HEADER_LEN_V6 - header)).min(MAX_OUTER_DATAGRAM)
     }
 
     /// Fragments refused, and half-assembled messages abandoned.
@@ -150,8 +170,9 @@ impl Segments {
 
     /// The datagrams to put on the wire for one message.
     ///
-    /// A message that fits [`Segments::budget`] is returned unchanged, as one
-    /// datagram. A larger one is cut into fragments sharing one freshly drawn
+    /// A message that fits [`Segments::budget_for`] for `destination` is
+    /// returned unchanged, as one datagram. A larger one is cut into fragments
+    /// sharing one freshly drawn
     /// [`message_id`](vallum_core::segment::Fragment::message_id).
     ///
     /// The id is drawn per call, so a retransmission is a new id and a fresh
@@ -170,9 +191,11 @@ impl Segments {
     pub fn outbound<R: Randomness + ?Sized>(
         &mut self,
         message: Vec<u8>,
+        destination: SocketAddr,
         rng: &mut R,
     ) -> Vec<Vec<u8>> {
-        if message.len() <= self.budget {
+        let budget = self.budget_for(destination);
+        if message.len() <= budget {
             return vec![message];
         }
 
@@ -180,7 +203,7 @@ impl Segments {
         rng.fill(&mut id_bytes);
         let message_id = u32::from_be_bytes(id_bytes);
 
-        match segment::split_with_budget(message_id, &message, self.budget) {
+        match segment::split_with_budget(message_id, &message, budget) {
             Ok(datagrams) => datagrams,
             Err(_) => {
                 self.dropped += 1;
@@ -347,24 +370,32 @@ mod tests {
         segment::split(id, data).expect("a legal message")
     }
 
+    fn v4_dest() -> SocketAddr {
+        "203.0.113.9:51820".parse().expect("a v4 endpoint")
+    }
+
+    fn v6_dest() -> SocketAddr {
+        "[2001:db8::9]:51820".parse().expect("a v6 endpoint")
+    }
+
     #[test]
     fn a_message_that_fits_is_one_datagram() {
         let mut segments = Segments::new();
         let mut rng = Counting(0);
         assert_eq!(
-            segments.outbound(message(100), &mut rng),
+            segments.outbound(message(100), v4_dest(), &mut rng),
             vec![message(100)]
         );
         // Exactly at the budget is still one datagram: only over it is cut.
         assert_eq!(
             segments
-                .outbound(message(MAX_OUTER_DATAGRAM), &mut rng)
+                .outbound(message(MAX_OUTER_DATAGRAM), v4_dest(), &mut rng)
                 .len(),
             1
         );
         assert!(
             segments
-                .outbound(message(MAX_OUTER_DATAGRAM + 1), &mut rng)
+                .outbound(message(MAX_OUTER_DATAGRAM + 1), v4_dest(), &mut rng)
                 .len()
                 > 1
         );
@@ -378,11 +409,11 @@ mod tests {
         // The tri-hybrid InitHello, the RespHello, and the largest message the
         // cap admits.
         for len in [4609, 4378, MAX_HANDSHAKE_MESSAGE] {
-            let outbound = segments.outbound(message(len), &mut rng);
+            let outbound = segments.outbound(message(len), v4_dest(), &mut rng);
             assert!(
                 outbound
                     .iter()
-                    .all(|datagram| datagram.len() <= segments.budget()),
+                    .all(|datagram| datagram.len() <= segments.budget_for(v4_dest())),
                 "a {len}-byte message produced an oversize datagram"
             );
             assert_eq!(segments.pending(), 0, "outbound holds no state");
@@ -567,9 +598,26 @@ mod tests {
         // not go on the wire in pieces, and not whole either.
         let mut segments = Segments::new();
         assert!(segments
-            .outbound(message(MAX_HANDSHAKE_MESSAGE + 1), &mut Counting(0))
+            .outbound(
+                message(MAX_HANDSHAKE_MESSAGE + 1),
+                v4_dest(),
+                &mut Counting(0)
+            )
             .is_empty());
         assert_eq!(segments.dropped(), 1);
+    }
+
+    #[test]
+    fn a_v4_destination_gets_the_header_slack_back() {
+        // The configured budget assumes the IPv6 header (48). A v4 destination
+        // spends 28, so it gets 20 bytes back — never above the protocol cap.
+        let narrow = Segments::with_budget(1_000);
+        assert_eq!(narrow.budget_for(v4_dest()), 1_020);
+        assert_eq!(narrow.budget_for(v6_dest()), 1_000);
+
+        let default = Segments::new();
+        assert_eq!(default.budget_for(v4_dest()), MAX_OUTER_DATAGRAM);
+        assert_eq!(default.budget_for(v6_dest()), MAX_OUTER_DATAGRAM);
     }
 
     #[test]
@@ -579,11 +627,11 @@ mod tests {
         let mut segments = Segments::with_budget(1_000);
         assert_eq!(segments.budget(), 1_000);
 
-        let datagrams = segments.outbound(message(1_200), &mut Counting(0));
+        let datagrams = segments.outbound(message(1_200), v4_dest(), &mut Counting(0));
         assert!(datagrams.len() > 1, "a 1200-byte message must be cut");
         for datagram in &datagrams {
             assert!(
-                datagram.len() <= 1_000,
+                datagram.len() <= segments.budget_for(v4_dest()),
                 "a datagram exceeded the narrow budget: {}",
                 datagram.len()
             );

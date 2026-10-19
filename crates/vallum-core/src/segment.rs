@@ -61,6 +61,15 @@ pub const FRAGMENT_CODE: u8 = 0x07;
 /// Bytes the envelope adds to every fragment.
 pub const FRAGMENT_HEADER_LEN: usize = 10;
 
+/// What an IPv4 outer path spends before the UDP payload: a 20-byte IPv4 header
+/// and an 8-byte UDP header.
+pub const OUTER_HEADER_LEN_V4: usize = 28;
+
+/// What an IPv6 outer path spends before the UDP payload: a 40-byte IPv6 header
+/// and an 8-byte UDP header. This is the worst case and the one
+/// [`MAX_OUTER_DATAGRAM`] is built on.
+pub const OUTER_HEADER_LEN_V6: usize = 48;
+
 /// The largest UDP payload Vallum will put on the wire.
 ///
 /// `1500 − 40 (IPv6 header) − 8 (UDP) = 1452`. The IPv6 sizes are the worst

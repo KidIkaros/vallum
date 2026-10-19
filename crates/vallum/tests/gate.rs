@@ -409,9 +409,10 @@ fn two_daemons_establish_and_carry_traffic_both_ways() {
 
 #[test]
 fn a_narrow_outer_mtu_carries_the_handshake_and_segments_data() {
-    // The same two daemons on a path the config says is 1000 bytes: the budget
-    // is 952, the derived inner MTU is 894, and a 900-byte payload therefore
-    // crosses as two fragments. This is the wiring from `interface.outer_mtu`
+    // The same two daemons on a path the config says is 1000 bytes: the
+    // configured budget is 952 (the IPv6 worst case), a v4 destination gets 972
+    // back, the derived inner MTU is 894, and a 900-byte payload (978 bytes on
+    // the wire) therefore still crosses as two fragments. This is the wiring from `interface.outer_mtu`
     // through `Resolved` into the segmenter, which no unit test covers end to
     // end.
     let dir = TempDir::new("narrow");
