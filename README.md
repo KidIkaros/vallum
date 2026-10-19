@@ -1,6 +1,5 @@
 # Vallum
 
-[![CI](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](Cargo.toml)
 
@@ -119,6 +118,9 @@ scripts/
   e2e-netns.sh                    two namespaces, real kernel, four lifecycles
   ct.sh · fuzz.sh                 the measurement and fuzzing gates
 ```
+
+Hosted GitHub Actions is disabled on the private/free plan; the gate of record
+is local: `./scripts/verify.sh` (add `E2E=1` for the namespace tunnel test).
 
 ## Build
 

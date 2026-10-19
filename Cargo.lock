@@ -2941,6 +2941,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3446,7 +3452,7 @@ dependencies = [
 
 [[package]]
 name = "vallum"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap 4.6.7",
  "clap_complete",
@@ -3464,6 +3470,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "similar",
  "toml",
  "toml_edit 0.22.27",
  "tun2",
@@ -3476,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-config"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "toml",
@@ -3485,18 +3492,18 @@ dependencies = [
 
 [[package]]
 name = "vallum-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "vallum-crypto",
 ]
 
 [[package]]
 name = "vallum-crypto"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "vallum-crypto-contract"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "vallum-crypto",
  "vallum-crypto-sdk",
@@ -3504,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-crypto-sdk"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "dudect-bencher",
  "origin-crypto-sdk",
@@ -3513,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-protocol-tests"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "criterion",
  "vallum-core",
@@ -3524,7 +3531,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-quick"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "clap 4.6.7",
  "ipnet",
@@ -3534,7 +3541,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-tunnel"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ipnet",
  "vallum-core",

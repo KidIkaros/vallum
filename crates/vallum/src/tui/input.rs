@@ -42,12 +42,36 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         return;
     }
     match app.view {
-        View::Help | View::Logs => {
+        View::Help => {
             if matches!(
                 key.code,
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
             ) {
                 app.view = View::Dashboard;
+            }
+            return;
+        }
+        View::Logs => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.view = View::Dashboard,
+                KeyCode::Char('r') => actions::load_logs(app),
+                KeyCode::Char('f') => {
+                    app.logs_follow = !app.logs_follow;
+                    app.notify(if app.logs_follow {
+                        "log follow on"
+                    } else {
+                        "log follow off"
+                    });
+                }
+                _ => {}
+            }
+            return;
+        }
+        View::Diff => {
+            match key.code {
+                KeyCode::Enter => actions::apply_config(app),
+                KeyCode::Esc | KeyCode::Char('q') => app.view = View::Dashboard,
+                _ => {}
             }
             return;
         }

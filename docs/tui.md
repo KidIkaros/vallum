@@ -24,7 +24,7 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 | `q` | export the client bundle and show its animated QR |
 | `c` | edit the runtime listen port and fwmark |
 | `C` | edit listen/MTU/fwmark/addresses/DNS/table |
-| `E` | edit the TOML in `$EDITOR` (backup + validation + apply prompt) |
+| `E` | edit the TOML in `$EDITOR`; review the two-column diff, Enter applies, Esc keeps the file |
 | `s` | start/stop: systemd first, then `vallum-quick` |
 | `l` | load journald logs |
 | `f` | toggle log follow (in the Logs view) |
@@ -51,6 +51,8 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
   says so and is cleared on close.
 - **Bundle import** is `vallum import-bundle <file> --output-dir DIR`; it writes
   the config and a 0600 key, refusing to overwrite without `--force`.
+- **Config edits** are backed up before `$EDITOR`; after editing, a two-column
+  diff is shown. Enter restarts/applies, Esc keeps the file unapplied.
 - **Service control**: `systemctl start/stop vallum@<stem>.service` when the
   unit exists; otherwise `vallum-quick up/down` if already root, or the exact
   `sudo` command when not. No sudo prompt is opened by the TUI.

@@ -14,6 +14,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
         View::Help => draw_help(frame, app),
         View::Logs => draw_logs(frame, app),
+        View::Diff => draw_diff(frame, app),
         View::Dashboard => draw_dashboard(frame, app),
     }
 }
@@ -274,6 +275,42 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
     frame.render_widget(
         Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("Help"))
+            .wrap(Wrap { trim: false }),
+        frame.area(),
+    );
+}
+
+fn draw_diff(frame: &mut Frame<'_>, app: &App) {
+    let Some(diff) = &app.diff else {
+        return;
+    };
+    let width = usize::from(frame.area().width.saturating_sub(4) / 2);
+    let mut lines = vec![Line::from(Span::styled(
+        format!("old │ new    backup {}", diff.backup.display()),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    for row in &diff.rows {
+        let style = match row.kind {
+            super::app::DiffKind::Equal => Style::default().fg(Color::Gray),
+            super::app::DiffKind::Delete => Style::default().fg(Color::Red),
+            super::app::DiffKind::Insert => Style::default().fg(Color::Green),
+            super::app::DiffKind::Replace => Style::default().fg(Color::Yellow),
+        };
+        let left = row.left.as_deref().unwrap_or("");
+        let right = row.right.as_deref().unwrap_or("");
+        lines.push(Line::from(vec![
+            Span::styled(format!("{left:<width$}"), style),
+            Span::raw(" │ "),
+            Span::styled(right.to_owned(), style),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Config diff (Enter apply, Esc keep)"),
+            )
             .wrap(Wrap { trim: false }),
         frame.area(),
     );

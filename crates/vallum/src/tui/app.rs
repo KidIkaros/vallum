@@ -178,6 +178,28 @@ pub enum View {
     Dashboard,
     Help,
     Logs,
+    Diff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffKind {
+    Equal,
+    Delete,
+    Insert,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffRow {
+    pub left: Option<String>,
+    pub right: Option<String>,
+    pub kind: DiffKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffView {
+    pub rows: Vec<DiffRow>,
+    pub backup: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +409,7 @@ pub struct App {
     pub editor_backup: Option<PathBuf>,
     pub logs_follow: bool,
     pub last_logs: Instant,
+    pub diff: Option<DiffView>,
 }
 
 impl App {
@@ -410,6 +433,7 @@ impl App {
             editor_backup: None,
             logs_follow: false,
             last_logs: Instant::now(),
+            diff: None,
         }
     }
 

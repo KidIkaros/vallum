@@ -12,15 +12,11 @@ cd vallum
 
 ## Before you send a change
 
-Run the same gates CI runs:
+Run the local gate of record:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo test -p vallum --no-default-features
-cargo deny check
-bash scripts/e2e-netns.sh
+./scripts/verify.sh          # fmt, clippy, tests, lean tests, deny, TUI snapshot
+E2E=1 ./scripts/verify.sh    # also the namespace tunnel test
 ```
 
 Protocol changes also need the relevant proof artefact and, for the PSK path,

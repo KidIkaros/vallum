@@ -266,17 +266,102 @@ pub fn finish_edit_config(app: &mut App, path: &std::path::Path) {
     let backup_note = backup
         .as_ref()
         .map_or_else(String::new, |path| format!("; backup {}", path.display()));
-    match crate::config::Config::load(path) {
-        Ok(_) => {
-            app.notify(format!(
-                "config parsed{backup_note}; Enter applies, Esc keeps the file"
-            ));
-            app.confirm = Some(super::app::Confirm {
-                action: ConfirmAction::ApplyConfig,
-            });
-        }
-        Err(error) => app.notify(format!("invalid config: {error}{backup_note}")),
+    if let Err(error) = crate::config::Config::load(path) {
+        app.notify(format!("invalid config: {error}{backup_note}"));
+        return;
     }
+    let Some(backup) = backup else {
+        app.notify("config parsed; no backup to diff");
+        return;
+    };
+    let old = std::fs::read_to_string(&backup).unwrap_or_default();
+    let new = std::fs::read_to_string(path).unwrap_or_default();
+    if old == new {
+        app.notify(format!("config parsed; no changes{backup_note}"));
+        return;
+    }
+    app.diff = Some(super::app::DiffView {
+        rows: build_diff(&old, &new),
+        backup,
+    });
+    app.view = super::app::View::Diff;
+}
+
+fn build_diff(old: &str, new: &str) -> Vec<super::app::DiffRow> {
+    use similar::{DiffOp, TextDiff};
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let diff = TextDiff::from_lines(old, new);
+    let mut rows = Vec::new();
+    for op in diff.ops() {
+        match *op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => {
+                for offset in 0..len {
+                    rows.push(super::app::DiffRow {
+                        left: Some(old_lines[old_index + offset].to_owned()),
+                        right: Some(new_lines[new_index + offset].to_owned()),
+                        kind: super::app::DiffKind::Equal,
+                    });
+                }
+            }
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                for offset in 0..old_len {
+                    rows.push(super::app::DiffRow {
+                        left: Some(old_lines[old_index + offset].to_owned()),
+                        right: None,
+                        kind: super::app::DiffKind::Delete,
+                    });
+                }
+            }
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                for offset in 0..new_len {
+                    rows.push(super::app::DiffRow {
+                        left: None,
+                        right: Some(new_lines[new_index + offset].to_owned()),
+                        kind: super::app::DiffKind::Insert,
+                    });
+                }
+            }
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                for offset in 0..old_len.max(new_len) {
+                    rows.push(super::app::DiffRow {
+                        left: (offset < old_len).then(|| old_lines[old_index + offset].to_owned()),
+                        right: (offset < new_len).then(|| new_lines[new_index + offset].to_owned()),
+                        kind: super::app::DiffKind::Replace,
+                    });
+                }
+            }
+        }
+        if rows.len() > 1_000 {
+            rows.truncate(1_000);
+            rows.push(super::app::DiffRow {
+                left: Some("… diff truncated".to_owned()),
+                right: None,
+                kind: super::app::DiffKind::Delete,
+            });
+            break;
+        }
+    }
+    rows
+}
+
+pub fn apply_config(app: &mut App) {
+    app.diff = None;
+    app.view = super::app::View::Dashboard;
+    restart_service(app);
 }
 
 fn restart_service(app: &mut App) {
@@ -736,6 +821,39 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_config_edit_opens_the_diff_view() {
+        let dir = std::env::temp_dir().join(format!("vallum-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vallum0.toml");
+        let original =
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"key\"\naddress = \"10.7.0.1/24\"\n";
+        std::fs::write(&path, original).unwrap();
+        let backup = dir.join("vallum0.toml.bak");
+        std::fs::write(&backup, original).unwrap();
+        std::fs::write(&path, format!("{original}# changed\n")).unwrap();
+        let mut app = App::new(vec![super::super::app::Interface::new(
+            "vallum0".to_owned(),
+            Some(path),
+            dir.join("control.sock"),
+        )]);
+        app.editor_backup = Some(backup);
+        finish_edit_config(&mut app, &dir.join("vallum0.toml"));
+        assert_eq!(app.view, super::super::app::View::Diff);
+        assert!(app.diff.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_diff_marks_changed_lines() {
+        let rows = build_diff("a\nb\n", "a\nc\n");
+        assert!(rows
+            .iter()
+            .any(|row| row.kind == super::super::app::DiffKind::Replace));
+        assert_eq!(rows.first().and_then(|row| row.left.as_deref()), Some("a"));
+    }
 
     #[test]
     fn the_interface_form_writes_and_validates() {
