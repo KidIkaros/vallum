@@ -652,7 +652,32 @@ pub fn service_plan(
     }
 }
 
+trait ServiceRunner {
+    fn is_root(&self) -> bool;
+    fn run(&self, program: &str, args: &[String]) -> Result<(), String>;
+}
+
+struct SystemRunner;
+
+impl ServiceRunner for SystemRunner {
+    fn is_root(&self) -> bool {
+        nix::unistd::geteuid().is_root()
+    }
+
+    fn run(&self, program: &str, args: &[String]) -> Result<(), String> {
+        match Command::new(program).args(args).status() {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => Err(format!("{program} exited {status}")),
+            Err(error) => Err(format!("{program}: {error}")),
+        }
+    }
+}
+
 pub fn toggle_service(app: &mut App) {
+    toggle_service_with(app, &SystemRunner);
+}
+
+fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
     let Some(interface) = app.current() else {
         return;
     };
@@ -665,44 +690,42 @@ pub fn toggle_service(app: &mut App) {
         .and_then(|stem| stem.to_str())
         .unwrap_or("vallum0");
     let unit = format!("vallum@{stem}.service");
-    let systemd = Command::new("systemctl")
-        .args(["cat", &unit])
-        .status()
-        .is_ok_and(|status| status.success());
+    let systemd = runner
+        .run("systemctl", &["cat".to_owned(), unit.clone()])
+        .is_ok();
     let plan = service_plan(
         config,
         interface.device.is_some(),
         systemd,
-        nix::unistd::geteuid().is_root(),
+        runner.is_root(),
     );
     match plan {
         ServicePlan::Systemd { unit, action } => {
-            match Command::new("systemctl").args([action, &unit]).status() {
-                Ok(status) if status.success() => {
-                    app.notify(format!("systemctl {action} {unit}"));
-                    refresh(app);
-                }
-                _ => {
-                    let quick = if interface.device.is_some() {
-                        "down"
-                    } else {
-                        "up"
-                    };
-                    app.notify(format!("sudo vallum-quick {quick} {}", config.display()));
-                }
+            if runner
+                .run("systemctl", &[action.to_owned(), unit.clone()])
+                .is_ok()
+            {
+                app.notify(format!("systemctl {action} {unit}"));
+                refresh(app);
+            } else {
+                let quick = if interface.device.is_some() {
+                    "down"
+                } else {
+                    "up"
+                };
+                app.notify(format!("sudo vallum-quick {quick} {}", config.display()));
             }
         }
         ServicePlan::Quick { action, config } => {
-            match Command::new("vallum-quick")
-                .arg(action)
-                .arg(&config)
-                .status()
+            let config_arg = config.display().to_string();
+            if runner
+                .run("vallum-quick", &[action.to_owned(), config_arg.clone()])
+                .is_ok()
             {
-                Ok(status) if status.success() => {
-                    app.notify(format!("vallum-quick {action}"));
-                    refresh(app);
-                }
-                _ => app.notify(format!("sudo vallum-quick {action} {}", config.display())),
+                app.notify(format!("vallum-quick {action}"));
+                refresh(app);
+            } else {
+                app.notify(format!("sudo vallum-quick {action} {config_arg}"));
             }
         }
         ServicePlan::Command(command) => app.notify(command),
@@ -886,6 +909,95 @@ mod tests {
         assert!(text.contains("10.7.0.1/24"));
         assert!(text.contains("9.9.9.9"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct FakeRunner {
+        root: bool,
+        calls: std::sync::Mutex<Vec<String>>,
+        results: std::sync::Mutex<Vec<Result<(), String>>>,
+    }
+
+    impl FakeRunner {
+        fn new(root: bool, results: Vec<Result<(), String>>) -> Self {
+            Self {
+                root,
+                calls: std::sync::Mutex::new(Vec::new()),
+                results: std::sync::Mutex::new(results),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ServiceRunner for FakeRunner {
+        fn is_root(&self) -> bool {
+            self.root
+        }
+
+        fn run(&self, program: &str, args: &[String]) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{program} {}", args.join(" ")));
+            self.results.lock().unwrap().remove(0)
+        }
+    }
+
+    #[test]
+    fn the_tui_uses_systemd_when_available() {
+        let app_interface = super::super::app::Interface::new(
+            "vallum0".to_owned(),
+            Some(std::path::PathBuf::from("/tmp/fake.toml")),
+            std::path::PathBuf::from("/tmp/control.sock"),
+        );
+        let mut app = App::new(vec![app_interface]);
+        let runner = FakeRunner::new(true, vec![Ok(()), Ok(())]);
+        toggle_service_with(&mut app, &runner);
+        assert_eq!(
+            runner.calls(),
+            [
+                "systemctl cat vallum@fake.service",
+                "systemctl start vallum@fake.service",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tui_falls_back_to_quick_as_root() {
+        let app_interface = super::super::app::Interface::new(
+            "vallum0".to_owned(),
+            Some(std::path::PathBuf::from("/tmp/fake.toml")),
+            std::path::PathBuf::from("/tmp/control.sock"),
+        );
+        let mut app = App::new(vec![app_interface]);
+        let runner = FakeRunner::new(true, vec![Err("no unit".to_owned()), Ok(())]);
+        toggle_service_with(&mut app, &runner);
+        assert_eq!(
+            runner.calls(),
+            [
+                "systemctl cat vallum@fake.service",
+                "vallum-quick up /tmp/fake.toml",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tui_shows_a_sudo_command_when_unprivileged() {
+        let app_interface = super::super::app::Interface::new(
+            "vallum0".to_owned(),
+            Some(std::path::PathBuf::from("/tmp/fake.toml")),
+            std::path::PathBuf::from("/tmp/control.sock"),
+        );
+        let mut app = App::new(vec![app_interface]);
+        let runner = FakeRunner::new(false, vec![Err("no unit".to_owned())]);
+        toggle_service_with(&mut app, &runner);
+        assert_eq!(runner.calls(), ["systemctl cat vallum@fake.service"]);
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.message.contains("sudo vallum-quick")));
     }
 
     #[test]
