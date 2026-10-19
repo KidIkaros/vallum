@@ -18,3 +18,13 @@ ml-kem = ["origin-crypto-sdk/ml-kem"]
 [dependencies]
 vallum-crypto.workspace = true
 origin-crypto-sdk.workspace = true
+
+[dev-dependencies]
+# The DudeCT harness. A dev-dependency on purpose: the daemon never links it,
+# and the measurement lives beside the only crate allowed to name SDK types.
+#
+# The harnesses are `examples/`, not `benches/`: `cargo bench` passes `--bench`
+# to a `harness = false` target, and dudect-bencher's CLI refuses it. Examples
+# get dev-dependencies and no injected arguments, and `cargo run --release
+# --example ct_ntru` is exactly what dudect-bencher documents.
+dudect-bencher = "0.7"
