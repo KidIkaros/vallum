@@ -16,7 +16,7 @@
 use vallum_core::wire::tag;
 use vallum_core::{
     initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    HandshakeError, Message, MessageBuilder, SessionKeys, StaticIdentity,
+    HandshakeError, Message, MessageBuilder, PeerIdentity, SessionKeys, StaticIdentity,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -24,6 +24,15 @@ use vallum_crypto_sdk::SdkSuite;
 const TIMESTAMP: [u8; 12] = [
     0x40, 0x00, 0x00, 0x00, 0x67, 0x00, 0x00, 0x00, 0x12, 0x34, 0x56, 0x78,
 ];
+
+/// The peer configuration matching a local identity.
+///
+/// KEM-only identities yield a KEM-only peer (P1 semantics); an identity with a
+/// signing half yields a peer that *requires* a signature, so a P3 run needs no
+/// extra plumbing to exercise the signature path.
+fn peer(identity: &StaticIdentity) -> PeerIdentity {
+    PeerIdentity::from_identity(identity)
+}
 
 fn hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -59,7 +68,7 @@ fn run(
     let (init_hello, i_state) = initiator_hello(
         suite,
         &initiator,
-        responder.public(),
+        &peer(&responder),
         init_index,
         timestamp,
         init_seed,
@@ -68,7 +77,7 @@ fn run(
     let (resp_hello, r_state) = responder_process_init(
         suite,
         &responder,
-        initiator.public(),
+        &peer(&initiator),
         &init_hello,
         resp_index,
         resp_seed,
@@ -212,9 +221,9 @@ fn mex_makes_the_static_secret_feed_the_encapsulation() {
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
     let (hello_a, _) =
-        initiator_hello(&suite, &initiator_a, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator_a, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
     let (hello_b, _) =
-        initiator_hello(&suite, &initiator_b, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator_b, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
 
     // Same timestamp/index/seed; the ephemeral key derives from `c` alone, so the
     // EPHEMERAL_PK is identical, while STATIC_CT (the MEX-bound op A) differs.
@@ -244,9 +253,9 @@ fn forged_confirmation_is_rejected() {
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
     let (init_hello, i_state) =
-        initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
     let (resp_hello, r_state) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
     let (init_conf, _) = initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
 
     // InitConf layout: 8-byte header, then CONFIRMATION (tag+len = 4 bytes, then
@@ -269,9 +278,9 @@ fn forged_responder_confirmation_is_rejected() {
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
     let (init_hello, i_state) =
-        initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
     let (resp_hello, _) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
 
     // Rebuild RespHello with a corrupted responder confirmation. The other fields
     // are copied across so the failure is the confirmation, not the framing.
@@ -310,16 +319,16 @@ fn a_responder_confirmation_cannot_be_replayed_from_another_handshake() {
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
     let (init_hello_1, _i_state_1) =
-        initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
     let (resp_hello_1, _) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello_1, 2, &d)
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello_1, 2, &d)
             .unwrap();
 
     // A second handshake with different initiator entropy.
     let (_, i_state_2) = initiator_hello(
         &suite,
         &initiator,
-        responder.public(),
+        &peer(&responder),
         1,
         TIMESTAMP,
         &[0x77u8; 32],
@@ -342,9 +351,9 @@ fn missing_confirmation_field_is_a_framing_error() {
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
     let (init_hello, i_state) =
-        initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
     let (resp_hello, r_state) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
     let (init_conf, _) = initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
 
     // Rebuild InitConf carrying only the receiver index — no confirmation at all.
@@ -373,14 +382,14 @@ fn suite_downgrade_is_rejected() {
     let initiator = StaticIdentity::generate(&tri, &a).unwrap();
     let responder = StaticIdentity::generate(&tri, &b).unwrap();
     let (mut init_hello, _) =
-        initiator_hello(&tri, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
+        initiator_hello(&tri, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
 
     // Suite id lives at header bytes 2..4.
     init_hello[2] = 0x00;
     init_hello[3] = 0x01;
 
     assert!(matches!(
-        responder_process_init(&tri, &responder, initiator.public(), &init_hello, 2, &d),
+        responder_process_init(&tri, &responder, &peer(&initiator), &init_hello, 2, &d),
         Err(HandshakeError::SuiteMismatch { .. })
     ));
 }
@@ -395,14 +404,14 @@ fn wrong_receiver_index_is_rejected() {
     let (init_hello, i_state) = initiator_hello(
         &suite,
         &initiator,
-        responder.public(),
+        &peer(&responder),
         0x1122_3344,
         TIMESTAMP,
         &c,
     )
     .unwrap();
     let (resp_hello, _) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
 
     // Rebuild RespHello echoing the wrong initiator index.
     let tampered = {

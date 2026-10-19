@@ -75,6 +75,12 @@ pub enum MessageType {
     InitConf,
     /// Either direction: an encrypted transport packet (P2).
     Data,
+    /// A detached identity document (P3): a signed KEM ↔ signing key binding.
+    ///
+    /// Not a handshake message — it rides the same framing so there is one
+    /// parser and one set of caps, but it is never exchanged *inside* a
+    /// handshake.
+    IdentityDoc,
 }
 
 impl MessageType {
@@ -86,6 +92,7 @@ impl MessageType {
             Self::RespHello => 0x02,
             Self::InitConf => 0x03,
             Self::Data => 0x04,
+            Self::IdentityDoc => 0x05,
         }
     }
 
@@ -97,6 +104,7 @@ impl MessageType {
             0x02 => Some(Self::RespHello),
             0x03 => Some(Self::InitConf),
             0x04 => Some(Self::Data),
+            0x05 => Some(Self::IdentityDoc),
             _ => None,
         }
     }
@@ -109,6 +117,7 @@ impl MessageType {
             Self::RespHello => "RespHello",
             Self::InitConf => "InitConf",
             Self::Data => "Data",
+            Self::IdentityDoc => "IdentityDoc",
         }
     }
 }
@@ -134,6 +143,12 @@ pub mod tag {
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).
     pub const IDENTITY_SIG: u16 = 0x0020;
+    /// An identity document's label (P3).
+    pub const IDENTITY_LABEL: u16 = 0x0021;
+    /// A KEM public key inside an identity document (P3).
+    pub const KEM_PUBLIC: u16 = 0x0022;
+    /// A signing public key inside an identity document (P3).
+    pub const SIGN_PUBLIC: u16 = 0x0023;
     /// WireGuard-style `mac1` cookie (P2).
     pub const MAC1: u16 = 0x0030;
     /// WireGuard-style `mac2` cookie (P2).

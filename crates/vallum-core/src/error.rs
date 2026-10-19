@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use vallum_crypto::{AeadError, KdfError, KemError, SuiteError};
+use vallum_crypto::{AeadError, KdfError, KemError, SigError, SuiteError};
 
 /// A handshake or wire-framing failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,10 +50,25 @@ pub enum HandshakeError {
     /// [`crate::handshake::responder_process_conf`] when the *initiator's* in
     /// `InitConf` fails.
     Confirmation,
+    /// The peer is configured with a signing key, but the message carried no
+    /// identity signature. Fail closed: absence is never treated as "no identity
+    /// wanted", or stripping the field would downgrade the session.
+    IdentityMissing,
+    /// The message carried an identity signature, but this endpoint has no
+    /// signing key configured for the peer, so it cannot be checked. Fail closed
+    /// rather than ignore an unverifiable assertion.
+    IdentityUnexpected,
+    /// A peer's hybrid identity signature did not verify — a forgery, a
+    /// substitution, or a message/transcript mismatch.
+    IdentityInvalid,
+    /// An operation needed a signing identity and this endpoint has none.
+    NoSigningIdentity,
     /// A hybrid-KEM operation failed.
     Kem(KemError),
     /// A key-derivation operation failed.
     Kdf(KdfError),
+    /// A signing operation failed.
+    Sign(SigError),
     /// A suite operation failed.
     Suite(SuiteError),
 }
@@ -81,8 +96,21 @@ impl fmt::Display for HandshakeError {
                 "HandshakeError: receiver index mismatch (ours is {expected}, peer echoed {got})"
             ),
             Self::Confirmation => write!(f, "HandshakeError: key confirmation failed"),
+            Self::IdentityMissing => write!(
+                f,
+                "HandshakeError: the peer is configured with a signing key but sent no identity signature"
+            ),
+            Self::IdentityUnexpected => write!(
+                f,
+                "HandshakeError: unexpected identity signature (no signing key configured for this peer)"
+            ),
+            Self::IdentityInvalid => write!(f, "HandshakeError: identity signature did not verify"),
+            Self::NoSigningIdentity => {
+                write!(f, "HandshakeError: this endpoint has no signing identity")
+            }
             Self::Kem(e) => write!(f, "HandshakeError: {e}"),
             Self::Kdf(e) => write!(f, "HandshakeError: {e}"),
+            Self::Sign(e) => write!(f, "HandshakeError: {e}"),
             Self::Suite(e) => write!(f, "HandshakeError: {e}"),
         }
     }
@@ -93,6 +121,7 @@ impl std::error::Error for HandshakeError {
         match self {
             Self::Kem(e) => Some(e),
             Self::Kdf(e) => Some(e),
+            Self::Sign(e) => Some(e),
             Self::Suite(e) => Some(e),
             _ => None,
         }
@@ -114,6 +143,12 @@ impl From<KdfError> for HandshakeError {
 impl From<SuiteError> for HandshakeError {
     fn from(e: SuiteError) -> Self {
         Self::Suite(e)
+    }
+}
+
+impl From<SigError> for HandshakeError {
+    fn from(e: SigError) -> Self {
+        Self::Sign(e)
     }
 }
 

@@ -29,8 +29,8 @@ use vallum_core::wire::tag;
 use vallum_core::{
     establish, establish_epoch, initiator_hello, initiator_process_resp, responder_process_conf,
     responder_process_init, DataError, HandshakeError, Message, MessageBuilder, MessageHeader,
-    MessageType, Receiver, Role, Sender, SessionKeys, StaticIdentity, PROTOCOL_VERSION,
-    REPLAY_WINDOW,
+    MessageType, PeerIdentity, Receiver, Role, Sender, SessionKeys, StaticIdentity,
+    PROTOCOL_VERSION, REPLAY_WINDOW,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -41,6 +41,11 @@ const TIMESTAMP: [u8; 12] = [
 
 const INIT_INDEX: u32 = 0x0A0B_0C0D;
 const RESP_INDEX: u32 = 0xE0E1_E2E3;
+
+/// The peer configuration matching a local identity.
+fn peer(identity: &StaticIdentity) -> PeerIdentity {
+    PeerIdentity::from_identity(identity)
+}
 
 /// A live session: both endpoints, both directions.
 struct Live {
@@ -73,7 +78,7 @@ impl Live {
         let (init_hello, i_state) = initiator_hello(
             &suite,
             &initiator,
-            responder.public(),
+            &peer(&responder),
             INIT_INDEX,
             TIMESTAMP,
             &init_seed,
@@ -83,7 +88,7 @@ impl Live {
         let (resp_hello, r_state) = responder_process_init(
             &suite,
             &responder,
-            initiator.public(),
+            &peer(&initiator),
             &init_hello,
             RESP_INDEX,
             &resp_seed,
@@ -190,7 +195,7 @@ fn a_data_packet_is_a_data_message_and_nothing_else() {
         responder_process_init(
             &suite,
             &responder,
-            initiator.public(),
+            &peer(&initiator),
             &packet,
             RESP_INDEX,
             &[0x44u8; 32],

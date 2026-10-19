@@ -17,8 +17,8 @@
 //! ─────────                                              ─────────
 //! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP ──▶   [static key]
 //!              ◀── EPHEMERAL_CT (B), STATIC_CT (C),
-//!                  CONFIRMATION (conf_r) ──────────────────    RespHello
-//! InitConf     ── CONFIRMATION (conf_i) ─────────────────▶      [verify]
+//!                  CONFIRMATION (conf_r), IDENTITY_SIG ────    RespHello
+//! InitConf     ── CONFIRMATION (conf_i), IDENTITY_SIG ───▶      [verify]
 //! ```
 //!
 //! | op | direction | peer key | purpose |
@@ -56,6 +56,13 @@
 //! `KEY` is the handshake root the data plane expands; P1 freezes it.
 //! Every concatenation is length-framed, so it is unambiguous.
 //!
+//! ## Identity (P3)
+//!
+//! [`identity`] adds the transferable half of authentication: a hybrid
+//! Ed25519 + Falcon-1024 signature over `TR`, carried in `RespHello` and
+//! `InitConf`, plus an issuer-signed identity document that binds a KEM key to a
+//! signing key. See `docs/proof/hybrid-identity.md`.
+//!
 //! ## Data plane (P2)
 //!
 //! [`keys`] expands `KEY` into a directional AEAD key and nonce prefix per
@@ -71,6 +78,7 @@ pub mod cookie;
 pub mod data;
 pub mod error;
 pub mod handshake;
+pub mod identity;
 pub mod keys;
 pub mod replay;
 pub mod timer;
@@ -83,8 +91,9 @@ pub use data::{
 pub use error::{DataError, HandshakeError};
 pub use handshake::{
     initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    InitiatorState, ResponderState, SessionKeys, StaticIdentity,
+    InitiatorState, ResponderState, SessionKeys,
 };
+pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
 pub use replay::{ReplayFilter, REPLAY_WINDOW};
 pub use timer::{TimerAction, Timers};

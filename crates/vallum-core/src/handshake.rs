@@ -7,9 +7,20 @@
 //! ─────────                                              ─────────
 //! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP ──▶   [static key]
 //!              ◀── EPHEMERAL_CT (B), STATIC_CT (C),
-//!                  CONFIRMATION (conf_r) ──────────────────    RespHello
-//! InitConf     ── CONFIRMATION (conf_i) ─────────────────▶      [verify]
+//!                  CONFIRMATION (conf_r), IDENTITY_SIG ────    RespHello
+//! InitConf     ── CONFIRMATION (conf_i), IDENTITY_SIG ───▶      [verify]
 //! ```
+//!
+//! ## Identity (P3)
+//!
+//! The confirmation values authenticate *key possession*: they prove a peer
+//! holds the static KEM secret its public key names. They do not prove a
+//! *name*. P3 adds an optional **hybrid Ed25519 + Falcon-1024 signature over
+//! `TR`** — the responder's in `RespHello`, the initiator's in `InitConf` — so a
+//! third party holding the peer's signing key can check who it was talking to.
+//! Because the signature is over `TR`, it commits the signer to every KEM
+//! ciphertext in the session. The signature keys, the fail-closed rules, and the
+//! identity-document (certificate) form live in [`crate::identity`].
 //!
 //! ## Explicit confirmation, both directions
 //!
@@ -85,10 +96,14 @@
 
 use vallum_crypto::{
     derive_kem_key, frame, transcript_hash, CryptoSuite, KemPublicKey, KemRole, KemSecretKey,
-    SharedSecret, KEM_ENCAPS_RANDOMNESS,
+    SharedSecret, SignPublicKey, KEM_ENCAPS_RANDOMNESS,
 };
 
 use crate::error::HandshakeError;
+use crate::identity::{
+    sign_transcript, verify_transcript, PeerIdentity, StaticIdentity, IDENTITY_INIT_DOMAIN,
+    IDENTITY_RESP_DOMAIN,
+};
 use crate::wire::{
     tag, Message, MessageBuilder, MessageHeader, MessageType, CONFIRMATION_SIZE, PROTOCOL_VERSION,
     TIMESTAMP_SIZE,
@@ -127,41 +142,10 @@ const CONFIRM_CMP_DOMAIN: &[u8] = b"vallum/confirm-cmp/v1";
 
 // ── identity ─────────────────────────────────────────────────────────
 
-/// A long-term static identity: the hybrid KEM key pair a peer is known by.
-///
-/// P1 uses the KEM key pair directly. P3 adds a hybrid *signature* identity on
-/// top for third-party verifiability; the handshake secrets here are unaffected.
-#[derive(Debug)]
-pub struct StaticIdentity {
-    public: KemPublicKey,
-    secret: KemSecretKey,
-}
-
-impl StaticIdentity {
-    /// Derive a static identity from a 32-byte seed.
-    ///
-    /// # Errors
-    ///
-    /// [`HandshakeError::Kem`] if the suite's key generation fails.
-    pub fn generate(suite: &dyn CryptoSuite, seed: &[u8; 32]) -> Result<Self, HandshakeError> {
-        let (public, secret) = suite
-            .kem_keygen(seed, KemRole::Static)
-            .map_err(HandshakeError::Kem)?;
-        Ok(Self { public, secret })
-    }
-
-    /// The public half — what peers are configured with.
-    #[must_use]
-    pub fn public(&self) -> &KemPublicKey {
-        &self.public
-    }
-
-    /// The secret half.
-    #[must_use]
-    pub fn secret(&self) -> &KemSecretKey {
-        &self.secret
-    }
-}
+// [`StaticIdentity`] and [`PeerIdentity`] live in [`crate::identity`] together
+// with the hybrid signature and identity-document machinery. The handshake uses
+// them as-is: a peer's KEM key is what the encapsulations target, and a peer's
+// optional signing key decides whether an identity signature is required.
 
 // ── session keys ─────────────────────────────────────────────────────
 
@@ -208,6 +192,9 @@ pub struct InitiatorState {
     timestamp: [u8; TIMESTAMP_SIZE],
     static_public: Vec<u8>,
     peer_public: Vec<u8>,
+    /// The peer's signing public key, if this endpoint requires a signature
+    /// (fail-closed: presence here means `RespHello` must carry one).
+    peer_signing: Option<SignPublicKey>,
     init_hello: Vec<u8>,
     /// Per-leg secrets from op A (initiator → responder static).
     static_legs: Vec<SharedSecret>,
@@ -249,6 +236,8 @@ pub struct ResponderState {
     peer_index: u32,
     resp_hello: Vec<u8>,
     timestamp: [u8; TIMESTAMP_SIZE],
+    /// The initiator's signing public key, if this endpoint requires one.
+    peer_signing: Option<SignPublicKey>,
     keys: SessionKeys,
 }
 
@@ -456,12 +445,47 @@ fn verify_confirmation(suite: &dyn CryptoSuite, expected: &SharedSecret, got: &[
     suite.hash(CONFIRM_CMP_DOMAIN, got) == suite.hash(CONFIRM_CMP_DOMAIN, expected.as_bytes())
 }
 
+/// The fail-closed identity-signature rule.
+///
+/// | peer signing key | `IDENTITY_SIG` | outcome |
+/// |---|---|---|
+/// | `Some(pk)` | present | must verify |
+/// | `Some(_)` | absent | [`HandshakeError::IdentityMissing`] |
+/// | `None` | present | [`HandshakeError::IdentityUnexpected`] |
+/// | `None` | absent | accept |
+///
+/// The requirement comes from local configuration, never from the wire, so
+/// stripping the field cannot downgrade a session that expects one.
+fn check_identity_signature(
+    suite: &dyn CryptoSuite,
+    suite_id: u16,
+    domain: &[u8],
+    transcript: &[u8; 32],
+    expected: Option<&SignPublicKey>,
+    signature: Option<&[u8]>,
+) -> Result<(), HandshakeError> {
+    match (expected, signature) {
+        (Some(pk), Some(sig)) => {
+            if verify_transcript(suite, pk, domain, suite_id, transcript, sig) {
+                Ok(())
+            } else {
+                Err(HandshakeError::IdentityInvalid)
+            }
+        }
+        (Some(_), None) => Err(HandshakeError::IdentityMissing),
+        (None, Some(_)) => Err(HandshakeError::IdentityUnexpected),
+        (None, None) => Ok(()),
+    }
+}
+
 // ── handshake steps ──────────────────────────────────────────────────
 
 /// Step 1 (initiator): build `InitHello` and retain the state to finish.
 ///
-/// `peer_public` is the responder's static public key, known from the peer
-/// configuration (WireGuard-style cryptokey routing).
+/// `peer` is the responder's identity, known from the peer configuration
+/// (WireGuard-style cryptokey routing). Its KEM key is what op A encapsulates to;
+/// its optional signing key is what the responder's `IDENTITY_SIG` will be
+/// checked against.
 ///
 /// # Errors
 ///
@@ -470,12 +494,13 @@ fn verify_confirmation(suite: &dyn CryptoSuite, expected: &SharedSecret, got: &[
 pub fn initiator_hello(
     suite: &dyn CryptoSuite,
     identity: &StaticIdentity,
-    peer_public: &KemPublicKey,
+    peer: &PeerIdentity,
     sender_index: u32,
     timestamp: [u8; TIMESTAMP_SIZE],
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
     let suite_id = suite.suite_id();
+    let peer_public = peer.kem();
 
     let eph_seed = derive_seed(suite, handshake_seed, EPH_SEED_INFO)?;
     let a_fresh = derive_seed(suite, handshake_seed, A_FRESH_INFO)?;
@@ -514,6 +539,7 @@ pub fn initiator_hello(
         timestamp,
         static_public: identity.public().as_bytes().to_vec(),
         peer_public: peer_public.as_bytes().to_vec(),
+        peer_signing: peer.signing().cloned(),
         init_hello: init_hello.clone(),
         static_legs: encapsulation.shared_secrets,
     };
@@ -526,24 +552,24 @@ pub fn initiator_hello(
 /// proves to the initiator that this responder holds `σ_r`. It is derived from
 /// the Op A decapsulation below.
 ///
-/// `peer_public` is the *initiator's* static public key, known from peer
-/// configuration.
+/// `peer` is the *initiator's* identity, known from peer configuration.
 ///
 /// # Errors
 ///
 /// [`HandshakeError::Wire`] on a malformed or unexpected message,
 /// [`HandshakeError::SuiteMismatch`] on a suite mismatch, or
-/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] if a crypto operation
-/// fails.
+/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] / [`HandshakeError::Sign`]
+/// if a crypto operation fails.
 pub fn responder_process_init(
     suite: &dyn CryptoSuite,
     identity: &StaticIdentity,
-    peer_public: &KemPublicKey,
+    peer: &PeerIdentity,
     init_hello: &[u8],
     sender_index: u32,
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
     let suite_id = suite.suite_id();
+    let peer_public = peer.kem();
     let message = Message::parse(init_hello)?;
     message.expect_type(MessageType::InitHello)?;
     message.expect_suite(suite_id)?;
@@ -619,6 +645,18 @@ pub fn responder_process_init(
     builder.field(tag::STATIC_CT, c.ciphertext.as_bytes())?;
     builder.field(tag::RECEIVER_INDEX, &message.sender_index().to_be_bytes())?;
     builder.field(tag::CONFIRMATION, confirm_responder.as_bytes())?;
+    // P3: our hybrid identity signature over TR. Present exactly when we hold a
+    // signing identity — a peer that requires one rejects its absence.
+    if let Some(signing) = identity.signing() {
+        let signature = sign_transcript(
+            suite,
+            signing,
+            IDENTITY_RESP_DOMAIN,
+            suite_id,
+            &transcript_resp,
+        )?;
+        builder.field(tag::IDENTITY_SIG, &signature)?;
+    }
     let resp_hello = builder.finish()?;
 
     // Stage 3 and the initiator's confirmation, which commits to conf_r.
@@ -645,6 +683,7 @@ pub fn responder_process_init(
         peer_index: message.sender_index(),
         resp_hello: resp_hello.clone(),
         timestamp,
+        peer_signing: peer.signing().cloned(),
         keys,
     };
     Ok((resp_hello, state))
@@ -725,6 +764,18 @@ pub fn initiator_process_resp(
         return Err(HandshakeError::Confirmation);
     }
 
+    // P3: the responder's identity signature over TR. Fail closed on absence
+    // (when configured) and on an unexpected signature; see
+    // [`check_identity_signature`].
+    check_identity_signature(
+        suite,
+        state.suite_id,
+        IDENTITY_RESP_DOMAIN,
+        &transcript_resp,
+        state.peer_signing.as_ref(),
+        message.get(tag::IDENTITY_SIG),
+    )?;
+
     let transcript_conf = transcript_conf(
         suite,
         state.suite_id,
@@ -751,6 +802,19 @@ pub fn initiator_process_resp(
     let mut builder = MessageBuilder::new(header);
     builder.field(tag::CONFIRMATION, keys.confirm_initiator.as_bytes())?;
     builder.field(tag::RECEIVER_INDEX, &message.sender_index().to_be_bytes())?;
+    // P3: our hybrid identity signature over the same TR the responder signed,
+    // under the initiator's domain label. The responder requires it when it has
+    // an initiator signing key configured.
+    if let Some(signing) = identity.signing() {
+        let signature = sign_transcript(
+            suite,
+            signing,
+            IDENTITY_INIT_DOMAIN,
+            state.suite_id,
+            &transcript_resp,
+        )?;
+        builder.field(tag::IDENTITY_SIG, &signature)?;
+    }
     let init_conf = builder.finish()?;
 
     Ok((init_conf, keys))
@@ -777,6 +841,17 @@ pub fn responder_process_conf(
     if !verify_confirmation(suite, &state.keys.confirm_initiator, &confirmation) {
         return Err(HandshakeError::Confirmation);
     }
+
+    // P3: the initiator's identity signature over TR (the same value the
+    // responder signed). Only reached once the initiator has proven the key.
+    check_identity_signature(
+        suite,
+        state.suite_id,
+        IDENTITY_INIT_DOMAIN,
+        &state.keys.transcript,
+        state.peer_signing.as_ref(),
+        message.get(tag::IDENTITY_SIG),
+    )?;
 
     Ok(state.keys)
 }

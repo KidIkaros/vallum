@@ -24,7 +24,9 @@
 //! 7. **AEAD** — seal/open round-trip, and rejection of wrong key, nonce, AD, and
 //!    a forged tag (the committing property).
 //! 8. **Signatures** — verify accepts a good signature and rejects a wrong
-//!    message, a tampered signature, and a wrong key.
+//!    message, a tampered signature at *any* byte offset, a truncated or padded
+//!    signature, and a wrong key. The byte sweep is the suite-agnostic form of
+//!    "every component of a hybrid signature must be checked".
 
 // The contract panics on violation by design — its callers are tests.
 #![allow(clippy::expect_used)]
@@ -281,6 +283,46 @@ fn check_signatures<S: CryptoSuite + ?Sized>(suite: &S) {
     assert!(
         !suite.verify(&pk, msg, &tampered),
         "tampered signature accepted"
+    );
+
+    // Every byte of the signature must be covered. A hybrid scheme is only
+    // hybrid if *both* component signatures are checked, so a suite that
+    // ignored, say, an appended classical half would pass a byte-0 tamper and
+    // fail nothing else. Sweep several positions — including the last byte —
+    // and require the verdict to flip everywhere. Positions are chosen to fall
+    // in different regions without assuming any particular layout.
+    for pos in [
+        0usize,
+        1,
+        4,
+        32,
+        64,
+        sig.len() / 2,
+        sig.len() - 2,
+        sig.len() - 1,
+    ] {
+        if pos >= sig.len() {
+            continue;
+        }
+        let mut flip = sig.clone();
+        flip[pos] ^= 0x80;
+        assert!(
+            !suite.verify(&pk, msg, &flip),
+            "a single flipped bit at offset {pos} was accepted: the signature \
+             is not covering every component"
+        );
+    }
+
+    // Truncation and extension are not valid signatures.
+    assert!(
+        !suite.verify(&pk, msg, &sig[..sig.len() - 1]),
+        "truncated signature accepted"
+    );
+    let mut extended = sig.clone();
+    extended.push(0);
+    assert!(
+        !suite.verify(&pk, msg, &extended),
+        "trailing garbage accepted"
     );
 
     let mut wrong_pk = pk.as_bytes().to_vec();
