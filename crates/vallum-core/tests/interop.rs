@@ -74,8 +74,7 @@ fn run(
         resp_seed,
     )?;
 
-    let (init_conf, i_keys) =
-        initiator_process_resp(suite, i_state, &initiator, &resp_hello)?;
+    let (init_conf, i_keys) = initiator_process_resp(suite, i_state, &initiator, &resp_hello)?;
 
     let r_keys = responder_process_conf(suite, r_state, &init_conf)?;
 
@@ -115,10 +114,30 @@ fn every_suite_completes_and_agrees() {
     for suite in shipped_suites() {
         let ex = default_run(&suite);
         assert_eq!(
-            ex.initiator, ex.responder,
+            ex.initiator.transcript,
+            ex.responder.transcript,
+            "suite {:#06x} endpoints derived different transcripts",
+            suite.suite_id()
+        );
+        assert_eq!(
+            ex.initiator.key.as_bytes(),
+            ex.responder.key.as_bytes(),
             "suite {:#06x} endpoints derived different keys",
             suite.suite_id()
         );
+        assert_eq!(
+            ex.initiator.confirm_initiator.as_bytes(),
+            ex.responder.confirm_initiator.as_bytes()
+        );
+        assert_eq!(
+            ex.initiator.confirm_responder.as_bytes(),
+            ex.responder.confirm_responder.as_bytes()
+        );
+        // The indices are the one thing that must *not* match: each end's own
+        // index is the other's peer index.
+        assert_eq!(ex.initiator.own_index, ex.responder.peer_index);
+        assert_eq!(ex.initiator.peer_index, ex.responder.own_index);
+        assert_ne!(ex.initiator.own_index, ex.initiator.peer_index);
         assert_ne!(ex.initiator.key.as_bytes(), &[0u8; 32], "all-zero key");
     }
 }
@@ -156,7 +175,10 @@ fn fresh_handshake_seed_changes_the_key() {
     // not know it yet), but must change RespHello and therefore the key.
     let ex1 = run(&suite, &a, &b, &c, &d, 1, 2, TIMESTAMP).unwrap();
     let ex2 = run(&suite, &a, &b, &c, &[0x45u8; 32], 1, 2, TIMESTAMP).unwrap();
-    assert_eq!(ex1.init_hello, ex2.init_hello, "InitHello must not depend on responder entropy");
+    assert_eq!(
+        ex1.init_hello, ex2.init_hello,
+        "InitHello must not depend on responder entropy"
+    );
     assert_ne!(ex1.resp_hello, ex2.resp_hello);
     assert_ne!(ex1.initiator.key.as_bytes(), ex2.initiator.key.as_bytes());
 
@@ -189,24 +211,10 @@ fn mex_makes_the_static_secret_feed_the_encapsulation() {
     let initiator_b = StaticIdentity::generate(&suite, &[0x99u8; 32]).unwrap();
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
-    let (hello_a, _) = initiator_hello(
-        &suite,
-        &initiator_a,
-        responder.public(),
-        1,
-        TIMESTAMP,
-        &c,
-    )
-    .unwrap();
-    let (hello_b, _) = initiator_hello(
-        &suite,
-        &initiator_b,
-        responder.public(),
-        1,
-        TIMESTAMP,
-        &c,
-    )
-    .unwrap();
+    let (hello_a, _) =
+        initiator_hello(&suite, &initiator_a, responder.public(), 1, TIMESTAMP, &c).unwrap();
+    let (hello_b, _) =
+        initiator_hello(&suite, &initiator_b, responder.public(), 1, TIMESTAMP, &c).unwrap();
 
     // Same timestamp/index/seed; the ephemeral key derives from `c` alone, so the
     // EPHEMERAL_PK is identical, while STATIC_CT (the MEX-bound op A) differs.
@@ -237,17 +245,9 @@ fn forged_confirmation_is_rejected() {
 
     let (init_hello, i_state) =
         initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
-    let (resp_hello, r_state) = responder_process_init(
-        &suite,
-        &responder,
-        initiator.public(),
-        &init_hello,
-        2,
-        &d,
-    )
-    .unwrap();
-    let (init_conf, _) =
-        initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
+    let (resp_hello, r_state) =
+        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
+    let (init_conf, _) = initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
 
     // InitConf layout: 8-byte header, then CONFIRMATION (tag+len = 4 bytes, then
     // the 32-byte value at offset 12..44), then RECEIVER_INDEX. Flip a bit inside
@@ -271,8 +271,7 @@ fn forged_responder_confirmation_is_rejected() {
     let (init_hello, i_state) =
         initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
     let (resp_hello, _) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d)
-            .unwrap();
+        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
 
     // Rebuild RespHello with a corrupted responder confirmation. The other fields
     // are copied across so the failure is the confirmation, not the framing.
@@ -285,8 +284,11 @@ fn forged_responder_confirmation_is_rejected() {
             .unwrap();
         b.field(tag::STATIC_CT, msg.require(tag::STATIC_CT).unwrap())
             .unwrap();
-        b.field(tag::RECEIVER_INDEX, msg.require(tag::RECEIVER_INDEX).unwrap())
-            .unwrap();
+        b.field(
+            tag::RECEIVER_INDEX,
+            msg.require(tag::RECEIVER_INDEX).unwrap(),
+        )
+        .unwrap();
         b.field(tag::CONFIRMATION, &confirmation).unwrap();
         b.finish().unwrap()
     };
@@ -314,9 +316,15 @@ fn a_responder_confirmation_cannot_be_replayed_from_another_handshake() {
             .unwrap();
 
     // A second handshake with different initiator entropy.
-    let (_, i_state_2) =
-        initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &[0x77u8; 32])
-            .unwrap();
+    let (_, i_state_2) = initiator_hello(
+        &suite,
+        &initiator,
+        responder.public(),
+        1,
+        TIMESTAMP,
+        &[0x77u8; 32],
+    )
+    .unwrap();
 
     // Combining handshake 1's RespHello with handshake 2's state must fail: the
     // transcript the responder confirmed is not the one this initiator computed.
@@ -335,23 +343,19 @@ fn missing_confirmation_field_is_a_framing_error() {
 
     let (init_hello, i_state) =
         initiator_hello(&suite, &initiator, responder.public(), 1, TIMESTAMP, &c).unwrap();
-    let (resp_hello, r_state) = responder_process_init(
-        &suite,
-        &responder,
-        initiator.public(),
-        &init_hello,
-        2,
-        &d,
-    )
-    .unwrap();
+    let (resp_hello, r_state) =
+        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
     let (init_conf, _) = initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
 
     // Rebuild InitConf carrying only the receiver index — no confirmation at all.
     let stripped = {
         let msg = Message::parse(&init_conf).unwrap();
         let mut b = MessageBuilder::new(msg.header());
-        b.field(tag::RECEIVER_INDEX, msg.require(tag::RECEIVER_INDEX).unwrap())
-            .unwrap();
+        b.field(
+            tag::RECEIVER_INDEX,
+            msg.require(tag::RECEIVER_INDEX).unwrap(),
+        )
+        .unwrap();
         b.finish().unwrap()
     };
 
@@ -388,12 +392,17 @@ fn wrong_receiver_index_is_rejected() {
     let initiator = StaticIdentity::generate(&suite, &a).unwrap();
     let responder = StaticIdentity::generate(&suite, &b).unwrap();
 
-    let (init_hello, i_state) =
-        initiator_hello(&suite, &initiator, responder.public(), 0x1122_3344, TIMESTAMP, &c)
-            .unwrap();
+    let (init_hello, i_state) = initiator_hello(
+        &suite,
+        &initiator,
+        responder.public(),
+        0x1122_3344,
+        TIMESTAMP,
+        &c,
+    )
+    .unwrap();
     let (resp_hello, _) =
-        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d)
-            .unwrap();
+        responder_process_init(&suite, &responder, initiator.public(), &init_hello, 2, &d).unwrap();
 
     // Rebuild RespHello echoing the wrong initiator index.
     let tampered = {
@@ -435,13 +444,31 @@ fn dump_frozen_vectors() {
     for suite in shipped_suites() {
         let ex = default_run(&suite);
         println!("=== suite {:#06x} ===", suite.suite_id());
-        println!("init_hello  {} bytes {}", ex.init_hello.len(), hex(&ex.init_hello));
-        println!("resp_hello  {} bytes {}", ex.resp_hello.len(), hex(&ex.resp_hello));
-        println!("init_conf   {} bytes {}", ex.init_conf.len(), hex(&ex.init_conf));
+        println!(
+            "init_hello  {} bytes {}",
+            ex.init_hello.len(),
+            hex(&ex.init_hello)
+        );
+        println!(
+            "resp_hello  {} bytes {}",
+            ex.resp_hello.len(),
+            hex(&ex.resp_hello)
+        );
+        println!(
+            "init_conf   {} bytes {}",
+            ex.init_conf.len(),
+            hex(&ex.init_conf)
+        );
         println!("transcript  {}", hex(&ex.initiator.transcript));
         println!("key         {}", hex(ex.initiator.key.as_bytes()));
-        println!("conf_i      {}", hex(ex.initiator.confirm_initiator.as_bytes()));
-        println!("conf_r      {}", hex(ex.initiator.confirm_responder.as_bytes()));
+        println!(
+            "conf_i      {}",
+            hex(ex.initiator.confirm_initiator.as_bytes())
+        );
+        println!(
+            "conf_r      {}",
+            hex(ex.initiator.confirm_responder.as_bytes())
+        );
     }
 }
 
@@ -506,10 +533,22 @@ fn frozen_vectors_match() {
         let ex = default_run(&suite);
         let where_ = format!("suite {:#06x}", v.suite_id);
 
-        assert_eq!(ex.init_hello.len(), v.init_hello_len, "{where_}: InitHello size");
-        assert_eq!(ex.resp_hello.len(), v.resp_hello_len, "{where_}: RespHello size");
+        assert_eq!(
+            ex.init_hello.len(),
+            v.init_hello_len,
+            "{where_}: InitHello size"
+        );
+        assert_eq!(
+            ex.resp_hello.len(),
+            v.resp_hello_len,
+            "{where_}: RespHello size"
+        );
         assert_eq!(hex(&ex.init_conf), v.init_conf, "{where_}: InitConf bytes");
-        assert_eq!(hex(&ex.initiator.transcript), v.transcript, "{where_}: transcript");
+        assert_eq!(
+            hex(&ex.initiator.transcript),
+            v.transcript,
+            "{where_}: transcript"
+        );
         assert_eq!(
             hex(ex.initiator.key.as_bytes()),
             v.key,

@@ -46,6 +46,15 @@ pub const HEADER_LEN: usize = 8;
 /// fragmentation opportunity.
 pub const MAX_HANDSHAKE_MESSAGE: usize = 16 * 1024;
 
+/// Hard cap on a single data message, in bytes.
+///
+/// Deliberately the same value as [`MAX_HANDSHAKE_MESSAGE`]. A tunnelled
+/// layer-3 packet is MTU-bounded — comfortably under 2 KiB — so this cap is a
+/// memory bound against a hostile peer, not a fragmentation budget. One parser
+/// and one cap for both planes means there is no second framing implementation
+/// to get subtly wrong.
+pub const MAX_DATA_MESSAGE: usize = MAX_HANDSHAKE_MESSAGE;
+
 /// Length of a TAI64N timestamp, as in WireGuard.
 pub const TIMESTAMP_SIZE: usize = 12;
 
@@ -64,6 +73,8 @@ pub enum MessageType {
     RespHello,
     /// Initiator → responder: explicit key confirmation.
     InitConf,
+    /// Either direction: an encrypted transport packet (P2).
+    Data,
 }
 
 impl MessageType {
@@ -74,6 +85,7 @@ impl MessageType {
             Self::InitHello => 0x01,
             Self::RespHello => 0x02,
             Self::InitConf => 0x03,
+            Self::Data => 0x04,
         }
     }
 
@@ -84,6 +96,7 @@ impl MessageType {
             0x01 => Some(Self::InitHello),
             0x02 => Some(Self::RespHello),
             0x03 => Some(Self::InitConf),
+            0x04 => Some(Self::Data),
             _ => None,
         }
     }
@@ -95,6 +108,7 @@ impl MessageType {
             Self::InitHello => "InitHello",
             Self::RespHello => "RespHello",
             Self::InitConf => "InitConf",
+            Self::Data => "Data",
         }
     }
 }
@@ -114,6 +128,8 @@ pub mod tag {
     pub const TIMESTAMP: u16 = 0x0004;
     /// The sender index this message replies to ([`super::INDEX_SIZE`] bytes, BE).
     pub const RECEIVER_INDEX: u16 = 0x0005;
+    /// A data message's 64-bit packet counter (P2).
+    pub const COUNTER: u16 = 0x0006;
     /// A key-confirmation value ([`super::CONFIRMATION_SIZE`] bytes).
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).
@@ -122,7 +138,16 @@ pub mod tag {
     pub const MAC1: u16 = 0x0030;
     /// WireGuard-style `mac2` cookie (P2).
     pub const MAC2: u16 = 0x0031;
+    /// A data message's AEAD ciphertext, tag appended (P2).
+    pub const DATA_CT: u16 = 0x0040;
 }
+
+/// Tags that a cookie MAC must not cover.
+///
+/// `mac1` and `mac2` are computed over the message *excluding* these fields —
+/// see [`Message::mac1_input`]. Keeping the list in one place is what makes the
+/// sender and receiver agree on the exact bytes.
+pub const MAC_TAGS: [u16; 2] = [tag::MAC1, tag::MAC2];
 
 /// A parsed 8-byte handshake header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,11 +181,12 @@ impl MessageHeader {
     /// [`HandshakeError::Wire`] if the buffer is too short or the message type
     /// is unknown.
     pub fn decode(buf: &[u8]) -> Result<Self, HandshakeError> {
-        let head = buf
-            .get(..HEADER_LEN)
-            .ok_or_else(|| HandshakeError::Wire(format!("shorter than the {HEADER_LEN}-byte header")))?;
-        let message_type = MessageType::from_code(head[1])
-            .ok_or_else(|| HandshakeError::Wire(format!("unknown message type {:#04x}", head[1])))?;
+        let head = buf.get(..HEADER_LEN).ok_or_else(|| {
+            HandshakeError::Wire(format!("shorter than the {HEADER_LEN}-byte header"))
+        })?;
+        let message_type = MessageType::from_code(head[1]).ok_or_else(|| {
+            HandshakeError::Wire(format!("unknown message type {:#04x}", head[1]))
+        })?;
         Ok(Self {
             version: head[0],
             message_type,
@@ -170,11 +196,37 @@ impl MessageHeader {
     }
 }
 
-/// Builds a handshake message field by field.
+/// Serialize a header plus TLV fields in order, skipping the tags in `exclude`.
+///
+/// Shared by [`MessageBuilder`] and [`Message`] so the bytes a cookie MAC covers
+/// are constructed identically on both ends.
+fn serialize_fields<T: AsRef<[u8]>>(
+    header: MessageHeader,
+    fields: &[(u16, T)],
+    exclude: &[u16],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&header.encode());
+    for (tag, value) in fields {
+        if exclude.contains(tag) {
+            continue;
+        }
+        let value = value.as_ref();
+        // Bounded by the 65535 field limit: the builder validates on append and
+        // the parser reads the length as a `u16`, so this cannot truncate.
+        let len = value.len() as u16;
+        out.extend_from_slice(&tag.to_be_bytes());
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// Builds a handshake or data message field by field.
 #[derive(Debug)]
 pub struct MessageBuilder {
     header: MessageHeader,
-    body: Vec<u8>,
+    fields: Vec<(u16, Vec<u8>)>,
 }
 
 impl MessageBuilder {
@@ -183,23 +235,72 @@ impl MessageBuilder {
     pub fn new(header: MessageHeader) -> Self {
         Self {
             header,
-            body: Vec::new(),
+            fields: Vec::new(),
         }
     }
 
     /// Append one TLV field.
     ///
+    /// The cookie fields are ordered, because a `mac1`/`mac2` is computed over
+    /// the fields present when it is added ([`MessageBuilder::mac1_input`]): all
+    /// other fields must come before `mac1`, and `mac2` must come after it.
+    /// Trying to add them in any other order is an error rather than a message
+    /// whose MAC the receiver would compute differently.
+    ///
     /// # Errors
     ///
-    /// [`HandshakeError::Wire`] if the value is longer than `u16::MAX` bytes.
+    /// [`HandshakeError::Wire`] if the value is longer than `u16::MAX` bytes,
+    /// if the tag was already added (the parser rejects duplicates, so refusing
+    /// to build one keeps every built message parseable), or if the cookie
+    /// fields are out of order.
     pub fn field(&mut self, tag: u16, value: &[u8]) -> Result<&mut Self, HandshakeError> {
-        let len = u16::try_from(value.len()).map_err(|_| {
-            HandshakeError::Wire(format!("field {tag:#06x} is {} bytes, over the 65535 limit", value.len()))
+        u16::try_from(value.len()).map_err(|_| {
+            HandshakeError::Wire(format!(
+                "field {tag:#06x} is {} bytes, over the 65535 limit",
+                value.len()
+            ))
         })?;
-        self.body.extend_from_slice(&tag.to_be_bytes());
-        self.body.extend_from_slice(&len.to_be_bytes());
-        self.body.extend_from_slice(value);
+        if self.fields.iter().any(|(t, _)| *t == tag) {
+            return Err(HandshakeError::Wire(format!("duplicate tag {tag:#06x}")));
+        }
+
+        let is_mac1 = tag == tag::MAC1;
+        let is_mac2 = tag == tag::MAC2;
+        let has_mac1 = self.fields.iter().any(|(t, _)| *t == tag::MAC1);
+        if is_mac2 && !has_mac1 {
+            return Err(HandshakeError::Wire("mac2 must be added after mac1".into()));
+        }
+        if !is_mac1 && !is_mac2 && has_mac1 {
+            return Err(HandshakeError::Wire(
+                "no field may be added after mac1".into(),
+            ));
+        }
+
+        self.fields.push((tag, value.to_vec()));
         Ok(self)
+    }
+
+    /// The bytes a `mac1` must cover: the header followed by every field so far
+    /// **except** the cookie fields, in wire order.
+    ///
+    /// Call this once the non-cookie fields are in, before adding `mac1`.
+    #[must_use]
+    pub fn mac1_input(&self) -> Vec<u8> {
+        self.serialize(&MAC_TAGS)
+    }
+
+    /// The bytes a `mac2` must cover: the header followed by every field so far
+    /// **except** `mac2` itself, so the `mac1` already present is included.
+    ///
+    /// Call this after adding `mac1`, before adding `mac2`.
+    #[must_use]
+    pub fn mac2_input(&self) -> Vec<u8> {
+        self.serialize(&[tag::MAC2])
+    }
+
+    /// Serialize header plus fields in order, skipping `exclude`.
+    fn serialize(&self, exclude: &[u16]) -> Vec<u8> {
+        serialize_fields(self.header, &self.fields, exclude)
     }
 
     /// Finish, returning the wire bytes.
@@ -208,15 +309,13 @@ impl MessageBuilder {
     ///
     /// [`HandshakeError::Wire`] if the assembled message exceeds the size cap.
     pub fn finish(self) -> Result<Vec<u8>, HandshakeError> {
-        if HEADER_LEN + self.body.len() > MAX_HANDSHAKE_MESSAGE {
+        let out = self.serialize(&[]);
+        if out.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(HandshakeError::Wire(format!(
                 "message would be {} bytes, over the {MAX_HANDSHAKE_MESSAGE}-byte cap",
-                HEADER_LEN + self.body.len()
+                out.len()
             )));
         }
-        let mut out = Vec::with_capacity(HEADER_LEN + self.body.len());
-        out.extend_from_slice(&self.header.encode());
-        out.extend_from_slice(&self.body);
         Ok(out)
     }
 }
@@ -340,6 +439,25 @@ impl<'a> Message<'a> {
         self.fields.iter().map(|(t, _)| *t)
     }
 
+    /// The bytes a `mac1` must cover: the header followed by every field
+    /// **except** the cookie fields, in wire order.
+    ///
+    /// This is the receiver's mirror of [`MessageBuilder::mac1_input`]. It is
+    /// derived from the parsed fields, not from the raw buffer, so a peer cannot
+    /// satisfy the cookie check by reordering fields: the reconstruction changes
+    /// and the MAC fails.
+    #[must_use]
+    pub fn mac1_input(&self) -> Vec<u8> {
+        serialize_fields(self.header, &self.fields, &MAC_TAGS)
+    }
+
+    /// The bytes a `mac2` must cover: the header followed by every field
+    /// **except** `mac2` — so `mac1` is included, as the sender had it.
+    #[must_use]
+    pub fn mac2_input(&self) -> Vec<u8> {
+        serialize_fields(self.header, &self.fields, &[tag::MAC2])
+    }
+
     /// Assert the message type.
     ///
     /// # Errors
@@ -439,7 +557,12 @@ mod tests {
         b.field(tag::TIMESTAMP, &[0u8; TIMESTAMP_SIZE]).unwrap();
         let mut bytes = b.finish().unwrap();
         // Splice the same field in a second time.
-        let dup = [&tag::TIMESTAMP.to_be_bytes()[..], &(12u16).to_be_bytes()[..], &[0u8; 12][..]].concat();
+        let dup = [
+            &tag::TIMESTAMP.to_be_bytes()[..],
+            &(12u16).to_be_bytes()[..],
+            &[0u8; 12][..],
+        ]
+        .concat();
         bytes.extend_from_slice(&dup);
         assert!(matches!(
             Message::parse(&bytes),
@@ -491,17 +614,15 @@ mod tests {
     #[test]
     fn oversize_message_is_rejected_on_build() {
         let mut b = MessageBuilder::new(header(MessageType::InitHello));
-        b.field(tag::EPHEMERAL_PK, &vec![0u8; MAX_HANDSHAKE_MESSAGE]).unwrap();
+        b.field(tag::EPHEMERAL_PK, &vec![0u8; MAX_HANDSHAKE_MESSAGE])
+            .unwrap();
         assert!(matches!(b.finish(), Err(HandshakeError::Wire(_))));
     }
 
     #[test]
     fn oversized_buffer_is_rejected_on_parse() {
         let buf = vec![0u8; MAX_HANDSHAKE_MESSAGE + 1];
-        assert!(matches!(
-            Message::parse(&buf),
-            Err(HandshakeError::Wire(_))
-        ));
+        assert!(matches!(Message::parse(&buf), Err(HandshakeError::Wire(_))));
     }
 
     #[test]
@@ -535,6 +656,105 @@ mod tests {
         let bytes = b.finish().unwrap();
         let msg = Message::parse(&bytes).unwrap();
         assert!(msg.require_array::<TIMESTAMP_SIZE>(tag::TIMESTAMP).is_err());
-        assert!(msg.require_array::<TIMESTAMP_SIZE>(tag::EPHEMERAL_PK).is_err());
+        assert!(msg
+            .require_array::<TIMESTAMP_SIZE>(tag::EPHEMERAL_PK)
+            .is_err());
+    }
+
+    #[test]
+    fn a_data_message_is_just_another_message_type() {
+        assert_eq!(MessageType::Data.code(), 0x04);
+        assert_eq!(MessageType::from_code(0x04), Some(MessageType::Data));
+        let mut b = MessageBuilder::new(header(MessageType::Data));
+        b.field(tag::COUNTER, &1u64.to_be_bytes()).unwrap();
+        b.field(tag::DATA_CT, b"ciphertext").unwrap();
+        let bytes = b.finish().unwrap();
+        let msg = Message::parse(&bytes).unwrap();
+        assert_eq!(msg.message_type(), MessageType::Data);
+        assert_eq!(msg.get(tag::COUNTER), Some(&1u64.to_be_bytes()[..]));
+    }
+
+    /// The cookie MACs must cover the same bytes on both ends. `mac1_input`
+    /// excludes both cookie fields; `mac2_input` excludes only `mac2`, so it
+    /// commits to `mac1`.
+    #[test]
+    fn mac_inputs_exclude_the_right_fields() {
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        b.field(tag::EPHEMERAL_PK, b"pk").unwrap();
+        let without_cookies = b.mac1_input();
+        assert_eq!(
+            without_cookies,
+            b.mac2_input(),
+            "with no cookies yet, both cover the same bytes"
+        );
+        assert_eq!(
+            &without_cookies[..HEADER_LEN],
+            &header(MessageType::InitHello).encode()
+        );
+        assert!(
+            without_cookies.len() > HEADER_LEN,
+            "the non-cookie fields are covered"
+        );
+
+        b.field(tag::MAC1, b"0123456789abcdef").unwrap();
+        let with_mac1 = b.mac1_input();
+        let with_mac1_for_mac2 = b.mac2_input();
+        assert_eq!(with_mac1, without_cookies, "mac1 does not cover itself");
+        assert_ne!(with_mac1_for_mac2, with_mac1, "mac2 must cover mac1");
+
+        b.field(tag::MAC2, b"fedcba9876543210").unwrap();
+        let bytes = b.finish().unwrap();
+        let msg = Message::parse(&bytes).unwrap();
+        // The receiver reconstructs exactly what the sender covered.
+        assert_eq!(msg.mac1_input(), with_mac1);
+        assert_eq!(msg.mac2_input(), with_mac1_for_mac2);
+    }
+
+    #[test]
+    fn mac_inputs_follow_wire_order_not_tag_order() {
+        // Field order is preserved, so a peer cannot rearrange fields and keep a
+        // valid cookie by some accidental canonicalisation.
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        b.field(0x7000, b"first").unwrap();
+        b.field(0x0100, b"second").unwrap();
+        let forward = b.mac1_input();
+
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        b.field(0x0100, b"second").unwrap();
+        b.field(0x7000, b"first").unwrap();
+        assert_ne!(b.mac1_input(), forward);
+    }
+
+    #[test]
+    fn cookie_fields_must_be_added_in_order() {
+        // mac2 before mac1.
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        assert!(matches!(
+            b.field(tag::MAC2, b"fedcba9876543210"),
+            Err(HandshakeError::Wire(_))
+        ));
+
+        // Anything other than mac2 after mac1.
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        b.field(tag::MAC1, b"0123456789abcdef").unwrap();
+        assert!(matches!(
+            b.field(tag::EPHEMERAL_PK, b"too late"),
+            Err(HandshakeError::Wire(_))
+        ));
+        // ...but mac2 is fine, and so is finishing.
+        b.field(tag::MAC2, b"fedcba9876543210").unwrap();
+        assert!(b.finish().is_ok());
+    }
+
+    #[test]
+    fn a_duplicate_tag_is_refused_at_build_time_too() {
+        // The parser rejects duplicates, so the builder must not be able to
+        // produce a message the parser would refuse.
+        let mut b = MessageBuilder::new(header(MessageType::InitHello));
+        b.field(tag::EPHEMERAL_PK, b"pk").unwrap();
+        assert!(matches!(
+            b.field(tag::EPHEMERAL_PK, b"pk again"),
+            Err(HandshakeError::Wire(_))
+        ));
     }
 }

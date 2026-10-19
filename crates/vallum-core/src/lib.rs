@@ -53,20 +53,54 @@
 //! the initiator's confirmation commits to the transcript that includes `conf_r`.
 //! This mirrors PQ-WireGuard's running hash chain (`H10 = H(H9 ‖ zero)`).
 //!
-//! `KEY` is the handshake root the data plane will expand (P4); P1 freezes it.
+//! `KEY` is the handshake root the data plane expands; P1 freezes it.
 //! Every concatenation is length-framed, so it is unambiguous.
+//!
+//! ## Data plane (P2)
+//!
+//! [`keys`] expands `KEY` into a directional AEAD key and nonce prefix per
+//! epoch; [`data`] seals and opens transport packets with the header and counter
+//! as associated data; [`replay`] drops duplicates from an authenticated sliding
+//! window; [`cookie`] supplies the `mac1`/`mac2` anti-flood layer; [`timestamp`]
+//! guards against a replayed handshake; [`timer`] bounds a key's lifetime.
+//! See `docs/proof/committing-aead-multikey.md`.
 
 #![forbid(unsafe_code)]
 
+pub mod cookie;
+pub mod data;
 pub mod error;
 pub mod handshake;
+pub mod keys;
+pub mod replay;
+pub mod timer;
+pub mod timestamp;
 pub mod wire;
 
-pub use error::HandshakeError;
+pub use data::{
+    establish, establish_epoch, Receiver, Sender, REJECT_AFTER_MESSAGES, REKEY_AFTER_MESSAGES,
+};
+pub use error::{DataError, HandshakeError};
 pub use handshake::{
     initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
     InitiatorState, ResponderState, SessionKeys, StaticIdentity,
 };
+pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
+pub use replay::{ReplayFilter, REPLAY_WINDOW};
+pub use timer::{TimerAction, Timers};
+pub use timestamp::{Tai64n, Tai64nGuard, TimestampError};
 pub use wire::{
-    Message, MessageBuilder, MessageHeader, MessageType, MAX_HANDSHAKE_MESSAGE, PROTOCOL_VERSION,
+    Message, MessageBuilder, MessageHeader, MessageType, MAX_DATA_MESSAGE, MAX_HANDSHAKE_MESSAGE,
+    PROTOCOL_VERSION,
 };
+
+/// Best-effort memory scrub the optimizer is unlikely to elide.
+///
+/// The same construction as `vallum-crypto`'s internal helper, kept local
+/// because that one is crate-private.
+pub(crate) fn scrub(buf: &mut [u8]) {
+    for byte in buf.iter_mut() {
+        *byte = 0;
+    }
+    core::hint::black_box(buf);
+}

@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use vallum_crypto::{KdfError, KemError, SuiteError};
+use vallum_crypto::{AeadError, KdfError, KemError, SuiteError};
 
 /// A handshake or wire-framing failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,10 @@ impl fmt::Display for HandshakeError {
         match self {
             Self::Wire(reason) => write!(f, "HandshakeError: bad wire data: {reason}"),
             Self::WrongMessageType { expected, got } => {
-                write!(f, "HandshakeError: expected {expected}, got message type {got:#04x}")
+                write!(
+                    f,
+                    "HandshakeError: expected {expected}, got message type {got:#04x}"
+                )
             }
             Self::SuiteMismatch { expected, got } => write!(
                 f,
@@ -111,5 +114,95 @@ impl From<KdfError> for HandshakeError {
 impl From<SuiteError> for HandshakeError {
     fn from(e: SuiteError) -> Self {
         Self::Suite(e)
+    }
+}
+
+/// A data-plane failure.
+///
+/// Deliberately distinct from [`HandshakeError`]: the data plane has failure
+/// modes the handshake does not — replay, counter exhaustion, recipient-index
+/// demultiplexing — and conflating them would make the caller's retry logic
+/// guess wrong. In particular a replay must **not** look like a forgery: the
+/// tag verified, the packet is simply one we have already accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataError {
+    /// The packet is not a well-formed data message.
+    Wire(String),
+    /// AEAD authentication failed: the packet was forged, corrupted, or sealed
+    /// under a different key, nonce, or associated data.
+    Aead(AeadError),
+    /// Key derivation for the data plane failed.
+    Kdf(KdfError),
+    /// The packet's counter was already accepted, or is older than the replay
+    /// window. `next` is one past the highest counter accepted so far.
+    Replay {
+        /// The counter carried by the rejected packet.
+        counter: u64,
+        /// One past the highest counter accepted so far.
+        next: u64,
+    },
+    /// The counter reached [`crate::data::REJECT_AFTER_MESSAGES`]; the key must
+    /// not be used to seal again.
+    CounterExhausted {
+        /// The counter that was refused.
+        counter: u64,
+    },
+    /// The packet named a different session than this one. Data packets carry
+    /// the *recipient's* index in the header, so this is how a receiver demuxes
+    /// without trusting the source address.
+    WrongIndex {
+        /// This session's own index.
+        expected: u32,
+        /// The index carried by the packet.
+        got: u32,
+    },
+}
+
+impl fmt::Display for DataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Wire(reason) => write!(f, "DataError: bad wire data: {reason}"),
+            Self::Aead(e) => write!(f, "DataError: authentication failed: {e}"),
+            Self::Kdf(e) => write!(f, "DataError: {e}"),
+            Self::Replay { counter, next } => write!(
+                f,
+                "DataError: counter {counter} rejected as replayed or too old (next is {next})"
+            ),
+            Self::CounterExhausted { counter } => {
+                write!(f, "DataError: counter {counter} reached the rekey limit")
+            }
+            Self::WrongIndex { expected, got } => write!(
+                f,
+                "DataError: packet names session {got:#010x}, this session is {expected:#010x}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DataError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Aead(e) => Some(e),
+            Self::Kdf(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<HandshakeError> for DataError {
+    fn from(e: HandshakeError) -> Self {
+        Self::Wire(e.to_string())
+    }
+}
+
+impl From<AeadError> for DataError {
+    fn from(e: AeadError) -> Self {
+        Self::Aead(e)
+    }
+}
+
+impl From<KdfError> for DataError {
+    fn from(e: KdfError) -> Self {
+        Self::Kdf(e)
     }
 }

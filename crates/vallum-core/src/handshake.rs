@@ -182,6 +182,15 @@ pub struct SessionKeys {
     /// `key` — i.e. holds `σ_r` — *before* the initiator accepts the session.
     /// PQ-WireGuard's `zero` field plays the same role.
     pub confirm_responder: SharedSecret,
+    /// The 32-bit session index this endpoint announced in its own handshake
+    /// messages.
+    ///
+    /// Data packets carry the *recipient's* index (WireGuard's `receiver`
+    /// field), so a receiver demuxes on this value and a sender stamps the
+    /// peer's. See [`crate::data::Sender`].
+    pub own_index: u32,
+    /// The 32-bit index the peer announced.
+    pub peer_index: u32,
 }
 
 // ── state ────────────────────────────────────────────────────────────
@@ -412,7 +421,12 @@ fn schedule(
     // it, and deriving `key` requires decapsulating op A.
     let mut confirm_responder = [0u8; 32];
     suite
-        .kdf(key.as_bytes(), transcript_resp, CONFIRM_R_INFO, &mut confirm_responder)
+        .kdf(
+            key.as_bytes(),
+            transcript_resp,
+            CONFIRM_R_INFO,
+            &mut confirm_responder,
+        )
         .map_err(HandshakeError::Kdf)?;
 
     Ok((key, SharedSecret::new(confirm_responder)))
@@ -621,6 +635,8 @@ pub fn responder_process_init(
         key,
         confirm_initiator,
         confirm_responder,
+        own_index: sender_index,
+        peer_index: message.sender_index(),
     };
 
     let state = ResponderState {
@@ -722,6 +738,8 @@ pub fn initiator_process_resp(
         key,
         confirm_initiator,
         confirm_responder,
+        own_index: state.sender_index,
+        peer_index: message.sender_index(),
     };
 
     let header = MessageHeader {
