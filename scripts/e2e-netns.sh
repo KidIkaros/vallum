@@ -200,6 +200,15 @@ write_config() { # $1 name  $2 inner CIDR  $3 listen  $4 peer endpoint  $5 peer 
 write_config a "$INNER_A/24" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
 write_config b "$INNER_B/24" "$OUTER_B:$PORT" ""                 "$INNER_A/32" "$PUB_A" 1
 
+# G1: a configured PSK on both ends. Every lifecycle below inherits it, so the
+# whole gate runs with a PSK rather than one special case.
+PSK=$("$BIN" genpsk)
+[ "${#PSK}" -eq 64 ] || bad "genpsk produced ${#PSK} characters, expected 64"
+sed -i "/^public_key = /a preshared_key = \"$PSK\"" "$WORK/a.toml" "$WORK/b.toml"
+grep -q "^preshared_key = \"$PSK\"$" "$WORK/a.toml" || bad "A's config lost the PSK"
+grep -q "^preshared_key = \"$PSK\"$" "$WORK/b.toml" || bad "B's config lost the PSK"
+ok "a shared preshared key is configured on both ends"
+
 # ── arm the adversary's capture ──────────────────────────────────────
 #
 # The adversary lives in ns2, but the `InitHello` it will replay is captured on

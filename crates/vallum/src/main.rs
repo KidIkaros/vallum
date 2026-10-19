@@ -56,6 +56,8 @@ enum Command {
     Keygen(KeygenArgs),
     /// Print the public line for an existing private key.
     Pubkey(PubkeyArgs),
+    /// Generate a 32-byte preshared key as 64 hex characters.
+    Genpsk,
 }
 
 #[derive(Args)]
@@ -100,6 +102,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run_tunnel(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keygen(&args),
         Command::Pubkey(args) => pubkey(&args, cli.allow_insecure_key_permissions),
+        Command::Genpsk => genpsk(),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -126,7 +129,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let suite = SdkSuite::from_id(config.suite_id(&args.config)?)
         .map_err(|e| Error::Suite(format!("key file names a suite this build cannot use: {e}")))?;
 
-    let resolved = config.resolve(&args.config, &suite)?;
+    let resolved = config.resolve_with(&args.config, &suite, allow_insecure_key)?;
     let log = Logger::new(resolved.level);
     if let Some(warning) = insecure_key {
         log_warn!(
@@ -221,6 +224,14 @@ fn install_signal_handlers(shutdown: &Shutdown) -> Result<(), Error> {
 }
 
 /// `keygen`.
+fn genpsk() -> Result<(), Error> {
+    let mut psk = [0u8; 32];
+    getrandom::fill(&mut psk)
+        .map_err(|e| Error::Io(std::io::Error::other(format!("getrandom: {e}"))))?;
+    println!("{}", keys::hex_encode(&psk));
+    Ok(())
+}
+
 fn keygen(args: &KeygenArgs) -> Result<(), Error> {
     let suite_id = parse_suite(&args.suite)?;
     // Refuse to write a key for a suite this build cannot expand.

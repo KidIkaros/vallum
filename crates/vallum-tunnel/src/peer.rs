@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use vallum_core::identity::PeerIdentity;
 use vallum_core::shaping::Machine;
+use vallum_crypto::SharedSecret;
 
 use crate::routing::{AllowedIps, Prefix};
 
@@ -111,6 +112,23 @@ impl PeerConfig {
     pub fn with_endpoint(mut self, endpoint: SocketAddr) -> Self {
         self.endpoint = Some(endpoint);
         self
+    }
+
+    /// Require this peer to use a configured preshared key (G1).
+    ///
+    /// The key is mixed into the handshake's key schedule; it never appears on
+    /// the wire, and the peer must be configured with the same one or the
+    /// confirmation fails.
+    #[must_use]
+    pub fn with_preshared_key(mut self, psk: SharedSecret) -> Self {
+        self.identity = self.identity.clone().with_preshared_key(psk);
+        self
+    }
+
+    /// The configured PSK, if any.
+    #[must_use]
+    pub fn preshared_key(&self) -> Option<&SharedSecret> {
+        self.identity.preshared_key()
     }
 
     /// Send an empty packet every `interval`, even with nothing to send.

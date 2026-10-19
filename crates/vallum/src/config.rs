@@ -164,6 +164,19 @@ pub struct PeerEntry {
     /// wrote and the daemon ignores is how a security setting goes missing.
     #[serde(default)]
     pub persistent_keepalive: Option<u16>,
+    /// A 32-byte preshared key as 64 hex characters, mixed into the handshake.
+    ///
+    /// The secret sits in the config file, so prefer [`Self::preshared_key_file`]
+    /// unless the file's own permissions already protect it. Both fields set is
+    /// an error rather than a precedence rule.
+    #[serde(default)]
+    pub preshared_key: Option<String>,
+    /// A file holding the PSK as 64 hex characters.
+    ///
+    /// The same permission policy as the private key applies: group/world bits
+    /// are refused unless `--allow-insecure-key-permissions` is passed.
+    #[serde(default)]
+    pub preshared_key_file: Option<PathBuf>,
     /// Traffic-analysis shaping machines for this peer's tunnel.
     #[serde(default)]
     pub shaping: Vec<ShapingSpec>,
@@ -316,6 +329,20 @@ impl Config {
     /// not match the suite, a peer line from a different suite, or a peer table
     /// the transport refuses.
     pub fn resolve(&self, path: &Path, suite: &dyn CryptoSuite) -> Result<Resolved, Error> {
+        self.resolve_with(path, suite, false)
+    }
+
+    /// Resolve, with the private-key permission override.
+    ///
+    /// [`Self::resolve`] is the strict form; the daemon passes the CLI override
+    /// here so a deliberately exposed key file is a warning rather than a
+    /// refusal.
+    pub fn resolve_with(
+        &self,
+        path: &Path,
+        suite: &dyn CryptoSuite,
+        allow_insecure_key: bool,
+    ) -> Result<Resolved, Error> {
         let mut warnings = Vec::new();
 
         let level = Level::parse(&self.log.level).ok_or_else(|| Error::Invalid {
@@ -566,6 +593,41 @@ impl Config {
                     ),
                 });
             }
+
+            // G1: an optional configured PSK, inline or from a file. Both set
+            // is an error: a precedence rule would let one silently shadow the
+            // other, and a PSK is not a field to guess about.
+            let peer_identity = match (
+                entry.preshared_key.as_deref(),
+                entry.preshared_key_file.as_deref(),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "{}: preshared_key and preshared_key_file are both set; \
+                             choose one",
+                            where_()
+                        ),
+                    });
+                }
+                (Some(text), None) => {
+                    let psk = keys::parse_psk(text).map_err(|why| Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!("{}: preshared_key: {why}", where_()),
+                    })?;
+                    peer_identity.with_preshared_key(psk)
+                }
+                (None, Some(declared)) => {
+                    let file = resolve_key_path(path, declared);
+                    let (psk, warning) = keys::load_psk(&file, allow_insecure_key)?;
+                    if let Some(warning) = warning {
+                        warnings.push(format!("{}: {warning}", where_()));
+                    }
+                    peer_identity.with_preshared_key(psk)
+                }
+                (None, None) => peer_identity,
+            };
 
             let mut config =
                 PeerConfig::new(entry.name.clone(), peer_identity).with_allowed_ips(nets.clone());

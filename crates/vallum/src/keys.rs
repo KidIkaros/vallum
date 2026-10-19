@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use vallum_core::identity::{PeerIdentity, StaticIdentity};
-use vallum_crypto::{CryptoSuite, KemPublicKey, SignPublicKey};
+use vallum_crypto::{CryptoSuite, KemPublicKey, SharedSecret, SignPublicKey};
 
 use crate::error::Error;
 
@@ -201,6 +201,46 @@ pub fn load_secret(path: &Path) -> Result<SecretFile, Error> {
         });
     }
     Ok(file)
+}
+
+/// Parse a 32-byte PSK from 64 hex characters.
+///
+/// # Errors
+///
+/// A human-readable reason if the text is not exactly 32 bytes of hex.
+pub fn parse_psk(text: &str) -> Result<SharedSecret, String> {
+    let bytes = hex_decode(text.trim())?;
+    let len = bytes.len();
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| format!("preshared key is {len} bytes, not 32"))?;
+    Ok(SharedSecret::new(bytes))
+}
+
+/// Load a PSK from a file, enforcing the private-key permission policy.
+///
+/// Returns the key and, when the override allowed a loose mode, the warning the
+/// caller should log.
+///
+/// # Errors
+///
+/// [`Error::KeyPermissions`] for a group/world-readable file without the
+/// override, or an I/O/parse failure naming the path.
+pub fn load_psk(
+    path: &Path,
+    allow_insecure: bool,
+) -> Result<(SharedSecret, Option<String>), Error> {
+    let warning = check_permissions(path, allow_insecure)?;
+    let text = fs::read_to_string(path).map_err(|source| Error::IoPath {
+        action: "read PSK file",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let psk = parse_psk(&text).map_err(|why| Error::Invalid {
+        path: path.to_path_buf(),
+        what: format!("PSK file: {why}"),
+    })?;
+    Ok((psk, warning))
 }
 
 /// Write a private-key file, for its owner's eyes only.

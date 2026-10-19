@@ -45,6 +45,8 @@ const CONFIRM_I_INFO: &[u8] = b"vallum/confirm/init/v1";
 const CONFIRM_R_INFO: &[u8] = b"vallum/confirm/resp/v1";
 /// Hash domain for comparing confirmation values.
 const CONFIRM_CMP_DOMAIN: &[u8] = b"vallum/confirm-cmp/v1";
+/// Mix a configured per-peer PSK into the schedule (G1).
+const CONFIG_PSK_INFO: &[u8] = b"vallum/config-psk/v1";
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -150,6 +152,7 @@ pub(super) fn schedule(
     legs: &[SharedSecret],
     initiator_static: &[u8],
     responder_static: &[u8],
+    preshared_key: Option<&SharedSecret>,
 ) -> Result<(SharedSecret, SharedSecret), HandshakeError> {
     let mut root = [0u8; 32];
     derive_kem_key(suite, transcript_resp, legs, &mut root).map_err(HandshakeError::Kdf)?;
@@ -166,6 +169,21 @@ pub(super) fn schedule(
         .kdf(&root, &psk, PSK_MIX_INFO, &mut key)
         .map_err(HandshakeError::Kdf)?;
     let key = SharedSecret::new(key);
+
+    // A configured per-peer PSK (G1), if any. Mixed after the UKS psk, so the
+    // default `None` path is byte-identical to every existing vector. It is an
+    // extra secret both ends already hold; a mismatch diverges the confirmation
+    // and the handshake fails, which is the only observable effect.
+    let key = match preshared_key {
+        Some(psk) => {
+            let mut mixed = [0u8; 32];
+            suite
+                .kdf(key.as_bytes(), psk.as_bytes(), CONFIG_PSK_INFO, &mut mixed)
+                .map_err(HandshakeError::Kdf)?;
+            SharedSecret::new(mixed)
+        }
+        None => key,
+    };
 
     // The responder's confirmation: only a party that derived `key` can produce
     // it, and deriving `key` requires decapsulating op A.

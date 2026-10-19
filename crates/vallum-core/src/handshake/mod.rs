@@ -216,6 +216,8 @@ pub struct InitiatorState {
     init_hello: Vec<u8>,
     /// Per-leg secrets from op A (initiator → responder static).
     static_legs: Vec<SharedSecret>,
+    /// The configured PSK this handshake was started with, if any (G1).
+    psk: Option<SharedSecret>,
 }
 
 impl InitiatorState {
@@ -392,6 +394,7 @@ pub fn initiator_hello(
         peer_signing: peer.signing().cloned(),
         init_hello: init_hello.clone(),
         static_legs: encapsulation.shared_secrets,
+        psk: peer.preshared_key().cloned(),
     };
     Ok((init_hello, state))
 }
@@ -608,6 +611,7 @@ pub fn responder_accept(
         &legs,
         peer_public.as_bytes(),
         identity.public().as_bytes(),
+        peer.preshared_key(),
     )?;
 
     // The confirmation goes in RespHello itself, so the initiator authenticates
@@ -770,6 +774,7 @@ pub fn initiator_process_resp(
         &legs,
         &state.static_public,
         &state.peer_public,
+        state.psk.as_ref(),
     )?;
 
     // Authenticate the responder *before* accepting the session key: only a party
