@@ -229,6 +229,7 @@ pub struct Form {
     pub title: String,
     pub fields: Vec<Field>,
     pub focus: usize,
+    pub cursor: usize,
     pub kind: FormKind,
 }
 
@@ -238,6 +239,11 @@ impl Form {
         Self {
             title: "Add peer".to_owned(),
             fields: vec![
+                Field {
+                    label: "name",
+                    value: String::new(),
+                    masked: false,
+                },
                 Field {
                     label: "public line",
                     value: String::new(),
@@ -265,6 +271,7 @@ impl Form {
                 },
             ],
             focus: 0,
+            cursor: 0,
             kind: FormKind::AddPeer,
         }
     }
@@ -279,6 +286,7 @@ impl Form {
             "dns (comma)",
             "table",
         ];
+        let cursor = values[0].chars().count();
         Self {
             title: "Interface config".to_owned(),
             fields: labels
@@ -291,6 +299,7 @@ impl Form {
                 })
                 .collect(),
             focus: 0,
+            cursor,
             kind: FormKind::Interface,
         }
     }
@@ -305,6 +314,7 @@ impl Form {
                 masked: false,
             }],
             focus: 0,
+            cursor: device.listen.chars().count(),
             kind: FormKind::ExportBundle,
         }
     }
@@ -315,6 +325,7 @@ impl Form {
             .listen
             .rsplit_once(':')
             .map_or_else(|| device.listen.clone(), |(_, port)| port.to_owned());
+        let cursor = port.chars().count();
         Self {
             title: "Runtime device".to_owned(),
             fields: vec![
@@ -330,6 +341,7 @@ impl Form {
                 },
             ],
             focus: 0,
+            cursor,
             kind: FormKind::Device,
         }
     }
@@ -339,6 +351,11 @@ impl Form {
         Self {
             title: format!("Edit {}", peer.name),
             fields: vec![
+                Field {
+                    label: "name",
+                    value: peer.name.clone(),
+                    masked: false,
+                },
                 Field {
                     label: "endpoint",
                     value: peer.endpoint.clone(),
@@ -361,6 +378,7 @@ impl Form {
                 },
             ],
             focus: 0,
+            cursor: peer.name.chars().count(),
             kind: FormKind::EditPeer(index),
         }
     }

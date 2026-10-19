@@ -234,7 +234,13 @@ pub fn keygen(app: &mut App) {
                 path.display()
             ));
             let mut form = super::app::Form::add_peer();
-            form.fields[0].value = line;
+            if let Some(field) = form
+                .fields
+                .iter_mut()
+                .find(|field| field.label == "public line")
+            {
+                field.value = line;
+            }
             app.form = Some(form);
         }
         Err(error) => app.notify(error.to_string()),

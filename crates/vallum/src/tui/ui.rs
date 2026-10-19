@@ -21,18 +21,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
 
 fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
+    let compact = area.width < 130;
+    let header_height = if app.interfaces.is_empty() {
+        3
+    } else if compact {
+        5
+    } else {
+        4
+    };
     let chunks = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(header_height),
         Constraint::Min(6),
         Constraint::Length(2),
     ])
     .split(area);
 
-    draw_header(frame, chunks[0], app);
-    let body = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
-        .split(chunks[1]);
-    draw_peers(frame, body[0], app);
-    draw_details(frame, body[1], app);
+    draw_header(frame, chunks[0], app, compact);
+    if app.interfaces.is_empty() {
+        draw_empty_state(frame, chunks[1]);
+    } else if area.width < 100 {
+        let body = Layout::vertical([Constraint::Percentage(54), Constraint::Percentage(46)])
+            .split(chunks[1]);
+        draw_peers(frame, body[0], app);
+        draw_details(frame, body[1], app);
+    } else {
+        let body = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(chunks[1]);
+        draw_peers(frame, body[0], app);
+        draw_details(frame, body[1], app);
+    }
     draw_footer(frame, chunks[2], app);
 
     if let Some(qr) = &app.qr {
@@ -44,22 +61,14 @@ fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     if app.confirm.is_some() {
         draw_confirm(frame, area, app);
     }
-    if let Some(toast) = &app.toast {
-        let width = area.width.saturating_sub(4).min(100);
-        let popup = Rect::new(area.x + 2, area.y + area.height.saturating_sub(3), width, 1);
-        frame.render_widget(
-            Paragraph::new(toast.message.as_str()).style(Style::default().fg(Color::Yellow)),
-            popup,
-        );
-    }
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     let Some(interface) = app.current() else {
-        let text = vec![
-            Line::from("No interfaces discovered."),
-            Line::from("Start one with `vallum-quick up <config>` or pass --config/--control."),
-        ];
+        let text = vec![Line::from(Span::styled(
+            "No interface connected",
+            Style::default().fg(Color::Yellow),
+        ))];
         frame.render_widget(
             Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Vallum")),
             area,
@@ -83,25 +92,37 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     lines.push(Line::from(tabs));
     match &interface.device {
         Some(device) => {
-            lines.push(Line::from(vec![
-                Span::styled("listen ", Style::default().fg(Color::DarkGray)),
-                Span::raw(device.listen.clone()),
-                Span::raw("  suite "),
-                Span::raw(device.suite.clone()),
-                Span::raw("  fwmark "),
-                Span::raw(device.fwmark.to_string()),
-                Span::raw("  "),
-                Span::raw(device.fingerprint.clone()),
-            ]));
-            lines.push(Line::from(format!(
-                "addresses {}  offload={} batching={}  can_set listen={} fwmark={} key={}",
-                device.addresses.join(", "),
-                device.offload,
-                device.batching,
-                device.can_set_listen_port,
-                device.can_set_fwmark,
-                device.can_set_private_key,
-            )));
+            if compact {
+                lines.push(Line::from(format!(
+                    "listen {}  suite {}  fwmark {}",
+                    device.listen, device.suite, device.fwmark
+                )));
+                lines.push(Line::from(format!(
+                    "id {}  addresses {}",
+                    device.fingerprint,
+                    device.addresses.join(", ")
+                )));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("listen ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(device.listen.clone()),
+                    Span::raw("  suite "),
+                    Span::raw(device.suite.clone()),
+                    Span::raw("  fwmark "),
+                    Span::raw(device.fwmark.to_string()),
+                    Span::raw("  "),
+                    Span::raw(device.fingerprint.clone()),
+                ]));
+                lines.push(Line::from(format!(
+                    "addresses {}  offload={} batching={}  can_set listen={} fwmark={} key={}",
+                    device.addresses.join(", "),
+                    device.offload,
+                    device.batching,
+                    device.can_set_listen_port,
+                    device.can_set_fwmark,
+                    device.can_set_private_key,
+                )));
+            }
         }
         None => lines.push(Line::from(Span::styled(
             interface
@@ -112,7 +133,30 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ))),
     }
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Vallum")),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title("Vallum")),
+        area,
+    );
+}
+
+fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
+    let text = vec![
+        Line::from(Span::styled(
+            "No Vallum interface found",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Inspect a running tunnel: vallum tui --control /run/vallum/<name>.sock"),
+        Line::from("Start a tunnel: sudo vallum-quick up /etc/vallum/<name>.toml"),
+        Line::from("Or pass --config /path/to/config.toml or --config-dir DIR."),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL).title("Get started")),
         area,
     );
 }
@@ -126,36 +170,49 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         return;
     };
-    let header = Row::new(vec![
-        "name",
-        "fingerprint",
-        "endpoint",
-        "allowed",
-        "handshake",
-        "rx/tx",
-        "epoch",
-        "psk",
-    ])
+    let expanded = area.width >= 160;
+    let header = if expanded {
+        Row::new(vec![
+            "name",
+            "fingerprint",
+            "endpoint",
+            "allowed",
+            "handshake",
+            "rx/tx",
+            "epoch",
+            "psk",
+        ])
+    } else {
+        Row::new(vec!["peer", "endpoint", "handshake", "rx / tx"])
+    }
     .style(
         Style::default()
             .add_modifier(Modifier::BOLD)
             .fg(Color::Cyan),
     );
     let rows = device.peers.iter().map(|peer| {
-        Row::new(vec![
-            Cell::from(peer.name.clone()),
-            Cell::from(peer.fingerprint.clone()),
-            Cell::from(peer.endpoint.clone()),
-            Cell::from(peer.allowed_ips.join(",")),
-            Cell::from(App::handshake_age(peer)),
-            Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
-            Cell::from(peer.epoch.to_string()),
-            Cell::from(if peer.preshared_key { "yes" } else { "—" }),
-        ])
+        if expanded {
+            Row::new(vec![
+                Cell::from(peer.name.clone()),
+                Cell::from(peer.fingerprint.clone()),
+                Cell::from(peer.endpoint.clone()),
+                Cell::from(peer.allowed_ips.join(",")),
+                Cell::from(App::handshake_age(peer)),
+                Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
+                Cell::from(peer.epoch.to_string()),
+                Cell::from(if peer.preshared_key { "yes" } else { "—" }),
+            ])
+        } else {
+            Row::new(vec![
+                Cell::from(peer.name.clone()),
+                Cell::from(peer.endpoint.clone()),
+                Cell::from(App::handshake_age(peer)),
+                Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
+            ])
+        }
     });
-    let table = Table::new(
-        rows,
-        [
+    let widths = if expanded {
+        vec![
             Constraint::Length(12),
             Constraint::Length(16),
             Constraint::Length(21),
@@ -164,11 +221,23 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Constraint::Length(13),
             Constraint::Length(6),
             Constraint::Length(4),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title("Peers"))
-    .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+        ]
+    } else {
+        vec![
+            Constraint::Length(16),
+            Constraint::Min(10),
+            Constraint::Length(10),
+            Constraint::Length(15),
+        ]
+    };
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(if expanded {
+            "Peers"
+        } else {
+            "Peers (select for details)"
+        }))
+        .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     let mut state = TableState::default().with_selected(Some(app.peer_selected));
     frame.render_stateful_widget(table, area, &mut state);
 }
@@ -237,12 +306,33 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let hint = "Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device  E edit config  C interface  s start/stop  l logs  ? help  Q quit";
-    frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
-    let _ = app;
+    let (navigation, actions) = if area.width < 100 {
+        (
+            "Tab interface  ↑/↓ peer  ? help  Q quit",
+            "a add  e edit  d remove  g key  q export  s service  l logs",
+        )
+    } else {
+        (
+            "Tab interface  ↑/↓ peer  ? help  Q quit",
+            "a add  e edit  d remove  g key  q export  c runtime  C config  s service  l logs  r refresh",
+        )
+    };
+    let second = app
+        .toast
+        .as_ref()
+        .map_or(actions, |toast| toast.message.as_str());
+    let hint = vec![
+        Line::from(navigation),
+        Line::from(Span::styled(
+            second,
+            if app.toast.is_some() {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        )),
+    ];
+    frame.render_widget(Paragraph::new(hint), area);
 }
 
 fn draw_help(frame: &mut Frame<'_>, _app: &App) {
@@ -257,7 +347,7 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
         Line::from("Tab / Shift-Tab   switch interface"),
         Line::from("j / k, arrows     select peer"),
         Line::from("a                 add peer"),
-        Line::from("e                 edit endpoint, allowed IPs, keepalive, PSK"),
+        Line::from("e                 edit name, endpoint, allowed IPs, keepalive, PSK"),
         Line::from("d                 remove peer (confirmation)"),
         Line::from("g                 generate a key and prefill the add form"),
         Line::from("q                 export the client bundle and show its QR"),
@@ -270,6 +360,7 @@ fn draw_help(frame: &mut Frame<'_>, _app: &App) {
         Line::from("?                 close help"),
         Line::from("Q / Ctrl-C        quit"),
         Line::from(""),
+        Line::from("Forms: arrows/Home/End edit text, Ctrl-U clears the field."),
         Line::from("Secrets are masked; the private key and PSK are never shown."),
     ];
     frame.render_widget(
@@ -372,16 +463,40 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
     frame.render_widget(Clear, popup);
     let mut lines = Vec::new();
     for (index, field) in form.fields.iter().enumerate() {
-        let marker = if index == form.focus { ">" } else { " " };
-        let value = if field.masked && !field.value.is_empty() {
-            "*".repeat(field.value.len().min(32))
+        let focused = index == form.focus;
+        let marker = if focused { ">" } else { " " };
+        let mut value = if field.masked && !field.value.is_empty() {
+            "************".to_owned()
         } else {
             field.value.clone()
         };
-        lines.push(Line::from(format!("{marker} {:<22} {value}", field.label)));
+        if focused {
+            if field.masked {
+                value.push('|');
+            } else {
+                let byte_index = value
+                    .char_indices()
+                    .nth(form.cursor)
+                    .map_or(value.len(), |(index, _)| index);
+                value.insert(byte_index, '|');
+            }
+        }
+        let style = if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {:<22} ", field.label), style),
+            Span::styled(value, style),
+        ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from("Tab next  Enter submit  Esc cancel"));
+    lines.push(Line::from(
+        "Tab next  ←/→ move  Home/End  Ctrl-U clear  Enter submit  Esc cancel",
+    ));
     frame.render_widget(
         Paragraph::new(lines)
             .block(

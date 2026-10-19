@@ -17,8 +17,8 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 |---|---|
 | `Tab` / `Shift-Tab` | next/previous interface |
 | `j` / `k`, arrows | select peer |
-| `a` | add peer (public line, endpoint, allowed IPs, keepalive, PSK) |
-| `e` | edit endpoint, allowed IPs, keepalive, PSK |
+| `a` | add peer (name, public line, endpoint, allowed IPs, keepalive, PSK) |
+| `e` | edit name, endpoint, allowed IPs, keepalive, PSK |
 | `d` | remove peer (confirmation) |
 | `g` | generate a key and prefill the add form |
 | `q` | export the client bundle and show its animated QR |
@@ -37,7 +37,15 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
 - **Dashboard**: interface name, listen address, suite, fwmark, addresses,
   fingerprint, capabilities, offload/batching; per peer name, fingerprint,
   endpoint, allowed IPs, handshake age, rx/tx totals and rates, epoch, PSK
-  presence.
+  presence. The table hides secondary columns on narrower terminals, and the
+  dashboard switches to a stacked peer/detail layout below 100 columns.
+- **Forms**: the focused field and insertion point are visible; arrows and
+  Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
+  the current field. Secret fields use a fixed mask so their length is not
+  displayed.
+- **Empty state**: when no interface is discoverable, the TUI shows direct
+  commands and flags for connecting to or starting a tunnel instead of empty
+  peers/details panes.
 - **Peer CRUD** through the UAPI. The public line is decoded and checked against
   the device suite; endpoint hostnames are resolved; allowed IPs are validated.
 - **Key generation** writes a 0600 key file and prefills the add form with the

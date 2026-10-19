@@ -54,6 +54,85 @@ fn the_device_form_prefills_the_port() {
 }
 
 #[test]
+fn peer_forms_expose_and_preserve_the_peer_name() {
+    let add = Form::add_peer();
+    assert_eq!(add.field("name"), "");
+
+    let peer = super::app::PeerView {
+        name: "work-laptop".to_owned(),
+        ..super::app::PeerView::default()
+    };
+    let edit = Form::edit_peer(0, &peer);
+    assert_eq!(edit.field("name"), "work-laptop");
+}
+
+#[test]
+fn form_text_can_be_corrected_without_erasing_the_whole_field() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    app.form = Some(Form::add_peer());
+    for character in ['c', 'a', 't'] {
+        super::input::handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+        );
+    }
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+    );
+    assert_eq!(app.form.as_ref().map(|form| form.field("name")), Some("ct"));
+}
+
+#[test]
+fn masked_form_fields_hide_values_and_do_not_reveal_length() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Vec::new());
+    let mut form = Form::add_peer();
+    form.fields[5].value = "very-secret-psk".to_owned();
+    form.focus = 5;
+    form.cursor = form.fields[5].value.chars().count();
+    app.form = Some(form);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw form");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!text.contains("very-secret-psk"));
+    assert!(text.contains("************|"));
+}
+
+#[test]
+fn empty_dashboard_explains_how_to_connect_or_start_an_interface() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &App::new(Vec::new())))
+        .expect("draw dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("No Vallum interface found"));
+    assert!(text.contains("vallum-quick up"));
+    assert!(!text.contains("No device data"));
+}
+
+#[test]
 fn escape_closes_the_qr_modal() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = App::new(Vec::new());

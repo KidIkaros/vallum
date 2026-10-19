@@ -130,9 +130,11 @@ fn handle_form(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Tab | KeyCode::Down => {
             form.focus = (form.focus + 1) % form.fields.len();
+            form.cursor = form.fields[form.focus].value.chars().count();
         }
         KeyCode::BackTab | KeyCode::Up => {
             form.focus = (form.focus + form.fields.len() - 1) % form.fields.len();
+            form.cursor = form.fields[form.focus].value.chars().count();
         }
         KeyCode::Enter => {
             app.form = Some(form);
@@ -140,10 +142,60 @@ fn handle_form(app: &mut App, key: KeyEvent) {
             return;
         }
         KeyCode::Backspace => {
-            form.fields[form.focus].value.pop();
+            let field = &mut form.fields[form.focus];
+            if field.masked {
+                field.value.pop();
+                form.cursor = field.value.chars().count();
+            } else if form.cursor > 0 {
+                if let Some((byte_index, _)) = field.value.char_indices().nth(form.cursor - 1) {
+                    field.value.remove(byte_index);
+                    form.cursor -= 1;
+                }
+            }
+        }
+        KeyCode::Delete => {
+            let field = &mut form.fields[form.focus];
+            if !field.masked {
+                if let Some((byte_index, _)) = field.value.char_indices().nth(form.cursor) {
+                    field.value.remove(byte_index);
+                }
+            }
+        }
+        KeyCode::Left => {
+            if !form.fields[form.focus].masked {
+                form.cursor = form.cursor.saturating_sub(1);
+            }
+        }
+        KeyCode::Right => {
+            if !form.fields[form.focus].masked {
+                form.cursor = (form.cursor + 1).min(form.fields[form.focus].value.chars().count());
+            }
+        }
+        KeyCode::Home => {
+            if !form.fields[form.focus].masked {
+                form.cursor = 0;
+            }
+        }
+        KeyCode::End => {
+            form.cursor = form.fields[form.focus].value.chars().count();
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            form.fields[form.focus].value.clear();
+            form.cursor = 0;
         }
         KeyCode::Char(character) => {
-            form.fields[form.focus].value.push(character);
+            let field = &mut form.fields[form.focus];
+            let byte_index = if field.masked {
+                field.value.len()
+            } else {
+                field
+                    .value
+                    .char_indices()
+                    .nth(form.cursor)
+                    .map_or(field.value.len(), |(index, _)| index)
+            };
+            field.value.insert(byte_index, character);
+            form.cursor += 1;
         }
         _ => {}
     }
