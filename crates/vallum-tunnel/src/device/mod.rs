@@ -338,7 +338,10 @@ impl Device {
     /// [`ConfigError`] as [`Device::new`].
     pub fn add_peer(&mut self, config: PeerConfig) -> Result<PeerId, ConfigError> {
         for existing in &self.peers {
-            if existing.config.identity() == config.identity() {
+            // The wire identity is the KEM key. The PSK and the signing
+            // expectation are policy attached to that identity, not part of
+            // it: two entries with the same KEM key are the same peer.
+            if existing.config.identity().kem().as_bytes() == config.identity().kem().as_bytes() {
                 return Err(ConfigError::DuplicatePeer {
                     existing: existing.config.name().to_owned(),
                     duplicate: config.name().to_owned(),

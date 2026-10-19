@@ -1246,6 +1246,36 @@ fn a_duplicate_peer_identity_is_refused() {
 }
 
 #[test]
+fn a_duplicate_peer_with_a_different_psk_is_still_a_duplicate() {
+    let suite = suite();
+    let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
+    let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("a key");
+
+    let result = Device::new(
+        suite,
+        a_identity,
+        vec![
+            PeerConfig::new("b", b_identity.to_peer())
+                .with_allowed_ips([net("10.0.0.2/32")])
+                .with_preshared_key(SharedSecret::new([0x11; 32])),
+            PeerConfig::new("b-again", b_identity.to_peer())
+                .with_allowed_ips([net("10.0.0.3/32")])
+                .with_preshared_key(SharedSecret::new([0x22; 32])),
+        ],
+        &mut TestRng(1),
+        0,
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(vallum_tunnel::ConfigError::DuplicatePeer { .. })
+        ),
+        "the same KEM key is the same peer, whatever PSK it is configured with"
+    );
+}
+
+#[test]
 fn a_v4_and_a_v6_peer_do_not_conflict() {
     let suite = suite();
     let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");

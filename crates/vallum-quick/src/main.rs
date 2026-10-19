@@ -99,6 +99,21 @@ fn up(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error
         run_hook(hook, dry_run)?;
     }
 
+    let result = up_after_pre(&config, config_path, &interface, table, dry_run);
+    if result.is_err() {
+        // A partially applied `up` must not leave a daemon or routes behind.
+        rollback(&config, config_path, &interface, table, dry_run);
+    }
+    result
+}
+
+fn up_after_pre(
+    config: &Config,
+    config_path: &Path,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // The daemon first: it creates the interface the routes point at.
     let binary = std::env::var("VALLUM_BIN").unwrap_or_else(|_| "vallum".to_owned());
     let mut child = if dry_run {
@@ -111,25 +126,32 @@ fn up(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error
             .arg(config_path)
             .spawn()?;
         let pidfile = config_path.with_extension("pid");
-        fs::write(&pidfile, child.id().to_string())?;
+        if let Err(error) = fs::write(&pidfile, child.id().to_string()) {
+            // The pidfile failed after the daemon started; do not leave it
+            // orphaned.
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.into());
+        }
         Some(child)
     };
 
     if !dry_run {
-        wait_for_interface(&interface)?;
+        wait_for_interface(interface)?;
     }
 
     if table != "off" {
         for peer in &config.peers {
             for prefix in &peer.allowed_ips {
                 let prefix: Prefix = prefix.parse()?;
-                add_route(&interface, &prefix, table, dry_run)?;
+                add_route(interface, &prefix, table, dry_run)?;
             }
         }
     }
 
     if !config.quick.dns.is_empty() {
-        set_dns(&interface, &config.quick.dns, dry_run)?;
+        set_dns(interface, &config.quick.dns, dry_run)?;
     }
 
     for hook in &config.quick.post_up {
@@ -144,6 +166,34 @@ fn up(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error
         }
     }
     Ok(())
+}
+
+/// Undo whatever a failed `up` may have applied.
+fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, dry_run: bool) {
+    if table != "off" {
+        for peer in &config.peers {
+            for prefix in &peer.allowed_ips {
+                if let Ok(prefix) = prefix.parse::<Prefix>() {
+                    let _ = del_route(interface, &prefix, table, dry_run);
+                }
+            }
+        }
+    }
+    if !config.quick.dns.is_empty() {
+        let _ = unset_dns(interface, dry_run);
+    }
+    let pidfile = config_path.with_extension("pid");
+    if let Ok(pid) = fs::read_to_string(&pidfile) {
+        let pid = pid.trim();
+        if dry_run {
+            println!("kill -TERM {pid}");
+        } else {
+            let _ = Command::new("kill").arg("-TERM").arg(pid).status();
+        }
+    }
+    if !dry_run {
+        let _ = fs::remove_file(&pidfile);
+    }
 }
 
 fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -243,8 +293,8 @@ fn save(
     Ok(())
 }
 
-fn strip(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let text = fs::read_to_string(config_path)?;
+/// The daemon-facing form of a config: everything except `[quick]`.
+fn strip_quick(text: &str) -> String {
     let mut out = String::new();
     let mut in_quick = false;
     for line in text.lines() {
@@ -257,7 +307,12 @@ fn strip(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             out.push('\n');
         }
     }
-    print!("{out}");
+    out
+}
+
+fn strip(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(config_path)?;
+    print!("{}", strip_quick(&text));
     Ok(())
 }
 
@@ -403,18 +458,7 @@ mod tests {
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        let mut out = String::new();
-        let mut in_quick = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_quick = trimmed == "[quick]";
-            }
-            if !in_quick {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
+        let out = strip_quick(&text);
         assert!(!out.contains("[quick]"));
         assert!(!out.contains("dns ="));
         assert!(out.contains("[[peer]]"));

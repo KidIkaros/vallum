@@ -24,6 +24,7 @@ use vallum::net::{DatagramSocket, SharedSocket, UdpTransport};
 use vallum::privileges;
 use vallum::run::{self, Shutdown};
 use vallum::tun::{self, InterfaceSpec};
+use vallum::uapi::errno;
 use vallum::{log_info, log_warn, Error};
 use vallum_core::{Role, SessionKeys};
 use vallum_crypto::SharedSecret;
@@ -646,12 +647,18 @@ fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
         .find_map(|line| line.strip_prefix("errno="))
         .and_then(|value| value.parse::<i32>().ok());
     let what = match errno {
-        Some(95) => "the daemon cannot change listen_port or fwmark at runtime; \
-                     restart it, or run `vallum-quick down` then `up`"
+        Some(errno::EPERM) => "the daemon could not rebind the socket: it needs \
+                               CAP_NET_ADMIN, and permission for the port"
             .to_owned(),
-        Some(2) => "update_only named a peer that is not configured".to_owned(),
-        Some(22) => "the request was malformed, or two peers claim the same prefix".to_owned(),
-        Some(17) => "the peer already exists".to_owned(),
+        Some(errno::EADDRINUSE) => "the requested listen port is already in use".to_owned(),
+        Some(errno::EADDRNOTAVAIL) => {
+            "the requested listen address is not available on this host".to_owned()
+        }
+        Some(errno::ENOENT) => "update_only named a peer that is not configured".to_owned(),
+        Some(errno::EINVAL) => {
+            "the request was malformed, or two peers claim the same prefix".to_owned()
+        }
+        Some(errno::EEXIST) => "the peer already exists".to_owned(),
         _ => format!("control request failed: {}", reply.trim()),
     };
     Err(Error::Invalid {

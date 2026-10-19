@@ -16,6 +16,29 @@ use vallum_tunnel::Prefix;
 
 use crate::keys::{hex_decode, hex_encode};
 
+/// The errno values the control protocol uses.
+///
+/// Shared by the daemon's transition and the CLI's message mapping, so the two
+/// cannot drift apart.
+pub mod errno {
+    /// Operation not permitted (a rebind without the capability).
+    pub const EPERM: i32 = 1;
+    /// No such peer.
+    pub const ENOENT: i32 = 2;
+    /// The peer already exists.
+    pub const EEXIST: i32 = 17;
+    /// Malformed request, or overlapping prefixes.
+    pub const EINVAL: i32 = 22;
+    /// No control plane is configured.
+    pub const ENOSYS: i32 = 38;
+    /// The requested port is in use.
+    pub const EADDRINUSE: i32 = 98;
+    /// The requested address is not available.
+    pub const EADDRNOTAVAIL: i32 = 99;
+    /// The loop did not answer.
+    pub const ETIMEDOUT: i32 = 110;
+}
+
 /// A parsed request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -163,7 +186,9 @@ pub fn parse(text: &str) -> Result<Request, String> {
                             "replace_allowed_ips" => {
                                 peer.replace_allowed_ips = parse_bool(value)?;
                             }
-                            _ => unreachable!("the outer match lists every peer key"),
+                            // A key listed in the outer pattern but not here is
+                            // a parser bug, not a reason to panic on input.
+                            _ => return Err(format!("unhandled peer key `{key}`")),
                         }
                     }
                     _ => return Err(format!("unknown key `{key}`")),

@@ -28,16 +28,8 @@ use vallum_tunnel::{Device, PeerConfig};
 
 use crate::net::DatagramSocket;
 use crate::run::{Input, Shutdown};
+use crate::uapi::errno::{EADDRINUSE, EADDRNOTAVAIL, EEXIST, EINVAL, ENOENT, EPERM, ETIMEDOUT};
 use crate::uapi::{self, Request, Set};
-
-/// `EINVAL`: a malformed request or an overlapping prefix.
-const EINVAL: i32 = 22;
-/// `ENOENT`: `update_only` named a peer that is not configured.
-const ENOENT: i32 = 2;
-/// `EEXIST`: the peer was already present.
-const EEXIST: i32 = 17;
-/// `ETIMEDOUT`: the loop did not answer.
-const ETIMEDOUT: i32 = 110;
 
 /// What the control plane needs to describe the device.
 pub struct ControlContext {
@@ -259,9 +251,9 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
 
 fn errno_for(error: &io::Error) -> i32 {
     match error.kind() {
-        io::ErrorKind::PermissionDenied => 1,  // EPERM
-        io::ErrorKind::AddrInUse => 98,        // EADDRINUSE
-        io::ErrorKind::AddrNotAvailable => 99, // EADDRNOTAVAIL
+        io::ErrorKind::PermissionDenied => EPERM,
+        io::ErrorKind::AddrInUse => EADDRINUSE,
+        io::ErrorKind::AddrNotAvailable => EADDRNOTAVAIL,
         _ => EINVAL,
     }
 }

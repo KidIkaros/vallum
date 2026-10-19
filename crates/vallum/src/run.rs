@@ -262,7 +262,7 @@ pub fn run(
             Ok(Input::Control { request, reply }) => {
                 let body = match control.as_mut() {
                     Some(server) => control::handle(&mut device, &mut server.context, request),
-                    None => crate::uapi::render_errno(38), // ENOSYS
+                    None => crate::uapi::render_errno(crate::uapi::errno::ENOSYS),
                 };
                 let _ = reply.send(body);
                 continue;
