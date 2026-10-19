@@ -37,13 +37,13 @@ jobs:
       - name: Install packaging tools
         run: |
           cargo install cargo-deb --locked
-          cargo install cargo-rpm --locked
+          cargo install cargo-generate-rpm --locked
 
       - name: Build the packages
         working-directory: vallum
         run: |
           cargo deb -p vallum --no-build
-          cargo rpm build -p vallum --release
+          (cd crates/vallum && cargo generate-rpm)
 
       - name: Assemble the tarball
         working-directory: vallum
@@ -57,7 +57,7 @@ jobs:
           cp packaging/vallum.bash "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cp target/debian/*.deb dist/ 2>/dev/null || true
-          find target -name '*.rpm' -exec cp {} dist/ \; 2>/dev/null || true
+          cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
           (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Publish the release

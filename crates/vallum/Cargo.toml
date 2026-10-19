@@ -87,8 +87,8 @@ section = "net"
 priority = "optional"
 depends = "$auto"
 assets = [
-    ["../../target/release/vallum", "usr/bin/vallum", "755"],
-    ["../../target/release/vallum-quick", "usr/bin/vallum-quick", "755"],
+    ["target/release/vallum", "usr/bin/vallum", "755"],
+    ["target/release/vallum-quick", "usr/bin/vallum-quick", "755"],
     ["../../packaging/vallum@.service", "lib/systemd/system/vallum@.service", "644"],
     ["../../packaging/vallum.8", "usr/share/man/man8/vallum.8", "644"],
     ["../../packaging/vallum-quick.8", "usr/share/man/man8/vallum-quick.8", "644"],
@@ -96,16 +96,16 @@ assets = [
     ["../../packaging/vallum.bash", "usr/share/bash-completion/completions/vallum", "644"],
 ]
 
-[package.metadata.rpm]
-package-name = "vallum"
+[package.metadata.generate-rpm]
+name = "vallum"
 summary = "Hybrid post-quantum layer-3 tunnel"
 license = "Apache-2.0"
 assets = [
-    ["../../target/release/vallum", "/usr/bin/vallum", "755"],
-    ["../../target/release/vallum-quick", "/usr/bin/vallum-quick", "755"],
-    ["../../packaging/vallum@.service", "/lib/systemd/system/vallum@.service", "644"],
-    ["../../packaging/vallum.8", "/usr/share/man/man8/vallum.8", "644"],
-    ["../../packaging/vallum-quick.8", "/usr/share/man/man8/vallum-quick.8", "644"],
-    ["../../packaging/vallum.toml.5", "/usr/share/man/man5/vallum.toml.5", "644"],
-    ["../../packaging/vallum.bash", "/usr/share/bash-completion/completions/vallum", "644"],
+    { source = "../../target/release/vallum", dest = "/usr/bin/vallum", mode = "755" },
+    { source = "../../target/release/vallum-quick", dest = "/usr/bin/vallum-quick", mode = "755" },
+    { source = "../../packaging/vallum@.service", dest = "/lib/systemd/system/vallum@.service", mode = "644" },
+    { source = "../../packaging/vallum.8", dest = "/usr/share/man/man8/vallum.8", mode = "644" },
+    { source = "../../packaging/vallum-quick.8", dest = "/usr/share/man/man8/vallum-quick.8", mode = "644" },
+    { source = "../../packaging/vallum.toml.5", dest = "/usr/share/man/man5/vallum.toml.5", mode = "644" },
+    { source = "../../packaging/vallum.bash", dest = "/usr/share/bash-completion/completions/vallum", mode = "644" },
 ]
