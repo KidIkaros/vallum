@@ -166,13 +166,13 @@ ok "two distinct tri-hybrid keys ($(wc -c < "$WORK/a.pub") bytes of public line 
 
 # A config names its key file *relatively*, and each daemon below is started from
 # a different working directory: this also exercises config-relative resolution.
-write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer allowed  $6 peer public  $7 keepalive
+write_config() { # $1 name  $2 inner CIDR  $3 listen  $4 peer endpoint  $5 peer allowed  $6 peer public  $7 keepalive
     local name=$1 addr=$2 listen=$3 endpoint=$4 allowed=$5 peer_public=$6 keepalive=$7
     {
         printf '[interface]\n'
         printf 'name = "vallum0"\n'
         printf 'private_key = "%s.key"\n' "$name"
-        printf 'address = "%s/24"\n' "$addr"
+        printf 'address = "%s"\n' "$addr"
         printf 'listen = "%s"\n' "$listen"
         printf '\n[log]\nlevel = "info"\n'
         printf '\n[[peer]]\nname = "peer"\n'
@@ -180,7 +180,7 @@ write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer 
         if [ -n "$endpoint" ]; then
             printf 'endpoint = "%s"\n' "$endpoint"
         fi
-        printf 'allowed_ips = ["%s/32"]\n' "$allowed"
+        printf 'allowed_ips = ["%s"]\n' "$allowed"
         if [ -n "$keepalive" ]; then
             printf 'persistent_keepalive = %s\n' "$keepalive"
         fi
@@ -192,8 +192,8 @@ write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer 
 # keep the path warm, because B is the end a NAT would forget: it never speaks
 # until spoken to. A one-second cadence makes the keepalive observable inside the
 # few seconds this script runs for.
-write_config a "$INNER_A" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B" "$PUB_B" ""
-write_config b "$INNER_B" "$OUTER_B:$PORT" ""                 "$INNER_A" "$PUB_A" 1
+write_config a "$INNER_A/24" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
+write_config b "$INNER_B/24" "$OUTER_B:$PORT" ""                 "$INNER_A/32" "$PUB_A" 1
 
 # ── arm the adversary's capture ──────────────────────────────────────
 #
@@ -624,6 +624,10 @@ grep -q '^outer_mtu = 1000$' "$WORK/a.toml" || bad "the narrow config was not wr
 
 FRAG_A_NARROW_BEFORE=$(snmp_here FragCreates)
 FRAG_B_NARROW_BEFORE=$(snmp_ns2 FragCreates)
+# The pidfiles still hold the previous lifecycle's pids; the wait loop below
+# would read them as a daemon that died before the new one writes its own.
+: > "$A_PIDFILE"
+: > "$B_PIDFILE"
 
 in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
     _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
@@ -668,6 +672,71 @@ kill_pidfile "$B_PIDFILE"
 wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the narrow path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the narrow path"
 ok "the narrow-path daemons exited on SIGTERM"
+
+# ── IPv6 interface addresses ─────────────────────────────────────────
+#
+# The daemon assigns a v6 address itself, over netlink: `tun2`'s configuration
+# path is an `AF_INET` ioctl and cannot express one. The outer path stays IPv4;
+# only the inner addressing changes, so a ping6 crossing proves the address was
+# assigned and the kernel installed its connected route.
+
+say "restarting with IPv6 inner addresses"
+: > "$A_PIDFILE"
+: > "$B_PIDFILE"
+sed -i 's|^address = .*|address = "fd00:7::1/64"|; s|^allowed_ips = .*|allowed_ips = ["fd00:7::2/128"]|' "$WORK/a.toml"
+sed -i 's|^address = .*|address = "fd00:7::2/64"|; s|^allowed_ips = .*|allowed_ips = ["fd00:7::1/128"]|' "$WORK/b.toml"
+
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
+B_JOB=$!
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
+A_JOB=$!
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the v6 path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s on the v6 path"
+    fi
+    sleep 0.1
+done
+
+in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:7::2/64' \
+    || bad "B's interface has no fd00:7::2/64; see $B_LOG"
+ok "the daemon assigned its IPv6 address and the kernel installed the route"
+
+
+
+# From A, for the same reason the IPv4 phase starts there: A has an endpoint to
+# dial, and B learns A's address from the authenticated handshake. A ping from B
+# first would queue forever — B has nothing to dial.
+if ping -6 -c2 -W5 -i0.3 -q fd00:7::2; then
+    ok "ping6 crossed the tunnel (fd00:7::1 -> fd00:7::2)"
+else
+    bad "IPv6 traffic did not cross the tunnel"
+fi
+
+# ...and the other way, over the session A started.
+if in_ns ping -6 -c2 -W5 -i0.3 -q fd00:7::1; then
+    ok "ping6 crossed back (fd00:7::2 -> fd00:7::1)"
+else
+    bad "the IPv6 reverse direction failed"
+fi
+
+say "shutting the IPv6-path daemons down"
+kill_pidfile "$A_PIDFILE"
+kill_pidfile "$B_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the v6 path"
+wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the v6 path"
+ok "the IPv6-path daemons exited on SIGTERM"
 
 printf '\n== PASS\n'
 INNER

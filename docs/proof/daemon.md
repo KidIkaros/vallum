@@ -228,13 +228,12 @@ So `resolve` emits a warning naming the address and the `ip route add` command t
 run. It does not run it: the daemon spawns no processes, uses no shell, and writes
 no routing table entries.
 
-For the same reason an IPv6 interface address is a warning with the exact
+For the same reason an IPv6 interface address *was* a warning with the exact
 `ip -6 addr add` command: `tun2`'s configuration path is `AF_INET`, and a
-half-configured interface is worse than one the operator finished. The data plane
-does not inspect the address family — a packet is routed by its destination prefix
-and sealed as bytes — and `allowed_ips` accepts v6 prefixes, but this phase has no
-test that carries inner IPv6, and the daemon cannot put a v6 address on the
-interface for you.
+half-configured interface is worse than one the operator finished. **H7 assigns it
+over netlink** and the e2e carries `ping6` both ways; see [`ipv6.md`](ipv6.md).
+The data plane does not inspect the address family — a packet is routed by its
+destination prefix and sealed as bytes — and `allowed_ips` accepts v6 prefixes.
 
 ### 2.5 Shutdown, entropy, and the CLI
 
@@ -333,10 +332,10 @@ performance claim and should not be quoted as one.
    unreachable until it sends something (§0c). The config does not pretend
    otherwise. **Closed in P6.6:** [`keepalive.md`](keepalive.md) adds the timer and
    the field; a peer may now be dialled on a cadence with no traffic to send.
-3. **No IPv6 address configuration, and no tested inner IPv6 path.** `tun2`'s
-   config path is `AF_INET`, so the daemon cannot assign a v6 address; it says so
-   and prints the command. `allowed_ips` accepts v6 prefixes and the data plane
-   treats packets as opaque bytes, but nothing in this phase carries v6 end to end.
+3. **No IPv6 address configuration in P6.4.** `tun2`'s config path is `AF_INET`,
+   so the daemon could not assign a v6 address; it said so and printed the
+   command. H7 closes this: the address is assigned over netlink, and the e2e
+   carries v6 both ways. See [`ipv6.md`](ipv6.md).
 4. **No routing-table management.** The daemon installs nothing and spawns
    nothing. A peer outside the interface prefix produces a warning, not a route.
 5. **No privilege separation in P6.4.** The process ran as the user that started

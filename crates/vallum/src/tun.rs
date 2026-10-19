@@ -190,30 +190,28 @@ mod platform {
         // interface down.
         config.up();
 
-        match spec.address {
-            // A `tun2` address is an `AF_INET` ioctl, so IPv4 (including a /32
-            // point-to-point address, whose netmask is 255.255.255.255) is what it
-            // can set.
-            Some(ipnet::IpNet::V4(net)) => {
-                config.address(net.addr());
-                config.netmask(net.netmask());
-            }
-            Some(other) => {
-                // `tun2`'s configuration path is `AF_INET`. Rather than refuse to
-                // start, say exactly what to run: a half-configured interface is
-                // worse than one the operator finished.
-                warn(format!(
-                    "interface address {other} is not IPv4; leaving it unset. \
-                     Run: ip -6 addr add {other} dev <interface>"
-                ));
-            }
-            None => {}
+        // A `tun2` address is an `AF_INET` ioctl, so IPv4 (including a /32
+        // point-to-point address, whose netmask is 255.255.255.255) is what it
+        // can set. IPv6 is assigned after creation, over netlink — see
+        // `assign_ipv6`.
+        if let Some(ipnet::IpNet::V4(net)) = spec.address {
+            config.address(net.addr());
+            config.netmask(net.netmask());
         }
+        let _ = &warn; // the v6 path no longer needs to hand work back
 
         // `ensure_root_privileges` defaults to true, so `create` both makes the
         // device and applies the configuration above.
         let device = tun2::create(&config)?;
         let name = device.tun_name()?;
+
+        // The v6 address needs the interface index, so it happens here. A
+        // failure is fatal: a half-configured interface is exactly the state
+        // this replaces.
+        if let Some(ipnet::IpNet::V6(net)) = spec.address {
+            assign_ipv6(&name, &net)?;
+        }
+
         let (reader, writer) = device.split();
 
         Ok(InterfaceParts {
@@ -222,6 +220,85 @@ mod platform {
             reader: Box::new(FdReader(reader)),
             writer: Box::new(FdWriter(writer)),
         })
+    }
+
+    /// Add an IPv6 address to an existing interface over netlink.
+    ///
+    /// `tun2` configures addresses with `SIOCSIFADDR` and an `AF_INET` sockaddr,
+    /// which cannot express a v6 address. `RTM_NEWADDR` can, and `netlink-sys`
+    /// owns the socket so this stays inside `unsafe_code = "forbid"`.
+    ///
+    /// `IFA_LOCAL` is the attribute `ip addr add` sends for a normal prefix;
+    /// `IFA_ADDRESS` is for a peer address and is not used here.
+    fn assign_ipv6(name: &str, net: &ipnet::Ipv6Net) -> io::Result<()> {
+        use netlink_packet_core::{
+            NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL,
+            NLM_F_REQUEST,
+        };
+        use netlink_packet_route::address::{
+            AddressAttribute, AddressHeader, AddressHeaderFlags, AddressMessage,
+        };
+        use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
+        use netlink_sys::{protocols::NETLINK_ROUTE, Socket};
+
+        let index = nix::net::if_::if_nametoindex(name)
+            .map_err(|e| io::Error::other(format!("if_nametoindex(`{name}`) for {net}: {e}")))?;
+
+        let mut message = AddressMessage::default();
+        message.header = AddressHeader {
+            family: AddressFamily::Inet6,
+            prefix_len: net.prefix_len(),
+            // `nodad`: a TUN has no link-layer neighbour discovery, so duplicate
+            // address detection's solicitations go nowhere and leave the address
+            // tentative for about a second — during which the kernel drops
+            // traffic to it. `ip addr add ... nodad` is the same choice.
+            flags: AddressHeaderFlags::Nodad,
+            index,
+            ..AddressHeader::default()
+        };
+        // `IFA_LOCAL` only: that is what `ip addr add` sends for a normal
+        // (non-peer) address, and the kernel derives the peer attribute from it.
+        message.attributes = vec![AddressAttribute::Local(net.addr().into())];
+
+        let mut header = NetlinkHeader::default();
+        header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+        header.sequence_number = 1;
+        let mut request = NetlinkMessage::new(
+            header,
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(message)),
+        );
+        request.finalize();
+        let mut buffer = vec![0u8; request.buffer_len()];
+        request.serialize(&mut buffer);
+
+        let mut socket = Socket::new(NETLINK_ROUTE)?;
+        socket.bind_auto()?;
+        socket.send(&buffer, 0)?;
+
+        // `recv` takes a `BufMut` and fills its *spare* capacity, so this must be
+        // an empty `Vec` with room — a pre-filled one has none, and the read
+        // would be zero bytes long.
+        let mut reply = Vec::with_capacity(4_096);
+        let len = socket.recv(&mut reply, 0)?;
+        let reply = NetlinkMessage::<RouteNetlinkMessage>::deserialize(&reply[..len])
+            .map_err(|e| io::Error::other(format!("parse netlink reply for {net}: {e}")))?;
+
+        match reply.payload {
+            // An ACK: no error code.
+            NetlinkPayload::Error(error) => match error.code {
+                None => Ok(()),
+                // Already assigned: idempotent, and the state the operator asked
+                // for either way.
+                Some(code) if code.get() == -(nix::errno::Errno::EEXIST as i32) => Ok(()),
+                Some(code) => Err(io::Error::other(format!(
+                    "assigning {net} to `{name}` failed: netlink errno {}",
+                    code.get()
+                ))),
+            },
+            _ => Err(io::Error::other(format!(
+                "assigning {net} to `{name}`: unexpected netlink reply"
+            ))),
+        }
     }
 }
 

@@ -60,6 +60,11 @@ pub const OUTER_HEADER_LEN: u16 = 48;
 /// The outer MTU assumed when the operator does not name one.
 pub const DEFAULT_OUTER_MTU: u16 = 1500;
 
+/// The smallest link MTU IPv6 permits (RFC 8200 §5). The kernel refuses to
+/// assign a v6 address to an interface below it, so the inner MTU is floored
+/// here when the address is v6 — and the resulting segmentation is warned about.
+pub const IPV6_MIN_MTU: u16 = 1280;
+
 /// A parsed configuration file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -376,6 +381,19 @@ impl Config {
                         ),
                     });
                 }
+                // IPv6 has a higher floor, and the kernel enforces it by
+                // refusing the address. Say so at load instead of failing in
+                // netlink with an errno the operator cannot act on.
+                if matches!(address, Some(ipnet::IpNet::V6(_))) && mtu < IPV6_MIN_MTU {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "interface.mtu {mtu} is below IPv6's minimum link MTU of \
+                             {IPV6_MIN_MTU}; the kernel will not assign a v6 address \
+                             to this interface"
+                        ),
+                    });
+                }
                 if usize::from(mtu) + DATA_OVERHEAD > budget {
                     warnings.push(format!(
                         "interface.mtu {mtu} plus the {DATA_OVERHEAD}-byte data overhead \
@@ -386,8 +404,21 @@ impl Config {
                 mtu
             }
             None => {
-                let fits = u16::try_from(budget - DATA_OVERHEAD).unwrap_or(DEFAULT_MTU);
-                fits.min(DEFAULT_MTU)
+                let mut fits = u16::try_from(budget - DATA_OVERHEAD).unwrap_or(DEFAULT_MTU);
+                fits = fits.min(DEFAULT_MTU);
+                // A narrow outer path can derive an inner MTU below IPv6's
+                // floor. The floor wins, and the cost is segmentation — which is
+                // what the envelope exists for, so it is a warning, not a
+                // refusal.
+                if matches!(address, Some(ipnet::IpNet::V6(_))) && fits < IPV6_MIN_MTU {
+                    warnings.push(format!(
+                        "interface.outer_mtu {outer_mtu} would derive an inner MTU of \
+                         {fits}, below IPv6's minimum of {IPV6_MIN_MTU}; using \
+                         {IPV6_MIN_MTU} and segmenting every full-size data packet"
+                    ));
+                    fits = IPV6_MIN_MTU;
+                }
+                fits
             }
         };
 
