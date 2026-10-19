@@ -1,0 +1,24 @@
+name: Configuration or build problem
+description: A config does not parse, a build fails, or an install is broken.
+title: "[config] "
+labels: ["config"]
+body:
+  - type: textarea
+    id: config
+    attributes:
+      label: Config shape
+      description: Redact keys, PSKs, and private endpoints.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Error
+      description: The exact command and output.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Distribution, kernel, and Rust version.

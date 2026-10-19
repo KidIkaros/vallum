@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vallum
+      - uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vallum
+
+      - name: Build the release binaries
+        working-directory: vallum
+        run: cargo build --release -p vallum -p vallum-quick
+
+      - name: Install packaging tools
+        run: |
+          cargo install cargo-deb --locked
+          cargo install cargo-rpm --locked
+
+      - name: Build the packages
+        working-directory: vallum
+        run: |
+          cargo deb -p vallum --no-build
+          cargo rpm build -p vallum
+
+      - name: Assemble the tarball
+        working-directory: vallum
+        run: |
+          set -euo pipefail
+          name="vallum-${GITHUB_REF_NAME}-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp target/release/vallum target/release/vallum-quick "dist/$name/"
+          cp LICENSE README.md "dist/$name/"
+          cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
+          cp packaging/vallum.bash "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp target/debian/*.deb dist/ 2>/dev/null || true
+          find target -name '*.rpm' -exec cp {} dist/ \; 2>/dev/null || true
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vallum/dist/*
+          generate_release_notes: true

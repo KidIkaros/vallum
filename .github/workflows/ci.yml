@@ -63,15 +63,26 @@ jobs:
           cargo fmt
           -p vallum-core -p vallum-tunnel -p vallum
           -p vallum-crypto -p vallum-crypto-sdk -p vallum-crypto-contract
+          -p vallum-config -p vallum-quick
           -- --check
 
-      - name: Clippy
+      - name: Clippy (all features)
         working-directory: vallum
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
         working-directory: vallum
         run: cargo test --workspace
+
+      - name: Test the lean daemon (no TUI)
+        working-directory: vallum
+        run: cargo test -p vallum --no-default-features
+
+      - name: Headless TUI snapshot
+        working-directory: vallum
+        run: |
+          cargo run -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/tui.txt
+          grep -q Vallum /tmp/tui.txt
 
   macos-inner:
     name: macOS check (protocol crates)

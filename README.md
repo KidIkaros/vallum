@@ -1,5 +1,9 @@
 # Vallum
 
+[![CI](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](Cargo.toml)
+
 A hybrid **post-quantum layer-3 tunnel** — a real userspace VPN, not a reference
 crate.
 
