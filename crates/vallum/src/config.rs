@@ -23,6 +23,7 @@
 //! public_key = "vallum1:0003:…:-"
 //! endpoint = "203.0.113.7:51820"
 //! allowed_ips = ["10.7.0.2/32", "fd00:7::2/128"]
+//! persistent_keepalive = 25
 //! ```
 //!
 //! # Unknown fields are refused
@@ -34,6 +35,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use vallum_core::identity::StaticIdentity;
@@ -103,6 +105,12 @@ pub struct PeerEntry {
     /// The addresses this peer may use.
     #[serde(default)]
     pub allowed_ips: Vec<String>,
+    /// Send an empty packet every this many seconds, even when idle, to hold a
+    /// NAT binding open for a peer that has nothing to send. Omitted means off;
+    /// `0` is refused rather than read as "off", because a field the operator
+    /// wrote and the daemon ignores is how a security setting goes missing.
+    #[serde(default)]
+    pub persistent_keepalive: Option<u16>,
     /// Traffic-analysis shaping machines for this peer's tunnel.
     #[serde(default)]
     pub shaping: Vec<ShapingSpec>,
@@ -395,6 +403,27 @@ impl Config {
 
             let mut config =
                 PeerConfig::new(entry.name.clone(), peer_identity).with_allowed_ips(nets.clone());
+            match entry.persistent_keepalive {
+                None => {}
+                // A whole number of seconds, because that is the unit an
+                // operator thinks in and the one WireGuard uses. The upper
+                // bound is the field width, nothing deeper: it is a cadence,
+                // not a crypto parameter, so a large one is merely useless.
+                Some(seconds) if seconds > 0 => {
+                    config =
+                        config.with_persistent_keepalive(Duration::from_secs(u64::from(seconds)));
+                }
+                Some(_) => {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "{}: persistent_keepalive is 0 seconds; omit the field to \
+                             disable it, or give a whole number of seconds",
+                            where_()
+                        ),
+                    });
+                }
+            }
             if let Some(text) = entry.endpoint.as_deref() {
                 let endpoint = text.parse::<SocketAddr>().map_err(|e| Error::Invalid {
                     path: path.to_path_buf(),

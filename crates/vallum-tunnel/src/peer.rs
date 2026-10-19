@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use vallum_core::identity::PeerIdentity;
 use vallum_core::shaping::Machine;
@@ -75,6 +76,7 @@ pub struct PeerConfig {
     identity: PeerIdentity,
     allowed_ips: AllowedIps,
     endpoint: Option<SocketAddr>,
+    persistent_keepalive: Option<Duration>,
     shaping: Vec<Machine>,
 }
 
@@ -92,6 +94,7 @@ impl PeerConfig {
             identity,
             allowed_ips: AllowedIps::default(),
             endpoint: None,
+            persistent_keepalive: None,
             shaping: Vec::new(),
         }
     }
@@ -107,6 +110,22 @@ impl PeerConfig {
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: SocketAddr) -> Self {
         self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// Send an empty packet every `interval`, even with nothing to send.
+    ///
+    /// A peer is silent until it has something to say, and silence is what a NAT
+    /// forgets first: the mapping was usually created by *our* outbound packet,
+    /// so a peer behind one it did not create is unreachable until it speaks.
+    /// With an interval the peer keeps talking, and the mapping stays warm.
+    ///
+    /// The interval is local policy and is never negotiated. It changes only the
+    /// timing of packets the peer is already allowed to send, never their
+    /// contents or their authenticity, so two ends may disagree about it freely.
+    #[must_use]
+    pub fn with_persistent_keepalive(mut self, interval: Duration) -> Self {
+        self.persistent_keepalive = Some(interval);
         self
     }
 
@@ -144,6 +163,12 @@ impl PeerConfig {
     #[must_use]
     pub fn endpoint(&self) -> Option<SocketAddr> {
         self.endpoint
+    }
+
+    /// The configured keepalive interval, if the peer must hold a path open.
+    #[must_use]
+    pub fn persistent_keepalive(&self) -> Option<Duration> {
+        self.persistent_keepalive
     }
 
     /// The shaping machines for this peer's tunnel.

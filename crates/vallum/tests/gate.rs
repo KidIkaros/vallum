@@ -541,6 +541,50 @@ fn a_mistyped_field_is_a_config_error_not_a_silent_default() {
 }
 
 #[test]
+fn a_persistent_keepalive_is_optional_and_zero_is_not_off() {
+    let dir = TempDir::new("keepalive");
+    let _a = prepare(dir.path(), "a", A_SEED);
+    let b = prepare(dir.path(), "b", B_SEED);
+    let key_path = dir.path().join("a.key");
+
+    let resolve = |name: &str, extra: &str| {
+        let text = config_text(
+            name,
+            &key_path,
+            "10.7.0.1/24",
+            socket_address(A_EP),
+            Level::Info,
+            &format!(
+                "[[peer]]\nname = \"b\"\npublic_key = \"{}\"\n\
+                 allowed_ips = [\"10.7.0.2/32\"]\n{extra}",
+                b.public
+            ),
+        );
+        resolve_text(dir.path(), name, &text)
+    };
+
+    // The field is optional: omitted means off, so nothing sends on its own.
+    let off = resolve("off", "").expect("an omitted field is valid");
+    assert_eq!(off.peers[0].persistent_keepalive(), None);
+
+    // A whole number of seconds is the configuration.
+    let on = resolve("on", "persistent_keepalive = 25\n").expect("25 s is valid");
+    assert_eq!(
+        on.peers[0].persistent_keepalive(),
+        Some(Duration::from_secs(25))
+    );
+
+    // Zero is refused, not quietly read as off: a field the operator wrote and
+    // the daemon ignores is how a security setting goes missing.
+    let error = resolve("zero", "persistent_keepalive = 0\n").unwrap_err();
+    assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
+    assert!(
+        error.to_string().contains("persistent_keepalive"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_relative_key_path_is_resolved_against_the_config_not_the_cwd() {
     let dir = TempDir::new("relkey");
 

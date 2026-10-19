@@ -19,6 +19,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use vallum_core::identity::StaticIdentity;
 use vallum_core::shaping::Machine;
@@ -288,6 +289,16 @@ impl Shape {
 
 /// The standard two-host fixture, with optional shaping machines for A.
 fn net_with(a_shaping: Vec<Machine>, shape: Shape) -> Net {
+    net_full(a_shaping, shape, None, None)
+}
+
+/// As [`net_with`], and each end may additionally be told to keep its path warm.
+fn net_full(
+    a_shaping: Vec<Machine>,
+    shape: Shape,
+    a_keepalive: Option<Duration>,
+    b_keepalive: Option<Duration>,
+) -> Net {
     let suite = suite();
     let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
     let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("a key");
@@ -297,6 +308,9 @@ fn net_with(a_shaping: Vec<Machine>, shape: Shape) -> Net {
     if shape.a_dials {
         a_peer = a_peer.with_endpoint(endpoint(B_EP));
     }
+    if let Some(interval) = a_keepalive {
+        a_peer = a_peer.with_persistent_keepalive(interval);
+    }
     if !a_shaping.is_empty() {
         a_peer = a_peer.with_shaping(a_shaping);
     }
@@ -305,6 +319,9 @@ fn net_with(a_shaping: Vec<Machine>, shape: Shape) -> Net {
         PeerConfig::new("a", a_identity.to_peer()).with_allowed_ips([net("10.0.0.1/32")]);
     if shape.b_dials {
         b_peer = b_peer.with_endpoint(endpoint(A_EP));
+    }
+    if let Some(interval) = b_keepalive {
+        b_peer = b_peer.with_persistent_keepalive(interval);
     }
 
     let a = Device::new(
@@ -840,6 +857,189 @@ fn a_min_interval_machine_holds_and_then_releases_traffic() {
     assert_eq!(net.hosts[0].stats().queued, 0);
 }
 
+// ── keepalive policy ─────────────────────────────────────────────────
+
+/// A configured interval is a *cadence*: due at the interval, twice the
+/// interval, and nowhere in between.
+#[test]
+fn a_persistent_keepalive_is_sent_once_per_interval() {
+    let mut net = net_full(
+        Vec::new(),
+        Shape::ROAMING,
+        None,
+        Some(Duration::from_millis(1_000)),
+    );
+
+    // Establish, then let the link go quiet: B has nothing of its own to send.
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    assert!(net.hosts[1].established_once());
+    let before = net.hosts[1].sent.len();
+
+    // Short of the interval, nothing.
+    net.advance(999);
+    net.pump(1);
+    assert_eq!(net.hosts[1].sent.len(), before, "not due yet");
+
+    // On the interval, exactly one empty packet.
+    net.advance(1);
+    net.pump(1);
+    assert_eq!(net.hosts[1].sent.len(), before + 1, "one keepalive");
+
+    // The next deadline is the next interval, not the next tick.
+    net.advance(999);
+    net.pump(1);
+    assert_eq!(net.hosts[1].sent.len(), before + 1, "still not due");
+    net.advance(1);
+    net.pump(1);
+    assert_eq!(net.hosts[1].sent.len(), before + 2, "and another");
+}
+
+/// With no session, a keepalive is a *dial*: the peer a NAT forgot is the peer
+/// that never spoke, so the interval has to make it speak.
+#[test]
+fn a_persistent_keepalive_peer_with_no_session_dials_itself() {
+    // Both ends *can* dial; only B is told to. Nothing is ever sent by hand.
+    let mut net = net_full(
+        Vec::new(),
+        Shape::BOTH_DIAL,
+        None,
+        Some(Duration::from_millis(1_000)),
+    );
+
+    net.advance(999);
+    net.pump(4);
+    assert!(
+        !net.hosts[1].established_once(),
+        "no dial before the interval"
+    );
+
+    net.advance(1);
+    net.pump(4);
+    net.settle();
+    assert_eq!(
+        net.hosts[1].established.first().map(|(_, _, role)| *role),
+        Some(Role::Initiator),
+        "B reached A with nothing to send"
+    );
+    assert_eq!(
+        net.hosts[0].established.first().map(|(_, _, role)| *role),
+        Some(Role::Responder)
+    );
+}
+
+/// With no interval configured a tunnel is silent when idle: the field is
+/// opt-in, and a peer that never asked for a keepalive must not acquire one.
+#[test]
+fn an_idle_tunnel_without_an_interval_says_nothing() {
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    assert!(net.hosts[1].established_once());
+
+    let before: usize = net.hosts.iter().map(|host| host.sent.len()).sum();
+    // Four silent seconds: below the 5 s handshake-retransmit floor and far
+    // below the reactive keepalive's 10 s, so any packet here would be a
+    // persistent keepalive that should not exist.
+    net.settle_over(1_000, 4);
+    let after: usize = net.hosts.iter().map(|host| host.sent.len()).sum();
+    assert_eq!(after, before, "an idle tunnel with no interval is silent");
+}
+
+/// The reactive keepalive is untouched by the policy one: a peer that spoke and
+/// heard nothing is still poked after ten silent seconds.
+#[test]
+fn the_reactive_keepalive_still_fires_without_an_interval() {
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    // B answers, which is how the initiator learns the handshake is finished.
+    net.outbound(1, ipv4(B_IP, A_IP, b"pong"));
+    net.settle();
+
+    // A speaks once more and hears nothing, so its idle clock starts.
+    net.advance(1_000);
+    net.outbound(0, ipv4(A_IP, B_IP, b"poke"));
+    net.settle();
+    let before = net.hosts[0].sent.len();
+
+    // Ten silent seconds, then exactly one empty packet from A.
+    net.settle_over(1_000, 12);
+    assert_eq!(
+        net.hosts[0].sent.len(),
+        before + 1,
+        "one reactive keepalive in twelve silent seconds"
+    );
+}
+
+/// A keepalive is not a broadcast: a peer with no address to dial waits to be
+/// called, exactly as an outbound packet would have to.
+#[test]
+fn a_keepalive_peer_with_no_endpoint_waits_to_be_called() {
+    // B has an interval but no endpoint; A is the end that dials.
+    let mut net = net_full(
+        Vec::new(),
+        Shape::ROAMING,
+        None,
+        Some(Duration::from_millis(1_000)),
+    );
+
+    net.advance(5_000);
+    net.pump(4);
+    for host in &net.hosts {
+        assert!(
+            host.sent.is_empty(),
+            "nothing to send, and nobody to send it to"
+        );
+    }
+
+    // Once A calls, B's interval has a path to keep warm.
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    assert!(net.hosts[1].established_once());
+}
+
+/// At a 5 s cadence and a send at t = 5 s, the persistent deadline and the
+/// reactive one coincide at t = 15 s. They are both an empty packet, so the tick
+/// must emit one, not two.
+#[test]
+fn a_persistent_keepalive_suppresses_the_reactive_one_when_they_coincide() {
+    let mut net = net_full(
+        Vec::new(),
+        Shape::ROAMING,
+        Some(Duration::from_millis(5_000)),
+        None,
+    );
+
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    // B answers, clearing the initiator's retransmit state so the only timer
+    // left is the one under test.
+    net.outbound(1, ipv4(B_IP, A_IP, b"pong"));
+    net.settle();
+
+    // A sends once at t = 5 s: the reactive deadline is now t = 15 s, which is
+    // also the third persistent deadline.
+    net.advance(5_000);
+    net.outbound(0, ipv4(A_IP, B_IP, b"poke"));
+    net.settle();
+    let before = net.hosts[0].sent.len();
+
+    // t = 10 s: the persistent keepalive alone.
+    net.advance(5_000);
+    net.pump(1);
+    assert_eq!(net.hosts[0].sent.len(), before + 1, "the 10 s cadence");
+
+    // t = 15 s: both rules are due; exactly one packet goes out.
+    net.advance(5_000);
+    net.pump(1);
+    assert_eq!(
+        net.hosts[0].sent.len(),
+        before + 2,
+        "one packet where the two rules meet"
+    );
+}
+
 // ── the queue is bounded ─────────────────────────────────────────────
 
 #[test]
@@ -1052,4 +1252,42 @@ fn a_forged_init_hello_cannot_lock_a_peer_out() {
     net.outbound(0, ipv4(A_IP, B_IP, b"still-works"));
     net.settle();
     assert_eq!(net.hosts[1].delivered.len(), 2);
+}
+
+/// A rekey that fails until the device gives up must not kill the peer for good.
+/// A fresh trigger — here an outbound packet — has to start a fresh run, with a
+/// fresh retransmission budget.
+#[test]
+fn a_peer_that_gave_up_recovers_when_the_path_comes_back() {
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"hello"));
+    net.settle();
+    assert!(net.hosts[1].established_once());
+
+    // Black-hole the path for 220 s. A's rekey starts at 120 s, fails, and gives
+    // up at 210 s; both keys expire at 180 s. Nothing is delivered throughout.
+    for _ in 0..220 {
+        net.advance(1_000);
+        net.pump(1);
+        for host in &mut net.hosts {
+            host.inbox.clear();
+        }
+    }
+
+    // The path is back. One packet must be enough to rebuild the tunnel.
+    let before = net.hosts[1].established.len();
+    net.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    for _ in 0..50 {
+        net.pump(1);
+    }
+    assert_eq!(
+        net.hosts[1].established.len(),
+        before + 1,
+        "a peer that gave up never came back"
+    );
+    assert_eq!(
+        net.hosts[1].delivered.last(),
+        Some(&ipv4(A_IP, B_IP, b"after")),
+        "the packet that restarted the handshake was not delivered"
+    );
 }

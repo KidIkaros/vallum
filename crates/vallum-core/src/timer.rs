@@ -121,6 +121,27 @@ impl Timers {
         self.attempts = None;
     }
 
+    /// Record that the device tore down the session because its key expired.
+    ///
+    /// Expiry outranks everything in [`poll`](Self::poll). A device that removed
+    /// the session but left `established_at` in place would therefore be told to
+    /// expire forever: no retransmission, no new handshake, a peer that is dead
+    /// until the process restarts. Once the spent session is gone there is nothing
+    /// left to expire, so this clears the session clock and the idle clock.
+    ///
+    /// An attempt run that is still in flight is **kept**: the key is spent, but a
+    /// replacement handshake may already be halfway through, and it must be allowed
+    /// to finish or to give up on its own schedule.
+    pub fn on_torn_down(&mut self, now: u64) {
+        self.now = now;
+        self.established_at = None;
+        // With no session, "we spoke and heard nothing" is meaningless; leaving
+        // the old times in place would fire a useless reactive keepalive every
+        // tick, because a failed send cannot advance `last_sent`.
+        self.last_sent = now;
+        self.last_received = now;
+    }
+
     /// Record that we sent a data packet.
     pub fn on_sent(&mut self, now: u64) {
         self.now = now;
@@ -133,7 +154,29 @@ impl Timers {
         self.last_received = now;
     }
 
-    /// Record that we sent a handshake (a first attempt or a retransmission).
+    /// Begin a **new** handshake run, with a fresh attempt budget.
+    ///
+    /// [`poll`](Self::poll) deliberately leaves a spent run in place when it
+    /// returns [`TimerAction::GiveUp`], so the device stays quiet until something
+    /// asks for a handshake again. That something — user traffic, or a persistent
+    /// keepalive — must start a run whose first attempt counts as the first, not
+    /// as one more on a budget that is already exhausted. Without this, a peer
+    /// that once gave up could never come back: the first message of every later
+    /// run would be abandoned by the very next `poll`.
+    pub fn begin_handshake(&mut self, now: u64) {
+        self.now = now;
+        self.attempts = Some(Attempts {
+            first: now,
+            last: now,
+            count: 1,
+        });
+    }
+
+    /// Record that we sent a handshake (a retransmission of one we began).
+    ///
+    /// A *new* run begins with [`begin_handshake`](Self::begin_handshake), not
+    /// with this: a run that ended in [`TimerAction::GiveUp`] leaves its count
+    /// behind on purpose, and continuing it would abandon the new run at once.
     pub fn on_handshake_sent(&mut self, now: u64) {
         self.now = now;
         self.attempts = Some(match self.attempts {
@@ -314,6 +357,60 @@ mod tests {
             timers.poll(1_000 + REKEY_ATTEMPT_TIME_MS),
             TimerAction::None,
             "nothing is due until the caller sends a handshake"
+        );
+    }
+
+    #[test]
+    fn tearing_down_a_spent_session_lets_the_rekey_finish() {
+        let mut timers = Timers::established(0);
+        timers.begin_handshake(REKEY_AFTER_TIME_MS);
+        assert_eq!(timers.poll(REJECT_AFTER_TIME_MS), TimerAction::Expire);
+
+        // The device removes the spent session. What remains is the rekey in
+        // flight, which is overdue and must be retried — not expired again.
+        timers.on_torn_down(REJECT_AFTER_TIME_MS);
+        assert_eq!(
+            timers.poll(REJECT_AFTER_TIME_MS + 1),
+            TimerAction::RetransmitHandshake,
+            "expiry must not repeat now the session is gone"
+        );
+
+        // Recording that retry puts the run back on its normal schedule.
+        timers.on_handshake_sent(REJECT_AFTER_TIME_MS + 1);
+        assert_eq!(
+            timers.poll(REJECT_AFTER_TIME_MS + 2),
+            TimerAction::None,
+            "nothing is due again until the retransmit interval elapses"
+        );
+    }
+
+    #[test]
+    fn a_new_run_after_giving_up_is_not_abandoned_immediately() {
+        let mut timers = Timers::new(0);
+        timers.begin_handshake(1_000);
+        timers.on_handshake_sent(1_000 + REKEY_TIMEOUT_MS);
+        assert_eq!(
+            timers.poll(1_000 + REKEY_ATTEMPT_TIME_MS),
+            TimerAction::GiveUp
+        );
+
+        // The spent run stays in place, so the device keeps quiet rather than
+        // churning: `poll` reports the same give-up until something asks again.
+        assert_eq!(
+            timers.poll(200_000),
+            TimerAction::GiveUp,
+            "a spent run is still spent"
+        );
+
+        // A new run starts from attempt one. Without this, the first message of
+        // every later run would be abandoned by the very next `poll`.
+        timers.begin_handshake(200_000);
+        assert_eq!(timers.attempts(), 1);
+        assert_eq!(timers.poll(200_000), TimerAction::None);
+        assert_eq!(
+            timers.poll(200_000 + REKEY_TIMEOUT_MS),
+            TimerAction::RetransmitHandshake,
+            "the new run retransmits instead of giving up"
         );
     }
 

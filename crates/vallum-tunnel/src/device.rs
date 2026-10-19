@@ -97,6 +97,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use vallum_core::cookie::{
     admit_handshake, build_cookie_reply, mac1 as compute_mac1, read_cookie_reply,
@@ -320,6 +321,12 @@ struct Peer {
     timestamp_guard: Tai64nGuard,
     shaper: Shaper,
     blocked_until: Option<u64>,
+    /// When the peer's *persistent* keepalive is next due, if it has one.
+    ///
+    /// Separate from [`Timers`] on purpose: the reactive keepalive there answers
+    /// silence we caused, while this one is due on a fixed schedule whether or
+    /// not anybody spoke. `None` means the peer has none configured.
+    next_keepalive_ms: Option<u64>,
     pending: VecDeque<Vec<u8>>,
     pending_bytes: usize,
     pending_conf: Option<PendingConf>,
@@ -338,6 +345,9 @@ impl Peer {
         // A configured endpoint is where we dial; roaming may replace it later,
         // but only with an address authenticated traffic arrived from.
         let endpoint = config.endpoint();
+        let next_keepalive_ms = config
+            .persistent_keepalive()
+            .map(|interval| now_ms.saturating_add(keepalive_millis(interval)));
         Self {
             config,
             hint,
@@ -349,6 +359,7 @@ impl Peer {
             timestamp_guard: Tai64nGuard::new(),
             shaper,
             blocked_until: None,
+            next_keepalive_ms,
             pending: VecDeque::new(),
             pending_bytes: 0,
             pending_conf: None,
@@ -727,7 +738,9 @@ impl Device {
         };
 
         self.peers[index].handshake = Handshake::Responding(Box::new(Responding { state, source }));
-        self.peers[index].timers.on_handshake_sent(now);
+        // A new initiation is a new transcript: begin a fresh attempt run, so a
+        // responder that once gave up on an older one is not dead to this caller.
+        self.peers[index].timers.begin_handshake(now);
         self.remap(index);
         // The reply goes to where the `InitHello` came from — the only address we
         // have — but the peer's endpoint is not committed until `InitConf`.
@@ -1043,18 +1056,71 @@ impl Device {
         // (3) Retransmit the initiator's `InitConf` until the responder answers.
         self.retransmit_conf(index, now, out);
 
-        // (4) The rekey/keepalive/expiry state machine.
+        // (4) A *persistent* keepalive, if the peer has one due. It goes first
+        //     because it is the one keepalive that must happen on schedule: with
+        //     a session it is an empty data packet, and with none it is a dial —
+        //     a peer behind a mapping it did not create is reachable only if we
+        //     speak first.
+        let persistent = self.persistent_keepalive(index, clock, rng, out);
+
+        // (5) The rekey/keepalive/expiry state machine. The reactive keepalive
+        //     stands down when the persistent one just went out: they are both an
+        //     empty packet, and two in one tick is one more than the path needs.
         match self.peers[index].timers.poll(now) {
             TimerAction::None => {}
+            TimerAction::SendKeepalive if persistent => {}
             TimerAction::SendKeepalive => self.send_keepalive(index, clock, rng, out),
             TimerAction::StartHandshake => self.start_handshake(index, clock, rng, out),
             TimerAction::RetransmitHandshake => self.retransmit_handshake(index, clock, out),
             TimerAction::GiveUp => self.abandon_handshake(index),
-            TimerAction::Expire => self.tear_down(index),
+            TimerAction::Expire => self.tear_down(index, now),
         }
 
-        // (5) Anything held for a session that is now usable.
+        // (6) Anything held for a session that is now usable.
         self.flush(index, clock, rng, out);
+    }
+
+    /// Send the peer's persistent keepalive if its interval has elapsed.
+    ///
+    /// Returns whether a keepalive actually went out, so the reactive keepalive
+    /// can stand down for this tick.
+    ///
+    /// With a session, "keepalive" is the same empty data packet the reactive
+    /// timer sends, shaped identically. Without one, it is a request to
+    /// *establish*: an idle peer with nowhere to send is exactly the peer a NAT
+    /// forgets, and dialling is the only thing that can fix that. A peer with no
+    /// endpoint to dial is left alone, because there is nobody to dial.
+    fn persistent_keepalive(
+        &mut self,
+        index: usize,
+        clock: Clock,
+        rng: &mut dyn Randomness,
+        out: &mut Vec<Action>,
+    ) -> bool {
+        let now = clock.monotonic_ms;
+        let Some(interval) = self.peers[index].config.persistent_keepalive() else {
+            return false;
+        };
+        match self.peers[index].next_keepalive_ms {
+            Some(due) if now >= due => {}
+            _ => return false,
+        }
+        self.peers[index].next_keepalive_ms = Some(now.saturating_add(keepalive_millis(interval)));
+
+        // A spent key must not carry traffic, and a keepalive is traffic. The
+        // expiry rule is `Timers`' own — the state machine below is about to act
+        // on it — so a keepalive never goes out on a key it has already rejected.
+        if self.peers[index].timers.is_expired(now) {
+            return false;
+        }
+
+        if self.peers[index].is_established() {
+            self.send_keepalive(index, clock, rng, out);
+            true
+        } else {
+            self.start_handshake(index, clock, rng, out);
+            false
+        }
     }
 
     /// Resend the initiator's `InitConf` until an authenticated packet arrives.
@@ -1147,9 +1213,7 @@ impl Device {
             cookie: None,
             init_hello,
         }));
-        self.peers[index]
-            .timers
-            .on_handshake_sent(clock.monotonic_ms);
+        self.peers[index].timers.begin_handshake(clock.monotonic_ms);
         self.remap(index);
 
         out.push(Action::Send {
@@ -1217,11 +1281,18 @@ impl Device {
         }
     }
 
-    /// Drop a session whose key is spent.
-    fn tear_down(&mut self, index: usize) {
+    /// Drop a session whose key the timers have rejected.
+    ///
+    /// The timers must be told, or `Expire` outranks every other action forever:
+    /// the session is already gone, but `poll` still reports expiry, which stops
+    /// the rekey retransmitting and `start_handshake` from ever being reached
+    /// again. A handshake already in flight is left alone — it keeps its own
+    /// retransmission and give-up schedule.
+    fn tear_down(&mut self, index: usize, now: u64) {
         self.peers[index].session = None;
         self.peers[index].previous_own_index = None;
         self.peers[index].pending_conf = None;
+        self.peers[index].timers.on_torn_down(now);
         self.remap(index);
     }
 
@@ -1580,6 +1651,16 @@ fn pad_target(effects: &[Effect]) -> Option<usize> {
             _ => None,
         })
         .max()
+}
+
+/// A configured keepalive interval in milliseconds.
+///
+/// Floored at one so an interval of zero — which a caller can express with a
+/// sub-millisecond `Duration` — cannot make the deadline permanent.
+fn keepalive_millis(interval: Duration) -> u64 {
+    u64::try_from(interval.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 /// A stable byte encoding of a socket address, used as the cookie's client key.

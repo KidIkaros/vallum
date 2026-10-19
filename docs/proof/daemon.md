@@ -58,6 +58,13 @@ unreachable until it does. Adding the timer is a small, separate change; adding 
 config field before the timer would be a lie about what the daemon does, so it is
 absent.
 
+> **Closed in P6.6.** The timer and the field landed together, in the order this
+> paragraph asked for: `PeerConfig::with_persistent_keepalive`, a per-peer deadline
+> in the device, and `persistent_keepalive = <seconds>` in `[[peer]]`. It is also
+> the first feature that makes the loop's 100 ms tick observable before the 120 s
+> rekey, and the end-to-end script now measures it. See
+> [`keepalive.md`](keepalive.md).
+
 **(d) A config that names its own key file was resolved against the working
 directory.** Found while wiring the end-to-end test, which starts daemons from
 `/`: `private_key = "a.key"` next to `vallum.toml` only worked if the operator
@@ -283,7 +290,8 @@ performance claim and should not be quoted as one.
    the frozen vectors would move.
 2. **No persistent keepalive.** A responder behind NAT with nothing to send is
    unreachable until it sends something (§0c). The config does not pretend
-   otherwise.
+   otherwise. **Closed in P6.6:** [`keepalive.md`](keepalive.md) adds the timer and
+   the field; a peer may now be dialled on a cadence with no traffic to send.
 3. **No IPv6 address configuration, and no tested inner IPv6 path.** `tun2`'s
    config path is `AF_INET`, so the daemon cannot assign a v6 address; it says so
    and prints the command. `allowed_ips` accepts v6 prefixes and the data plane

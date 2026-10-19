@@ -166,8 +166,8 @@ ok "two distinct tri-hybrid keys ($(wc -c < "$WORK/a.pub") bytes of public line 
 
 # A config names its key file *relatively*, and each daemon below is started from
 # a different working directory: this also exercises config-relative resolution.
-write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer allowed  $6 peer public
-    local name=$1 addr=$2 listen=$3 endpoint=$4 allowed=$5 peer_public=$6
+write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer allowed  $6 peer public  $7 keepalive
+    local name=$1 addr=$2 listen=$3 endpoint=$4 allowed=$5 peer_public=$6 keepalive=$7
     {
         printf '[interface]\n'
         printf 'name = "vallum0"\n'
@@ -181,13 +181,19 @@ write_config() { # $1 name  $2 inner addr  $3 listen  $4 peer endpoint  $5 peer 
             printf 'endpoint = "%s"\n' "$endpoint"
         fi
         printf 'allowed_ips = ["%s/32"]\n' "$allowed"
+        if [ -n "$keepalive" ]; then
+            printf 'persistent_keepalive = %s\n' "$keepalive"
+        fi
     } > "$WORK/$name.toml"
 }
 
 # A dials B. B is told nothing about where A is: it must learn A's address from
-# the authenticated handshake, which is the roaming path.
-write_config a "$INNER_A" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B" "$PUB_B"
-write_config b "$INNER_B" "$OUTER_B:$PORT" ""                 "$INNER_A" "$PUB_A"
+# the authenticated handshake, which is the roaming path. B is the end told to
+# keep the path warm, because B is the end a NAT would forget: it never speaks
+# until spoken to. A one-second cadence makes the keepalive observable inside the
+# few seconds this script runs for.
+write_config a "$INNER_A" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B" "$PUB_B" ""
+write_config b "$INNER_B" "$OUTER_B:$PORT" ""                 "$INNER_A" "$PUB_A" 1
 
 # ── arm the adversary's capture ──────────────────────────────────────
 #
@@ -363,6 +369,55 @@ if [ "$((FRAG_A_AFTER - FRAG_A_BEFORE))" -gt 0 ] || [ "$((FRAG_B_AFTER - FRAG_B_
 else
     printf '   note   no outer fragmentation was observed here.\n'
 fi
+
+# ── the idle peer keeps the path warm ────────────────────────────────
+#
+# B was told `persistent_keepalive = 1` and has nothing of its own to send: no
+# ping runs during this window. Every datagram B produces here is the policy
+# keepalive, which also makes this the only place the daemon's periodic tick is
+# observable before the 120 s rekey would exercise it — and the keepalive itself
+# is what makes a NAT-bound peer reachable when it has nothing to say.
+#
+# A keepalive is a single datagram, so it never fragments; the fragment counters
+# read just above are unaffected by it.
+say "listening on veth-a for 2.5 s with no traffic, watching B keep the path warm"
+KEEPALIVES=$(python3 - "$OUTER_A" "$PORT" <<'PY'
+import socket, sys, time
+
+a_address, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+s.bind(("veth-a", 0))
+s.settimeout(0.2)
+deadline = time.time() + 2.5
+count = 0
+while time.time() < deadline:
+    try:
+        frame, _ = s.recvfrom(65535)
+    except socket.timeout:
+        continue
+    if frame[12:14] != b"\x08\x00":
+        continue
+    ip = frame[14:]
+    ihl = (ip[0] & 0xF) * 4
+    if ip[9] != 17:  # UDP
+        continue
+    flags = int.from_bytes(ip[6:8], "big")
+    if (flags & 0x1FFF) or (flags & 0x2000):
+        continue  # a fragment; a keepalive is one whole datagram
+    if socket.inet_ntoa(ip[16:20]) != a_address:
+        continue
+    if int.from_bytes(ip[ihl + 2 : ihl + 4], "big") != port:
+        continue
+    count += 1
+print(count)
+PY
+) || bad "the keepalive counter failed to run"
+
+grep -q "persistent_keepalive" "$WORK/b.toml" || bad "B's config lost its keepalive field"
+[ "$KEEPALIVES" -ge 2 ] \
+    || bad "idle B sent $KEEPALIVES keepalives in 2.5 s, expected at least 2 at a 1 s cadence"
+printf '   B sent %s keepalives in 2.5 idle seconds with no traffic to send\n' "$KEEPALIVES"
+ok "the idle peer kept its NAT binding warm on its own"
 
 # ── the adversary ────────────────────────────────────────────────────
 #
