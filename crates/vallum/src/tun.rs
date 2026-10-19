@@ -93,12 +93,14 @@ pub trait TunWriter: Send {
 pub struct InterfaceSpec {
     /// The kernel interface name, if the operator pinned one.
     pub name: Option<String>,
-    /// The address and prefix to assign to the interface.
+    /// The addresses and prefixes to assign to the interface.
     ///
     /// A prefix that covers the peers' `allowed_ips` makes the kernel install the
     /// connected route, which is why a two-host deployment needs no route
-    /// command at all.
-    pub address: Option<ipnet::IpNet>,
+    /// command at all. Both families may be present: a dual-stack tunnel names
+    /// one of each, and every address is assigned over netlink after the device
+    /// exists.
+    pub addresses: Vec<ipnet::IpNet>,
     /// The inner MTU.
     pub mtu: u16,
 }
@@ -175,7 +177,7 @@ mod platform {
     ///
     /// If the device cannot be created or configured — most often because the
     /// process lacks `CAP_NET_ADMIN`.
-    pub fn open(spec: &InterfaceSpec, warn: &mut dyn FnMut(String)) -> io::Result<InterfaceParts> {
+    pub fn open(spec: &InterfaceSpec, _warn: &mut dyn FnMut(String)) -> io::Result<InterfaceParts> {
         use tun2::AbstractDevice;
 
         let mtu = effective_mtu(spec);
@@ -190,26 +192,20 @@ mod platform {
         // interface down.
         config.up();
 
-        // A `tun2` address is an `AF_INET` ioctl, so IPv4 (including a /32
-        // point-to-point address, whose netmask is 255.255.255.255) is what it
-        // can set. IPv6 is assigned after creation, over netlink — see
-        // `assign_ipv6`.
-        if let Some(ipnet::IpNet::V4(net)) = spec.address {
-            config.address(net.addr());
-            config.netmask(net.netmask());
-        }
-        let _ = &warn; // the v6 path no longer needs to hand work back
-
-        // `ensure_root_privileges` defaults to true, so `create` both makes the
-        // device and applies the configuration above.
+        // `tun2` configures addresses with `SIOCSIFADDR` and an `AF_INET`
+        // sockaddr, which cannot express IPv6 and can only hold one address.
+        // Both limits are avoided by assigning every configured address over
+        // netlink once the device exists — see `assign_address`.
+        //
+        // `ensure_root_privileges` defaults to true, so `create` makes the
+        // device and applies the MTU and `up` above.
         let device = tun2::create(&config)?;
         let name = device.tun_name()?;
 
-        // The v6 address needs the interface index, so it happens here. A
-        // failure is fatal: a half-configured interface is exactly the state
+        // A failure is fatal: a half-configured interface is exactly the state
         // this replaces.
-        if let Some(ipnet::IpNet::V6(net)) = spec.address {
-            assign_ipv6(&name, &net)?;
+        for net in &spec.addresses {
+            assign_address(&name, net)?;
         }
 
         let (reader, writer) = device.split();
@@ -222,15 +218,12 @@ mod platform {
         })
     }
 
-    /// Add an IPv6 address to an existing interface over netlink.
+    /// The serialized `RTM_NEWADDR` request for `net` on interface `index`.
     ///
-    /// `tun2` configures addresses with `SIOCSIFADDR` and an `AF_INET` sockaddr,
-    /// which cannot express a v6 address. `RTM_NEWADDR` can, and `netlink-sys`
-    /// owns the socket so this stays inside `unsafe_code = "forbid"`.
-    ///
-    /// `IFA_LOCAL` is the attribute `ip addr add` sends for a normal prefix;
-    /// `IFA_ADDRESS` is for a peer address and is not used here.
-    fn assign_ipv6(name: &str, net: &ipnet::Ipv6Net) -> io::Result<()> {
+    /// Pure, so the layout is testable without `CAP_NET_ADMIN`: both bugs this
+    /// gate found were here — the family and flags were hard-coded to IPv6, and
+    /// `IFA_ADDRESS` was missing, which the v4 kernel rejects with `ERANGE`.
+    fn address_request(net: &ipnet::IpNet, index: u32) -> Vec<u8> {
         use netlink_packet_core::{
             NetlinkHeader, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_CREATE, NLM_F_EXCL,
             NLM_F_REQUEST,
@@ -239,26 +232,40 @@ mod platform {
             AddressAttribute, AddressHeader, AddressHeaderFlags, AddressMessage,
         };
         use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
-        use netlink_sys::{protocols::NETLINK_ROUTE, Socket};
 
-        let index = nix::net::if_::if_nametoindex(name)
-            .map_err(|e| io::Error::other(format!("if_nametoindex(`{name}`) for {net}: {e}")))?;
+        let (family, address, flags) = match net {
+            ipnet::IpNet::V4(net) => (
+                AddressFamily::Inet,
+                std::net::IpAddr::V4(net.addr()),
+                AddressHeaderFlags::default(),
+            ),
+            ipnet::IpNet::V6(net) => (
+                AddressFamily::Inet6,
+                std::net::IpAddr::V6(net.addr()),
+                // `nodad`: a TUN has no link-layer neighbour discovery, so
+                // duplicate address detection's solicitations go nowhere and
+                // leave the address tentative for about a second — during which
+                // the kernel drops traffic to it. `ip addr add ... nodad` is the
+                // same choice. IPv4 has no equivalent flag.
+                AddressHeaderFlags::Nodad,
+            ),
+        };
 
         let mut message = AddressMessage::default();
         message.header = AddressHeader {
-            family: AddressFamily::Inet6,
+            family,
             prefix_len: net.prefix_len(),
-            // `nodad`: a TUN has no link-layer neighbour discovery, so duplicate
-            // address detection's solicitations go nowhere and leave the address
-            // tentative for about a second — during which the kernel drops
-            // traffic to it. `ip addr add ... nodad` is the same choice.
-            flags: AddressHeaderFlags::Nodad,
+            flags,
             index,
             ..AddressHeader::default()
         };
-        // `IFA_LOCAL` only: that is what `ip addr add` sends for a normal
-        // (non-peer) address, and the kernel derives the peer attribute from it.
-        message.attributes = vec![AddressAttribute::Local(net.addr().into())];
+        // Both attributes, as `ip addr add` sends them: `IFA_LOCAL` is the
+        // address, `IFA_ADDRESS` is its peer (equal for a normal prefix). The
+        // kernel rejects a v4 request that omits the second with `ERANGE`.
+        message.attributes = vec![
+            AddressAttribute::Local(address),
+            AddressAttribute::Address(address),
+        ];
 
         let mut header = NetlinkHeader::default();
         header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
@@ -270,6 +277,28 @@ mod platform {
         request.finalize();
         let mut buffer = vec![0u8; request.buffer_len()];
         request.serialize(&mut buffer);
+        buffer
+    }
+
+    /// Add one address to an existing interface over netlink.
+    ///
+    /// `tun2` configures addresses with `SIOCSIFADDR` and an `AF_INET` sockaddr,
+    /// which cannot express IPv6 and can only hold one address. `RTM_NEWADDR`
+    /// handles both families and any number of addresses, and `netlink-sys`
+    /// owns the socket so this stays inside `unsafe_code = "forbid"`.
+    ///
+    /// `IFA_LOCAL` and `IFA_ADDRESS` are both set, as `ip addr add` does: for a
+    /// normal prefix they are the same address, and the v4 kernel path requires
+    /// the second (`ERANGE` otherwise). `IFA_F_NODAD` is set for IPv6 only —
+    /// see the comment on `flags` below.
+    fn assign_address(name: &str, net: &ipnet::IpNet) -> io::Result<()> {
+        use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
+        use netlink_packet_route::RouteNetlinkMessage;
+        use netlink_sys::{protocols::NETLINK_ROUTE, Socket};
+
+        let index = nix::net::if_::if_nametoindex(name)
+            .map_err(|e| io::Error::other(format!("if_nametoindex(`{name}`) for {net}: {e}")))?;
+        let buffer = address_request(net, index);
 
         let mut socket = Socket::new(NETLINK_ROUTE)?;
         socket.bind_auto()?;
@@ -298,6 +327,44 @@ mod platform {
             _ => Err(io::Error::other(format!(
                 "assigning {net} to `{name}`: unexpected netlink reply"
             ))),
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    mod tests {
+        use super::address_request;
+
+        #[test]
+        fn a_v4_request_is_af_inet_with_both_attributes() {
+            let bytes = address_request(&"10.8.0.1/32".parse().unwrap(), 7);
+            assert_eq!(bytes.len(), 40);
+            assert_eq!(bytes[16], 2, "family must be AF_INET");
+            assert_eq!(bytes[17], 32, "prefix length");
+            assert_eq!(bytes[18], 0, "IFA_F_NODAD is IPv6-only");
+            assert_eq!(
+                u32::from_ne_bytes(bytes[20..24].try_into().unwrap()),
+                7,
+                "interface index"
+            );
+            assert_eq!(&bytes[24..28], &[8, 0, 2, 0], "IFA_LOCAL header");
+            assert_eq!(&bytes[28..32], &[10, 8, 0, 1], "IFA_LOCAL value");
+            assert_eq!(
+                &bytes[32..36],
+                &[8, 0, 1, 0],
+                "IFA_ADDRESS header — the v4 kernel rejects the request without it"
+            );
+            assert_eq!(&bytes[36..40], &[10, 8, 0, 1], "IFA_ADDRESS value");
+        }
+
+        #[test]
+        fn a_v6_request_is_nodad_and_carries_the_128_bit_address() {
+            let bytes = address_request(&"fd00:8::1/128".parse().unwrap(), 7);
+            assert_eq!(bytes.len(), 64);
+            assert_eq!(bytes[16], 10, "family must be AF_INET6");
+            assert_eq!(bytes[17], 128, "prefix length");
+            assert_eq!(bytes[18], 2, "IFA_F_NODAD");
+            assert_eq!(&bytes[24..28], &[20, 0, 2, 0], "IFA_LOCAL, 16 bytes");
         }
     }
 }

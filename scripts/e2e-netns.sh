@@ -68,6 +68,8 @@ WORK=$2
 
 OUTER_A=10.99.0.1
 OUTER_B=10.99.0.2
+OUTER6_A=fd00:99::1
+OUTER6_B=fd00:99::2
 INNER_A=10.7.0.1
 INNER_B=10.7.0.2
 PORT=51820
@@ -137,6 +139,7 @@ ip link set lo up
 ip link add veth-a type veth peer name veth-b
 ip link set veth-a up
 ip addr add "$OUTER_A/24" dev veth-a
+ip -6 addr add "$OUTER6_A/64" dev veth-a nodad
 
 # Park a process in a fresh network namespace. `sleep infinity` holds it open
 # for as long as this script runs, and `nsenter` is how we reach inside.
@@ -150,9 +153,11 @@ in_ns ip link set lo up
 ip link set veth-b netns "$(cat "$HOLDER_PIDFILE")"
 in_ns ip link set veth-b up
 in_ns ip addr add "$OUTER_B/24" dev veth-b
+in_ns ip -6 addr add "$OUTER6_B/64" dev veth-b nodad
 
 ping -c1 -W3 -q "$OUTER_B" >/dev/null || bad "the outer network is not up"
-ok "outer network is up"
+ping -6 -c1 -W3 -q "$OUTER6_B" >/dev/null || bad "the outer IPv6 network is not up"
+ok "outer network is up, over IPv4 and IPv6"
 
 # ── keys and configs ─────────────────────────────────────────────────
 
@@ -737,6 +742,93 @@ kill_pidfile "$B_PIDFILE"
 wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the v6 path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the v6 path"
 ok "the IPv6-path daemons exited on SIGTERM"
+
+# ── IPv6 outer path, dual-stack /32 inner ────────────────────────────
+#
+# Two gaps in one lifecycle: the transport binds a v6 socket and dials a v6
+# endpoint (so `IPV6_DONTFRAG` and the v6 cookie encoding are exercised), and the
+# interface carries one address of each family as a /32 and a /128. With no
+# connected route for either, the operator installs the host routes — which is
+# also what the daemon's config warning tells them to do.
+
+say "restarting with a v6 outer path and dual-stack /32 inner addresses"
+: > "$A_PIDFILE"
+: > "$B_PIDFILE"
+
+sed -i -e 's|^address = .*|addresses = ["10.8.0.1/32", "fd00:8::1/128"]|' \
+       -e 's|^listen = .*|listen = "[fd00:99::1]:51820"|' \
+       -e 's|^endpoint = .*|endpoint = "[fd00:99::2]:51820"|' \
+       -e 's|^allowed_ips = .*|allowed_ips = ["10.8.0.2/32", "fd00:8::2/128"]|' \
+       "$WORK/a.toml"
+sed -i -e 's|^address = .*|addresses = ["10.8.0.2/32", "fd00:8::2/128"]|' \
+       -e 's|^listen = .*|listen = "[fd00:99::2]:51820"|' \
+       -e 's|^allowed_ips = .*|allowed_ips = ["10.8.0.1/32", "fd00:8::1/128"]|' \
+       "$WORK/b.toml"
+grep -q '^addresses = ' "$WORK/a.toml" || bad "the dual-stack config was not written"
+
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
+B_JOB=$!
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
+A_JOB=$!
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited on the dual-stack path; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s on the dual-stack path"
+    fi
+    sleep 0.1
+done
+
+# Both addresses, both families, assigned by the daemon over netlink.
+ip addr show dev vallum0 | grep -q '10.8.0.1/32' \
+    || bad "A has no v4 /32 address; see $A_LOG"
+ip -6 addr show dev vallum0 | grep -q 'fd00:8::1/128' \
+    || bad "A has no v6 /128 address; see $A_LOG"
+in_ns ip addr show dev vallum0 | grep -q '10.8.0.2/32' \
+    || bad "B has no v4 /32 address; see $B_LOG"
+in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:8::2/128' \
+    || bad "B has no v6 /128 address; see $B_LOG"
+ok "one interface carries both families, assigned by the daemon"
+
+# A /32 and a /128 install no connected route; the operator adds host routes,
+# exactly as the config warning says.
+ip route add 10.8.0.2/32 dev vallum0
+ip -6 route add fd00:8::2/128 dev vallum0
+in_ns ip route add 10.8.0.1/32 dev vallum0
+in_ns ip -6 route add fd00:8::1/128 dev vallum0
+
+if ping -c2 -W5 -i0.3 -q 10.8.0.2; then
+    ok "IPv4 crossed a dual-stack tunnel over a v6 outer path"
+else
+    bad "IPv4 did not cross the dual-stack tunnel"
+fi
+if ping -6 -c2 -W5 -i0.3 -q fd00:8::2; then
+    ok "IPv6 crossed the same tunnel"
+else
+    bad "IPv6 did not cross the dual-stack tunnel"
+fi
+if in_ns ping -c2 -W5 -i0.3 -q 10.8.0.1 && in_ns ping -6 -c2 -W5 -i0.3 -q fd00:8::1; then
+    ok "both families crossed back"
+else
+    bad "the reverse direction failed for at least one family"
+fi
+
+say "shutting the dual-stack daemons down"
+kill_pidfile "$A_PIDFILE"
+kill_pidfile "$B_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the dual-stack path"
+wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the dual-stack path"
+ok "the dual-stack daemons exited on SIGTERM"
 
 printf '\n== PASS\n'
 INNER

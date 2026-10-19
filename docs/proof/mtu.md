@@ -109,5 +109,9 @@ bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
 4. **No upward adaptation.** Jumbo paths are not used; the cap is 1452.
 5. **No change to the receiver's bounds.** `MAX_FRAGMENT_DATA` still caps a
    fragment at 1442; a smaller budget is always below it.
-6. **The 48-byte header assumption is IPv6's.** An IPv4 path has 20 bytes of
-   slack, so the budget is conservative there, as it always was.
+6. **The 48-byte header assumption is IPv6's, deliberately.** The budget is
+   **global**: one daemon has one segmenter, and its peers may be reached over
+   either family, so the worst-case header is the only safe constant. An IPv4
+   outer path therefore has 20 bytes of slack — conservative, not wrong. Making
+   the budget depend on `listen` would be wrong for a daemon whose peers are
+   reached over the other family.

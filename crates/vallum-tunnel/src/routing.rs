@@ -291,4 +291,30 @@ mod tests {
         let packet = vec![0x50u8; 40];
         assert!(packet_source(&packet).is_none());
     }
+
+    #[test]
+    fn a_default_route_covers_every_v4_destination() {
+        // The full-tunnel case: one peer owns the whole v4 space. `ipnet`'s /0
+        // containment is the whole mechanism, and the family is not crossed.
+        let all = AllowedIps::new(vec![net("0.0.0.0/0")]);
+        assert!(all.contains(&ip("10.7.0.2")));
+        assert!(all.contains(&ip("224.0.0.1")));
+        assert!(all.contains(&ip("255.255.255.255")));
+        assert!(!all.contains(&ip("2001:db8::1")));
+    }
+
+    #[test]
+    fn multicast_and_broadcast_destinations_are_matched_by_prefix() {
+        // A peer may be granted a multicast group or a LAN's broadcast address;
+        // nothing in the routing layer special-cases them, which is the point.
+        let multicast = AllowedIps::new(vec![net("224.0.0.0/4")]);
+        assert!(multicast.contains(&ip("224.0.0.1")));
+        assert!(multicast.contains(&ip("239.255.255.250")));
+        assert!(!multicast.contains(&ip("10.0.0.1")));
+
+        let lan = AllowedIps::new(vec![net("10.7.0.0/24")]);
+        assert!(lan.contains(&ip("10.7.0.0")));
+        assert!(lan.contains(&ip("10.7.0.255")));
+        assert!(!lan.contains(&ip("10.7.1.0")));
+    }
 }

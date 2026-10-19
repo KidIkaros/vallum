@@ -143,7 +143,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
 
     let spec = InterfaceSpec {
         name: resolved.interface_name.clone(),
-        address: resolved.address,
+        addresses: resolved.addresses.clone(),
         mtu: resolved.mtu,
     };
     let mut interface_warnings = Vec::new();

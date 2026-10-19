@@ -693,7 +693,11 @@ fn a_relative_key_path_is_resolved_against_the_config_not_the_cwd() {
         .resolve(&config_path, &suite())
         .expect("a relative key path must resolve next to the config");
     assert_eq!(
-        resolved.address.map(|net| net.to_string()).as_deref(),
+        resolved
+            .addresses
+            .first()
+            .map(ToString::to_string)
+            .as_deref(),
         Some("10.7.0.1/24")
     );
 

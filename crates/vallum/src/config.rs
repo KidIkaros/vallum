@@ -12,7 +12,7 @@
 //! [interface]
 //! name = "vallum0"
 //! private_key = "/etc/vallum/private.key"
-//! address = "10.7.0.1/24"
+//! addresses = ["10.7.0.1/24", "fd00:7::1/64"]
 //! listen = "0.0.0.0:51820"
 //!
 //! [log]
@@ -94,8 +94,26 @@ pub struct Interface {
     /// anywhere. An absolute path is used as written.
     pub private_key: PathBuf,
     /// The address and prefix to assign the interface.
+    ///
+    /// A single-address shorthand for [`Interface::addresses`]; both may be
+    /// used. A dual-stack tunnel names one address of each family in
+    /// `addresses`.
     #[serde(default)]
     pub address: Option<String>,
+    /// Addresses to assign to the interface, of either or both families.
+    ///
+    /// Every entry is assigned over netlink after the device exists, so a
+    /// dual-stack tunnel is one config:
+    ///
+    /// ```toml
+    /// addresses = ["10.7.0.1/24", "fd00:7::1/64"]
+    /// ```
+    ///
+    /// IPv4-mapped IPv6 prefixes (`::ffff:10.0.0.1/128`) are refused: they do
+    /// not match a v4 source in `allowed_ips`, so they are a trap rather than a
+    /// shorthand.
+    #[serde(default)]
+    pub addresses: Vec<String>,
     /// The inner MTU.
     #[serde(default)]
     pub mtu: Option<u16>,
@@ -217,8 +235,8 @@ impl Default for Log {
 pub struct Resolved {
     /// The interface name, or `None` to let the kernel pick.
     pub interface_name: Option<String>,
-    /// The address to assign, if any.
-    pub address: Option<IpNet>,
+    /// The addresses to assign, in config order.
+    pub addresses: Vec<IpNet>,
     /// The inner MTU.
     pub mtu: u16,
     /// The UDP address to bind.
@@ -245,7 +263,7 @@ impl std::fmt::Debug for Resolved {
         // reaching a log line.
         f.debug_struct("Resolved")
             .field("interface_name", &self.interface_name)
-            .field("address", &self.address)
+            .field("addresses", &self.addresses)
             .field("mtu", &self.mtu)
             .field("listen", &self.listen)
             .field("peer_count", &self.peers.len())
@@ -308,13 +326,32 @@ impl Config {
             ),
         })?;
 
-        let address = match self.interface.address.as_deref() {
-            Some(text) => Some(text.parse::<IpNet>().map_err(|e| Error::Invalid {
-                path: path.to_path_buf(),
-                what: format!("interface.address `{text}`: {e}"),
-            })?),
-            None => None,
-        };
+        // `address` is the single-address shorthand; `addresses` is the list.
+        // Both may be used, and the result is de-duplicated so a config that
+        // repeats an address is not an error, just noisy.
+        let mut addresses: Vec<IpNet> = Vec::new();
+        if let Some(text) = self.interface.address.as_deref() {
+            addresses.push(parse_interface_address(path, "interface.address", text)?);
+        }
+        for (index, text) in self.interface.addresses.iter().enumerate() {
+            addresses.push(parse_interface_address(
+                path,
+                &format!("interface.addresses[{index}]"),
+                text,
+            )?);
+        }
+        let mut unique: Vec<IpNet> = Vec::with_capacity(addresses.len());
+        for net in addresses {
+            if unique.contains(&net) {
+                warnings.push(format!(
+                    "interface address {net} is listed twice; ignoring the duplicate"
+                ));
+                continue;
+            }
+            unique.push(net);
+        }
+        let addresses = unique;
+        let has_v6 = addresses.iter().any(|net| matches!(net, IpNet::V6(_)));
 
         let listen = match self.interface.listen.as_deref() {
             Some(text) => text.parse::<SocketAddr>().map_err(|e| Error::Invalid {
@@ -384,7 +421,7 @@ impl Config {
                 // IPv6 has a higher floor, and the kernel enforces it by
                 // refusing the address. Say so at load instead of failing in
                 // netlink with an errno the operator cannot act on.
-                if matches!(address, Some(ipnet::IpNet::V6(_))) && mtu < IPV6_MIN_MTU {
+                if has_v6 && mtu < IPV6_MIN_MTU {
                     return Err(Error::Invalid {
                         path: path.to_path_buf(),
                         what: format!(
@@ -410,7 +447,7 @@ impl Config {
                 // floor. The floor wins, and the cost is segmentation — which is
                 // what the envelope exists for, so it is a warning, not a
                 // refusal.
-                if matches!(address, Some(ipnet::IpNet::V6(_))) && fits < IPV6_MIN_MTU {
+                if has_v6 && fits < IPV6_MIN_MTU {
                     warnings.push(format!(
                         "interface.outer_mtu {outer_mtu} would derive an inner MTU of \
                          {fits}, below IPv6's minimum of {IPV6_MIN_MTU}; using \
@@ -567,12 +604,18 @@ impl Config {
             // connected route and the packet never reaches the tunnel. Worth
             // saying; not worth refusing, because an operator may install the
             // route some other way.
-            if let Some(net) = address {
+            if !addresses.is_empty() {
+                let prefixes = addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 for allowed in &nets {
-                    if !net.contains(allowed) {
+                    if !addresses.iter().any(|net| net.contains(allowed)) {
                         warnings.push(format!(
-                            "{}: allowed_ips {allowed} is outside the interface's {net}; \
-                             a route to it is needed (ip route add {allowed} dev <interface>)",
+                            "{}: allowed_ips {allowed} is outside the interface's \
+                             {prefixes}; a route to it is needed \
+                             (ip route add {allowed} dev <interface>)",
                             where_()
                         ));
                     }
@@ -584,7 +627,7 @@ impl Config {
 
         Ok(Resolved {
             interface_name: self.interface.name.clone(),
-            address,
+            addresses,
             mtu,
             listen,
             identity,
@@ -595,6 +638,30 @@ impl Config {
             outer_budget: budget,
         })
     }
+}
+
+/// Parse one interface address, refusing the IPv4-mapped IPv6 trap.
+///
+/// `::ffff:10.0.0.1/128` is a v6 prefix, so it never matches an inner v4 source
+/// in `allowed_ips` and never routes a v4 packet. An operator who writes it
+/// means `10.0.0.1/32`, and the error says so.
+fn parse_interface_address(path: &Path, field: &str, text: &str) -> Result<IpNet, Error> {
+    let net: IpNet = text.parse().map_err(|e| Error::Invalid {
+        path: path.to_path_buf(),
+        what: format!("{field} `{text}`: {e}"),
+    })?;
+    if let IpNet::V6(net6) = net {
+        if let Some(v4) = net6.addr().to_ipv4_mapped() {
+            return Err(Error::Invalid {
+                path: path.to_path_buf(),
+                what: format!(
+                    "{field} `{text}` is an IPv4-mapped IPv6 prefix; write the IPv4                      address instead (`{v4}/{}`)",
+                    net6.prefix_len().saturating_sub(96)
+                ),
+            });
+        }
+    }
+    Ok(net)
 }
 
 /// Resolve a path declared in a config against the config's own directory.

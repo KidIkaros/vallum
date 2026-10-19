@@ -88,11 +88,14 @@ Unit tests cover the MTU interaction:
 ## 5. What this does **not** claim
 
 1. **No SLAAC, no DHCPv6.** One static address from the config.
-2. **No multiple addresses, no address removal.** One `address` per interface,
-   as before.
-3. **No v6-only deployment.** The outer transport is whatever `interface.listen`
-   binds; the e2e exercises a v4 outer path. A v6 outer path is untested, though
-   `UdpTransport::bind` and `IPV6_DONTFRAG` (H6) support it.
+2. **No multiple addresses in H7.** One `address` per interface. **H9 lifts
+   this**: `addresses = [...]` assigns any number, of either family, over the
+   same netlink path — see [`dual-stack.md`](dual-stack.md). Address removal is
+   still out of scope.
+3. **No v6-only deployment in H7.** The outer transport is whatever
+   `interface.listen` binds; H7's e2e exercised a v4 outer path. **H9 tests a v6
+   outer path** end to end, including `IPV6_DONTFRAG` and the v6 cookie encoding
+   — see [`dual-stack.md`](dual-stack.md).
 4. **No IPv6 route management.** The connected route comes from the kernel when
    the address is assigned; peers outside the prefix still need an `ip route`
    (the existing warning covers that).

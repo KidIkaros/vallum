@@ -197,9 +197,11 @@ returns `Unsupported` rather than half-working.
 ### 2.3 Configuration and keys
 
 TOML, because an operator edits it by hand. `[interface]` names the interface, the
-key file, the address/prefix, the MTU (default `1380`), and the listen address
-(default `0.0.0.0:51820`); each `[[peer]]` carries a name, a public line, an
-optional endpoint, and `allowed_ips`; `[log]` sets `trace`…`error`.
+key file, the address/prefix (`address`, or `addresses` for a dual-stack or
+multi-address interface), the MTU (default `1380`), the outer MTU (default
+`1500`), the user/group to become, and the listen address (default
+`0.0.0.0:51820`); each `[[peer]]` carries a name, a public line, an optional
+endpoint, and `allowed_ips`; `[log]` sets `trace`…`error`.
 
 `deny_unknown_fields` is on every table. The failure it prevents is not
 cosmetic: `allowed_ip` for `allowed_ips` would otherwise parse and leave a peer
@@ -220,8 +222,10 @@ against the wrong suite is a startup error that names both ids.
 
 ### 2.4 Routing, and what the daemon will not do
 
-The daemon assigns `address/prefix` to the interface and relies on the kernel's
-connected route to send the prefix into the tunnel. When a peer's `allowed_ips`
+The daemon assigns every configured `address`/`addresses` prefix to the interface
+— over netlink, both families — and relies on the kernel's connected route to
+send the prefix into the tunnel. A `/32` or `/128` has no connected route; the
+operator adds host routes, and the warning below says so. When a peer's `allowed_ips`
 falls outside that prefix, the kernel has no route for it, and the peer is
 unreachable — a failure mode that otherwise looks exactly like a broken handshake.
 So `resolve` emits a warning naming the address and the `ip route add` command to
@@ -232,8 +236,11 @@ For the same reason an IPv6 interface address *was* a warning with the exact
 `ip -6 addr add` command: `tun2`'s configuration path is `AF_INET`, and a
 half-configured interface is worse than one the operator finished. **H7 assigns it
 over netlink** and the e2e carries `ping6` both ways; see [`ipv6.md`](ipv6.md).
-The data plane does not inspect the address family — a packet is routed by its
-destination prefix and sealed as bytes — and `allowed_ips` accepts v6 prefixes.
+**H9 generalises the assignment to both families and any number of addresses**,
+so `addresses = ["10.7.0.1/24", "fd00:7::1/64"]` is one dual-stack interface —
+see [`dual-stack.md`](dual-stack.md). The data plane does not inspect the address
+family — a packet is routed by its destination prefix and sealed as bytes — and
+`allowed_ips` accepts both.
 
 ### 2.5 Shutdown, entropy, and the CLI
 

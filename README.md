@@ -17,10 +17,10 @@ the floor and pushes on the five things it leaves on the table:
 | Vector | Gap in PQ-WireGuard | Vallum |
 |---|---|---|
 | Hybrid KEM | one classical + one PQ leg, single KEM each | tri-hybrid `X25519 + sntrup761 + ML-KEM-768`, combined with HKDF-SHA3-256 |
-| Hybrid signature auth | none (static KEM keys only) | Ed25519 + Falcon-1024 over the transcript (identity documents) |
-| Dual-use identity key | none | Thormarker Ed25519→X25519 construction (planned) |
-| Bounded ratchet | none | fresh hybrid ephemerals per rekey, 2⁴⁸ cap, key erasure (planned) |
-| Traffic analysis | none | Maybenot-style shaping, off by default (planned) |
+| Hybrid signature auth | none (static KEM keys only) | Ed25519 + Falcon-1024 over the transcript, with CA-issued identity documents and a signed validity window |
+| Key reuse | none | **rejected on purpose** (P3): one master seed → a KEM key *and* an independently derived signing key; no dual-use key |
+| Epoch axis | no epoch, no erasure discipline | rekey is a fresh hybrid handshake (root independence), 2⁴⁸/2⁴⁹ caps, one superseded epoch erased after `REJECT_AFTER_TIME` |
+| Traffic analysis | none | Maybenot-style shaping, off by default, padding inside the AEAD |
 
 It also keeps the good parts of WireGuard (cryptokey routing, TAI64N, keyed MAC
 cookies, roaming by authenticated source) and strengthens suite negotiation:
@@ -95,18 +95,35 @@ one (recorded as an open limitation).
 Cargo.toml                        workspace
 crates/
   vallum-crypto/                  boundary: trait + combiners (no deps)
-  vallum-crypto-sdk/              origin-crypto-sdk adapter
+  vallum-crypto-sdk/              origin-crypto-sdk adapter (and the CT harnesses)
   vallum-crypto-contract/         suite-agnostic contract tests
-  vallum-core/                    handshake · key schedule · TLV wire framing
-docs/
-  proof/eck-pfs-psk.md            P1 gate: eCK-PFS-PSK adaptation
+  vallum-core/                    handshake · key schedule · TLV wire · data plane
+                                  · epoch · shaping · segmentation · identity
+  vallum-tunnel/                  sans-IO transport: peers, routing, handshakes
+  vallum/                         the daemon: TOML, TUN, UDP, privileges, CLI
+fuzz/                             cargo-fuzz workspace (four targets)
+docs/proof/                       one artefact per gate
+  eck-pfs-psk · committing-aead-multikey · hybrid-identity · ratchet-pcs
+  traffic-shaping · transport · segment · keepalive · pentest · daemon
+  constant-time · benchmarks · fuzzing · privileges · mtu · ipv6 · dual-stack
+  identity-validity · tamarin
+scripts/
+  e2e-netns.sh                    two namespaces, real kernel, four lifecycles
+  ct.sh · fuzz.sh                 the measurement and fuzzing gates
 ```
 
 ## Test
 
 ```sh
-cargo test --workspace      # unit + boundary contract tests
-cargo clippy --workspace --all-targets
+cargo test --workspace      # unit + integration + boundary contract tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt -p vallum-core -p vallum-tunnel -p vallum -p vallum-crypto \
+          -p vallum-crypto-sdk -p vallum-crypto-contract -- --check
+cargo deny check            # licenses, sources, bans, advisories
+bash scripts/e2e-netns.sh   # two namespaces, a real kernel, four lifecycles
+bash scripts/ct.sh          # DudeCT constant-time gate
+bash scripts/fuzz.sh 60     # four cargo-fuzz targets
+cargo bench -p vallum-core  # handshake and data-plane baselines
 ```
 
 Byte-exact handshake vectors are frozen in `crates/vallum-core/tests/interop.rs`
@@ -123,7 +140,17 @@ suite, plus an adapter-swap smoke test.
 
 ## Status
 
-Phase **P1** (handshake core). The three-message KEM-AKE, MEX, the staged
-transcript, and both explicit key confirmations are implemented and test-green.
-Data plane, identity, ratchet, and shaping are not yet implemented. See the plan
-for the phase gates and `docs/proof/eck-pfs-psk.md` for the P1 proof adaptation.
+Every phase is implemented and gated: **P0–P6.8** (boundary through the daemon,
+keepalive, segmentation, and the admission tag), all seven proof obligations
+(including the Tamarin model), and **H1–H9** (constant-time, benchmarks, fuzzing
+and CI, privilege separation, MTU-aware segmentation, IPv6, identity validity,
+dual-stack addressing). `docs/proof/` holds one artefact per gate, and each one
+states what it does **not** claim.
+
+Known open items are product decisions rather than missing work: a code-based
+(non-lattice) KEM suite for true family diversity, the Rosenpass-style PSK bridge,
+and the final name. The SDK's custom sntrup761 is the cost centre — ~9 ms per
+decapsulation here, versus ~0.25 ms for the ML-KEM leg — which is why the
+alternative-suite work matters.
+
+A dual-stack tunnel is one config: `addresses = ["10.7.0.1/24", "fd00:7::1/64"]`.
