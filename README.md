@@ -50,6 +50,30 @@ vallum-crypto-sdk            (future: from-scratch adapter)
 Swapping crypto = one new adapter + one new suite id + refreshing the KATs. The
 handshake, key schedule, framing, and data plane do not change.
 
+## Handshake
+
+Three messages, three hybrid-KEM operations, one round trip:
+
+```
+Initiator                                              Responder
+InitHello    ── STATIC_CT (A) · EPHEMERAL_PK · TIMESTAMP ──▶   [static key]
+             ◀── EPHEMERAL_CT (B) · STATIC_CT (C) · conf_r ──   RespHello
+InitConf     ── conf_i ────────────────────────────────────▶   [verify]
+```
+
+| op | direction | peer key | purpose |
+|----|-----------|----------|---------|
+| A | init → resp | responder **static** | responder authentication |
+| B | resp → init | initiator **ephemeral** | forward secrecy |
+| C | resp → init | initiator **static** | initiator authentication |
+
+Both static operations are **MEX-bound** (`KDF1(σ, r)`): the sender's own
+long-term secret is mixed into the encapsulation randomness, so a subverted RNG
+cannot fix the shared secret. Confirmation is **mutual and explicit** — the
+responder proves key possession in `RespHello`, the initiator in `InitConf` — so
+neither party accepts a key before authenticating the other. That is the property
+whose absence kept WireGuard out of eCK-PFS-PSK; see `docs/proof/eck-pfs-psk.md`.
+
 ## Suite registry
 
 | id | legs | status |
@@ -73,6 +97,9 @@ crates/
   vallum-crypto/                  boundary: trait + combiners (no deps)
   vallum-crypto-sdk/              origin-crypto-sdk adapter
   vallum-crypto-contract/         suite-agnostic contract tests
+  vallum-core/                    handshake · key schedule · TLV wire framing
+docs/
+  proof/eck-pfs-psk.md            P1 gate: eCK-PFS-PSK adaptation
 ```
 
 ## Test
@@ -82,6 +109,13 @@ cargo test --workspace      # unit + boundary contract tests
 cargo clippy --workspace --all-targets
 ```
 
+Byte-exact handshake vectors are frozen in `crates/vallum-core/tests/interop.rs`
+and regenerate with:
+
+```sh
+cargo test -p vallum-core --test interop -- --ignored --nocapture
+```
+
 The contract tests (`crates/vallum-crypto-contract`) exercise KEM keygen/round-
 trip/tamper-rejection, the combiner, the transcript hash, committing-AEAD seal/
 open + forgery rejection, and hybrid signature verify/reject — for every shipped
@@ -89,5 +123,7 @@ suite, plus an adapter-swap smoke test.
 
 ## Status
 
-Phase **P0** (crypto boundary + combiner). The handshake, data plane, identity,
-ratchet, and shaping are not yet implemented. See the plan for the phase gates.
+Phase **P1** (handshake core). The three-message KEM-AKE, MEX, the staged
+transcript, and both explicit key confirmations are implemented and test-green.
+Data plane, identity, ratchet, and shaping are not yet implemented. See the plan
+for the phase gates and `docs/proof/eck-pfs-psk.md` for the P1 proof adaptation.

@@ -19,13 +19,19 @@
 //! # Construction
 //!
 //! ```text
-//! TR = hash("vallum/transcript/v1", suite_id ‖ InitHello ‖ RespHello)
+//! TR = hash("vallum/transcript/v1", suite_id ‖ <labelled transcript fields>)
 //! K  = KDF(salt = TR, ikm = ss_1 ‖ ss_2 ‖ … ‖ ss_n, info = "vallum/kem/v1", out)
 //! ```
 //!
-//! Because `TR` hashes the exact handshake bytes, it transitively binds every
-//! ciphertext already — no separate ciphertext binding is needed at the
-//! combiner. Ever input is length-framed, so concatenation is unambiguous.
+//! `transcript_hash` frames `suite_id ‖ messages` and hashes under the
+//! `vallum/transcript/v1` domain; the caller supplies the message list. The
+//! handshake passes **stage-labelled field groups** rather than whole messages
+//! (see `vallum-core`), because the responder's confirmation lives *inside*
+//! `RespHello` and so cannot be covered by the transcript it is derived from.
+//!
+//! Because the transcript binds every field the protocol uses — including every
+//! ciphertext — no separate ciphertext binding is needed at the combiner. Every
+//! input is length-framed, so concatenation is unambiguous.
 //!
 //! The combiner lemma is: if at least one leg is IND-CCA, `K` is unpredictable
 //! to a polynomial adversary unless the KDF fails as a dual-PRF with

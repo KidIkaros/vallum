@@ -13,7 +13,8 @@
 
 use vallum_crypto::{
     AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole,
-    KemSecretKey, LegKind, Rng, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    KemSecretKey, LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    KEM_ENCAPS_RANDOMNESS,
 };
 use vallum_crypto_contract::{assert_default_legs, run_contract};
 use vallum_crypto_sdk::SdkSuite;
@@ -72,16 +73,20 @@ impl<S: CryptoSuite> CryptoSuite for SwapSuite<S> {
         self.0.kem_keygen(seed, role)
     }
 
-    fn kem_encaps(&self, pk: &KemPublicKey, rng: &mut dyn Rng) -> Result<Encapsulation, KemError> {
-        self.0.kem_encaps(pk, rng)
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError> {
+        self.0.kem_encaps(pk, randomness)
     }
 
     fn kem_decaps(
         &self,
         sk: &KemSecretKey,
-        enc: &Encapsulation,
+        ciphertext: &[u8],
     ) -> Result<Vec<SharedSecret>, KemError> {
-        self.0.kem_decaps(sk, enc)
+        self.0.kem_decaps(sk, ciphertext)
     }
 
     fn kdf(&self, salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<(), KdfError> {

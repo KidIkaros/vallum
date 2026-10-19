@@ -48,8 +48,8 @@ use origin_crypto_sdk::x25519::{X25519KeyPair, X25519PublicKey};
 
 use vallum_crypto::{
     AeadError, Ciphertext, CryptoSuite, Encapsulation, KemError, KemPublicKey, KemRole,
-    KemSecretKey, KdfError, LegKind, Rng, SharedSecret, SigError, SignPublicKey, SignSecretKey,
-    SuiteError, WireSizes,
+    KemSecretKey, KdfError, LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey,
+    SuiteError, WireSizes, KEM_ENCAPS_RANDOMNESS,
 };
 
 /// Suite id: `X25519 + sntrup761`.
@@ -61,6 +61,8 @@ pub const SUITE_TRI_HYBRID: u16 = 0x0003;
 
 /// Domain separation for per-leg seed derivation.
 const DERIVE_INFO: &[u8] = b"vallum/sdk-suite/v1";
+/// Domain separation for per-leg encapsulation-randomness expansion.
+const ENCAPS_DERIVE_INFO: &[u8] = b"vallum/sdk-suite/encaps/v1";
 /// Domain separation for the hybrid identity key.
 const SIGN_DOMAIN: &str = "vallum/identity/v1";
 
@@ -180,6 +182,14 @@ fn derive(seed: &[u8; 32], role: KemRole, leg: usize, out: &mut [u8]) -> Result<
     hkdf_sha3_256(seed, None, &info, out).map_err(kem_err)
 }
 
+/// Expand the caller's encapsulation randomness for a given leg.
+fn encaps_derive(randomness: &[u8; 32], leg: usize, out: &mut [u8]) -> Result<(), KemError> {
+    let mut info = Vec::with_capacity(ENCAPS_DERIVE_INFO.len() + 1);
+    info.extend_from_slice(ENCAPS_DERIVE_INFO);
+    info.push(u8::try_from(leg).unwrap_or(u8::MAX));
+    hkdf_sha3_256(randomness, None, &info, out).map_err(kem_err)
+}
+
 /// Take a fixed-size array from `buf` at `off`, advancing `off`.
 fn take<const N: usize>(buf: &[u8], off: &mut usize) -> Result<[u8; N], KemError> {
     let end = off
@@ -240,14 +250,19 @@ fn mlkem_keygen(
 fn mlkem_encaps(
     pk: &[u8],
     off: &mut usize,
-    ciphertexts: &mut Vec<Ciphertext>,
+    randomness: &[u8; 32],
+    leg: usize,
+    ciphertext: &mut Vec<u8>,
     secrets: &mut Vec<SharedSecret>,
 ) -> Result<(), KemError> {
     use origin_crypto_sdk::pqc::ml_kem::{EncapsulationKey, MlKem768Kem, EK_SIZE};
     let ek_bytes: [u8; EK_SIZE] = take(pk, off)?;
     let ek = EncapsulationKey::from_bytes(&ek_bytes).map_err(kem_err)?;
-    let (ct, ss) = MlKem768Kem::encapsulate(&ek);
-    ciphertexts.push(Ciphertext::new(ct.as_bytes().to_vec()));
+    // Deterministic encapsulation so MEX covers this leg and vectors are exact.
+    let mut m = [0u8; 32];
+    encaps_derive(randomness, leg, &mut m)?;
+    let (ct, ss) = MlKem768Kem::encapsulate_deterministic(&ek, &m);
+    ciphertext.extend_from_slice(&ct.as_bytes());
     secrets.push(SharedSecret::new(ss));
     Ok(())
 }
@@ -256,7 +271,9 @@ fn mlkem_encaps(
 fn mlkem_encaps(
     _pk: &[u8],
     _off: &mut usize,
-    _ciphertexts: &mut Vec<Ciphertext>,
+    _randomness: &[u8; 32],
+    _leg: usize,
+    _ciphertext: &mut Vec<u8>,
     _secrets: &mut Vec<SharedSecret>,
 ) -> Result<(), KemError> {
     Err(KemError::new("ML-KEM support not compiled in"))
@@ -264,20 +281,25 @@ fn mlkem_encaps(
 
 #[cfg(feature = "ml-kem")]
 fn mlkem_decaps(
-    ct: &[u8],
+    ciphertext: &[u8],
+    off: &mut usize,
     sk_seed: &[u8; 64],
 ) -> Result<SharedSecret, KemError> {
-    use origin_crypto_sdk::pqc::ml_kem::{Ciphertext as MlCiphertext, DecapsulationKey, MlKem768Kem};
+    use origin_crypto_sdk::pqc::ml_kem::{
+        Ciphertext as MlCiphertext, DecapsulationKey, MlKem768Kem, CT_SIZE,
+    };
+    let ct_arr: [u8; CT_SIZE] = take(ciphertext, off)?;
     let dk = DecapsulationKey::from_seed(sk_seed);
-    let ct_arr: [u8; 1088] = ct
-        .try_into()
-        .map_err(|_| KemError::new("bad ML-KEM ciphertext length"))?;
     let ct = MlCiphertext::from_bytes(&ct_arr).map_err(kem_err)?;
     Ok(SharedSecret::new(MlKem768Kem::decapsulate(&dk, &ct)))
 }
 
 #[cfg(not(feature = "ml-kem"))]
-fn mlkem_decaps(_ct: &[u8], _sk_seed: &[u8; 64]) -> Result<SharedSecret, KemError> {
+fn mlkem_decaps(
+    _ciphertext: &[u8],
+    _off: &mut usize,
+    _sk_seed: &[u8; 64],
+) -> Result<SharedSecret, KemError> {
     Err(KemError::new("ML-KEM support not compiled in"))
 }
 
@@ -327,62 +349,77 @@ impl CryptoSuite for SdkSuite {
         Ok((KemPublicKey::new(pk), KemSecretKey::new(sk)))
     }
 
-    fn kem_encaps(&self, pk: &KemPublicKey, rng: &mut dyn Rng) -> Result<Encapsulation, KemError> {
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError> {
         let bytes = pk.as_bytes();
         let mut off = 0usize;
-        let mut ciphertexts = Vec::new();
+        let mut ciphertext = Vec::new();
         let mut shared_secrets = Vec::new();
 
-        for kind in self.leg_kinds() {
+        for (i, kind) in self.leg_kinds().iter().enumerate() {
             match kind {
                 LegKind::X25519 => {
                     let peer_bytes: [u8; 32] = take(bytes, &mut off)?;
                     let mut scalar = [0u8; 32];
-                    rng.fill_bytes(&mut scalar);
+                    encaps_derive(randomness, i, &mut scalar)?;
                     let eph = X25519KeyPair::from_secret_key(&scalar).map_err(kem_err)?;
                     let peer = X25519PublicKey::from_bytes(peer_bytes);
                     let ss = eph.diffie_hellman(&peer).map_err(kem_err)?;
-                    ciphertexts.push(Ciphertext::new(eph.public_key().as_bytes().to_vec()));
+                    ciphertext.extend_from_slice(eph.public_key().as_bytes());
                     shared_secrets.push(SharedSecret::new(*ss.as_bytes()));
                 }
                 LegKind::NtruPrime761 => {
                     let public: NtruPublic = take(bytes, &mut off)?;
                     let mut sub = [0u8; 32];
-                    rng.fill_bytes(&mut sub);
+                    encaps_derive(randomness, i, &mut sub)?;
                     let mut det_rng = ChaCha20Rng::from_seed(sub);
                     let (ct, ss) = NtruPrime::encapsulate(&public, &mut det_rng);
-                    ciphertexts.push(Ciphertext::new(ct.to_vec()));
+                    ciphertext.extend_from_slice(&ct);
                     shared_secrets.push(SharedSecret::new(ss));
                 }
-                LegKind::MlKem768 => {
-                    mlkem_encaps(bytes, &mut off, &mut ciphertexts, &mut shared_secrets)?
-                }
+                LegKind::MlKem768 => mlkem_encaps(
+                    bytes,
+                    &mut off,
+                    randomness,
+                    i,
+                    &mut ciphertext,
+                    &mut shared_secrets,
+                )?,
             }
         }
-        Ok(Encapsulation { ciphertexts, shared_secrets })
+        Ok(Encapsulation {
+            ciphertext: Ciphertext::new(ciphertext),
+            shared_secrets,
+        })
     }
 
     fn kem_decaps(
         &self,
         sk: &KemSecretKey,
-        enc: &Encapsulation,
+        ciphertext: &[u8],
     ) -> Result<Vec<SharedSecret>, KemError> {
         let kinds = self.leg_kinds();
-        if enc.ciphertexts.len() != kinds.len() {
-            return Err(KemError::new("ciphertext leg count mismatch"));
+        let expected = self.sizes().kem_ct;
+        if ciphertext.len() != expected {
+            return Err(KemError::new(format!(
+                "ciphertext is {} bytes, expected {expected}",
+                ciphertext.len()
+            )));
         }
 
         let sk_bytes = sk.as_bytes();
         let mut sk_off = 0usize;
+        let mut ct_off = 0usize;
         let mut out = Vec::with_capacity(kinds.len());
 
-        for (i, kind) in kinds.iter().enumerate() {
-            let ct = enc.ciphertexts[i].as_bytes();
+        for kind in kinds {
             match kind {
                 LegKind::X25519 => {
                     let scalar: [u8; 32] = take(sk_bytes, &mut sk_off)?;
-                    let mut ct_off = 0usize;
-                    let peer_bytes: [u8; 32] = take(ct, &mut ct_off)?;
+                    let peer_bytes: [u8; 32] = take(ciphertext, &mut ct_off)?;
                     let kp = X25519KeyPair::from_secret_key(&scalar).map_err(kem_err)?;
                     let peer = X25519PublicKey::from_bytes(peer_bytes);
                     let ss = kp.diffie_hellman(&peer).map_err(kem_err)?;
@@ -390,15 +427,13 @@ impl CryptoSuite for SdkSuite {
                 }
                 LegKind::NtruPrime761 => {
                     let secret: NtruSecret = take(sk_bytes, &mut sk_off)?;
-                    let ct_arr: NtruCiphertext = ct
-                        .try_into()
-                        .map_err(|_| KemError::new("bad NTRU ciphertext length"))?;
+                    let ct_arr: NtruCiphertext = take(ciphertext, &mut ct_off)?;
                     let ss = NtruPrime::decapsulate(&ct_arr, &secret).map_err(kem_err)?;
                     out.push(SharedSecret::new(ss));
                 }
                 LegKind::MlKem768 => {
                     let seed: [u8; 64] = take(sk_bytes, &mut sk_off)?;
-                    out.push(mlkem_decaps(ct, &seed)?);
+                    out.push(mlkem_decaps(ciphertext, &mut ct_off, &seed)?);
                 }
             }
         }

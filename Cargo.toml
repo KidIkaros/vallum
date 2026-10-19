@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/vallum-core",
     "crates/vallum-crypto",
     "crates/vallum-crypto-sdk",
     "crates/vallum-crypto-contract",
@@ -17,6 +18,7 @@ description = "Vallum — hybrid post-quantum layer-3 tunnel"
 [workspace.dependencies]
 vallum-crypto = { path = "crates/vallum-crypto" }
 vallum-crypto-sdk = { path = "crates/vallum-crypto-sdk" }
+vallum-core = { path = "crates/vallum-core" }
 
 # The SDK is pinned by path (never a floating crates.io version). See the plan's
 # disruption playbook: an SDK bump only recompiles the adapter.

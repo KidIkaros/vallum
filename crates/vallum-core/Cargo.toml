@@ -1,0 +1,20 @@
+[package]
+name = "vallum-core"
+description = "Vallum handshake core: TLV framing and the 3-message hybrid-KEM AKE."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# `vallum-crypto` ONLY. No provider, no SDK, no RNG crate: randomness enters as
+# caller-supplied seeds. That is what makes the handshake byte-exact and what
+# keeps the crypto boundary narrow enough to survive an implementation swap.
+[lints]
+workspace = true
+
+[dependencies]
+vallum-crypto.workspace = true
+
+[dev-dependencies]
+vallum-crypto-sdk.workspace = true

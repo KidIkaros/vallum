@@ -30,38 +30,9 @@
 #![allow(clippy::expect_used)]
 
 use vallum_crypto::{
-    derive_kem_key, transcript_hash, Ciphertext, CryptoSuite, KemRole, LegKind, Rng, WireSizes,
+    derive_kem_key, transcript_hash, CryptoSuite, Encapsulation, KemPublicKey, KemRole,
+    KemSecretKey, LegKind, SharedSecret, WireSizes, KEM_ENCAPS_RANDOMNESS,
 };
-
-/// A deterministic, non-cryptographic RNG for contract runs.
-///
-/// Only needs to be reproducible; it never protects anything.
-#[derive(Debug)]
-pub struct DetRng(u64);
-
-impl DetRng {
-    /// Create a deterministic RNG from a seed.
-    pub fn new(seed: u64) -> Self {
-        Self(seed ^ 0x9E37_79B9_7F4A_7C15)
-    }
-}
-
-impl Rng for DetRng {
-    fn fill_bytes(&mut self, dst: &mut [u8]) {
-        for chunk in dst.chunks_mut(8) {
-            // splitmix64
-            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            let bytes = z.to_le_bytes();
-            for (b, s) in chunk.iter_mut().zip(bytes.iter()) {
-                *b = *s;
-            }
-        }
-    }
-}
 
 /// Assert that a suite provides the leg kinds Vallum's combiner expects.
 ///
@@ -129,26 +100,48 @@ fn check_kem_keygen<S: CryptoSuite + ?Sized>(suite: &S) {
 
 fn check_kem_roundtrip<S: CryptoSuite + ?Sized>(
     suite: &S,
-) -> (
-    vallum_crypto::KemPublicKey,
-    vallum_crypto::KemSecretKey,
-    vallum_crypto::Encapsulation,
-    Vec<vallum_crypto::SharedSecret>,
-) {
+) -> (KemPublicKey, KemSecretKey, Encapsulation, Vec<SharedSecret>) {
     let sizes = suite.sizes();
     let legs = suite.leg_kinds();
     let (pk, sk) = suite
         .kem_keygen(&[0x5Au8; 32], KemRole::Static)
         .expect("kem_keygen");
 
-    let mut rng = DetRng::new(1);
-    let enc = suite.kem_encaps(&pk, &mut rng).expect("kem_encaps");
+    let randomness: [u8; KEM_ENCAPS_RANDOMNESS] = [0x3Cu8; KEM_ENCAPS_RANDOMNESS];
+
+    // Encapsulation is a pure function of (pk, randomness).
+    let enc = suite.kem_encaps(&pk, &randomness).expect("kem_encaps");
+    let enc_again = suite.kem_encaps(&pk, &randomness).expect("kem_encaps");
+    assert_eq!(
+        enc.ciphertext.as_bytes(),
+        enc_again.ciphertext.as_bytes(),
+        "encaps is not deterministic"
+    );
+    for (a, b) in enc
+        .shared_secrets
+        .iter()
+        .zip(enc_again.shared_secrets.iter())
+    {
+        assert_eq!(a.as_bytes(), b.as_bytes(), "encaps secrets not deterministic");
+    }
+
+    // Distinct randomness must change the ciphertext.
+    let other = suite
+        .kem_encaps(&pk, &[0x3Du8; KEM_ENCAPS_RANDOMNESS])
+        .expect("kem_encaps");
+    assert_ne!(
+        enc.ciphertext.as_bytes(),
+        other.ciphertext.as_bytes(),
+        "encapsulation ignores the supplied randomness"
+    );
+
     assert_eq!(enc.leg_count(), legs.len(), "encaps leg count");
+    assert_eq!(enc.ciphertext.len(), sizes.kem_ct, "ciphertext size");
 
-    let total_ct: usize = enc.ciphertexts.iter().map(|c| c.len()).sum();
-    assert_eq!(total_ct, sizes.kem_ct, "total ciphertext size");
-
-    let dec = suite.kem_decaps(&sk, &enc).expect("kem_decaps");
+    // The wire form round-trips: decapsulating the raw bytes recovers every leg.
+    let dec = suite
+        .kem_decaps(&sk, enc.ciphertext.as_bytes())
+        .expect("kem_decaps");
     assert_eq!(dec.len(), legs.len(), "decaps leg count");
     for (i, (a, b)) in enc.shared_secrets.iter().zip(dec.iter()).enumerate() {
         assert_eq!(a.as_bytes(), b.as_bytes(), "leg {i} secret mismatch");
@@ -159,24 +152,27 @@ fn check_kem_roundtrip<S: CryptoSuite + ?Sized>(
 
 fn check_kem_tamper<S: CryptoSuite + ?Sized>(
     suite: &S,
-    sk: &vallum_crypto::KemSecretKey,
-    enc: &vallum_crypto::Encapsulation,
+    sk: &KemSecretKey,
+    enc: &Encapsulation,
 ) {
-    for i in 0..enc.ciphertexts.len() {
-        let mut tampered = enc.clone();
-        let mut bytes = tampered.ciphertexts[i].as_bytes().to_vec();
-        bytes[0] ^= 1;
-        tampered.ciphertexts[i] = Ciphertext::new(bytes);
+    let bytes = enc.ciphertext.as_bytes();
+    let mut tampered = bytes.to_vec();
+    tampered[0] ^= 1;
+    let dec = suite
+        .kem_decaps(sk, &tampered)
+        .expect("kem_decaps of tampered ciphertext");
+    assert!(
+        dec.iter()
+            .zip(enc.shared_secrets.iter())
+            .any(|(a, b)| a.as_bytes() != b.as_bytes()),
+        "tampering the ciphertext did not change any recovered secret"
+    );
 
-        let dec = suite
-            .kem_decaps(sk, &tampered)
-            .expect("kem_decaps of tampered ciphertext");
-        assert_ne!(
-            dec[i].as_bytes(),
-            enc.shared_secrets[i].as_bytes(),
-            "tampering leg {i} did not change the recovered secret"
-        );
-    }
+    // A wrong-length ciphertext must be rejected, not silently truncated.
+    assert!(
+        suite.kem_decaps(sk, &bytes[..bytes.len() - 1]).is_err(),
+        "short ciphertext accepted"
+    );
 }
 
 fn check_combiner<S: CryptoSuite + ?Sized>(suite: &S, legs: &[vallum_crypto::SharedSecret]) {

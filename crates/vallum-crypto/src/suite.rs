@@ -23,14 +23,15 @@ use core::fmt;
 
 use crate::error::{AeadError, KdfError, KemError, SigError};
 
-/// A source of cryptographic randomness.
+/// Size of the caller-supplied encapsulation randomness, in bytes.
 ///
-/// Deliberately not `rand::RngCore`: the boundary must not leak a third-party
-/// RNG trait. An adapter wraps whatever the implementation provides.
-pub trait Rng {
-    /// Fill `dst` with cryptographically secure random bytes.
-    fn fill_bytes(&mut self, dst: &mut [u8]);
-}
+/// Encapsulation takes an explicit 32-byte seed rather than an RNG handle. This
+/// makes it **fully deterministic**, so handshake transcripts and session keys
+/// are reproducible and byte-exact vectors are possible; and it lets the
+/// protocol mix a long-term secret into the randomness (the MEX / dual-PRF
+/// hardening from PQ-WireGuard) *before* the KEM runs. The adapter expands the
+/// seed into per-leg randomness with its own KDF.
+pub const KEM_ENCAPS_RANDOMNESS: usize = 32;
 
 /// The role a KEM key pair plays in the handshake.
 ///
@@ -236,12 +237,11 @@ impl fmt::Debug for SignSecretKey {
 }
 
 /// The result of encapsulating to every leg of a hybrid public key.
-///
-/// `ciphertexts` and `shared_secrets` are parallel and in combiner order.
 #[derive(Clone, Debug)]
 pub struct Encapsulation {
-    /// One ciphertext per leg, in combiner order.
-    pub ciphertexts: Vec<Ciphertext>,
+    /// Concatenated ciphertext — one leg after another, in combiner order. This
+    /// is the exact wire form.
+    pub ciphertext: Ciphertext,
     /// One shared secret per leg, in combiner order.
     pub shared_secrets: Vec<SharedSecret>,
 }
@@ -249,7 +249,7 @@ pub struct Encapsulation {
 impl Encapsulation {
     /// Number of legs.
     pub fn leg_count(&self) -> usize {
-        self.ciphertexts.len()
+        self.shared_secrets.len()
     }
 }
 
@@ -282,16 +282,29 @@ pub trait CryptoSuite: Send + Sync + 'static {
         role: KemRole,
     ) -> Result<(KemPublicKey, KemSecretKey), KemError>;
 
-    /// Encapsulate to every leg, returning per-leg ciphertexts and secrets.
-    fn kem_encaps(&self, pk: &KemPublicKey, rng: &mut dyn Rng) -> Result<Encapsulation, KemError>;
+    /// Encapsulate to every leg, returning the concatenated ciphertext (wire
+    /// form) and the per-leg shared secrets.
+    ///
+    /// `randomness` must be 32 uniformly random bytes and must never be reused
+    /// across encapsulations to the same key. Implementations derive per-leg
+    /// randomness from it deterministically, so the same `(pk, randomness)` pair
+    /// always yields the same ciphertext and secrets.
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError>;
 
-    /// Decapsulate every leg, returning per-leg shared secrets in combiner
-    /// order. Implementations must not fail open on tampering: a modified
-    /// ciphertext yields a *different* secret, never the original.
+    /// Decapsulate a concatenated ciphertext, returning per-leg shared secrets
+    /// in combiner order.
+    ///
+    /// `ciphertext` must be exactly `sizes().kem_ct` bytes. Implementations must
+    /// never fail open: a modified ciphertext yields *different* secrets, never
+    /// the original.
     fn kem_decaps(
         &self,
         sk: &KemSecretKey,
-        enc: &Encapsulation,
+        ciphertext: &[u8],
     ) -> Result<Vec<SharedSecret>, KemError>;
 
     // ── KDF (HKDF-shaped) ────────────────────────────────────────────

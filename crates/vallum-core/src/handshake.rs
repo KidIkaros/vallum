@@ -1,0 +1,764 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Vallum's three-message hybrid-KEM authenticated key exchange (KEM-AKE).
+//!
+//! ```text
+//! Initiator                                              Responder
+//! ─────────                                              ─────────
+//! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP ──▶   [static key]
+//!              ◀── EPHEMERAL_CT (B), STATIC_CT (C),
+//!                  CONFIRMATION (conf_r) ──────────────────    RespHello
+//! InitConf     ── CONFIRMATION (conf_i) ─────────────────▶      [verify]
+//! ```
+//!
+//! ## Explicit confirmation, both directions
+//!
+//! WireGuard uses the initiator's *first data packet* as implicit confirmation,
+//! which is exactly what made it unprovable in eCK-PFS-PSK. PQ-WireGuard adds an
+//! explicit confirmation message; it also puts an explicit confirmation in
+//! `RespHello` (its `zero` field), so that **both** parties authenticate each
+//! other *before* accepting the session key. Vallum does the same, and it is not
+//! optional: without `conf_r` the initiator would accept a key on the strength of
+//! an unauthenticated `RespHello`.
+//!
+//! * `conf_r` (responder → initiator, inside `RespHello`) is derived from `KEY`,
+//!   and `KEY` requires decapsulating op A — so verifying it proves the peer holds
+//!   `σ_r`. That authenticates the **responder** to the initiator.
+//! * `conf_i` (initiator → responder, in `InitConf`) requires ops B *and* C, i.e.
+//!   the initiator's ephemeral and static secrets. That authenticates the
+//!   **initiator** to the responder.
+//!
+//! ## Staged transcript
+//!
+//! The confirmation values must be verifiable at the point their message
+//! arrives, so the transcript is built in stages that mirror PQ-WireGuard's
+//! running hash chain rather than as one hash of the final byte sequence:
+//!
+//! ```text
+//! TR1  = H("vallum/tr/init", suite_id ‖ sid_i ‖ epk_i ‖ ct_A ‖ timestamp)
+//! TR   = H("vallum/tr/resp", suite_id ‖ TR1 ‖ sid_r ‖ ct_B ‖ ct_C)
+//! ROOT = KDF(salt = TR,  ikm = ss_A ‖ ss_B ‖ ss_C, info = "vallum/kem/v1")
+//! PSK  = H("vallum/psk/v1", frame([spk_i, spk_r]))          // UKS mitigation
+//! KEY  = KDF(salt = ROOT, ikm = PSK, info = "vallum/psk-mix/v1")
+//! conf_r = KDF(salt = KEY, ikm = TR,             info = "vallum/confirm/resp/v1")
+//! TR2    = H("vallum/tr/conf", suite_id ‖ TR ‖ conf_r)
+//! conf_i = KDF(salt = KEY, ikm = TR2,            info = "vallum/confirm/init/v1")
+//! ```
+//!
+//! `TR` binds everything before the responder's confirmation and is therefore the
+//! key-schedule transcript; `TR2` binds `conf_r` and is what `conf_i` commits to.
+//! Every concatenation is length-framed, so it is unambiguous. `KEY` is the
+//! handshake root the data plane will expand (P4); P1 freezes it together with
+//! both confirmation values.
+//!
+//! Note that the transcript is built from **parsed field values** rather than the
+//! raw received bytes. That is deliberate: it removes any need to canonicalise
+//! TLV ordering, and (unlike `H(InitHello ‖ RespHello)`) it lets the responder
+//! hash `RespHello` before its confirmation exists.
+//!
+//! ## The three KEM operations
+//!
+//! | op | direction | peer key | purpose |
+//! |----|-----------|----------|---------|
+//! | A | initiator → responder | responder **static** | responder authentication |
+//! | B | responder → initiator | initiator **ephemeral** | forward secrecy |
+//! | C | responder → initiator | initiator **static** | initiator authentication |
+//!
+//! One round trip plus an explicit confirmation.
+//!
+//! ## MEX (dual-PRF hardening)
+//!
+//! The two **static** encapsulations (A and C) do not use raw randomness. Their
+//! encapsulation seed is `KDF(salt = fresh, ikm = sender_static_secret, info = …)`
+//! — the sender's own long-term secret is mixed into the KEM randomness. This is
+//! PQ-WireGuard's MEX fix: a subverted RNG cannot fix the shared secret, because
+//! the adversary would also need the static secret. Op B is ephemeral and uses
+//! plain fresh randomness.
+//!
+//! ## Randomness
+//!
+//! This module takes no RNG. Every handshake is a pure function of the caller's
+//! `handshake_seed` (32 bytes of fresh randomness) and the peer's static key, so
+//! a full transcript is byte-exact and reproducible — which is what makes the
+//! frozen vectors in `tests/interop.rs` possible. The runtime layer is
+//! responsible for sourcing `handshake_seed`, `sender_index`, and the timestamp.
+
+use vallum_crypto::{
+    derive_kem_key, frame, transcript_hash, CryptoSuite, KemPublicKey, KemRole, KemSecretKey,
+    SharedSecret, KEM_ENCAPS_RANDOMNESS,
+};
+
+use crate::error::HandshakeError;
+use crate::wire::{
+    tag, Message, MessageBuilder, MessageHeader, MessageType, CONFIRMATION_SIZE, PROTOCOL_VERSION,
+    TIMESTAMP_SIZE,
+};
+
+// ── domain separation ────────────────────────────────────────────────
+
+/// Salt for deriving per-handshake sub-seeds from the caller's seed.
+const HANDSHAKE_SALT: &[u8] = b"vallum/handshake/v1";
+/// Fresh seed for the initiator's ephemeral KEM key pair.
+const EPH_SEED_INFO: &[u8] = b"vallum/handshake/eph/v1";
+/// Fresh salt for op A's MEX-bound randomness.
+const A_FRESH_INFO: &[u8] = b"vallum/handshake/a-fresh/v1";
+/// Fresh seed for op B's plain encapsulation randomness.
+const B_FRESH_INFO: &[u8] = b"vallum/handshake/b-fresh/v1";
+/// Fresh salt for op C's MEX-bound randomness.
+const C_FRESH_INFO: &[u8] = b"vallum/handshake/c-fresh/v1";
+/// MEX: bind a static secret into encapsulation randomness.
+const MEX_INFO: &[u8] = b"vallum/mex/v1";
+/// Transcript stage 1 — the initiator's `InitHello` fields.
+const TR_INIT_DOMAIN: &[u8] = b"vallum/tr/init/v1";
+/// Transcript stage 2 — the responder's `RespHello` core fields.
+const TR_RESP_DOMAIN: &[u8] = b"vallum/tr/resp/v1";
+/// Transcript stage 3 — binds the responder's confirmation value.
+const TR_CONF_DOMAIN: &[u8] = b"vallum/tr/conf/v1";
+/// Hash domain for the UKS-mitigation pre-shared key.
+const PSK_DOMAIN: &[u8] = b"vallum/psk/v1";
+/// Mix the psk into the handshake root.
+const PSK_MIX_INFO: &[u8] = b"vallum/psk-mix/v1";
+/// Initiator key-confirmation value.
+const CONFIRM_I_INFO: &[u8] = b"vallum/confirm/init/v1";
+/// Responder key-confirmation value.
+const CONFIRM_R_INFO: &[u8] = b"vallum/confirm/resp/v1";
+/// Hash domain for comparing confirmation values.
+const CONFIRM_CMP_DOMAIN: &[u8] = b"vallum/confirm-cmp/v1";
+
+// ── identity ─────────────────────────────────────────────────────────
+
+/// A long-term static identity: the hybrid KEM key pair a peer is known by.
+///
+/// P1 uses the KEM key pair directly. P3 adds a hybrid *signature* identity on
+/// top for third-party verifiability; the handshake secrets here are unaffected.
+#[derive(Debug)]
+pub struct StaticIdentity {
+    public: KemPublicKey,
+    secret: KemSecretKey,
+}
+
+impl StaticIdentity {
+    /// Derive a static identity from a 32-byte seed.
+    ///
+    /// # Errors
+    ///
+    /// [`HandshakeError::Kem`] if the suite's key generation fails.
+    pub fn generate(suite: &dyn CryptoSuite, seed: &[u8; 32]) -> Result<Self, HandshakeError> {
+        let (public, secret) = suite
+            .kem_keygen(seed, KemRole::Static)
+            .map_err(HandshakeError::Kem)?;
+        Ok(Self { public, secret })
+    }
+
+    /// The public half — what peers are configured with.
+    #[must_use]
+    pub fn public(&self) -> &KemPublicKey {
+        &self.public
+    }
+
+    /// The secret half.
+    #[must_use]
+    pub fn secret(&self) -> &KemSecretKey {
+        &self.secret
+    }
+}
+
+// ── session keys ─────────────────────────────────────────────────────
+
+/// The result of a completed handshake.
+///
+/// `Debug` cannot leak: every secret field is [`SharedSecret`], which redacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionKeys {
+    /// The handshake transcript hash — public, but bound into every key.
+    pub transcript: [u8; 32],
+    /// The handshake root key. The data plane expands this (P4).
+    pub key: SharedSecret,
+    /// The value the initiator sends in `InitConf` to confirm the key.
+    pub confirm_initiator: SharedSecret,
+    /// The value the responder sends in `RespHello` to confirm the key.
+    ///
+    /// This gives the initiator explicit assurance that the responder derived
+    /// `key` — i.e. holds `σ_r` — *before* the initiator accepts the session.
+    /// PQ-WireGuard's `zero` field plays the same role.
+    pub confirm_responder: SharedSecret,
+}
+
+// ── state ────────────────────────────────────────────────────────────
+
+/// Initiator state carried between `InitHello` and `RespHello`.
+#[derive(Debug)]
+pub struct InitiatorState {
+    suite_id: u16,
+    sender_index: u32,
+    ephemeral_public: KemPublicKey,
+    ephemeral_secret: KemSecretKey,
+    /// Op A's ciphertext, as sent. Bound into transcript stage 1.
+    static_ct: Vec<u8>,
+    /// The timestamp we sent. Bound into transcript stage 1.
+    timestamp: [u8; TIMESTAMP_SIZE],
+    static_public: Vec<u8>,
+    peer_public: Vec<u8>,
+    init_hello: Vec<u8>,
+    /// Per-leg secrets from op A (initiator → responder static).
+    static_legs: Vec<SharedSecret>,
+}
+
+impl InitiatorState {
+    /// The suite id this handshake is bound to.
+    #[must_use]
+    pub fn suite_id(&self) -> u16 {
+        self.suite_id
+    }
+
+    /// The session index we chose and sent in `InitHello`.
+    #[must_use]
+    pub fn sender_index(&self) -> u32 {
+        self.sender_index
+    }
+
+    /// Our ephemeral public key (the one the responder encapsulates op B to).
+    #[must_use]
+    pub fn ephemeral_public(&self) -> &KemPublicKey {
+        &self.ephemeral_public
+    }
+
+    /// The exact `InitHello` bytes we sent — useful for a transport layer that
+    /// must retransmit, and for tests. The key schedule does *not* hash these
+    /// bytes; it hashes the parsed fields (see the module docs).
+    #[must_use]
+    pub fn init_hello(&self) -> &[u8] {
+        &self.init_hello
+    }
+}
+
+/// Responder state carried between `RespHello` and `InitConf`.
+#[derive(Debug)]
+pub struct ResponderState {
+    suite_id: u16,
+    sender_index: u32,
+    peer_index: u32,
+    resp_hello: Vec<u8>,
+    timestamp: [u8; TIMESTAMP_SIZE],
+    keys: SessionKeys,
+}
+
+impl ResponderState {
+    /// The suite id this handshake is bound to.
+    #[must_use]
+    pub fn suite_id(&self) -> u16 {
+        self.suite_id
+    }
+
+    /// The session index we chose and sent in `RespHello`.
+    #[must_use]
+    pub fn sender_index(&self) -> u32 {
+        self.sender_index
+    }
+
+    /// The initiator's session index, echoed from `InitHello`.
+    #[must_use]
+    pub fn peer_index(&self) -> u32 {
+        self.peer_index
+    }
+
+    /// The exact `RespHello` bytes we sent.
+    #[must_use]
+    pub fn resp_hello(&self) -> &[u8] {
+        &self.resp_hello
+    }
+
+    /// The initiator's timestamp, still unvalidated (`InitHello` carries it for
+    /// the anti-replay check P2 adds).
+    #[must_use]
+    pub fn timestamp(&self) -> &[u8; TIMESTAMP_SIZE] {
+        &self.timestamp
+    }
+
+    /// Keys derived for this handshake, usable once `InitConf` verifies.
+    #[must_use]
+    pub fn session_keys(&self) -> &SessionKeys {
+        &self.keys
+    }
+}
+
+// ── helpers ──────────────────────────────────────────────────────────
+
+/// Derive a per-handshake 32-byte sub-seed under its own domain label.
+fn derive_seed(
+    suite: &dyn CryptoSuite,
+    seed: &[u8; 32],
+    info: &[u8],
+) -> Result<[u8; 32], HandshakeError> {
+    let mut out = [0u8; 32];
+    suite
+        .kdf(HANDSHAKE_SALT, seed, info, &mut out)
+        .map_err(HandshakeError::Kdf)?;
+    Ok(out)
+}
+
+/// MEX: `KDF(salt = fresh, ikm = static_secret, info = "vallum/mex/v1")`.
+///
+/// Because HKDF's salt is the HMAC key, the output is unpredictable whenever the
+/// static secret is — which is exactly the property that makes the shared secret
+/// survive a subverted RNG.
+fn mex_randomness(
+    suite: &dyn CryptoSuite,
+    static_secret: &KemSecretKey,
+    fresh: &[u8; 32],
+) -> Result<[u8; KEM_ENCAPS_RANDOMNESS], HandshakeError> {
+    let mut out = [0u8; KEM_ENCAPS_RANDOMNESS];
+    suite
+        .kdf(fresh, static_secret.as_bytes(), MEX_INFO, &mut out)
+        .map_err(HandshakeError::Kdf)?;
+    Ok(out)
+}
+
+/// Transcript stage 1 — binds the initiator's `InitHello` fields.
+fn transcript_init(
+    suite: &dyn CryptoSuite,
+    suite_id: u16,
+    sender_index: u32,
+    ephemeral_pk: &[u8],
+    static_ct: &[u8],
+    timestamp: &[u8],
+) -> [u8; 32] {
+    transcript_hash(
+        suite,
+        suite_id,
+        &[
+            TR_INIT_DOMAIN,
+            &sender_index.to_be_bytes(),
+            ephemeral_pk,
+            static_ct,
+            timestamp,
+        ],
+    )
+}
+
+/// Transcript stage 2 — binds the responder's `RespHello` core fields onto
+/// stage 1.
+///
+/// This is the value the key schedule is salted with, and what the responder's
+/// confirmation commits to.
+fn transcript_resp(
+    suite: &dyn CryptoSuite,
+    suite_id: u16,
+    transcript_init: &[u8; 32],
+    sender_index: u32,
+    ephemeral_ct: &[u8],
+    static_ct: &[u8],
+) -> [u8; 32] {
+    transcript_hash(
+        suite,
+        suite_id,
+        &[
+            TR_RESP_DOMAIN,
+            &transcript_init[..],
+            &sender_index.to_be_bytes(),
+            ephemeral_ct,
+            static_ct,
+        ],
+    )
+}
+
+/// Transcript stage 3 — binds the responder's confirmation onto stage 2.
+///
+/// PQ-WireGuard's running hash chain has the same shape (`H10 = H(H9 ‖ zero)`):
+/// the responder's confirmation commits to the transcript *before* it, and the
+/// initiator's confirmation commits to the transcript that includes it.
+fn transcript_conf(
+    suite: &dyn CryptoSuite,
+    suite_id: u16,
+    transcript_resp: &[u8; 32],
+    confirm_responder: &[u8],
+) -> [u8; 32] {
+    transcript_hash(
+        suite,
+        suite_id,
+        &[TR_CONF_DOMAIN, &transcript_resp[..], confirm_responder],
+    )
+}
+
+/// The key-schedule half: `KEY` plus the responder's confirmation value.
+///
+/// `legs` must be in the suite's combiner order on both sides: `A ‖ B ‖ C`. The
+/// responder recovers A by decapsulation rather than encapsulation, but the order
+/// is identical, which is what makes the two derivations agree.
+fn schedule(
+    suite: &dyn CryptoSuite,
+    transcript_resp: &[u8; 32],
+    legs: &[SharedSecret],
+    initiator_static: &[u8],
+    responder_static: &[u8],
+) -> Result<(SharedSecret, SharedSecret), HandshakeError> {
+    let mut root = [0u8; 32];
+    derive_kem_key(suite, transcript_resp, legs, &mut root).map_err(HandshakeError::Kdf)?;
+
+    // UKS mitigation: both static public keys are *public*, so this psk is not a
+    // secret on its own. It is mixed as HKDF `ikm` with the root as salt, i.e. as
+    // PRK = HMAC(key = root, msg = psk), which can only add entropy — an attacker
+    // who does not know both keys cannot reproduce it, so an unknown-key-share
+    // attack diverges the keys and becomes *detectable*.
+    let psk = suite.hash(PSK_DOMAIN, &frame(&[initiator_static, responder_static]));
+
+    let mut key = [0u8; 32];
+    suite
+        .kdf(&root, &psk, PSK_MIX_INFO, &mut key)
+        .map_err(HandshakeError::Kdf)?;
+    let key = SharedSecret::new(key);
+
+    // The responder's confirmation: only a party that derived `key` can produce
+    // it, and deriving `key` requires decapsulating op A.
+    let mut confirm_responder = [0u8; 32];
+    suite
+        .kdf(key.as_bytes(), transcript_resp, CONFIRM_R_INFO, &mut confirm_responder)
+        .map_err(HandshakeError::Kdf)?;
+
+    Ok((key, SharedSecret::new(confirm_responder)))
+}
+
+/// The initiator's confirmation — proves the initiator derived `key`, which
+/// requires ops B *and* C.
+fn confirm_initiator(
+    suite: &dyn CryptoSuite,
+    key: &SharedSecret,
+    transcript_conf: &[u8; 32],
+) -> Result<SharedSecret, HandshakeError> {
+    let mut out = [0u8; 32];
+    suite
+        .kdf(key.as_bytes(), transcript_conf, CONFIRM_I_INFO, &mut out)
+        .map_err(HandshakeError::Kdf)?;
+    Ok(SharedSecret::new(out))
+}
+
+/// Verify a peer's confirmation value against ours.
+///
+/// Comparing digests (rather than a bespoke constant-time loop) is sound here:
+/// both sides hash a value the protocol already binds, and equality of the
+/// digests is exactly equality of the inputs. A timing signal on a hash
+/// comparison reveals nothing about the confirmation itself.
+fn verify_confirmation(suite: &dyn CryptoSuite, expected: &SharedSecret, got: &[u8]) -> bool {
+    suite.hash(CONFIRM_CMP_DOMAIN, got) == suite.hash(CONFIRM_CMP_DOMAIN, expected.as_bytes())
+}
+
+// ── handshake steps ──────────────────────────────────────────────────
+
+/// Step 1 (initiator): build `InitHello` and retain the state to finish.
+///
+/// `peer_public` is the responder's static public key, known from the peer
+/// configuration (WireGuard-style cryptokey routing).
+///
+/// # Errors
+///
+/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] if a crypto operation
+/// fails, or [`HandshakeError::Wire`] if the message cannot be framed.
+pub fn initiator_hello(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer_public: &KemPublicKey,
+    sender_index: u32,
+    timestamp: [u8; TIMESTAMP_SIZE],
+    handshake_seed: &[u8; 32],
+) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
+    let suite_id = suite.suite_id();
+
+    let eph_seed = derive_seed(suite, handshake_seed, EPH_SEED_INFO)?;
+    let a_fresh = derive_seed(suite, handshake_seed, A_FRESH_INFO)?;
+
+    // The initiator's ephemeral key pair: B is encapsulated to this, and its
+    // secret is destroyed at the end of the handshake — that is the forward
+    // secrecy for op B.
+    let (ephemeral_public, ephemeral_secret) = suite
+        .kem_keygen(&eph_seed, KemRole::Ephemeral)
+        .map_err(HandshakeError::Kem)?;
+
+    // Op A: initiator → responder static, MEX-bound to our own static secret.
+    let randomness = mex_randomness(suite, identity.secret(), &a_fresh)?;
+    let encapsulation = suite
+        .kem_encaps(peer_public, &randomness)
+        .map_err(HandshakeError::Kem)?;
+
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::InitHello,
+        suite_id,
+        sender_index,
+    };
+    let mut builder = MessageBuilder::new(header);
+    builder.field(tag::STATIC_CT, encapsulation.ciphertext.as_bytes())?;
+    builder.field(tag::EPHEMERAL_PK, ephemeral_public.as_bytes())?;
+    builder.field(tag::TIMESTAMP, &timestamp)?;
+    let init_hello = builder.finish()?;
+
+    let state = InitiatorState {
+        suite_id,
+        sender_index,
+        ephemeral_public,
+        ephemeral_secret,
+        static_ct: encapsulation.ciphertext.as_bytes().to_vec(),
+        timestamp,
+        static_public: identity.public().as_bytes().to_vec(),
+        peer_public: peer_public.as_bytes().to_vec(),
+        init_hello: init_hello.clone(),
+        static_legs: encapsulation.shared_secrets,
+    };
+    Ok((init_hello, state))
+}
+
+/// Step 2 (responder): consume `InitHello`, build `RespHello`, retain state.
+///
+/// `RespHello` carries the responder's **confirmation value** (`conf_r`), which
+/// proves to the initiator that this responder holds `σ_r`. It is derived from
+/// the Op A decapsulation below.
+///
+/// `peer_public` is the *initiator's* static public key, known from peer
+/// configuration.
+///
+/// # Errors
+///
+/// [`HandshakeError::Wire`] on a malformed or unexpected message,
+/// [`HandshakeError::SuiteMismatch`] on a suite mismatch, or
+/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] if a crypto operation
+/// fails.
+pub fn responder_process_init(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer_public: &KemPublicKey,
+    init_hello: &[u8],
+    sender_index: u32,
+    handshake_seed: &[u8; 32],
+) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+    let suite_id = suite.suite_id();
+    let message = Message::parse(init_hello)?;
+    message.expect_type(MessageType::InitHello)?;
+    message.expect_suite(suite_id)?;
+
+    let static_ct = message.require(tag::STATIC_CT)?;
+    let ephemeral_pk = message.require(tag::EPHEMERAL_PK)?;
+    let timestamp = message.require_array::<TIMESTAMP_SIZE>(tag::TIMESTAMP)?;
+
+    // Op A: recover our share by decapsulating the initiator's static ciphertext.
+    let a_legs = suite
+        .kem_decaps(identity.secret(), static_ct)
+        .map_err(HandshakeError::Kem)?;
+
+    // Op B: responder → initiator ephemeral, plain fresh randomness (the
+    // ephemeral key is itself fresh, so MEX has nothing to add).
+    let ephemeral_public = KemPublicKey::new(ephemeral_pk.to_vec());
+    let b_fresh = derive_seed(suite, handshake_seed, B_FRESH_INFO)?;
+    let b = suite
+        .kem_encaps(&ephemeral_public, &b_fresh)
+        .map_err(HandshakeError::Kem)?;
+
+    // Op C: responder → initiator static, MEX-bound to our own static secret.
+    let c_fresh = derive_seed(suite, handshake_seed, C_FRESH_INFO)?;
+    let c_randomness = mex_randomness(suite, identity.secret(), &c_fresh)?;
+    let c = suite
+        .kem_encaps(peer_public, &c_randomness)
+        .map_err(HandshakeError::Kem)?;
+
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::RespHello,
+        suite_id,
+        sender_index,
+    };
+
+    let mut legs = a_legs;
+    legs.extend_from_slice(&b.shared_secrets);
+    legs.extend_from_slice(&c.shared_secrets);
+
+    // Transcript stages 1 and 2. Stage 2 covers exactly the fields above (the
+    // RespHello core), because the responder's own confirmation is derived from
+    // it and so cannot yet be part of it.
+    let transcript_init = transcript_init(
+        suite,
+        suite_id,
+        message.sender_index(),
+        ephemeral_pk,
+        static_ct,
+        &timestamp,
+    );
+    let transcript_resp = transcript_resp(
+        suite,
+        suite_id,
+        &transcript_init,
+        sender_index,
+        b.ciphertext.as_bytes(),
+        c.ciphertext.as_bytes(),
+    );
+
+    // Op order in the combiner is A ‖ B ‖ C on both sides.
+    let (key, confirm_responder) = schedule(
+        suite,
+        &transcript_resp,
+        &legs,
+        peer_public.as_bytes(),
+        identity.public().as_bytes(),
+    )?;
+
+    // The confirmation goes in RespHello itself, so the initiator authenticates
+    // us before it accepts the session (PQ-WireGuard's `zero`).
+    let mut builder = MessageBuilder::new(header);
+    builder.field(tag::EPHEMERAL_CT, b.ciphertext.as_bytes())?;
+    builder.field(tag::STATIC_CT, c.ciphertext.as_bytes())?;
+    builder.field(tag::RECEIVER_INDEX, &message.sender_index().to_be_bytes())?;
+    builder.field(tag::CONFIRMATION, confirm_responder.as_bytes())?;
+    let resp_hello = builder.finish()?;
+
+    // Stage 3 and the initiator's confirmation, which commits to conf_r.
+    let transcript_conf = transcript_conf(
+        suite,
+        suite_id,
+        &transcript_resp,
+        confirm_responder.as_bytes(),
+    );
+    let confirm_initiator = confirm_initiator(suite, &key, &transcript_conf)?;
+
+    let keys = SessionKeys {
+        transcript: transcript_resp,
+        key,
+        confirm_initiator,
+        confirm_responder,
+    };
+
+    let state = ResponderState {
+        suite_id,
+        sender_index,
+        peer_index: message.sender_index(),
+        resp_hello: resp_hello.clone(),
+        timestamp,
+        keys,
+    };
+    Ok((resp_hello, state))
+}
+
+/// Step 3 (initiator): consume `RespHello`, verify the responder, derive keys,
+/// build `InitConf`.
+///
+/// Returns [`HandshakeError::Confirmation`] if the responder's confirmation
+/// value in `RespHello` does not verify — i.e. the peer does not hold `σ_r`.
+/// Nothing is accepted before that check passes.
+///
+/// # Errors
+///
+/// [`HandshakeError::Wire`] on a malformed or unexpected message,
+/// [`HandshakeError::Confirmation`] if the responder did not prove the key, or
+/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] if a crypto operation
+/// fails.
+pub fn initiator_process_resp(
+    suite: &dyn CryptoSuite,
+    state: InitiatorState,
+    identity: &StaticIdentity,
+    resp_hello: &[u8],
+) -> Result<(Vec<u8>, SessionKeys), HandshakeError> {
+    let message = Message::parse(resp_hello)?;
+    message.expect_type(MessageType::RespHello)?;
+    message.expect_suite(state.suite_id)?;
+    message.expect_receiver_index(state.sender_index)?;
+
+    let ephemeral_ct = message.require(tag::EPHEMERAL_CT)?;
+    let static_ct = message.require(tag::STATIC_CT)?;
+    let peer_confirmation = message.require_array::<CONFIRMATION_SIZE>(tag::CONFIRMATION)?;
+
+    // Op B: only our ephemeral secret recovers this — the forward-secret leg.
+    let b_legs = suite
+        .kem_decaps(&state.ephemeral_secret, ephemeral_ct)
+        .map_err(HandshakeError::Kem)?;
+
+    // Op C: only our static secret recovers this — the leg that authenticates us.
+    let c_legs = suite
+        .kem_decaps(identity.secret(), static_ct)
+        .map_err(HandshakeError::Kem)?;
+
+    let mut legs = state.static_legs;
+    legs.extend_from_slice(&b_legs);
+    legs.extend_from_slice(&c_legs);
+
+    let transcript_init = transcript_init(
+        suite,
+        state.suite_id,
+        state.sender_index,
+        state.ephemeral_public.as_bytes(),
+        &state.static_ct,
+        &state.timestamp,
+    );
+    let transcript_resp = transcript_resp(
+        suite,
+        state.suite_id,
+        &transcript_init,
+        message.sender_index(),
+        ephemeral_ct,
+        static_ct,
+    );
+
+    let (key, confirm_responder) = schedule(
+        suite,
+        &transcript_resp,
+        &legs,
+        &state.static_public,
+        &state.peer_public,
+    )?;
+
+    // Authenticate the responder *before* accepting the session key: only a party
+    // holding σ_r can have decapsulated op A and so derived `key`. Without this
+    // check the initiator would accept a key from an unauthenticated RespHello —
+    // exactly the gap that made WireGuard unprovable in eCK-PFS-PSK.
+    if !verify_confirmation(suite, &confirm_responder, &peer_confirmation) {
+        return Err(HandshakeError::Confirmation);
+    }
+
+    let transcript_conf = transcript_conf(
+        suite,
+        state.suite_id,
+        &transcript_resp,
+        confirm_responder.as_bytes(),
+    );
+    let confirm_initiator = confirm_initiator(suite, &key, &transcript_conf)?;
+
+    let keys = SessionKeys {
+        transcript: transcript_resp,
+        key,
+        confirm_initiator,
+        confirm_responder,
+    };
+
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::InitConf,
+        suite_id: state.suite_id,
+        sender_index: state.sender_index,
+    };
+    let mut builder = MessageBuilder::new(header);
+    builder.field(tag::CONFIRMATION, keys.confirm_initiator.as_bytes())?;
+    builder.field(tag::RECEIVER_INDEX, &message.sender_index().to_be_bytes())?;
+    let init_conf = builder.finish()?;
+
+    Ok((init_conf, keys))
+}
+
+/// Step 4 (responder): verify `InitConf` and release the session keys.
+///
+/// # Errors
+///
+/// [`HandshakeError::Confirmation`] if the initiator did not prove the key, or
+/// [`HandshakeError::Wire`] on a malformed or unexpected message.
+pub fn responder_process_conf(
+    suite: &dyn CryptoSuite,
+    state: ResponderState,
+    init_conf: &[u8],
+) -> Result<SessionKeys, HandshakeError> {
+    let message = Message::parse(init_conf)?;
+    message.expect_type(MessageType::InitConf)?;
+    message.expect_suite(state.suite_id)?;
+    message.expect_receiver_index(state.sender_index)?;
+
+    let confirmation = message.require_array::<CONFIRMATION_SIZE>(tag::CONFIRMATION)?;
+
+    if !verify_confirmation(suite, &state.keys.confirm_initiator, &confirmation) {
+        return Err(HandshakeError::Confirmation);
+    }
+
+    Ok(state.keys)
+}

@@ -41,8 +41,8 @@ pub mod suite;
 pub use error::{AeadError, KdfError, KemError, SigError, SuiteError};
 pub use kem::{derive_kem_key, frame, transcript_hash, KEM_INFO, TRANSCRIPT_INFO};
 pub use suite::{
-    Ciphertext, CryptoSuite, Encapsulation, KemPublicKey, KemRole, KemSecretKey, LegKind, Rng,
-    SharedSecret, SignPublicKey, SignSecretKey, WireSizes,
+    Ciphertext, CryptoSuite, Encapsulation, KemPublicKey, KemRole, KemSecretKey, LegKind,
+    SharedSecret, SignPublicKey, SignSecretKey, WireSizes, KEM_ENCAPS_RANDOMNESS,
 };
 
 /// Best-effort memory scrub the optimizer is unlikely to elide.
