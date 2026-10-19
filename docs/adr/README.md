@@ -1,0 +1,10 @@
+# Architecture Decision Records
+
+| ADR | Title | Status | Date |
+|-----|-------|--------|------|
+| [0001](0001-configured-psk.md) | Mix a configured PSK after the UKS psk, and keep it out of the identity | accepted | 2026-10-19 |
+| [0002](0002-wireguard-uapi.md) | WireGuard-style UAPI over a 0600 Unix socket | accepted | 2026-10-19 |
+| [0003](0003-runtime-socket-rebind.md) | Runtime socket rebind with a generation-checked SharedSocket | accepted | 2026-10-19 |
+| [0004](0004-vallum-config.md) | Extract the TOML schema into vallum-config | accepted | 2026-10-19 |
+| [0005](0005-linux-only-platform-scope.md) | Linux-only platform scope for this release | accepted | 2026-10-19 |
+| [0006](0006-udp-batching.md) | Batch UDP sends with sendmmsg; defer GSO/GRO | accepted | 2026-10-19 |
