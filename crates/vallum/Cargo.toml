@@ -59,3 +59,25 @@ vallum-core.workspace = true
 vallum-crypto.workspace = true
 vallum-tunnel.workspace = true
 vallum-crypto-sdk.workspace = true
+
+[package.metadata.deb]
+maintainer = "Vallum contributors"
+copyright = "2026, Vallum contributors"
+license-file = ["LICENSE", "4"]
+extended-description = "Hybrid post-quantum layer-3 tunnel."
+section = "net"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/vallum", "usr/bin/vallum", "755"],
+    ["../../packaging/vallum@.service", "lib/systemd/system/vallum@.service", "644"],
+    ["../../packaging/vallum.8", "usr/share/man/man8/vallum.8", "644"],
+    ["../../packaging/vallum-quick.8", "usr/share/man/man8/vallum-quick.8", "644"],
+    ["../../packaging/vallum.toml.5", "usr/share/man/man5/vallum.toml.5", "644"],
+    ["../../packaging/vallum.bash", "usr/share/bash-completion/completions/vallum", "644"],
+]
+
+[package.metadata.rpm]
+package-name = "vallum"
+summary = "Hybrid post-quantum layer-3 tunnel"
+license = "Apache-2.0"

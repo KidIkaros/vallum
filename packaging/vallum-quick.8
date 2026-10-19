@@ -1,0 +1,43 @@
+.TH VALLUM-QUICK 8 "2026-10-19" "vallum 0.1.0" "System Administration"
+.SH NAME
+vallum-quick \- bring a Vallum config up with its routes, DNS and hooks
+.SH SYNOPSIS
+.B vallum-quick
+.B up
+.I FILE
+.RB [ --dry-run ]
+.br
+.B vallum-quick
+.B down
+.I FILE
+.RB [ --dry-run ]
+.br
+.B vallum-quick
+.B strip
+.I FILE
+.SH DESCRIPTION
+.B vallum-quick
+is the admin-side helper. It starts
+.BR vallum (8),
+adds routes for each peer's allowed IPs, installs DNS through
+.BR resolvconf (8)
+when available, and runs the operator's hooks. The daemon never runs any of
+this.
+.SH OPTIONS
+.TP
+.B --dry-run
+Print the commands instead of running them.
+.SH CONFIGURATION
+The
+.B [quick]
+table holds
+.BR dns ,
+.BR table
+.RB ( auto ", " off " or a number), and "
+.BR pre_up ", " post_up ", " pre_down ", " post_down .
+Hooks run through
+.BR sh (1)
+and are the operator's responsibility.
+.SH SEE ALSO
+.BR vallum (8),
+.BR vallum.toml (5)

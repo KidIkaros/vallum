@@ -1,0 +1,20 @@
+[package]
+name = "vallum-quick"
+description = "The OS-level helper for Vallum: routes, DNS, firewall and hooks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# This is the admin tool, not the daemon: it is allowed to run `ip`, `resolvconf`
+# and the operator's hooks. The daemon stays free of all of that.
+[lints]
+workspace = true
+
+[dependencies]
+vallum = { path = "../vallum" }
+vallum-tunnel = { path = "../vallum-tunnel" }
+ipnet = "2.12"
+clap = { version = "4", features = ["derive"] }

@@ -77,6 +77,33 @@ pub struct Config {
     /// Logging.
     #[serde(default)]
     pub log: Log,
+    /// Options only `vallum-quick` uses. The daemon parses and ignores them.
+    #[serde(default)]
+    pub quick: Quick,
+}
+
+/// The `[quick]` table: OS-level work done by `vallum-quick`, never the daemon.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Quick {
+    /// DNS servers to install on the interface, through `resolvconf`.
+    #[serde(default)]
+    pub dns: Vec<String>,
+    /// `auto`, `off`, or a routing-table number.
+    #[serde(default)]
+    pub table: Option<String>,
+    /// Commands run by `vallum-quick` before and after the interface.
+    #[serde(default)]
+    pub pre_up: Vec<String>,
+    /// See [`Quick::pre_up`].
+    #[serde(default)]
+    pub post_up: Vec<String>,
+    /// See [`Quick::pre_up`].
+    #[serde(default)]
+    pub pre_down: Vec<String>,
+    /// See [`Quick::pre_up`].
+    #[serde(default)]
+    pub post_down: Vec<String>,
 }
 
 /// The `[interface]` table.

@@ -1,0 +1,54 @@
+.TH VALLUM 8 "2026-10-19" "vallum 0.1.0" "System Administration"
+.SH NAME
+vallum \- hybrid post-quantum layer-3 tunnel
+.SH SYNOPSIS
+.B vallum
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B vallum
+runs a layer-3 tunnel with a tri-hybrid KEM handshake and an explicit,
+mutually authenticated key confirmation. It is configured by a TOML file; the
+daemon owns the tunnel, the TUN interface and the UDP socket, and nothing else.
+.SH COMMANDS
+.TP
+.B run --config FILE
+Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
+.TP
+.B keygen --output FILE [--suite ID] [--signing]
+Generate a private key and print the peer public line.
+.TP
+.B pubkey --private-key FILE
+Print the public line for an existing key.
+.TP
+.B genpsk
+Print a fresh 32-byte preshared key as 64 hex characters.
+.TP
+.B show [--config FILE | --control SOCKET] [--dump] [--field NAME]
+Query a running daemon's control socket.
+.TP
+.B setconf FILE
+Replace every peer with the config's peers.
+.TP
+.B addconf FILE
+Add or update the config's peers.
+.TP
+.B syncconf FILE
+Apply only the differences, preserving unchanged sessions.
+.SH FILES
+.TP
+.I /etc/vallum/*.toml
+Configuration files.
+.TP
+.I /run/vallum/*.sock
+Control sockets, mode 0600.
+.SH SECURITY
+The private key is refused if its file is group- or world-readable, unless
+.B --allow-insecure-key-permissions
+is given. The control socket is same-user only. The daemon runs no shell and
+writes no routes; use
+.BR vallum-quick (8)
+for host-level work.
+.SH SEE ALSO
+.BR vallum-quick (8),
+.BR vallum.toml (5)

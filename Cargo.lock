@@ -2366,6 +2366,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vallum-quick"
+version = "0.1.0"
+dependencies = [
+ "clap 4.6.7",
+ "ipnet",
+ "vallum",
+ "vallum-tunnel",
+]
+
+[[package]]
 name = "vallum-tunnel"
 version = "0.1.0"
 dependencies = [

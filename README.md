@@ -101,7 +101,10 @@ crates/
                                   · epoch · shaping · segmentation · identity
   vallum-tunnel/                  sans-IO transport: peers, routing, handshakes
   vallum-protocol-tests/          suite-dependent tests and benchmarks
+  vallum-quick/                   routes, DNS, firewall and hooks (admin tool)
   vallum/                         the daemon: TOML, TUN, UDP, privileges, CLI
+packaging/                        systemd unit, man pages, completion
+scripts/install.sh                first install and client add/remove
 fuzz/                             cargo-fuzz workspace (four targets)
 docs/proof/                       one artefact per gate
   eck-pfs-psk · committing-aead-multikey · hybrid-identity · ratchet-pcs
