@@ -90,6 +90,23 @@ produce a key that fails to parse. `decode_public` now strips all whitespace
 before splitting: every field is hex, hex contains no whitespace, so stripping can
 only rescue a wrapped line and can never change the meaning of a well-formed one.
 
+**(f) The end-to-end test slept 0.4 s and called that "running", which made a slow
+start look like a dead tunnel.** Found while verifying P6.7 on a loaded host:
+`ping` answered `Network is unreachable` and the gate failed, while both daemons
+were healthy and simply had not finished starting. The cause is ordering, not
+slowness — the script checked `kill -0` on a process that existed and then pinged
+an address whose route the process had not yet created, and the daemon needs about
+0.75 s here where the sleep allowed 0.4.
+
+The failure mode is the reason it survived so long: the symptom of an interface
+that is not up yet is byte-identical to the symptom of a tunnel that does not
+work, so the gate was reporting a tunnel fault for a start-up race and would have
+kept doing so. It now waits for readiness — the `tunnel up on interface` line,
+which the daemon prints after `TUNSETIFF` *and* `Configuration::up()`, so the
+interface and its connected route both exist — with a 10 s deadline and a
+separate check that no daemon died while waiting. A fixed sleep is a race with a
+deadline chosen by whoever ran it last on an idle machine.
+
 ---
 
 ## 1. The obligation, stated exactly
@@ -113,15 +130,16 @@ operating-system surface:
 | a peer outside the interface prefix is loud, not fatal | `Resolved::warnings` |
 | the interface is up, with the configured MTU | `tun::platform::open` |
 | packets flow both ways through a real kernel | `scripts/e2e-netns.sh` |
+| no message needs IP fragmentation to cross | `vallum-tunnel::Segments`, `Segment`'s `MAX_OUTER_DATAGRAM`; measured by the gate's `FragCreates` |
 | an inner source outside `allowed_ips` is dropped at the receiving end | `vallum-tunnel::Device` |
 | junk on the socket never costs a tunnel packet | `Message::parse` |
 | the loop reports what it did | `LoopStats`, the shutdown log line |
 | `SIGTERM`/`SIGINT` stop it | `Shutdown`, `signal-hook` |
 | a failed draw from the OS RNG is fatal | `entropy::OsRng` |
 
-**Success criterion.** `cargo test --workspace` — 215 tests, 214 of which run (the
-one ignored test is the frozen-vector regeneration harness), including the 10
-daemon gate tests in `crates/vallum/tests/gate.rs` and 8 unit tests in the crate.
+**Success criterion.** `cargo test --workspace` — 259 tests, 258 of which run (the
+one ignored test is the frozen-vector regeneration harness), including the 11
+daemon gate tests in `crates/vallum/tests/gate.rs` and the crate's unit tests.
 Plus `scripts/e2e-netns.sh`, which needs no root and exits 0 only if a real ping
 crosses two real interfaces.
 

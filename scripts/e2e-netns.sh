@@ -293,7 +293,6 @@ say "starting daemon B in the second namespace, then daemon A here"
 in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
     _ "$BIN" "$B_PIDFILE" "$WORK/b.toml" > "$B_LOG" 2>&1 &
 B_JOB=$!
-sleep 0.4
 
 # Started from `/`, because the config names its key file relatively: if the
 # daemon resolved that against the working directory instead of the config, this
@@ -301,12 +300,35 @@ sleep 0.4
 bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
     _ "$A_PIDFILE" "$BIN" "$WORK/a.toml" > "$A_LOG" 2>&1 &
 A_JOB=$!
-sleep 0.4
 
-for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
-    kill -0 "$(cat "$pidfile")" 2>/dev/null || bad "$(basename "$pidfile" .pid) exited at startup; see $WORK"
+# Wait for both interfaces rather than sleeping a fixed time. The daemon prints
+# `tunnel up` after `TUNSETIFF` and `Configuration::up()`, so the line means the
+# interface exists *and* its connected route does — which is exactly what `ping`
+# needs and exactly what it does not have yet while the daemon is starting.
+#
+# A fixed sleep here is a race, and it fails in the worst possible way: `ping`
+# then answers `Network is unreachable`, which reads like a broken tunnel when
+# nothing is broken, only slow. On a quiet host 0.4 s was enough; on this one
+# under load the daemon takes about 0.75 s, so the gate failed on a busy machine
+# and passed on an idle one, for a reason unconnected to what it tests.
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$A_LOG" && grep -q "tunnel up on interface" "$B_LOG"; then
+        break
+    fi
+    # A pidfile that is not written yet is a daemon still starting, not a
+    # failure; a pid that was written and is gone is a daemon that died.
+    for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited at startup; see $WORK"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "an interface did not come up within 10 s; see $A_LOG and $B_LOG"
+    fi
+    sleep 0.1
 done
-ok "both daemons are running"
+ok "both daemons are running with their interfaces up"
 
 # ── establishment ────────────────────────────────────────────────────
 
