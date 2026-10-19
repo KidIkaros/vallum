@@ -1,1 +1,12 @@
 /target
+
+# Runtime state and secrets
+*.pid
+*.sock
+*.log
+*.vallum-bundle
+
+# Editor and OS droppings
+.DS_Store
+.idea/
+.vscode/

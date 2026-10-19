@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 # This crate depends on `vallum-crypto` ONLY. That is the point: the contract is
 # defined purely in terms of the `CryptoSuite` trait, so it applies unchanged to

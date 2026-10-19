@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod commands;
 pub mod config;
 pub mod control;
 pub mod entropy;

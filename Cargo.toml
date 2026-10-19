@@ -19,6 +19,9 @@ rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Vallum contributors"]
 description = "Vallum — hybrid post-quantum layer-3 tunnel"
+repository = "https://github.com/KidIkaros/vallum"
+homepage = "https://github.com/KidIkaros/vallum"
+documentation = "https://github.com/KidIkaros/vallum/tree/main/docs"
 
 [workspace.dependencies]
 vallum-crypto = { path = "crates/vallum-crypto" }

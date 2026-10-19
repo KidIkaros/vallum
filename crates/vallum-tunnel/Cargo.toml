@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 # `vallum-core` and `vallum-crypto` only, plus `ipnet` for prefix matching.
 # No sockets, no TUN, no clock, no RNG: events come in, actions go out.
