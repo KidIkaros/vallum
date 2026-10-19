@@ -1,6 +1,6 @@
 # P6.7 — application-layer segmentation, and the dependence P6.4 recorded
 
-**Status:** post-gate follow-up to P6.4. Covers `vallum_core::segment` (the wire
+**Status:** post-gate follow-up to P6.4. Covers `vallum_tunnel::segment` (the wire
 form), `vallum_tunnel::Segments` (the stateful half), and the four places the
 daemon's loop and MTU arithmetic touch it.
 **Depends on:** P6.4 (`docs/proof/daemon.md`) for the loop and the MTU policy, P6.6
@@ -175,7 +175,7 @@ expected to be replaced.
 
 | piece | home | why |
 |---|---|---|
-| the wire form — constants, `Fragment`, `parse`, `is_fragment`, `split`, `REASSEMBLY_TIMEOUT_MS` | `vallum_core::segment` | it is a wire format, and it sits beside the `wire` module it must not be confused with |
+| the wire form — constants, `Fragment`, `parse`, `is_fragment`, `split`, `REASSEMBLY_TIMEOUT_MS` | `vallum_tunnel::segment` | it is a wire format, and it sits beside the `wire` module it must not be confused with |
 | the state — the table, `outbound`, `inbound`, the counters | `vallum_tunnel::Segments` | it needs `SocketAddr` and `Randomness`, and it holds state across datagrams |
 | wiring — one `Segments` per device, on both directions of the socket | `vallum/src/run.rs` | the loop owns the socket, so it owns the framing on it |
 
@@ -234,7 +234,7 @@ does not cover.
 
 ## 3. Evidence
 
-### 3.1 The format (`crates/vallum-core/src/segment.rs`, 6 tests)
+### 3.1 The format (`crates/vallum-tunnel/src/segment/mod.rs`, 6 tests)
 
 Round-trip; `is_fragment` against a real `InitHello`; a truncated fragment is
 still classified as a fragment and refused with a fragment-shaped reason; a

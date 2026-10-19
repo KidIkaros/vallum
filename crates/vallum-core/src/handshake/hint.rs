@@ -78,4 +78,3 @@ pub(super) fn hint_crypt(
     nonce.copy_from_slice(&out[32..]);
     Ok((key, nonce))
 }
-

@@ -2,7 +2,7 @@
 
 //! Segmentation: the half of the envelope that has state.
 //!
-//! [`vallum_core::segment`] is the format. This module is the part that decides
+//! [`super`] is the format. This module is the part that decides
 //! when to use it and puts the pieces back together: a small, bounded table of
 //! half-assembled messages keyed by source address and message id, and a
 //! splitting rule for the way out.
@@ -57,9 +57,7 @@
 
 use std::net::SocketAddr;
 
-use vallum_core::segment::{
-    self, MAX_OUTER_DATAGRAM, OUTER_HEADER_LEN_V4, OUTER_HEADER_LEN_V6, REASSEMBLY_TIMEOUT_MS,
-};
+use super::{MAX_OUTER_DATAGRAM, OUTER_HEADER_LEN_V4, OUTER_HEADER_LEN_V6, REASSEMBLY_TIMEOUT_MS};
 
 use crate::rng::Randomness;
 
@@ -112,7 +110,7 @@ impl Segments {
     #[must_use]
     pub fn with_budget(budget: usize) -> Self {
         assert!(
-            (vallum_core::segment::FRAGMENT_HEADER_LEN + 1..=MAX_OUTER_DATAGRAM).contains(&budget),
+            (super::FRAGMENT_HEADER_LEN + 1..=MAX_OUTER_DATAGRAM).contains(&budget),
             "fragment budget {budget} cannot carry an envelope"
         );
         Self {
@@ -173,7 +171,7 @@ impl Segments {
     /// A message that fits [`Segments::budget_for`] for `destination` is
     /// returned unchanged, as one datagram. A larger one is cut into fragments
     /// sharing one freshly drawn
-    /// [`message_id`](vallum_core::segment::Fragment::message_id).
+    /// [`message_id`](vallum_core::super::Fragment::message_id).
     ///
     /// The id is drawn per call, so a retransmission is a new id and a fresh
     /// reassembly on the far side. That is deliberate: the far side would
@@ -203,7 +201,7 @@ impl Segments {
         rng.fill(&mut id_bytes);
         let message_id = u32::from_be_bytes(id_bytes);
 
-        match segment::split_with_budget(message_id, &message, budget) {
+        match super::split_with_budget(message_id, &message, budget) {
             Ok(datagrams) => datagrams,
             Err(_) => {
                 self.dropped += 1;
@@ -219,13 +217,13 @@ impl Segments {
     /// missing. Returns `None` when the datagram was a fragment that was
     /// accepted and held, or was refused.
     pub fn inbound(&mut self, now_ms: u64, source: SocketAddr, bytes: Vec<u8>) -> Option<Vec<u8>> {
-        if !segment::is_fragment(&bytes) {
+        if !super::is_fragment(&bytes) {
             return Some(bytes);
         }
 
         self.expire(now_ms);
 
-        let Ok((head, data)) = segment::parse(&bytes) else {
+        let Ok((head, data)) = super::parse(&bytes) else {
             self.dropped += 1;
             return None;
         };
@@ -328,8 +326,8 @@ impl Partial {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use super::super::{Fragment, MAX_FRAGMENT_DATA};
     use super::*;
-    use vallum_core::segment::{Fragment, MAX_FRAGMENT_DATA};
     use vallum_core::MAX_HANDSHAKE_MESSAGE;
 
     /// A deterministic generator, so an id is reproducible. See [`Randomness`].
@@ -367,7 +365,7 @@ mod tests {
     }
 
     fn split(id: u32, data: &[u8]) -> Vec<Vec<u8>> {
-        segment::split(id, data).expect("a legal message")
+        super::super::split(id, data).expect("a legal message")
     }
 
     fn v4_dest() -> SocketAddr {
@@ -651,6 +649,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "cannot carry an envelope")]
     fn a_budget_too_small_for_the_envelope_is_a_construction_bug() {
-        let _ = Segments::with_budget(vallum_core::segment::FRAGMENT_HEADER_LEN);
+        let _ = Segments::with_budget(super::super::FRAGMENT_HEADER_LEN);
     }
 }

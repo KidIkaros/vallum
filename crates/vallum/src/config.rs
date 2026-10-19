@@ -47,7 +47,7 @@ use crate::error::Error;
 use crate::keys::{self, SecretFile};
 use crate::logging::Level;
 use crate::tun::{DATA_OVERHEAD, DEFAULT_MTU, MIN_MTU};
-use vallum_core::segment::MAX_OUTER_DATAGRAM;
+use vallum_tunnel::segment::MAX_OUTER_DATAGRAM;
 
 /// The port a Vallum daemon listens on unless told otherwise. The same number
 /// WireGuard chose, so a firewall rule is memorable rather than arbitrary.

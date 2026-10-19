@@ -38,22 +38,26 @@
 //! # Telling the two framings apart
 //!
 //! A *message* begins `01` (the protocol version) followed by a
-//! [`MessageType`](crate::wire::MessageType) code. No message type has the code
+//! [`MessageType`](vallum_core::wire::MessageType) code. No message type has the code
 //! `0x07`, so `01 07` can only be a fragment and the receiver needs two bytes to
-//! know which framing it has. [`crate::wire::Message::parse`] refuses `0x07`, so
+//! know which framing it has. [`vallum_core::wire::Message::parse`] refuses `0x07`, so
 //! a fragment that reaches the message layer is dropped rather than misread —
 //! there is no second parser to disagree with this one.
 //!
 //! [`offset`]: Fragment::offset
 //! [`total`]: Fragment::total
 
-use crate::error::HandshakeError;
-use crate::wire::{MAX_HANDSHAKE_MESSAGE, PROTOCOL_VERSION};
+mod reassembly;
+
+pub use reassembly::{Segments, MAX_REASSEMBLIES};
+
+use vallum_core::wire::{MAX_HANDSHAKE_MESSAGE, PROTOCOL_VERSION};
+use vallum_core::HandshakeError;
 
 /// The byte that marks a datagram as a fragment rather than a message.
 ///
 /// It sits where a message's type code sits, but it is **not** a
-/// [`MessageType`](crate::wire::MessageType) and must never be assigned as one:
+/// [`MessageType`](vallum_core::wire::MessageType) and must never be assigned as one:
 /// `01 07` has to stay unambiguous, or the receiver cannot tell the framings
 /// apart. `wire` refuses it on parse, which is what keeps the two apart.
 pub const FRAGMENT_CODE: u8 = 0x07;
@@ -282,7 +286,7 @@ pub fn split_with_budget(
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::wire::{Message, MessageBuilder, MessageHeader, MessageType};
+    use vallum_core::wire::{Message, MessageBuilder, MessageHeader, MessageType};
 
     fn fragment(message_id: u32, offset: u16, total: u16, data: &[u8]) -> Vec<u8> {
         let mut out = Fragment {

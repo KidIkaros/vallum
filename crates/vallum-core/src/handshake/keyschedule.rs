@@ -207,7 +207,11 @@ pub(super) fn verify_value(suite: &dyn CryptoSuite, expected: &[u8], got: &[u8])
 }
 
 /// Verify a peer's confirmation value against ours.
-pub(super) fn verify_confirmation(suite: &dyn CryptoSuite, expected: &SharedSecret, got: &[u8]) -> bool {
+pub(super) fn verify_confirmation(
+    suite: &dyn CryptoSuite,
+    expected: &SharedSecret,
+    got: &[u8],
+) -> bool {
     verify_value(suite, expected.as_bytes(), got)
 }
 

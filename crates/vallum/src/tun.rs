@@ -30,7 +30,7 @@
 use std::fmt;
 use std::io;
 
-use vallum_core::segment::MAX_OUTER_DATAGRAM;
+use vallum_tunnel::segment::MAX_OUTER_DATAGRAM;
 
 /// The default inner MTU. See the module docs for the arithmetic.
 pub const DEFAULT_MTU: u16 = 1380;
@@ -46,7 +46,7 @@ pub const MIN_MTU: u16 = 576;
 /// `HEADER_LEN(8) + 4 + COUNTER(8) + 4 + PAYLOAD_LEN(2) + tag(32)`: the fixed
 /// header, the counter TLV, the ciphertext TLV, the authenticated length prefix
 /// inside the AEAD, and the tag. The tag is the one term a suite supplies, which
-/// is why [`vallum_core::segment`] caps the *datagram* rather than trusting this
+/// is why [`vallum_tunnel::segment`] caps the *datagram* rather than trusting this
 /// number: a padded or larger-tagged message that overruns the budget is fragmented
 /// instead of put on the wire too big.
 pub const DATA_OVERHEAD: usize = 58;
