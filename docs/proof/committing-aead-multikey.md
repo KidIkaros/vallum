@@ -214,6 +214,17 @@ This gate references them and does not duplicate them — a second copy would ro
    are P6; P2 supplies the crypto halves only.
 7. **No ratchet.** `establish_epoch` takes an `epoch` value; monotonicity is
    P4's obligation and is documented as the caller's responsibility.
+8. **No length privacy on its own.** As written in P2, a data packet's ciphertext
+   length is `plaintext + tag`, so the *payload length is visible on the wire*.
+   The AD covers the header and the counter, not the length. P5 closes that
+   channel by making the sealed plaintext `u16 BE length ‖ payload ‖ zeros`
+   (`data.rs::seal_padded`): the length is now carried *inside* the AEAD and the
+   visible length is a chosen target. Nothing above changes — the AD is still 16
+   bytes, the nonce is still unchanged, and every multi-key and commitment
+   argument is about `(key, nonce, AD, ciphertext)` and is indifferent to what
+   the plaintext contains. The change *strengthens* requirement 3 (below): the
+   length field is read only after the tag verifies, so a forged ciphertext can
+   no longer even propose a length. See `docs/proof/traffic-shaping.md`.
 
 ---
 
@@ -259,6 +270,7 @@ tests, are the gate's durable output.
 | fail closed under load with no cookie facility | `cookie.rs::admit_handshake` | `under_load_without_a_cookie_gets_a_cookie_and_nothing_more` |
 | cookie survives one rotation, not two | `cookie.rs::CookieSecret` | `a_cookie_keeps_working_across_a_rotation_but_not_forever` |
 | cookie reply needs the request it answers | `cookie.rs::seal/open_cookie_reply` | `a_cookie_reply_is_readable_only_with_the_request_it_answers` |
+| payload length is a chosen target, not a leak | `data.rs::{seal_padded, strip_padding}` (P5) | `padding_hides_the_payload_length_and_is_recovered_exactly`, `a_forged_length_prefix_fails_the_tag` (unit); `tests/shaping.rs` |
 | no key ambiguity across the whole surface | all of the above | the §4 matrix |
 
 *(`DataKeys::derive` refuses a suite whose AEAD geometry is not 32-byte key /

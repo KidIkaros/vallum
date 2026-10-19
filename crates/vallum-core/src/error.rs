@@ -198,6 +198,19 @@ pub enum DataError {
         /// The epoch that could not be advanced past.
         epoch: u64,
     },
+    /// A padded seal was asked for a target size that cannot hold the payload.
+    ///
+    /// The sealed plaintext is `u16 BE length ‖ payload ‖ zeros`, so the target
+    /// must be at least the payload's length plus the prefix. A shaping machine
+    /// that asks for less is a machine bug, not a wire condition, so it fails
+    /// rather than silently sending an unpadded packet that breaks the
+    /// indistinguishability it was supposed to provide.
+    PaddingTooSmall {
+        /// The payload's length.
+        payload: usize,
+        /// The target pre-image length the caller asked for.
+        target: usize,
+    },
     /// A rekey presented a different crypto suite than the session was
     /// established with.
     ///
@@ -233,6 +246,10 @@ impl fmt::Display for DataError {
             Self::EpochExhausted { epoch } => {
                 write!(f, "DataError: epoch {epoch} cannot advance further")
             }
+            Self::PaddingTooSmall { payload, target } => write!(
+                f,
+                "DataError: padded seal target {target} cannot hold a {payload}-byte payload"
+            ),
             Self::SuiteChanged { expected, got } => write!(
                 f,
                 "DataError: rekey changed the crypto suite (session uses {expected:#06x}, rekey uses {got:#06x})"

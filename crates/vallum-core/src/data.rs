@@ -28,6 +28,26 @@
 //! all of `{transcript, epoch, suite, counter, recipient}` are bound to every
 //! packet, at the price of 16 bytes of associated data.
 //!
+//! # The sealed plaintext carries its own length
+//!
+//! Every sealed payload is
+//!
+//! ```text
+//! u16 BE true length ‖ payload ‖ zero padding
+//! ```
+//!
+//! and this sits **inside** the AEAD, so the padding is authenticated and the
+//! true length cannot be forged, truncated, or extended without the tag failing.
+//! What an observer sees is the ciphertext's length — which is now a *chosen*
+//! quantity, not a leak of the payload's size. That is the hook the P5 shaping
+//! machine pads into: [`Sender::seal_padded`] fixes the pre-image to a target
+//! size, and [`Receiver::open`] returns the payload without the padding.
+//!
+//! The prefix costs two bytes per packet and is always present, so enabling a
+//! shaping machine later is a policy change with no wire change. Payloads are
+//! capped at [`crate::wire::MAX_DATA_MESSAGE`], far below 2¹⁶, so the prefix's
+//! width is never the binding constraint.
+//!
 //! # Counter discipline
 //!
 //! Nonce uniqueness rests on two facts: the nonce is `prefix ‖ counter` with a
@@ -62,6 +82,12 @@ pub const REKEY_AFTER_MESSAGES: u64 = 1 << 48;
 /// Twice [`REKEY_AFTER_MESSAGES`], so a peer that ignores the rekey request
 /// still has room to keep talking while one is in flight.
 pub const REJECT_AFTER_MESSAGES: u64 = 1 << 49;
+
+/// Bytes of length prefix at the front of every sealed payload.
+///
+/// See the module docs: the prefix is inside the AEAD, and the padding after the
+/// payload is what a shaping machine chooses.
+pub const PAYLOAD_LEN_SIZE: usize = 2;
 
 /// Seals outbound transport packets under one directional key.
 #[derive(Debug)]
@@ -106,6 +132,9 @@ impl Sender {
     /// `plaintext` is a bare layer-3 packet. An empty payload is a keepalive:
     /// the protocol has no separate message for it, exactly as in WireGuard.
     ///
+    /// The packet carries no padding beyond the length prefix. A shaping machine
+    /// that wants a chosen on-wire size uses [`Self::seal_padded`].
+    ///
     /// # Errors
     ///
     /// - [`DataError::CounterExhausted`] if the key reached
@@ -117,17 +146,60 @@ impl Sender {
         suite: &S,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, DataError> {
+        self.seal_padded(suite, plaintext, plaintext.len() + PAYLOAD_LEN_SIZE)
+    }
+
+    /// Seal one transport packet with the sealed plaintext exactly `target`
+    /// bytes long, padding with zeros as required.
+    ///
+    /// `target` is the length of the *pre-image* — length prefix plus payload
+    /// plus padding — so both peers (and an observer) see a ciphertext of the
+    /// same size whatever the payload was. Use it to give every packet in a
+    /// class the same on-wire length; see the P5 shaping machine.
+    ///
+    /// # Errors
+    ///
+    /// - [`DataError::PaddingTooSmall`] if `target` cannot hold the length prefix
+    ///   and the payload.
+    /// - [`DataError::Wire`] if the payload does not fit the length prefix, or
+    ///   the framed packet exceeds the size cap.
+    /// - [`DataError::CounterExhausted`] as [`Self::seal`].
+    /// - [`DataError::Aead`] as [`Self::seal`].
+    pub fn seal_padded<S: CryptoSuite + ?Sized>(
+        &mut self,
+        suite: &S,
+        plaintext: &[u8],
+        target: usize,
+    ) -> Result<Vec<u8>, DataError> {
+        let needed = plaintext.len() + PAYLOAD_LEN_SIZE;
+        if target < needed {
+            return Err(DataError::PaddingTooSmall {
+                payload: plaintext.len(),
+                target,
+            });
+        }
         if self.counter >= REJECT_AFTER_MESSAGES {
             return Err(DataError::CounterExhausted {
                 counter: self.counter,
             });
         }
 
+        let mut pre_image = vec![0u8; target];
+        let len = u16::try_from(plaintext.len()).map_err(|_| {
+            DataError::Wire(format!(
+                "payload of {} bytes does not fit the {PAYLOAD_LEN_SIZE}-byte length prefix",
+                plaintext.len()
+            ))
+        })?;
+        pre_image[..PAYLOAD_LEN_SIZE].copy_from_slice(&len.to_be_bytes());
+        pre_image[PAYLOAD_LEN_SIZE..needed].copy_from_slice(plaintext);
+        // The rest is already zero: the padding.
+
         let counter = self.counter;
         let header = self.header();
         let ad = associated_data(&header, counter);
         let nonce = nonce(self.key.nonce_prefix(), counter);
-        let ciphertext = suite.aead_seal(self.key.key(), &nonce, &ad, plaintext)?;
+        let ciphertext = suite.aead_seal(self.key.key(), &nonce, &ad, &pre_image)?;
 
         let mut builder = MessageBuilder::new(header);
         builder.field(tag::COUNTER, &counter.to_be_bytes())?;
@@ -184,7 +256,9 @@ impl Receiver {
     ///
     /// # Errors
     ///
-    /// - [`DataError::Wire`] if the packet is not a well-formed data message.
+    /// - [`DataError::Wire`] if the packet is not a well-formed data message, or
+    ///   its authenticated length prefix describes a payload larger than the
+    ///   decrypted pre-image.
     /// - [`DataError::WrongIndex`] if it names another session.
     /// - [`DataError::Aead`] if the tag does not verify.
     /// - [`DataError::Replay`] if the (authenticated) counter was already
@@ -215,15 +289,43 @@ impl Receiver {
         // exactly what the sender authenticated (or the tag fails).
         let ad = associated_data(&message.header(), counter);
         let nonce = nonce(self.key.nonce_prefix(), counter);
-        let plaintext = suite.aead_open(self.key.key(), &nonce, &ad, ciphertext)?;
+        let pre_image = suite.aead_open(self.key.key(), &nonce, &ad, ciphertext)?;
 
         // Ordering is the whole point: the tag has now verified, so `counter` is
         // a value the peer really sent. Letting a forged counter reach the
         // window would let an off-path attacker push it forward and drop real
         // traffic.
         self.filter.accept(counter)?;
-        Ok(plaintext)
+
+        // The prefix is inside the AEAD, so it is as authentic as the payload;
+        // the padding after it is discarded.
+        strip_padding(&pre_image)
     }
+}
+
+/// Recover the payload from a decrypted pre-image: `u16 BE length ‖ payload ‖
+/// zero padding`.
+fn strip_padding(pre_image: &[u8]) -> Result<Vec<u8>, DataError> {
+    let Some(prefix) = pre_image.get(..PAYLOAD_LEN_SIZE) else {
+        return Err(DataError::Wire(format!(
+            "sealed payload is {} bytes, shorter than the {PAYLOAD_LEN_SIZE}-byte \
+             length prefix",
+            pre_image.len()
+        )));
+    };
+    let len = usize::from(u16::from_be_bytes([prefix[0], prefix[1]]));
+
+    // Checked against what actually decrypted, so a length field that claims
+    // more than the AEAD returned is a framing error, not a panic.
+    let padding = &pre_image[PAYLOAD_LEN_SIZE..];
+    let Some(payload) = padding.get(..len) else {
+        return Err(DataError::Wire(format!(
+            "length prefix claims {len} bytes, pre-image holds {}",
+            padding.len()
+        )));
+    };
+
+    Ok(payload.to_vec())
 }
 
 /// Establish the data plane for one endpoint from a finished handshake.
@@ -456,9 +558,60 @@ mod tests {
         let (suite, mut a_send, _, _, mut b_recv) = pair();
         let packet = a_send.seal(&suite, &[]).unwrap();
         assert_eq!(b_recv.open(&suite, &packet).unwrap(), b"");
-        // 8-byte header + COUNTER TLV (4 + 8) + DATA_CT TLV (4 + tag).
-        assert_eq!(packet.len(), HEADER_LEN + 12 + 4 + 32);
+        // 8-byte header + COUNTER TLV (4 + 8) + DATA_CT TLV (4 + tag), where the
+        // sealed plaintext is just the 2-byte length prefix.
+        assert_eq!(packet.len(), HEADER_LEN + 12 + 4 + 32 + PAYLOAD_LEN_SIZE);
         assert_eq!(b_recv.next_counter(), 1, "a keepalive consumes a counter");
+    }
+
+    #[test]
+    fn padding_hides_the_payload_length_and_is_recovered_exactly() {
+        let (suite, mut a_send, _, _, mut b_recv) = pair();
+
+        // Two payloads of very different lengths, padded to one target, produce
+        // ciphertexts of the same size — which is the whole point.
+        let short = a_send.seal_padded(&suite, b"x", 512).unwrap();
+        let long = a_send.seal_padded(&suite, &[0xAB; 400], 512).unwrap();
+        assert_eq!(short.len(), long.len(), "same target, same on-wire size");
+
+        // The receiver recovers each payload without its padding.
+        assert_eq!(b_recv.open(&suite, &short).unwrap(), b"x");
+        assert_eq!(b_recv.open(&suite, &long).unwrap(), vec![0xAB; 400]);
+
+        // A target exactly big enough needs no padding at all.
+        let exact = a_send
+            .seal_padded(&suite, b"abc", 3 + PAYLOAD_LEN_SIZE)
+            .unwrap();
+        assert_eq!(b_recv.open(&suite, &exact).unwrap(), b"abc");
+
+        // A target that cannot hold the payload is refused, and burns no counter.
+        let before = a_send.counter();
+        assert_eq!(
+            a_send.seal_padded(&suite, b"abc", 3 + PAYLOAD_LEN_SIZE - 1),
+            Err(DataError::PaddingTooSmall {
+                payload: 3,
+                target: 3 + PAYLOAD_LEN_SIZE - 1,
+            })
+        );
+        assert_eq!(a_send.counter(), before);
+    }
+
+    #[test]
+    fn a_forged_length_prefix_fails_the_tag() {
+        let (suite, mut a_send, _, _, mut b_recv) = pair();
+        let packet = a_send.seal_padded(&suite, b"payload", 128).unwrap();
+
+        // The pre-image is `u16 len ‖ payload ‖ zeros` inside DATA_CT, so the
+        // first two ciphertext bytes are the encrypted length prefix. Flip one:
+        // the padding scheme must not degrade into a malleable length field.
+        let ct_at = HEADER_LEN + 4 + COUNTER_SIZE + 4;
+        let mut forged = packet.clone();
+        forged[ct_at] ^= 0x01;
+        assert!(matches!(
+            b_recv.open(&suite, &forged),
+            Err(DataError::Aead(_))
+        ));
+        assert_eq!(b_recv.next_counter(), 0, "no forgery moved the window");
     }
 
     #[test]

@@ -80,6 +80,15 @@
 //! tradeoff attacks on key chains have no target. A superseded epoch is retained
 //! receive-only for in-flight packets, then erased.
 //! See `docs/proof/ratchet-pcs.md`.
+//!
+//! ## Shaping (P5)
+//!
+//! [`shaping`] is Vallum's answer to traffic analysis: probabilistic machines
+//! that pad packet lengths and hold outgoing traffic, driven by transport events
+//! and off by default. The padding lives *inside* the AEAD
+//! ([`data::Sender::seal_padded`]), so the on-wire length is a chosen quantity
+//! rather than a leak of the payload's size.
+//! See `docs/proof/traffic-shaping.md`.
 
 #![forbid(unsafe_code)]
 
@@ -91,12 +100,14 @@ pub mod identity;
 pub mod keys;
 pub mod replay;
 pub mod session;
+pub mod shaping;
 pub mod timer;
 pub mod timestamp;
 pub mod wire;
 
 pub use data::{
-    establish, establish_epoch, Receiver, Sender, REJECT_AFTER_MESSAGES, REKEY_AFTER_MESSAGES,
+    establish, establish_epoch, Receiver, Sender, PAYLOAD_LEN_SIZE, REJECT_AFTER_MESSAGES,
+    REKEY_AFTER_MESSAGES,
 };
 pub use error::{DataError, HandshakeError};
 pub use handshake::{
@@ -107,6 +118,7 @@ pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdenti
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
 pub use replay::{ReplayFilter, REPLAY_WINDOW};
 pub use session::{Session, RETAIN_PREVIOUS_EPOCH_MS};
+pub use shaping::{Action, Branch, Effect, Event, Machine, Shaper, State, MACHINE_END, UNLIMITED};
 pub use timer::{TimerAction, Timers};
 pub use timestamp::{Tai64n, Tai64nGuard, TimestampError};
 pub use wire::{

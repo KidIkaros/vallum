@@ -30,7 +30,7 @@ use vallum_core::{
     establish, establish_epoch, initiator_hello, initiator_process_resp, responder_process_conf,
     responder_process_init, DataError, HandshakeError, Message, MessageBuilder, MessageHeader,
     MessageType, PeerIdentity, Receiver, Role, Sender, SessionKeys, StaticIdentity,
-    PROTOCOL_VERSION, REPLAY_WINDOW,
+    PAYLOAD_LEN_SIZE, PROTOCOL_VERSION, REPLAY_WINDOW,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -210,9 +210,10 @@ fn a_keepalive_is_an_empty_payload_of_a_known_size() {
     let packet = live.a_send.seal(&live.suite, &[]).unwrap();
 
     // 8-byte header, COUNTER (4-byte tag + u64), DATA_CT (4-byte tag + 32-byte
-    // tag, no plaintext). A fixed, minimal, unremarkable packet — the point of a
-    // keepalive is that it reveals only that a session exists.
-    assert_eq!(packet.len(), 8 + 12 + 4 + 32);
+    // AEAD tag + the 2-byte payload-length prefix). A fixed, minimal,
+    // unremarkable packet — the point of a keepalive is that it reveals only
+    // that a session exists.
+    assert_eq!(packet.len(), 8 + 12 + 4 + 32 + PAYLOAD_LEN_SIZE);
     assert_eq!(live.b_recv.open(&live.suite, &packet).unwrap(), b"");
     assert_eq!(
         live.b_recv.next_counter(),
