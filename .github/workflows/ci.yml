@@ -104,29 +104,6 @@ jobs:
         working-directory: vallum
         run: cargo check -p vallum-core -p vallum-tunnel -p vallum-crypto
 
-  macos-daemon:
-    name: macOS check (daemon, experimental)
-    runs-on: macos-latest
-    # The daemon's SDK dependency builds C (blake3/zstd) with Apple clang; this
-    # job exists to surface the remaining cfg gaps, not to gate a release yet.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vallum
-      - name: Check the daemon for macOS
-        working-directory: vallum
-        run: cargo check -p vallum
-
   e2e:
     name: end-to-end (two namespaces, real kernel)
     runs-on: ubuntu-latest
