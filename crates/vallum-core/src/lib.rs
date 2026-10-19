@@ -17,7 +17,8 @@
 //! ─────────                                              ─────────
 //! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP ──▶   [static key]
 //!              ◀── EPHEMERAL_CT (B), STATIC_CT (C),
-//!                  CONFIRMATION (conf_r), IDENTITY_SIG ────    RespHello
+//!                  CONFIRMATION (conf_r), IDENTITY_SIG,
+//!                  PRE_TAG (op-A-keyed, checked first) ────     RespHello
 //! InitConf     ── CONFIRMATION (conf_i), IDENTITY_SIG ───▶      [verify]
 //! ```
 //!
@@ -122,9 +123,9 @@ pub use data::{
 };
 pub use error::{DataError, HandshakeError};
 pub use handshake::{
-    initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
-    responder_process_conf, responder_process_init, InitHelloInfo, InitiatorState, ResponderState,
-    SessionKeys, PEER_HINT_SIZE,
+    initiator_hello, initiator_process_resp, peer_hint, resp_tag, responder_accept,
+    responder_identify, responder_process_conf, responder_process_init, verify_resp_tag,
+    InitHelloInfo, InitiatorState, ResponderState, SessionKeys, PEER_HINT_SIZE, RESP_TAG_SIZE,
 };
 pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};

@@ -276,6 +276,11 @@ Measured by `a_signature_adds_exactly_one_field_per_message`:
 | `InitConf` | 52 | 1701 | +1649 |
 | **handshake total** | **8995** | **12293** | **+3298** |
 
+> **P6.8 note.** These are the P3 measurements. The `RespHello` column has since
+> moved +36 B in both configurations (4378 → 4414 unsigned, 6027 → 6063 signed)
+> for the op-A-keyed admission tag; the signature delta and every `InitHello` /
+> `InitConf` figure are unchanged. See [`resp-tag.md`](resp-tag.md).
+
 Delta = `tag u16 | len u16 | signature` = 4 + 1645. The 1645-byte signature is
 `u32 BE falcon_len | falcon (≤1577) | ed25519 (64)`, i.e. the maximum-size
 Falcon-1024 signature. The plan's §4.2 note ("add ~1.3 KB") was an estimate; the

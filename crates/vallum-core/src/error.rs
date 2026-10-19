@@ -70,6 +70,14 @@ pub enum HandshakeError {
     /// stale peer table, or a bug. Fail closed rather than complete a handshake
     /// under a peer the initiator did not name.
     PeerHintMismatch,
+    /// A `RespHello` did not carry a valid op-A-keyed admission tag (P6.8).
+    ///
+    /// Only a party that decapsulated op A — i.e. holds the responder's static
+    /// secret — can produce the tag, so this means the message was forged,
+    /// mutated, or replayed from another handshake. It is an *admission* failure,
+    /// not an authentication one: the tag is checked before any decapsulation,
+    /// and [`Self::Confirmation`] still gates session acceptance afterwards.
+    RespTag,
     /// An operation needed a signing identity and this endpoint has none.
     NoSigningIdentity,
     /// A hybrid-KEM operation failed.
@@ -123,6 +131,10 @@ impl fmt::Display for HandshakeError {
             Self::PeerHintMismatch => write!(
                 f,
                 "HandshakeError: the sealed peer hint did not name the resolved peer"
+            ),
+            Self::RespTag => write!(
+                f,
+                "HandshakeError: the RespHello admission tag did not verify"
             ),
             Self::NoSigningIdentity => {
                 write!(f, "HandshakeError: this endpoint has no signing identity")

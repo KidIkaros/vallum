@@ -192,13 +192,17 @@ suppress the traffic that keeps the path reachable.
 1. **Nothing here is a defence against an on-path attacker.** The device enforces
    local policy and honest bookkeeping. Confidentiality, authenticity and PCS are
    the business of P1–P5, and their argument is the proofs, not this code.
-2. **The residual decapsulation cost is real and named.** An attacker who has
-   observed an `InitHello` knows the initiator's index and can make it decapsulate
-   twice per forged `RespHello`. The work is bounded — one outstanding handshake,
-   and the initiator's own send rate is the ceiling — but not free. Closing it
-   needs a wire change (an op-A-keyed tag checked before decapsulation) and is
-   recorded as a follow-up rather than smuggled in. On the responder side the
-   equivalent cost is behind `mac1`, and behind a cookie under load.
+2. **The residual decapsulation cost is real and named — and P6.8 closed it.**
+   An attacker who has observed an `InitHello` knows the initiator's index and can
+   make it decapsulate twice per forged `RespHello`; worse, the transport rebuilds
+   the initiator state first (an ephemeral keygen and an op-A encapsulation), so
+   the measured pre-P6.8 price was keygen + encaps + two decaps. P6.8's op-A-keyed
+   `PRE_TAG` is that wire change: the initiator checks it before the rebuild, so a
+   forgery costs one KDF and the handshake survives. See
+   `docs/proof/resp-tag.md`. On the responder side there is **no** equivalent and
+   cannot be one — the decapsulation is what produces the key the tag would be
+   checked against — so that cost stays behind `mac1`, and behind a cookie under
+   load.
 3. **The `allowed_ips` model is WireGuard's, including its limitation.** A peer may
    claim any address inside a prefix it was granted; the model does not verify that
    the host at that address exists or consented.

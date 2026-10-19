@@ -57,6 +57,11 @@ the fix.
 > measurement: see [`segment.md`](segment.md). The prediction recorded here — "a
 > future framing level (which is a wire change)" — was wrong about the wire: the
 > envelope sits *below* the message layer, so it is not a wire change at all.
+>
+> **Moved in P6.8.** `RespHello` is now **4414 B** (+36 B for the op-A-keyed
+> admission tag), not 4378. `InitHello` and every other size in this section are
+> unchanged, and the fragment arithmetic is unaffected: 4414 still crosses as four
+> Vallum fragments. See [`resp-tag.md`](resp-tag.md).
 
 **(c) There is no persistent keepalive, so a NAT-bound responder is silent.**
 `KEEPALIVE_TIMEOUT_MS` is WireGuard's rule — send a keepalive after 10 s of

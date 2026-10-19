@@ -161,6 +161,15 @@ pub mod tag {
     /// about who sent it, while op C — the leg that names the initiator — cannot
     /// be built until the peer is known. See [`crate::handshake`].
     pub const PEER_HINT: u16 = 0x0007;
+    /// An op-A-keyed admission tag on a `RespHello` (P6.8).
+    ///
+    /// A MAC over the whole message, keyed by a value derived from op A's
+    /// shared secret — which only a holder of the responder's static secret can
+    /// produce. The initiator checks it **before** decapsulating ops B and C, so
+    /// a forged `RespHello` costs one KDF rather than two hybrid decapsulations.
+    /// It is an admission token, not authentication: `CONFIRMATION` still gates
+    /// session acceptance.
+    pub const PRE_TAG: u16 = 0x0008;
     /// A key-confirmation value ([`super::CONFIRMATION_SIZE`] bytes).
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).
@@ -340,6 +349,18 @@ impl MessageBuilder {
         self.serialize(&[tag::MAC2])
     }
 
+    /// The bytes a `RespHello` pre-tag covers: the header followed by every
+    /// field so far **except** the pre-tag itself, in wire order.
+    ///
+    /// Call this once every other field is in, before adding
+    /// [`tag::PRE_TAG`]. Unlike the confirmation values, this binds the
+    /// optional `IDENTITY_SIG` too, so mutating any byte of a captured
+    /// `RespHello` fails the tag rather than reaching a decapsulation.
+    #[must_use]
+    pub fn resp_tag_input(&self) -> Vec<u8> {
+        self.serialize(&[tag::PRE_TAG])
+    }
+
     /// Serialize header plus fields in order, skipping `exclude`.
     fn serialize(&self, exclude: &[u16]) -> Vec<u8> {
         serialize_fields(self.header, &self.fields, exclude)
@@ -498,6 +519,17 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn mac2_input(&self) -> Vec<u8> {
         serialize_fields(self.header, &self.fields, &[tag::MAC2])
+    }
+
+    /// The bytes a `RespHello` pre-tag covers: the header followed by every
+    /// field **except** the pre-tag itself.
+    ///
+    /// This is the receiver's mirror of [`MessageBuilder::resp_tag_input`]. It
+    /// is derived from the parsed fields, not the raw buffer, so the sender and
+    /// receiver agree on exactly which bytes the tag authenticates.
+    #[must_use]
+    pub fn resp_tag_input(&self) -> Vec<u8> {
+        serialize_fields(self.header, &self.fields, &[tag::PRE_TAG])
     }
 
     /// Assert the message type.

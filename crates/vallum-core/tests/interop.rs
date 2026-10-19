@@ -13,13 +13,19 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use vallum_core::wire::tag;
 use vallum_core::{
-    initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
-    responder_process_conf, responder_process_init, HandshakeError, Message, MessageBuilder,
-    PeerIdentity, SessionKeys, StaticIdentity, PEER_HINT_SIZE,
+    initiator_hello, initiator_process_resp, peer_hint, resp_tag, responder_accept,
+    responder_identify, responder_process_conf, responder_process_init, HandshakeError, Message,
+    MessageBuilder, PeerIdentity, SessionKeys, StaticIdentity, PEER_HINT_SIZE, RESP_TAG_SIZE,
 };
-use vallum_crypto::CryptoSuite;
+
+use vallum_crypto::{
+    AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole, KemSecretKey,
+    LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    KEM_ENCAPS_RANDOMNESS,
+};
 use vallum_crypto_sdk::SdkSuite;
 
 const TIMESTAMP: [u8; 12] = [
@@ -41,6 +47,24 @@ fn hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+/// Re-seal a mutated `RespHello`'s op-A admission tag (P6.8).
+///
+/// The confirmation tests mutate `RespHello` to exercise the key schedule, which
+/// runs after the tag. Re-sealing keeps each test claiming the rejection it is
+/// about; without it the tag would reject first (correctly, but earlier).
+fn retag(suite: &dyn CryptoSuite, key: &[u8; RESP_TAG_SIZE], bytes: &[u8]) -> Vec<u8> {
+    let message = Message::parse(bytes).unwrap();
+    let tag_value = resp_tag(suite, key, &message.resp_tag_input()).unwrap();
+    let mut builder = MessageBuilder::new(message.header());
+    for t in message.tags() {
+        if t != tag::PRE_TAG {
+            builder.field(t, message.get(t).unwrap()).unwrap();
+        }
+    }
+    builder.field(tag::PRE_TAG, &tag_value).unwrap();
+    builder.finish().unwrap()
 }
 
 /// The full three-message exchange, as the protocol drives it.
@@ -284,8 +308,10 @@ fn forged_responder_confirmation_is_rejected() {
         responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
 
     // Rebuild RespHello with a corrupted responder confirmation. The other fields
-    // are copied across so the failure is the confirmation, not the framing.
-    let forged = {
+    // are copied across and the admission tag is re-sealed, so the failure is the
+    // confirmation, not the framing or the tag.
+    let key = i_state.resp_tag_key(&suite).unwrap();
+    let forged = retag(&suite, &key, &{
         let msg = Message::parse(&resp_hello).unwrap();
         let mut confirmation = msg.require_array::<32>(tag::CONFIRMATION).unwrap();
         confirmation[0] ^= 1;
@@ -301,7 +327,7 @@ fn forged_responder_confirmation_is_rejected() {
         .unwrap();
         b.field(tag::CONFIRMATION, &confirmation).unwrap();
         b.finish().unwrap()
-    };
+    });
 
     assert!(matches!(
         initiator_process_resp(&suite, i_state, &initiator, &forged),
@@ -336,10 +362,30 @@ fn a_responder_confirmation_cannot_be_replayed_from_another_handshake() {
     )
     .unwrap();
 
-    // Combining handshake 1's RespHello with handshake 2's state must fail: the
-    // transcript the responder confirmed is not the one this initiator computed.
+    // P6.8 rejects the splice before any decapsulation: the admission tag is
+    // keyed by *this* handshake's op A, so handshake 1's `RespHello` cannot
+    // carry a tag this initiator will accept.
     assert!(matches!(
         initiator_process_resp(&suite, i_state_2, &initiator, &resp_hello_1),
+        Err(HandshakeError::RespTag)
+    ));
+
+    // And the older defence still holds independently: re-sealed under this
+    // handshake's key, the confirmation is bound to handshake 1's transcript,
+    // which is not the one this initiator computed.
+    let (_, i_state_2) = initiator_hello(
+        &suite,
+        &initiator,
+        &peer(&responder),
+        1,
+        TIMESTAMP,
+        &[0x77u8; 32],
+    )
+    .unwrap();
+    let key = i_state_2.resp_tag_key(&suite).unwrap();
+    let resealed = retag(&suite, &key, &resp_hello_1);
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state_2, &initiator, &resealed),
         Err(HandshakeError::Confirmation)
     ));
 }
@@ -446,7 +492,312 @@ fn errors_do_not_leak_secrets_in_debug() {
     );
 }
 
-// ── 3. frozen vectors ────────────────────────────────────────────────
+// ── 3. the RespHello admission tag (P6.8) ────────────────────────────
+
+/// A delegating suite that counts KEM operations.
+///
+/// The P6.8 claim is not just "a forged `RespHello` is rejected" — it is
+/// "*before any KEM work*". Asserting the error alone would pass even if the
+/// two decapsulations still ran, so the test counts them.
+struct CountingSuite {
+    inner: SdkSuite,
+    keygen: AtomicUsize,
+    encaps: AtomicUsize,
+    decaps: AtomicUsize,
+}
+
+impl CountingSuite {
+    fn new(inner: SdkSuite) -> Self {
+        Self {
+            inner,
+            keygen: AtomicUsize::new(0),
+            encaps: AtomicUsize::new(0),
+            decaps: AtomicUsize::new(0),
+        }
+    }
+
+    fn kem_ops(&self) -> usize {
+        self.keygen.load(Ordering::Relaxed)
+            + self.encaps.load(Ordering::Relaxed)
+            + self.decaps.load(Ordering::Relaxed)
+    }
+}
+
+impl CryptoSuite for CountingSuite {
+    fn suite_id(&self) -> u16 {
+        self.inner.suite_id()
+    }
+
+    fn sizes(&self) -> WireSizes {
+        self.inner.sizes()
+    }
+
+    fn leg_kinds(&self) -> &'static [LegKind] {
+        self.inner.leg_kinds()
+    }
+
+    fn kem_keygen(
+        &self,
+        seed: &[u8; 32],
+        role: KemRole,
+    ) -> Result<(KemPublicKey, KemSecretKey), KemError> {
+        self.keygen.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_keygen(seed, role)
+    }
+
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError> {
+        self.encaps.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_encaps(pk, randomness)
+    }
+
+    fn kem_decaps(
+        &self,
+        sk: &KemSecretKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<SharedSecret>, KemError> {
+        self.decaps.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_decaps(sk, ciphertext)
+    }
+
+    fn kdf(&self, salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<(), KdfError> {
+        self.inner.kdf(salt, ikm, info, out)
+    }
+
+    fn hash(&self, domain: &[u8], data: &[u8]) -> [u8; 32] {
+        self.inner.hash(domain, data)
+    }
+
+    fn aead_seal(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        pt: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_seal(key, nonce, ad, pt)
+    }
+
+    fn aead_open(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        ct: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_open(key, nonce, ad, ct)
+    }
+
+    fn sign_keygen(&self, seed: &[u8; 32]) -> Result<(SignPublicKey, SignSecretKey), SigError> {
+        self.inner.sign_keygen(seed)
+    }
+
+    fn sign(&self, sk: &SignSecretKey, msg: &[u8]) -> Result<Vec<u8>, SigError> {
+        self.inner.sign(sk, msg)
+    }
+
+    fn verify(&self, pk: &SignPublicKey, msg: &[u8], sig: &[u8]) -> bool {
+        self.inner.verify(pk, msg, sig)
+    }
+}
+
+/// A `RespHello` with the given field replaced, keeping every other field.
+fn resp_hello_with(bytes: &[u8], tag_id: u16, value: &[u8]) -> Vec<u8> {
+    let message = Message::parse(bytes).unwrap();
+    let mut builder = MessageBuilder::new(message.header());
+    for t in message.tags() {
+        let v = if t == tag_id {
+            value
+        } else {
+            message.get(t).unwrap()
+        };
+        builder.field(t, v).unwrap();
+    }
+    builder.finish().unwrap()
+}
+
+/// A forged `RespHello` — the message an attacker who observed our `InitHello`
+/// can produce, since it knows our index — is rejected by the tag **before any
+/// KEM operation runs**.
+#[test]
+fn a_forged_resp_hello_costs_no_kem_work() {
+    let suite = CountingSuite::new(SdkSuite::from_id(0x0003).unwrap());
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, i_state) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let (resp_hello, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
+
+    // Right receiver index (the attacker knows it), everything else garbage.
+    let forged = {
+        let msg = Message::parse(&resp_hello).unwrap();
+        let ct_len = msg.require(tag::EPHEMERAL_CT).unwrap().len();
+        let static_len = msg.require(tag::STATIC_CT).unwrap().len();
+        let mut b = MessageBuilder::new(msg.header());
+        b.field(tag::EPHEMERAL_CT, &vec![0u8; ct_len]).unwrap();
+        b.field(tag::STATIC_CT, &vec![0u8; static_len]).unwrap();
+        b.field(
+            tag::RECEIVER_INDEX,
+            msg.require(tag::RECEIVER_INDEX).unwrap(),
+        )
+        .unwrap();
+        b.field(tag::CONFIRMATION, &[0u8; 32]).unwrap();
+        b.field(tag::PRE_TAG, &[0u8; 32]).unwrap();
+        b.finish().unwrap()
+    };
+
+    let before = suite.kem_ops();
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state, &initiator, &forged),
+        Err(HandshakeError::RespTag)
+    ));
+    assert_eq!(
+        suite.kem_ops(),
+        before,
+        "a forged RespHello performed KEM work"
+    );
+}
+
+/// The tag is not optional: stripping it is a framing error, not a way to skip
+/// the check.
+#[test]
+fn a_missing_resp_hello_tag_is_a_framing_error() {
+    let suite = SdkSuite::from_id(0x0003).unwrap();
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, i_state) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let (resp_hello, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
+
+    let stripped = {
+        let msg = Message::parse(&resp_hello).unwrap();
+        let mut b = MessageBuilder::new(msg.header());
+        for t in msg.tags() {
+            if t != tag::PRE_TAG {
+                b.field(t, msg.get(t).unwrap()).unwrap();
+            }
+        }
+        b.finish().unwrap()
+    };
+
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state, &initiator, &stripped),
+        Err(HandshakeError::Wire(_))
+    ));
+}
+
+/// The tag covers the whole message, so a mutated ciphertext fails the tag
+/// rather than reaching a decapsulation — the failure an attacker could
+/// otherwise repeat to burn CPU.
+#[test]
+fn a_tampered_resp_hello_fails_the_tag() {
+    let suite = SdkSuite::from_id(0x0003).unwrap();
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, i_state) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let (resp_hello, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
+
+    // Flip one bit of `ct_B`; the tag covers it.
+    let mut ct = Message::parse(&resp_hello)
+        .unwrap()
+        .require(tag::EPHEMERAL_CT)
+        .unwrap()
+        .to_vec();
+    ct[0] ^= 1;
+    let tampered = resp_hello_with(&resp_hello, tag::EPHEMERAL_CT, &ct);
+
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state, &initiator, &tampered),
+        Err(HandshakeError::RespTag)
+    ));
+}
+
+/// A tag lifted from another handshake does not verify here, even though every
+/// other field is genuine: the key is per-handshake.
+#[test]
+fn a_resp_hello_tag_does_not_replay_across_handshakes() {
+    let suite = SdkSuite::from_id(0x0003).unwrap();
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello_1, _) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let (resp_hello_1, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello_1, 2, &d)
+            .unwrap();
+
+    let (init_hello_2, i_state_2) = initiator_hello(
+        &suite,
+        &initiator,
+        &peer(&responder),
+        1,
+        TIMESTAMP,
+        &[0x99u8; 32],
+    )
+    .unwrap();
+    let (resp_hello_2, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello_2, 3, &d)
+            .unwrap();
+
+    // Genuine handshake 2, with handshake 1's tag spliced in.
+    let stale_tag = Message::parse(&resp_hello_1)
+        .unwrap()
+        .require(tag::PRE_TAG)
+        .unwrap()
+        .to_vec();
+    let spliced = resp_hello_with(&resp_hello_2, tag::PRE_TAG, &stale_tag);
+
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state_2, &initiator, &spliced),
+        Err(HandshakeError::RespTag)
+    ));
+}
+
+/// A retransmitted `RespHello` is byte-identical, so its tag still verifies and
+/// the handshake completes — the tag must not turn a lost answer into a dead
+/// handshake.
+#[test]
+fn a_retransmitted_resp_hello_still_verifies() {
+    let suite = SdkSuite::from_id(0x0003).unwrap();
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, i_state) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let (resp_hello, _) =
+        responder_process_init(&suite, &responder, &peer(&initiator), &init_hello, 2, &d).unwrap();
+
+    // The transport rebuilds the state deterministically from the same seed, so
+    // this is exactly what a retransmitted answer meets.
+    let (_, i_state_again) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+
+    let first = initiator_process_resp(&suite, i_state, &initiator, &resp_hello);
+    let again = initiator_process_resp(&suite, i_state_again, &initiator, &resp_hello);
+    assert!(first.is_ok(), "first answer rejected");
+    assert!(again.is_ok(), "retransmitted answer rejected");
+    assert_eq!(
+        first.unwrap().1.key.as_bytes(),
+        again.unwrap().1.key.as_bytes()
+    );
+}
+
+// ── 4. frozen vectors ────────────────────────────────────────────────
 
 #[test]
 #[ignore = "run with --ignored to print the current frozen vectors"]
@@ -482,7 +833,7 @@ fn dump_frozen_vectors() {
     }
 }
 
-// ── 4. peer identification (P6) ──────────────────────────────────────
+// ── 5. peer identification (P6) ──────────────────────────────────────
 
 /// A responder resolves *which peer* is calling from the sealed hint, before it
 /// has authenticated anyone. Both ends derive the hint from the peer's static
@@ -656,10 +1007,14 @@ fn frozen_vectors_match() {
     // stages. If any of these fail after a provider swap, the swap changed
     // protocol-visible bytes and the contract is broken.
     //
-    // One `InitHello` field is *not* in the transcript: the P6 peer hint, which
-    // is sealed under op A and carries no key material. It is pinned by
-    // `init_hello_len` instead — a scheme change that altered the hint would
-    // change the length even though `TR` and every key below stayed put.
+    // Two fields are *not* in the transcript. The P6 peer hint is sealed under
+    // op A and carries no key material; it is pinned by `init_hello_len` — a
+    // scheme change that altered the hint would change the length even though
+    // `TR` and every key below stayed put. The P6.8 `RespHello` admission tag is
+    // derived from the transcript (it is a MAC over the whole message under an
+    // op-A key), so it cannot be inside it either; `resp_hello_len` pins it for
+    // the same reason. Its addition moved *only* that length, by +36 B — the
+    // narrowest bump a message change can have.
     struct Vector {
         suite_id: u16,
         init_hello_len: usize,
@@ -675,7 +1030,7 @@ fn frozen_vectors_match() {
         Vector {
             suite_id: 0x0001,
             init_hello_len: 2337,
-            resp_hello_len: 2202,
+            resp_hello_len: 2238,
             init_conf: "010300010a0b0c0d00100020eec128c04c9bbb41982b13ea0408773ef6d4e9ccdb97237656b2a7e9f6c9489600050004e0e1e2e3",
             transcript: "846d88879dd8511e8f692fa43ec622153b0ba64dac36c92c2a864f31a7fcbc07",
             key: "c4f2772b75022bf47361754dc88bb40c78c1aa196958ae6631a32bf6fd30c530",
@@ -685,7 +1040,7 @@ fn frozen_vectors_match() {
         Vector {
             suite_id: 0x0002,
             init_hello_len: 2412,
-            resp_hello_len: 2300,
+            resp_hello_len: 2336,
             init_conf: "010300020a0b0c0d00100020bbcb651aa14240f8300d8e6d7d38e53b940a2030a630f48ba1978ecccd86c4b100050004e0e1e2e3",
             transcript: "f36118a94977124c29cfd976408445660450803a101d8e939703a7b234626697",
             key: "439f0600bcd6b3fade69983f7afc236d29e111e1fcfdb22f64aa44b4dea8a2c5",
@@ -695,7 +1050,7 @@ fn frozen_vectors_match() {
         Vector {
             suite_id: 0x0003,
             init_hello_len: 4609,
-            resp_hello_len: 4378,
+            resp_hello_len: 4414,
             init_conf: "010300030a0b0c0d0010002052171e405c34b707362b25c1b3ad823b83161dc6f0ba6c4b58e0e59d32a18ec200050004e0e1e2e3",
             transcript: "6c22bee37269a2a89aae4752718fbce53c8210659b5a4ddc84424e165436a9fc",
             key: "53b04bac78b3b0bd12eadbf80ae2e88e35075c70104c26ea12c95d6eacff22c9",

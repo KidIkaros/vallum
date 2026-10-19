@@ -20,8 +20,9 @@
 
 use vallum_core::wire::{tag, Message, MessageBuilder};
 use vallum_core::{
-    initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    HandshakeError, IdentityDocument, PeerIdentity, SessionKeys, StaticIdentity,
+    initiator_hello, initiator_process_resp, resp_tag, responder_process_conf,
+    responder_process_init, HandshakeError, IdentityDocument, PeerIdentity, SessionKeys,
+    StaticIdentity, RESP_TAG_SIZE,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -101,6 +102,27 @@ fn flip_field_bit(bytes: &[u8], tag: u16, index: usize) -> Vec<u8> {
     let mut value = field(bytes, tag).expect("field present");
     value[index] ^= 1;
     with_field(bytes, tag, &value)
+}
+
+/// Re-seal a mutated `RespHello`'s op-A admission tag (P6.8).
+///
+/// These tests mutate the message to exercise the *identity* layer, which runs
+/// after the tag. Without re-sealing, the mutation would be rejected by the tag
+/// first and the identity rule would go untested — a correct rejection, but the
+/// wrong one for what the test claims.
+fn retag(suite: &SdkSuite, key: &[u8; RESP_TAG_SIZE], bytes: &[u8]) -> Vec<u8> {
+    let message = Message::parse(bytes).expect("parse");
+    let tag_value = resp_tag(suite, key, &message.resp_tag_input()).expect("tag");
+    let mut builder = MessageBuilder::new(message.header());
+    for t in message.tags() {
+        if t != tag::PRE_TAG {
+            builder
+                .field(t, message.get(t).expect("field"))
+                .expect("field");
+        }
+    }
+    builder.field(tag::PRE_TAG, &tag_value).expect("field");
+    builder.finish().expect("finish")
 }
 
 /// A complete four-step exchange, returning every message and both key sets.
@@ -294,7 +316,10 @@ fn a_stripped_responder_signature_is_rejected() {
     )
     .unwrap();
 
-    let stripped = without_field(&resp_hello, tag::IDENTITY_SIG);
+    // Re-seal the admission tag: the mutation targets the identity rule, which
+    // runs after the tag, and the tag itself must not be the thing that rejects.
+    let key = i_state.resp_tag_key(&suite).unwrap();
+    let stripped = retag(&suite, &key, &without_field(&resp_hello, tag::IDENTITY_SIG));
     assert!(matches!(
         initiator_process_resp(&suite, i_state, &initiator, &stripped),
         Err(HandshakeError::IdentityMissing)
@@ -359,13 +384,56 @@ fn a_forged_responder_signature_is_rejected() {
     )
     .unwrap();
 
-    // Flip the last byte — inside the Falcon half of the encoded signature.
+    // Flip the last byte — inside the Falcon half of the encoded signature —
+    // then re-seal the admission tag so the identity rule is what rejects.
+    let key = i_state.resp_tag_key(&suite).unwrap();
+    let forged = retag(
+        &suite,
+        &key,
+        &flip_field_bit(&resp_hello, tag::IDENTITY_SIG, {
+            field(&resp_hello, tag::IDENTITY_SIG).unwrap().len() - 1
+        }),
+    );
+    assert!(matches!(
+        initiator_process_resp(&suite, i_state, &initiator, &forged),
+        Err(HandshakeError::IdentityInvalid)
+    ));
+}
+
+/// The P6.8 admission tag covers the signature field too: mutating a captured
+/// `RespHello`'s signature without re-sealing fails at the tag, so a signed
+/// session cannot be made to spend two decapsulations on a mutated message.
+#[test]
+fn a_mutated_signature_fails_the_admission_tag() {
+    let suite = SdkSuite::tri_hybrid();
+    let initiator = identity(&suite, &[0x11u8; 32]);
+    let responder = identity(&suite, &[0x22u8; 32]);
+
+    let (init_hello, i_state) = initiator_hello(
+        &suite,
+        &initiator,
+        &PeerIdentity::from_identity(&responder),
+        I_IDX,
+        TS,
+        &[0xA1u8; 32],
+    )
+    .unwrap();
+    let (resp_hello, _) = responder_process_init(
+        &suite,
+        &responder,
+        &PeerIdentity::from_identity(&initiator),
+        &init_hello,
+        R_IDX,
+        &[0xB1u8; 32],
+    )
+    .unwrap();
+
     let forged = flip_field_bit(&resp_hello, tag::IDENTITY_SIG, {
         field(&resp_hello, tag::IDENTITY_SIG).unwrap().len() - 1
     });
     assert!(matches!(
         initiator_process_resp(&suite, i_state, &initiator, &forged),
-        Err(HandshakeError::IdentityInvalid)
+        Err(HandshakeError::RespTag)
     ));
 }
 
@@ -518,7 +586,14 @@ fn a_signature_does_not_replay_across_sessions() {
         stale_sig.len()
     );
 
-    let replayed = with_field(&resp_hello_2, tag::IDENTITY_SIG, &stale_sig);
+    // Re-seal the admission tag: the splice is the identity-layer forgery under
+    // test, not a tag failure.
+    let key = i_state.resp_tag_key(&suite).unwrap();
+    let replayed = retag(
+        &suite,
+        &key,
+        &with_field(&resp_hello_2, tag::IDENTITY_SIG, &stale_sig),
+    );
     assert!(matches!(
         initiator_process_resp(&suite, i_state, &initiator, &replayed),
         Err(HandshakeError::IdentityInvalid)

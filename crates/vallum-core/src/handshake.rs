@@ -195,6 +195,21 @@ const PEER_HINT_SALT: &[u8] = b"vallum/peer-hint/seal/v1";
 /// Label for the key that seals the hint.
 const PEER_HINT_KEY_INFO: &[u8] = b"vallum/peer-hint/key/v1";
 
+// ── RespHello admission tag (P6.8) ───────────────────────────────────
+
+/// Length of the `RespHello` admission tag, in bytes.
+///
+/// The same size as a confirmation value: a MAC over the whole message under a
+/// key derived from op A, so only a party that decapsulated op A can produce it.
+pub const RESP_TAG_SIZE: usize = 32;
+
+/// Salt for the key that authenticates a `RespHello`.
+const RESP_TAG_SALT: &[u8] = b"vallum/resp-tag/seal/v1";
+/// Label for the key that authenticates a `RespHello`.
+const RESP_TAG_KEY_INFO: &[u8] = b"vallum/resp-tag/key/v1";
+/// Label for the tag itself.
+const RESP_TAG_INFO: &[u8] = b"vallum/resp-tag/v1";
+
 // ── identity ─────────────────────────────────────────────────────────
 
 // [`StaticIdentity`] and [`PeerIdentity`] live in [`crate::identity`] together
@@ -280,6 +295,23 @@ impl InitiatorState {
     #[must_use]
     pub fn init_hello(&self) -> &[u8] {
         &self.init_hello
+    }
+
+    /// The op-A-keyed key a `RespHello` must carry a tag under (P6.8).
+    ///
+    /// A transport that wants to reject a forged `RespHello` **before**
+    /// rebuilding the handshake state stores this at send time; it is the only
+    /// secret [`resp_tag`] needs. It is as sensitive as the state it is
+    /// derived from.
+    ///
+    /// # Errors
+    ///
+    /// [`HandshakeError::Kdf`] if the suite's KDF fails.
+    pub fn resp_tag_key(
+        &self,
+        suite: &dyn CryptoSuite,
+    ) -> Result<[u8; RESP_TAG_SIZE], HandshakeError> {
+        derive_resp_tag_key(suite, &self.static_legs)
     }
 }
 
@@ -398,6 +430,72 @@ fn hint_crypt(
     let mut nonce = [0u8; NONCE_SIZE];
     nonce.copy_from_slice(&out[32..]);
     Ok((key, nonce))
+}
+
+/// Derive the op-A-keyed key that authenticates a `RespHello` (P6.8).
+///
+/// Both endpoints can compute it, and both can do so before ops B and C are
+/// touched: the initiator from the encapsulation it made, the responder from
+/// the decapsulation it did. Only a holder of the responder's static secret can
+/// produce it, which is what makes it an admission token for the initiator.
+fn derive_resp_tag_key(
+    suite: &dyn CryptoSuite,
+    legs: &[SharedSecret],
+) -> Result<[u8; RESP_TAG_SIZE], HandshakeError> {
+    let parts: Vec<&[u8]> = legs.iter().map(|leg| &leg.as_bytes()[..]).collect();
+    let mut key = [0u8; RESP_TAG_SIZE];
+    suite
+        .kdf(RESP_TAG_SALT, &frame(&parts), RESP_TAG_KEY_INFO, &mut key)
+        .map_err(HandshakeError::Kdf)?;
+    Ok(key)
+}
+
+/// The `RespHello` admission tag: a MAC over the message under the op-A key.
+///
+/// `input` is [`crate::wire::Message::resp_tag_input`] — the header plus every
+/// field except the tag itself — so the tag binds the optional identity
+/// signature too, and mutating any byte of a captured message fails it.
+pub fn resp_tag(
+    suite: &dyn CryptoSuite,
+    key: &[u8; RESP_TAG_SIZE],
+    input: &[u8],
+) -> Result<[u8; RESP_TAG_SIZE], HandshakeError> {
+    let mut tag = [0u8; RESP_TAG_SIZE];
+    suite
+        .kdf(key, input, RESP_TAG_INFO, &mut tag)
+        .map_err(HandshakeError::Kdf)?;
+    Ok(tag)
+}
+
+/// Verify a `RespHello`'s admission tag with a key retained at send time (P6.8).
+///
+/// The transport uses this to reject a forged `RespHello` **before** rebuilding
+/// the initiator state — a rebuild costs an ephemeral keygen and an op-A
+/// encapsulation, which is exactly the work the tag exists to deny an attacker
+/// who only observed our `InitHello`. `tag_key` comes from
+/// [`InitiatorState::resp_tag_key`].
+///
+/// A malformed message or a missing tag returns `false`: the caller treats it
+/// as a forged message, because nothing downstream would be reached either way.
+#[must_use]
+pub fn verify_resp_tag(
+    suite: &dyn CryptoSuite,
+    tag_key: &[u8; RESP_TAG_SIZE],
+    resp_hello: &[u8],
+) -> bool {
+    let Ok(message) = Message::parse(resp_hello) else {
+        return false;
+    };
+    if message.message_type() != MessageType::RespHello {
+        return false;
+    }
+    let Ok(got) = message.require_array::<RESP_TAG_SIZE>(tag::PRE_TAG) else {
+        return false;
+    };
+    let Ok(expected) = resp_tag(suite, tag_key, &message.resp_tag_input()) else {
+        return false;
+    };
+    verify_value(suite, &expected, &got)
 }
 
 /// MEX: `KDF(salt = fresh, ikm = static_secret, info = "vallum/mex/v1")`.
@@ -540,14 +638,19 @@ fn confirm_initiator(
     Ok(SharedSecret::new(out))
 }
 
-/// Verify a peer's confirmation value against ours.
+/// Verify a fixed-size value against ours.
 ///
 /// Comparing digests (rather than a bespoke constant-time loop) is sound here:
 /// both sides hash a value the protocol already binds, and equality of the
 /// digests is exactly equality of the inputs. A timing signal on a hash
-/// comparison reveals nothing about the confirmation itself.
+/// comparison reveals nothing about the value itself.
+fn verify_value(suite: &dyn CryptoSuite, expected: &[u8], got: &[u8]) -> bool {
+    suite.hash(CONFIRM_CMP_DOMAIN, got) == suite.hash(CONFIRM_CMP_DOMAIN, expected)
+}
+
+/// Verify a peer's confirmation value against ours.
 fn verify_confirmation(suite: &dyn CryptoSuite, expected: &SharedSecret, got: &[u8]) -> bool {
-    suite.hash(CONFIRM_CMP_DOMAIN, got) == suite.hash(CONFIRM_CMP_DOMAIN, expected.as_bytes())
+    verify_value(suite, expected.as_bytes(), got)
 }
 
 /// The fail-closed identity-signature rule.
@@ -897,6 +1000,12 @@ pub fn responder_accept(
         )?;
         builder.field(tag::IDENTITY_SIG, &signature)?;
     }
+    // P6.8: the op-A-keyed admission tag, emitted last so it covers every other
+    // field — including the optional signature. The initiator checks it before
+    // decapsulating ops B and C, so a forged `RespHello` costs one KDF.
+    let tag_key = derive_resp_tag_key(suite, &info.static_legs)?;
+    let pre_tag = resp_tag(suite, &tag_key, &builder.resp_tag_input())?;
+    builder.field(tag::PRE_TAG, &pre_tag)?;
     let resp_hello = builder.finish()?;
 
     // Stage 3 and the initiator's confirmation, which commits to conf_r.
@@ -980,6 +1089,20 @@ pub fn initiator_process_resp(
     let ephemeral_ct = message.require(tag::EPHEMERAL_CT)?;
     let static_ct = message.require(tag::STATIC_CT)?;
     let peer_confirmation = message.require_array::<CONFIRMATION_SIZE>(tag::CONFIRMATION)?;
+
+    // P6.8: the admission tag, checked *before* any decapsulation. Deriving op
+    // A's key required the responder to decapsulate our `InitHello`, so only a
+    // holder of σ_r can produce this tag. An attacker who observed our
+    // `InitHello` knows our index and can forge a `RespHello`, but that forgery
+    // now costs one KDF instead of two hybrid decapsulations. The tag is an
+    // admission token only: `conf_r` below is still what authenticates the
+    // session.
+    let tag_key = state.resp_tag_key(suite)?;
+    let expected_tag = resp_tag(suite, &tag_key, &message.resp_tag_input())?;
+    let got_tag = message.require_array::<RESP_TAG_SIZE>(tag::PRE_TAG)?;
+    if !verify_value(suite, &expected_tag, &got_tag) {
+        return Err(HandshakeError::RespTag);
+    }
 
     // Op B: only our ephemeral secret recovers this — the forward-secret leg.
     let b_legs = suite

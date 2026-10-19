@@ -18,14 +18,21 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use vallum_core::identity::StaticIdentity;
 use vallum_core::shaping::Machine;
-use vallum_core::wire::{HEADER_LEN, MAX_HANDSHAKE_MESSAGE};
-use vallum_core::{Message, MessageType, Role, Tai64n};
-use vallum_crypto::CryptoSuite;
+use vallum_core::wire::{tag, HEADER_LEN, MAX_HANDSHAKE_MESSAGE};
+use vallum_core::{
+    Message, MessageBuilder, MessageHeader, MessageType, Role, Tai64n, PROTOCOL_VERSION,
+};
+use vallum_crypto::{
+    AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole, KemSecretKey,
+    LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    KEM_ENCAPS_RANDOMNESS,
+};
 use vallum_crypto_sdk::SdkSuite;
 use vallum_tunnel::{Action, Clock, Device, Event, IpNet, PeerConfig, PeerId, Randomness};
 
@@ -46,6 +53,115 @@ impl Randomness for TestRng {
                 .wrapping_add(1_442_695_040_888_963_407);
             *byte = (self.0 >> 33) as u8;
         }
+    }
+}
+
+/// A delegating suite that counts KEM operations (P6.8).
+///
+/// The gate asserts that a forged `RespHello` reaches *no* KEM work, which the
+/// outcome alone cannot show.
+struct CountingSuite {
+    inner: SdkSuite,
+    keygen: AtomicUsize,
+    encaps: AtomicUsize,
+    decaps: AtomicUsize,
+}
+
+impl CountingSuite {
+    fn new(inner: SdkSuite) -> Self {
+        Self {
+            inner,
+            keygen: AtomicUsize::new(0),
+            encaps: AtomicUsize::new(0),
+            decaps: AtomicUsize::new(0),
+        }
+    }
+
+    fn kem_ops(&self) -> usize {
+        self.keygen.load(Ordering::Relaxed)
+            + self.encaps.load(Ordering::Relaxed)
+            + self.decaps.load(Ordering::Relaxed)
+    }
+}
+
+impl CryptoSuite for CountingSuite {
+    fn suite_id(&self) -> u16 {
+        self.inner.suite_id()
+    }
+
+    fn sizes(&self) -> WireSizes {
+        self.inner.sizes()
+    }
+
+    fn leg_kinds(&self) -> &'static [LegKind] {
+        self.inner.leg_kinds()
+    }
+
+    fn kem_keygen(
+        &self,
+        seed: &[u8; 32],
+        role: KemRole,
+    ) -> Result<(KemPublicKey, KemSecretKey), KemError> {
+        self.keygen.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_keygen(seed, role)
+    }
+
+    fn kem_encaps(
+        &self,
+        pk: &KemPublicKey,
+        randomness: &[u8; KEM_ENCAPS_RANDOMNESS],
+    ) -> Result<Encapsulation, KemError> {
+        self.encaps.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_encaps(pk, randomness)
+    }
+
+    fn kem_decaps(
+        &self,
+        sk: &KemSecretKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<SharedSecret>, KemError> {
+        self.decaps.fetch_add(1, Ordering::Relaxed);
+        self.inner.kem_decaps(sk, ciphertext)
+    }
+
+    fn kdf(&self, salt: &[u8], ikm: &[u8], info: &[u8], out: &mut [u8]) -> Result<(), KdfError> {
+        self.inner.kdf(salt, ikm, info, out)
+    }
+
+    fn hash(&self, domain: &[u8], data: &[u8]) -> [u8; 32] {
+        self.inner.hash(domain, data)
+    }
+
+    fn aead_seal(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        pt: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_seal(key, nonce, ad, pt)
+    }
+
+    fn aead_open(
+        &self,
+        key: &[u8; 32],
+        nonce: &[u8; 24],
+        ad: &[u8],
+        ct: &[u8],
+    ) -> Result<Vec<u8>, AeadError> {
+        self.inner.aead_open(key, nonce, ad, ct)
+    }
+
+    fn sign_keygen(&self, seed: &[u8; 32]) -> Result<(SignPublicKey, SignSecretKey), SigError> {
+        self.inner.sign_keygen(seed)
+    }
+
+    fn sign(&self, sk: &SignSecretKey, msg: &[u8]) -> Result<Vec<u8>, SigError> {
+        self.inner.sign(sk, msg)
+    }
+
+    fn verify(&self, pk: &SignPublicKey, msg: &[u8], sig: &[u8]) -> bool {
+        self.inner.verify(pk, msg, sig)
     }
 }
 
@@ -299,7 +415,18 @@ fn net_full(
     a_keepalive: Option<Duration>,
     b_keepalive: Option<Duration>,
 ) -> Net {
-    let suite = suite();
+    net_full_suite(suite(), a_shaping, shape, a_keepalive, b_keepalive)
+}
+
+/// As [`net_full`], with a caller-supplied suite — how the P6.8 gate counts KEM
+/// operations without changing what the tunnel does.
+fn net_full_suite(
+    suite: Arc<dyn CryptoSuite>,
+    a_shaping: Vec<Machine>,
+    shape: Shape,
+    a_keepalive: Option<Duration>,
+    b_keepalive: Option<Duration>,
+) -> Net {
     let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
     let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("a key");
 
@@ -1219,6 +1346,83 @@ fn a_data_packet_naming_the_reserved_index_matches_no_peer() {
     net.pump(2);
     assert!(net.hosts[1].delivered.is_empty());
     assert!(net.hosts[1].established.is_empty());
+}
+
+// ── the RespHello admission tag (P6.8) ───────────────────────────────
+
+#[test]
+fn a_forged_resp_hello_costs_no_kem_work() {
+    // An attacker who observed A's `InitHello` knows A's index. It can therefore
+    // address a `RespHello` to A's outstanding handshake — the cheap message.
+    // Without the op-A-keyed tag, A would rebuild its state (ephemeral keygen +
+    // an op-A encapsulation) and decapsulate twice before noticing. With it, the
+    // forgery costs a parse and a KDF, and the handshake survives.
+    let counting = Arc::new(CountingSuite::new(SdkSuite::tri_hybrid()));
+    let mut net = net_full_suite(counting.clone(), Vec::new(), Shape::ROAMING, None, None);
+
+    // A has a packet for B, so it starts a handshake. The `InitHello` is kept
+    // here and never delivered: we forge the answer instead.
+    net.outbound(0, ipv4(A_IP, B_IP, b"ping"));
+    let init = net.hosts[0]
+        .sent
+        .iter()
+        .find(|bytes| {
+            Message::parse(bytes).is_ok_and(|m| m.message_type() == MessageType::InitHello)
+        })
+        .expect("A's InitHello")
+        .clone();
+    let index = Message::parse(&init).expect("parse").sender_index();
+    let peer = net.hosts[0].peer_id();
+    assert!(net.hosts[0].device.handshake_in_flight(peer));
+
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::RespHello,
+        suite_id: counting.suite_id(),
+        sender_index: 0x0B0B_0B0B,
+    };
+    let mut builder = MessageBuilder::new(header);
+    builder
+        .field(tag::EPHEMERAL_CT, &vec![0u8; counting.sizes().kem_ct])
+        .unwrap();
+    builder
+        .field(tag::STATIC_CT, &vec![0u8; counting.sizes().kem_ct])
+        .unwrap();
+    builder
+        .field(tag::RECEIVER_INDEX, &index.to_be_bytes())
+        .unwrap();
+    builder.field(tag::CONFIRMATION, &[0u8; 32]).unwrap();
+    builder.field(tag::PRE_TAG, &[0u8; 32]).unwrap();
+    let forged = builder.finish().unwrap();
+
+    let before = counting.kem_ops();
+    let clock = net.clock();
+    let host = &mut net.hosts[0];
+    let actions = host.device.handle(
+        clock,
+        Event::Datagram {
+            source: endpoint(B_EP),
+            bytes: forged,
+        },
+        &mut host.rng,
+    );
+
+    assert_eq!(
+        counting.kem_ops(),
+        before,
+        "a forged RespHello performed KEM work"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, Action::Established { .. })),
+        "a forged RespHello established a session"
+    );
+    assert_eq!(net.hosts[0].stats().rejected, 1);
+    assert!(
+        net.hosts[0].device.handshake_in_flight(peer),
+        "the forged answer consumed the handshake"
+    );
 }
 
 // ── the timestamp is committed only once the key is proven ───────────

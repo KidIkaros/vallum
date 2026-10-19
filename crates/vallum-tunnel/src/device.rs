@@ -105,7 +105,7 @@ use vallum_core::cookie::{
 };
 use vallum_core::handshake::{
     initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
-    responder_process_conf, ResponderState, SessionKeys,
+    responder_process_conf, verify_resp_tag, ResponderState, SessionKeys, RESP_TAG_SIZE,
 };
 use vallum_core::identity::StaticIdentity;
 use vallum_core::keys::{Role, COUNTER_SIZE, NONCE_SIZE};
@@ -261,6 +261,13 @@ struct Initiating {
     cookie: Option<[u8; COOKIE_SIZE]>,
     /// The framed `InitHello` itself, so a retransmission never re-encapsulates.
     init_hello: Vec<u8>,
+    /// The op-A-keyed key a `RespHello` must carry a tag under (P6.8).
+    ///
+    /// Retained so a forged `RespHello` can be rejected **before** the state
+    /// rebuild below, which costs an ephemeral keygen and an op-A
+    /// encapsulation. Without it the tag would only save the two decapsulations
+    /// that come after that rebuild.
+    resp_tag_key: [u8; RESP_TAG_SIZE],
 }
 
 /// An in-flight handshake we are answering.
@@ -848,6 +855,18 @@ impl Device {
         let Handshake::Initiating(init) = handshake else {
             return;
         };
+
+        // P6.8: the op-A-keyed admission tag, checked **before** the rebuild. An
+        // attacker who observed our `InitHello` knows the index and can forge a
+        // `RespHello`; without this check the forgery buys an ephemeral keygen
+        // and an op-A encapsulation. With it, the forgery costs one KDF and the
+        // handshake is untouched.
+        if !verify_resp_tag(&*suite, &init.resp_tag_key, bytes) {
+            self.peers[index].rejected += 1;
+            self.peers[index].handshake = Handshake::Initiating(init);
+            return;
+        }
+
         let rebuilt = initiator_hello(
             &*suite,
             &self.identity,
@@ -1185,7 +1204,14 @@ impl Device {
             *timestamp.as_bytes(),
             &seed,
         );
-        let Ok((init_hello, _)) = built else {
+        let Ok((init_hello, state)) = built else {
+            return;
+        };
+        // The op-A-keyed admission key. The state itself is discarded — the
+        // handshake rebuilds it deterministically from the stored inputs — but
+        // this one derived secret is retained so a forged `RespHello` can be
+        // rejected before that rebuild (P6.8).
+        let Ok(resp_tag_key) = state.resp_tag_key(&*suite) else {
             return;
         };
 
@@ -1212,6 +1238,7 @@ impl Device {
             mac1,
             cookie: None,
             init_hello,
+            resp_tag_key,
         }));
         self.peers[index].timers.begin_handshake(clock.monotonic_ms);
         self.remap(index);
