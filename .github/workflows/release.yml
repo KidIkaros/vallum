@@ -58,7 +58,7 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cp target/debian/*.deb dist/ 2>/dev/null || true
           cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
-          (cd dist && sha256sum * > SHA256SUMS)
+          (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS)
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
