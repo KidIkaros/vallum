@@ -87,6 +87,10 @@ install_config() {
     if [ -f /etc/vallum/server.key ]; then
         return
     fi
+    if [ "$DRY" -eq 1 ]; then
+        echo "   would generate /etc/vallum/server.key and /etc/vallum/vallum0.toml"
+        return
+    fi
     say "generating the server key"
     run /usr/local/bin/vallum keygen --output /etc/vallum/server.key --suite 3
     run /usr/local/bin/vallum pubkey --private-key /etc/vallum/server.key \
@@ -141,6 +145,12 @@ add_client() {
     [ -n "$name" ] || { echo "--add-client needs a name" >&2; exit 1; }
     ip=$(next_client_ip)
     say "adding client $name at $ip"
+    if [ "$DRY" -eq 1 ]; then
+        echo "   would keygen /etc/vallum/clients/$name.key"
+        echo "   would append a [[peer]] for $ip to /etc/vallum/vallum0.toml"
+        echo "   would write /etc/vallum/clients/$name.conf and print its QR"
+        return
+    fi
     run install -d -m 0755 /etc/vallum/clients
     run /usr/local/bin/vallum keygen --output "/etc/vallum/clients/$name.key" --suite 3
     run /usr/local/bin/vallum pubkey --private-key "/etc/vallum/clients/$name.key" \
@@ -179,6 +189,10 @@ remove_client() {
     local name=$1
     [ -n "$name" ] || { echo "--remove-client needs a name" >&2; exit 1; }
     say "removing client $name"
+    if [ "$DRY" -eq 1 ]; then
+        echo "   would remove the peer block and /etc/vallum/clients/$name.*"
+        return
+    fi
     if [ "$DRY" -eq 0 ]; then
         awk -v name="$name" '
             /^\[\[peer\]\]/ { block = $0 "\n"; in_peer = 1; next }
