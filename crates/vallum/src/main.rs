@@ -10,7 +10,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex};
 
 use clap::{Args, Parser, Subcommand};
 use vallum::clock::{SystemClock, TimeSource};
@@ -19,7 +20,7 @@ use vallum::control;
 use vallum::entropy;
 use vallum::keys;
 use vallum::logging::Logger;
-use vallum::net::{DatagramSocket, UdpTransport};
+use vallum::net::{DatagramSocket, SharedSocket, UdpTransport};
 use vallum::privileges;
 use vallum::run::{self, Shutdown};
 use vallum::tun::{self, InterfaceSpec};
@@ -224,6 +225,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         resolved.fwmark,
     )?);
     let bound = socket.local_addr().unwrap_or(resolved.listen);
+    let shared = Arc::new(SharedSocket::new(Arc::clone(&socket)));
 
     // Everything privileged is done: the interface exists, the socket is bound,
     // and the key has been read. From here the daemon needs no more than the two
@@ -277,19 +279,20 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         device,
         run::Attached {
             parts,
-            socket: Arc::clone(&socket),
+            socket: Arc::clone(&shared),
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
             budget: resolved.outer_budget,
             control: resolved.control.clone().map(|path| control::ControlServer {
                 path,
-                context: control::ControlContext {
+                context: Arc::new(control::ControlContext {
                     interface: interface_name,
                     addresses: resolved.addresses.clone(),
                     private_key: seed,
-                    listen: bound,
-                    fwmark: resolved.fwmark,
+                    listen: Mutex::new(bound),
+                    fwmark: AtomicU32::new(resolved.fwmark),
+                    socket: Arc::clone(&shared),
                     suite,
-                },
+                }),
             }),
         },
         &mut rng,

@@ -130,13 +130,13 @@ keeps its session.
 
 ## 6. What this does **not** claim (yet)
 
-1. **`listen_port` changes are `EOPNOTSUPP`.** They need a socket rebind; the
-   plan's next cut is the `SocketHandle` swap. `fwmark` is applied at startup and
-   reported, but a *runtime* change is also `EOPNOTSUPP` (see `socket-ops.md`).
-   `syncconf` and `setconf` now send the device fields, so a changed port is a
-   **refusal with a remedy**, not a silent no-op; a value that already matches is
-   skipped, which keeps `syncconf` idempotent. The capabilities are stated in
-   `get` (`vallum_can_set_*`).
+1. **`listen_port` and `fwmark` changes rebind the socket.** The daemon binds
+   the new socket first and swaps it in only on success; the reader notices the
+   generation change after its 250 ms read timeout. A failure leaves the running
+   socket untouched and returns `EPERM`/`EADDRINUSE`/`EADDRNOTAVAIL`, which the
+   CLI explains. `get` advertises the capability (`vallum_can_set_*`), and
+   `syncconf`/`setconf` send the device fields, so a change is applied rather
+   than silently ignored.
 2. **`private_key` changes are accepted** and tear down every session and
    handshake, because they were authenticated as the old key.
 3. **A PSK change applies to the next handshake.** The live session keeps

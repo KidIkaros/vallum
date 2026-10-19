@@ -19,7 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -81,6 +81,9 @@ impl UdpTransport {
     /// `CAP_NET_ADMIN`).
     pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
         let socket = UdpSocket::bind(address)?;
+        // A short read timeout is what lets the reader notice a rebind: it
+        // wakes, checks the shared socket's generation, and switches.
+        socket.set_read_timeout(Some(Duration::from_millis(250)))?;
         #[cfg(target_os = "linux")]
         if fwmark != 0 {
             nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &fwmark)
@@ -125,6 +128,72 @@ impl DatagramSocket for UdpTransport {
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+}
+
+/// A socket that can be replaced while the reader is blocked on it.
+///
+/// `listen_port` and `fwmark` are runtime properties, so the daemon needs to
+/// swap the socket without restarting. The reader holds a clone of the current
+/// socket and a short read timeout; after each timeout it compares the
+/// generation and, if it changed, reads from the new one. The old `Arc` drops
+/// when the last reader releases it.
+pub struct SharedSocket {
+    current: Mutex<Arc<dyn DatagramSocket>>,
+    generation: AtomicU64,
+}
+
+impl std::fmt::Debug for SharedSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedSocket")
+            .field("generation", &self.generation())
+            .field("local_addr", &self.local_addr().ok())
+            .finish()
+    }
+}
+
+impl SharedSocket {
+    /// Wrap the initial socket.
+    #[must_use]
+    pub fn new(socket: Arc<dyn DatagramSocket>) -> Self {
+        Self {
+            current: Mutex::new(socket),
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// The current generation and socket.
+    #[must_use]
+    pub fn current(&self) -> (u64, Arc<dyn DatagramSocket>) {
+        let socket = match self.current.lock() {
+            Ok(current) => Arc::clone(&current),
+            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
+        };
+        (self.generation.load(Ordering::Acquire), socket)
+    }
+
+    /// The current generation, without cloning the socket.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Replace the socket and bump the generation.
+    pub fn replace(&self, socket: Arc<dyn DatagramSocket>) {
+        match self.current.lock() {
+            Ok(mut current) => *current = socket,
+            Err(poisoned) => *poisoned.into_inner() = socket,
+        }
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// The current socket's local address.
+    ///
+    /// # Errors
+    ///
+    /// If the socket cannot say.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.current().1.local_addr()
     }
 }
 

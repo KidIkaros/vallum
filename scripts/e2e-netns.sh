@@ -377,6 +377,8 @@ grep -q '^interface ' "$WORK/show.txt" || bad "show did not report the interface
 grep -q '^peer ' "$WORK/show.txt" || bad "show did not report the peer"
 grep -q 'allowed_ip=' "$WORK/show.dump" || bad "show did not report allowed IPs"
 grep -q '^fwmark=4660$' "$WORK/show.dump" || bad "show did not report the fwmark"
+grep -q '^vallum_can_set_listen_port=true$' "$WORK/show.dump" \
+    || bad "the capability line does not advertise a runtime rebind"
 grep -q '^private_key=' "$WORK/show.dump" || bad "show --dump lost the private key"
 grep -q '^  private_key=' "$WORK/show.txt" && bad "the default show printed the private key"
 grep -q '^  preshared_key=' "$WORK/show.txt" && bad "the default show printed the PSK"
@@ -400,15 +402,6 @@ grep -q 'private_key = "private.key"' "$WORK/showconf.toml" \
     || bad "showconf did not use a private-key placeholder"
 ok "showconf exports a usable config without secrets"
 
-# A changed listen port cannot be applied at runtime; the CLI must say so, not
-# exit 0. This is the design fix for the silent no-op.
-cp "$WORK/a.toml" "$WORK/a.bad.toml"
-sed -i 's/^listen = .*/listen = "10.99.0.1:59999"/' "$WORK/a.bad.toml"
-if "$BIN" syncconf "$WORK/a.bad.toml" > "$WORK/bad.out" 2>&1; then
-    bad "syncconf accepted a listen_port change it cannot apply"
-fi
-grep -q 'listen_port' "$WORK/bad.out" || bad "syncconf did not name listen_port"
-ok "an unapplied interface change is refused with a remedy"
 
 "$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
 ok "syncconf applied an unchanged config idempotently"
@@ -668,6 +661,26 @@ if ping -c1 -W5 -q "$INNER_B"; then
 else
     bad "the tunnel stopped carrying traffic after the attack"
 fi
+
+# ── runtime rebind ───────────────────────────────────────────────────
+#
+# The last functional limit: a listen-port change used to be EOPNOTSUPP. The
+# socket is swappable now, so the control plane applies it and the reader picks
+# up the new socket after its read timeout.
+say "rebinding A's listen port at runtime"
+cp "$WORK/a.toml" "$WORK/a.rebind.toml"
+sed -i 's/^listen = .*/listen = "10.99.0.1:51999"/' "$WORK/a.rebind.toml"
+"$BIN" syncconf "$WORK/a.rebind.toml" || bad "runtime rebind failed"
+"$BIN" show --control "$WORK/control.sock" --dump > "$WORK/rebind.dump" 2>&1 \
+    || bad "show after the rebind failed"
+grep -q '^listen_port=51999$' "$WORK/rebind.dump" \
+    || bad "the daemon did not rebind to 51999"
+if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+    ok "the tunnel survived a runtime listen-port change"
+else
+    bad "the tunnel did not survive the rebind"
+fi
+ok "the bound port is now 51999, as the control plane reports"
 
 # ── shut down ────────────────────────────────────────────────────────
 

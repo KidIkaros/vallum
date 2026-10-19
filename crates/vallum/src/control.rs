@@ -16,8 +16,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use vallum_crypto::KemPublicKey;
 use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_tunnel::{Device, PeerConfig};
 
+use crate::net::DatagramSocket;
 use crate::run::{Input, Shutdown};
 use crate::uapi::{self, Request, Set};
 
@@ -35,13 +37,10 @@ const EINVAL: i32 = 22;
 const ENOENT: i32 = 2;
 /// `EEXIST`: the peer was already present.
 const EEXIST: i32 = 17;
-/// `EOPNOTSUPP`: a device-level field that needs a restart.
-const EOPNOTSUPP: i32 = 95;
 /// `ETIMEDOUT`: the loop did not answer.
 const ETIMEDOUT: i32 = 110;
 
 /// What the control plane needs to describe the device.
-#[derive(Clone)]
 pub struct ControlContext {
     /// The private-key seed, as the daemon holds it.
     pub private_key: [u8; 32],
@@ -50,9 +49,11 @@ pub struct ControlContext {
     /// The interface addresses.
     pub addresses: Vec<vallum_tunnel::Prefix>,
     /// The bound UDP address.
-    pub listen: SocketAddr,
+    pub listen: Mutex<SocketAddr>,
     /// The socket mark.
-    pub fwmark: u32,
+    pub fwmark: AtomicU32,
+    /// The swappable socket, for a runtime rebind.
+    pub socket: Arc<crate::net::SharedSocket>,
     /// The suite, for a runtime identity change.
     pub suite: Arc<dyn CryptoSuite>,
 }
@@ -60,8 +61,8 @@ pub struct ControlContext {
 impl fmt::Debug for ControlContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ControlContext")
-            .field("listen", &self.listen)
-            .field("fwmark", &self.fwmark)
+            .field("listen", &self.listen.lock().ok().map(|v| *v))
+            .field("fwmark", &self.fwmark.load(Ordering::Relaxed))
             .field("private_key", &"<redacted>")
             .finish_non_exhaustive()
     }
@@ -73,7 +74,7 @@ pub struct ControlServer {
     /// The path to bind.
     pub path: PathBuf,
     /// The context used to answer `get`.
-    pub context: ControlContext,
+    pub context: Arc<ControlContext>,
 }
 
 /// Bind the socket and serve requests until shutdown.
@@ -189,20 +190,25 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             epoch: device.epoch(id).unwrap_or(0),
         });
     }
+    let listen = *context
+        .listen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fwmark = context.fwmark.load(Ordering::Acquire);
     uapi::DeviceState {
         interface: context.interface.clone(),
         private_key: context.private_key,
         public_key: device.public_key().as_bytes().to_vec(),
         public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
         fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
-        listen: context.listen,
-        fwmark: context.fwmark,
+        listen,
+        fwmark,
         suite: device.suite_id(),
         addresses: context.addresses.clone(),
         capabilities: uapi::Capabilities {
             set_private_key: true,
-            set_listen_port: false,
-            set_fwmark: false,
+            set_listen_port: true,
+            set_fwmark: true,
         },
         peers,
     }
@@ -221,17 +227,28 @@ fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
             Err(_) => return uapi::render_errno(EINVAL),
         }
     }
-    // Device-level socket fields need a rebind, which is not in this cut; a
-    // change that matches the current value is accepted so a `syncconf` that
-    // repeats the config is idempotent.
-    if let Some(port) = set.listen_port {
-        if port != context.listen.port() {
-            return uapi::render_errno(EOPNOTSUPP);
-        }
-    }
-    if let Some(mark) = set.fwmark {
-        if mark != context.fwmark {
-            return uapi::render_errno(EOPNOTSUPP);
+    // A device-level change is a rebind: bind the new socket first, and only
+    // swap it in once it exists. A failure leaves the running socket untouched.
+    let current_listen = *context
+        .listen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current_mark = context.fwmark.load(Ordering::Acquire);
+    let desired_port = set.listen_port.unwrap_or(current_listen.port());
+    let desired_mark = set.fwmark.unwrap_or(current_mark);
+    if desired_port != current_listen.port() || desired_mark != current_mark {
+        let address = SocketAddr::new(current_listen.ip(), desired_port);
+        match crate::net::UdpTransport::bind_with_fwmark(address, desired_mark) {
+            Ok(socket) => {
+                let bound = socket.local_addr().unwrap_or(address);
+                context.socket.replace(Arc::new(socket));
+                *context
+                    .listen
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = bound;
+                context.fwmark.store(desired_mark, Ordering::Release);
+            }
+            Err(error) => return uapi::render_errno(errno_for(&error)),
         }
     }
     if set.replace_peers {
@@ -244,6 +261,15 @@ fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
         }
     }
     uapi::render_ok()
+}
+
+fn errno_for(error: &io::Error) -> i32 {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => 1,  // EPERM
+        io::ErrorKind::AddrInUse => 98,        // EADDRINUSE
+        io::ErrorKind::AddrNotAvailable => 99, // EADDRNOTAVAIL
+        _ => EINVAL,
+    }
 }
 
 fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) -> Result<(), i32> {
@@ -321,12 +347,17 @@ mod tests {
     }
 
     fn context(suite: Arc<dyn CryptoSuite>) -> ControlContext {
+        let socket = Arc::new(
+            crate::net::UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("bind"),
+        );
+        let listen = socket.local_addr().expect("local addr");
         ControlContext {
             interface: "vallum0".to_owned(),
             addresses: Vec::new(),
             private_key: [9u8; 32],
-            listen: "0.0.0.0:51820".parse().unwrap(),
-            fwmark: 0,
+            listen: Mutex::new(listen),
+            fwmark: AtomicU32::new(0),
+            socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
         }
     }
@@ -374,6 +405,22 @@ mod tests {
         assert!(handle(&mut device, &context, remove).contains("errno=0"));
         let reply = handle(&mut device, &context, Request::Get);
         assert!(!reply.contains(&format!("public_key={key}")));
+    }
+
+    #[test]
+    fn a_listen_port_change_rebinds_the_socket() {
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x07; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let context = context(suite);
+        let before = context.socket.generation();
+
+        let request = uapi::parse("set=1\nlisten_port=0\n").expect("a legal set");
+        assert!(handle(&mut device, &context, request).contains("errno=0"));
+        assert!(context.socket.generation() > before);
+        assert_ne!(context.listen.lock().expect("listen").port(), 0);
     }
 
     #[test]

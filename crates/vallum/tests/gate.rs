@@ -283,6 +283,7 @@ fn launch_from_text(
     let name = prepared.name.clone();
     let (parts, interface) = tun::mock::pair(&name, 1280);
     let socket: Arc<dyn DatagramSocket> = Arc::new(net.bind(listen).expect("bind the socket"));
+    let shared = Arc::new(vallum::net::SharedSocket::new(socket));
     let shutdown = Shutdown::new();
 
     let policy = run::Loop {
@@ -300,7 +301,7 @@ fn launch_from_text(
                 device,
                 run::Attached {
                     parts,
-                    socket,
+                    socket: shared,
                     clock: thread_clock as Arc<dyn TimeSource>,
                     budget: resolved.outer_budget,
                     control: None,

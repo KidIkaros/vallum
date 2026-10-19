@@ -48,7 +48,7 @@ use crate::clock::TimeSource;
 use crate::control::{self, ControlServer};
 use crate::error::Error;
 use crate::logging::Logger;
-use crate::net::DatagramSocket;
+use crate::net::SharedSocket;
 use crate::tun::InterfaceParts;
 use crate::{log_debug, log_info, log_warn};
 
@@ -164,8 +164,8 @@ pub struct LoopStats {
 pub struct Attached {
     /// The interface, in two halves.
     pub parts: InterfaceParts,
-    /// The datagram socket.
-    pub socket: Arc<dyn DatagramSocket>,
+    /// The datagram socket, swappable at runtime.
+    pub socket: Arc<SharedSocket>,
     /// The two clocks.
     pub clock: Arc<dyn TimeSource>,
     /// The largest UDP payload the outer path can carry (`outer_mtu - 48`).
@@ -296,7 +296,7 @@ pub fn run(
             match action {
                 Action::Send { destination, bytes } => {
                     for datagram in segments.outbound(bytes, destination, rng) {
-                        match socket.send_to(&datagram, destination) {
+                        match send_datagram(&socket, &datagram, destination) {
                             Ok(()) => stats.datagrams_sent += 1,
                             Err(error) => {
                                 stats.datagrams_failed += 1;
@@ -358,6 +358,26 @@ pub fn run(
     Ok(stats)
 }
 
+/// Send one datagram on the current socket, retrying once across a rebind.
+fn send_datagram(socket: &SharedSocket, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+    let (generation, current) = socket.current();
+    match current.send_to(bytes, destination) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotConnected
+                || error.kind() == io::ErrorKind::BrokenPipe =>
+        {
+            let (next_generation, next) = socket.current();
+            if next_generation != generation {
+                next.send_to(bytes, destination)
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Did the kernel refuse a datagram because it is larger than the path?
 ///
 /// `EMSGSIZE` on a UDP send is the one error that means "the operator's
@@ -414,7 +434,7 @@ fn spawn_tun_reader(
 fn spawn_udp_reader(
     tx: &mpsc::SyncSender<Input>,
     queued: Arc<AtomicUsize>,
-    socket: Arc<dyn DatagramSocket>,
+    socket: Arc<SharedSocket>,
     log: &Logger,
 ) -> Result<(), Error> {
     let tx = tx.clone();
@@ -423,14 +443,25 @@ fn spawn_udp_reader(
     thread::Builder::new()
         .name("vallum-udp".to_owned())
         .spawn(move || loop {
-            match socket.recv_from(&mut buf) {
+            let (generation, current) = socket.current();
+            match current.recv_from(&mut buf) {
                 Ok((n, source)) => {
                     queued.fetch_add(1, Ordering::Relaxed);
                     if tx.send(Input::Datagram(source, buf[..n].to_vec())).is_err() {
                         break;
                     }
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.kind() == io::ErrorKind::TimedOut =>
+                {
+                    // A rebind wakes the reader here; an unchanged socket is
+                    // simply idle.
+                    if socket.generation() != generation {
+                        continue;
+                    }
+                }
                 Err(error) => {
                     log_debug!(log, "socket read stopped: {error}");
                     break;

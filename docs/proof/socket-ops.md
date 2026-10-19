@@ -19,9 +19,10 @@ fwmark = 4660
 - Failure is fatal: a configured mark that cannot be set is a policy-routing
   misconfiguration, not something to log and ignore.
 - Reported by the UAPI (`fwmark=<decimal>`) and by `vallum show`.
-- A runtime `set fwmark=` still returns `EOPNOTSUPP`: it needs the socket rebind
-  that G2's plan defers. Repeating the current value is accepted, so `syncconf`
-  is idempotent.
+- A runtime `set fwmark=` rebinds the socket with the new mark. The daemon binds
+  the new socket first and swaps it in only on success; the reader picks it up
+  after its read timeout. A failure (no `CAP_NET_ADMIN`, port in use) leaves the
+  running socket untouched and is reported with the errno.
 
 Why it matters: a mark is how a daemon participates in policy routing — a
 kill-switch rule, a separate table, a VRF — without the daemon owning the
@@ -69,8 +70,10 @@ rewrite it.
 
 ## 5. What this does **not** claim
 
-1. **No runtime `fwmark`/`listen_port` change.** Both need the socket rebind;
-   they return `EOPNOTSUPP`.
+1. **Runtime `fwmark`/`listen_port` changes need the privilege to bind and to
+   set `SO_MARK`.** The daemon attempts the rebind and reports `EPERM` if the
+   deployment has dropped `CAP_NET_ADMIN`; the systemd unit keeps it as an
+   ambient capability. The socket itself is swappable.
 2. **No periodic DNS refresh.** Resolution is at load/set time.
 3. **No DNS SRV or multiple-endpoint failover.** The first resolved address is
    used.
