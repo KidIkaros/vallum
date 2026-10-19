@@ -8,6 +8,7 @@ members = [
     "crates/vallum-tunnel",
     "crates/vallum-protocol-tests",
     "crates/vallum-quick",
+    "crates/vallum-config",
     "crates/vallum",
 ]
 

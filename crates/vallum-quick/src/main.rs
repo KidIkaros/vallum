@@ -15,7 +15,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use vallum::config::Config;
+use vallum_config::Config;
 use vallum_tunnel::Prefix;
 
 #[derive(Parser)]

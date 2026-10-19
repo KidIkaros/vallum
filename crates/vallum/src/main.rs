@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
 use vallum::clock::{SystemClock, TimeSource};
-use vallum::config::{self, Config};
+use vallum::config::{self, Config, ResolveConfig};
 use vallum::control;
 use vallum::entropy;
 use vallum::keys;

@@ -31,7 +31,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use vallum::clock::{MockClock, TimeSource};
-use vallum::config::{Config, Resolved};
+use vallum::config::{Config, ResolveConfig, Resolved};
 use vallum::entropy::OsRng;
 use vallum::keys;
 use vallum::logging::{Level, Logger};

@@ -1,0 +1,17 @@
+[package]
+name = "vallum-config"
+description = "The TOML schema for Vallum, shared by the daemon and vallum-quick."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+vallum-core = { path = "../vallum-core" }

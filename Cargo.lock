@@ -2481,10 +2481,20 @@ dependencies = [
  "signal-hook",
  "toml",
  "tun2",
+ "vallum-config",
  "vallum-core",
  "vallum-crypto",
  "vallum-crypto-sdk",
  "vallum-tunnel",
+]
+
+[[package]]
+name = "vallum-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "vallum-core",
 ]
 
 [[package]]
@@ -2532,7 +2542,7 @@ version = "0.1.0"
 dependencies = [
  "clap 4.6.7",
  "ipnet",
- "vallum",
+ "vallum-config",
  "vallum-tunnel",
 ]
 

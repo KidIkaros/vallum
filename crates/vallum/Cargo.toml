@@ -15,6 +15,7 @@ vallum-core.workspace = true
 vallum-crypto.workspace = true
 vallum-crypto-sdk.workspace = true
 vallum-tunnel.workspace = true
+vallum-config = { path = "../vallum-config" }
 ipnet.workspace = true
 
 # Configuration is the operator's surface, so the parser is a hard dependency

@@ -14,7 +14,7 @@ publish = false
 workspace = true
 
 [dependencies]
-vallum = { path = "../vallum" }
+vallum-config = { path = "../vallum-config" }
 vallum-tunnel = { path = "../vallum-tunnel" }
 ipnet = "2.12"
 clap = { version = "4", features = ["derive"] }
