@@ -5,6 +5,7 @@ members = [
     "crates/vallum-crypto",
     "crates/vallum-crypto-sdk",
     "crates/vallum-crypto-contract",
+    "crates/vallum-tunnel",
 ]
 
 [workspace.package]
@@ -19,6 +20,12 @@ description = "Vallum — hybrid post-quantum layer-3 tunnel"
 vallum-crypto = { path = "crates/vallum-crypto" }
 vallum-crypto-sdk = { path = "crates/vallum-crypto-sdk" }
 vallum-core = { path = "crates/vallum-core" }
+
+# The only non-Vallum dependency of a library crate: prefix matching for
+# cryptokey routing. Small, safe, and `no_std`-friendly; hand-rolling CIDR
+# matching in the code that decides *where a packet goes* is how routing bugs
+# become security bugs.
+ipnet = "2.12"
 
 # The SDK is pinned by path (never a floating crates.io version). See the plan's
 # disruption playbook: an SDK bump only recompiles the adapter.

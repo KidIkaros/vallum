@@ -274,6 +274,28 @@ impl Session {
         self.current.sender.seal(suite, plaintext)
     }
 
+    /// Seal one layer-3 packet under the current epoch, at a chosen size.
+    ///
+    /// The transport's shaping hook: a machine that wants a packet in a fixed
+    /// size class asks for the sealed plaintext to be exactly `target` bytes, and
+    /// the padding is inside the AEAD. `target` is a *pre-image* length, so the
+    /// packet that lands on the wire is larger by the header, the framing and the
+    /// tag — the size class an observer sees is `target` plus a per-suite
+    /// constant, which is why the caller clamps it to what
+    /// [`crate::wire::MAX_DATA_MESSAGE`] can carry.
+    ///
+    /// # Errors
+    ///
+    /// As [`Sender::seal_padded`].
+    pub fn seal_padded<S: CryptoSuite + ?Sized>(
+        &mut self,
+        suite: &S,
+        plaintext: &[u8],
+        target: usize,
+    ) -> Result<Vec<u8>, DataError> {
+        self.current.sender.seal_padded(suite, plaintext, target)
+    }
+
     /// Open one inbound packet, from either the current or the retained epoch.
     ///
     /// The epoch is decided by the **index** the packet names, not by trying

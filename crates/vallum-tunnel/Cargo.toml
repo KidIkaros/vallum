@@ -1,0 +1,18 @@
+[package]
+name = "vallum-tunnel"
+description = "Vallum's transport: the peer table, cryptokey routing, and the per-peer handshake driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# `vallum-core` and `vallum-crypto` only, plus `ipnet` for prefix matching.
+# No sockets, no TUN, no clock, no RNG: events come in, actions go out.
+[dependencies]
+vallum-core.workspace = true
+vallum-crypto.workspace = true
+ipnet.workspace = true
+
+[dev-dependencies]
+vallum-crypto-sdk.workspace = true

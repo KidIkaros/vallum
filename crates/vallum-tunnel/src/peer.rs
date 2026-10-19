@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The peer table's configuration half.
+//!
+//! A peer is a *public* key plus the addresses it is allowed to use. Nothing
+//! secret lives here: the peer's KEM key is what the handshake encapsulates to,
+//! its optional signing key is what a signature is checked against, and its
+//! addresses are the cryptokey routing entry. Our own secrets live in
+//! [`vallum_core::StaticIdentity`].
+//!
+//! Identity mode is **local policy and never negotiated**. A peer configured
+//! with only a KEM key requires no signature; a peer configured with a signing
+//! key must present one, and its absence or an unexpected signature fails the
+//! handshake closed (P3). The wire says nothing about which mode a session is in,
+//! so an attacker cannot downgrade one.
+
+use std::fmt;
+use std::net::SocketAddr;
+
+use vallum_core::identity::PeerIdentity;
+use vallum_core::shaping::Machine;
+
+use crate::routing::{AllowedIps, IpNet};
+
+/// A handle to a configured peer.
+///
+/// Stable for the life of a [`crate::Device`]: peers are append-only, so an id
+/// never refers to a different peer than it did when it was handed out. Actions
+/// carry one so a caller can name a peer in a log without re-deriving the
+/// mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PeerId(usize);
+
+impl PeerId {
+    /// The peer's position in the table.
+    #[must_use]
+    pub fn index(self) -> usize {
+        self.0
+    }
+
+    /// Wrap a table position. Crate-internal: a caller gets its ids from
+    /// [`crate::Device`], never invents one.
+    #[must_use]
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self(index)
+    }
+}
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "peer#{}", self.0)
+    }
+}
+
+/// The public configuration of one peer.
+///
+/// Built with [`PeerConfig::new`] and the `with_*` setters, all of which are
+/// additive and cheap to chain:
+///
+/// ```no_run
+/// use std::net::SocketAddr;
+/// use std::str::FromStr;
+/// use vallum_core::PeerIdentity;
+/// use vallum_tunnel::{IpNet, PeerConfig};
+///
+/// # fn peer_identity() -> PeerIdentity { unimplemented!() }
+/// let config = PeerConfig::new("laptop", peer_identity())
+///     .with_allowed_ips([IpNet::from_str("10.0.0.2/32").unwrap()])
+///     .with_endpoint(SocketAddr::from(([203, 0, 113, 7], 51820)));
+/// assert_eq!(config.name(), "laptop");
+/// ```
+#[derive(Debug, Clone)]
+pub struct PeerConfig {
+    name: String,
+    identity: PeerIdentity,
+    allowed_ips: AllowedIps,
+    endpoint: Option<SocketAddr>,
+    shaping: Vec<Machine>,
+}
+
+impl PeerConfig {
+    /// A peer known by its public identity.
+    ///
+    /// The default endpoint is `None`, which means *roaming from the peer's own
+    /// handshakes*: the address is learned from the first authenticated message
+    /// and then tracked. A peer that must be dialled needs
+    /// [`Self::with_endpoint`].
+    #[must_use]
+    pub fn new(name: impl Into<String>, identity: PeerIdentity) -> Self {
+        Self {
+            name: name.into(),
+            identity,
+            allowed_ips: AllowedIps::default(),
+            endpoint: None,
+            shaping: Vec::new(),
+        }
+    }
+
+    /// The addresses this peer may send from and receive to.
+    #[must_use]
+    pub fn with_allowed_ips(mut self, nets: impl IntoIterator<Item = IpNet>) -> Self {
+        self.allowed_ips = AllowedIps::new(nets.into_iter().collect());
+        self
+    }
+
+    /// A static address to dial, instead of learning it from the peer.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: SocketAddr) -> Self {
+        self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// Traffic-analysis shaping machines for **this** peer's tunnel.
+    ///
+    /// Shaping is per-tunnel, not per-device: the machines observe one peer's
+    /// sent and received packets, and a block holds only that peer's queue. Off
+    /// unless machines are installed here.
+    #[must_use]
+    pub fn with_shaping(mut self, machines: Vec<Machine>) -> Self {
+        self.shaping = machines;
+        self
+    }
+
+    /// A human-readable name, for logs and configuration round-trips.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The peer's public identity — the KEM key, and the signing key if one is
+    /// required.
+    #[must_use]
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+
+    /// The addresses this peer is responsible for.
+    #[must_use]
+    pub fn allowed_ips(&self) -> &AllowedIps {
+        &self.allowed_ips
+    }
+
+    /// The configured address, if the peer is dialled rather than roaming.
+    #[must_use]
+    pub fn endpoint(&self) -> Option<SocketAddr> {
+        self.endpoint
+    }
+
+    /// The shaping machines for this peer's tunnel.
+    #[must_use]
+    pub fn shaping(&self) -> &[Machine] {
+        &self.shaping
+    }
+}
