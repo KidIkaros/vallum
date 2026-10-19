@@ -104,8 +104,9 @@ use vallum_core::cookie::{
     sign_with_cookies, Admission, CookieSecret, COOKIE_ROTATION_SECONDS, COOKIE_SIZE, MAC_SIZE,
 };
 use vallum_core::handshake::{
-    initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
-    responder_process_conf, verify_resp_tag, ResponderState, SessionKeys, RESP_TAG_SIZE,
+    initiator_hello_with_psk, initiator_process_resp, peer_hint, responder_accept_with_psk,
+    responder_identify, responder_process_conf, verify_resp_tag, ResponderState, SessionKeys,
+    RESP_TAG_SIZE,
 };
 use vallum_core::identity::StaticIdentity;
 use vallum_core::keys::{Role, COUNTER_SIZE, NONCE_SIZE};

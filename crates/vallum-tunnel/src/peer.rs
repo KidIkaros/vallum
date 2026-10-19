@@ -77,6 +77,8 @@ pub struct PeerConfig {
     identity: PeerIdentity,
     allowed_ips: AllowedIps,
     endpoint: Option<SocketAddr>,
+    /// The configured PSK, if any. A peer secret, not part of the identity.
+    preshared_key: Option<SharedSecret>,
     persistent_keepalive: Option<Duration>,
     shaping: Vec<Machine>,
 }
@@ -95,6 +97,7 @@ impl PeerConfig {
             identity,
             allowed_ips: AllowedIps::default(),
             endpoint: None,
+            preshared_key: None,
             persistent_keepalive: None,
             shaping: Vec::new(),
         }
@@ -121,19 +124,19 @@ impl PeerConfig {
     /// confirmation fails.
     #[must_use]
     pub fn with_preshared_key(mut self, psk: SharedSecret) -> Self {
-        self.identity = self.identity.clone().with_preshared_key(psk);
+        self.preshared_key = Some(psk);
         self
     }
 
     /// The configured PSK, if any.
     #[must_use]
     pub fn preshared_key(&self) -> Option<&SharedSecret> {
-        self.identity.preshared_key()
+        self.preshared_key.as_ref()
     }
 
     /// Replace the PSK, as a runtime `set` does.
     pub fn set_preshared_key(&mut self, psk: Option<SharedSecret>) {
-        self.identity.set_preshared_key(psk);
+        self.preshared_key = psk;
     }
 
     /// Replace the allowed addresses, as a runtime `set` does.

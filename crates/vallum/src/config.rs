@@ -662,7 +662,7 @@ impl Config {
             // G1: an optional configured PSK, inline or from a file. Both set
             // is an error: a precedence rule would let one silently shadow the
             // other, and a PSK is not a field to guess about.
-            let peer_identity = match (
+            let preshared_key = match (
                 entry.preshared_key.as_deref(),
                 entry.preshared_key_file.as_deref(),
             ) {
@@ -681,7 +681,7 @@ impl Config {
                         path: path.to_path_buf(),
                         what: format!("{}: preshared_key: {why}", where_()),
                     })?;
-                    peer_identity.with_preshared_key(psk)
+                    Some(psk)
                 }
                 (None, Some(declared)) => {
                     let file = resolve_key_path(path, declared);
@@ -689,13 +689,16 @@ impl Config {
                     if let Some(warning) = warning {
                         warnings.push(format!("{}: {warning}", where_()));
                     }
-                    peer_identity.with_preshared_key(psk)
+                    Some(psk)
                 }
-                (None, None) => peer_identity,
+                (None, None) => None,
             };
 
             let mut config =
                 PeerConfig::new(entry.name.clone(), peer_identity).with_allowed_ips(nets.clone());
+            if let Some(psk) = preshared_key {
+                config = config.with_preshared_key(psk);
+            }
             match entry.persistent_keepalive {
                 None => {}
                 // A whole number of seconds, because that is the unit an

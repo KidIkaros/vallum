@@ -56,8 +56,7 @@
 //! inherited. See `docs/proof/hybrid-identity.md` §5.
 
 use vallum_crypto::{
-    frame, CryptoSuite, KemPublicKey, KemRole, KemSecretKey, SharedSecret, SignPublicKey,
-    SignSecretKey,
+    frame, CryptoSuite, KemPublicKey, KemRole, KemSecretKey, SignPublicKey, SignSecretKey,
 };
 
 use crate::error::HandshakeError;
@@ -205,7 +204,6 @@ impl StaticIdentity {
         PeerIdentity {
             kem: self.kem_public.clone(),
             signing: self.signing.as_ref().map(|s| s.public.clone()),
-            preshared_key: None,
         }
     }
 }
@@ -219,20 +217,13 @@ impl StaticIdentity {
 pub struct PeerIdentity {
     kem: KemPublicKey,
     signing: Option<SignPublicKey>,
-    /// An optional configured PSK (G1), mixed into the key schedule. It is not
-    /// part of the peer's public identity and never appears on the wire.
-    preshared_key: Option<SharedSecret>,
 }
 
 impl PeerIdentity {
     /// A peer known only by its KEM key (P1 behaviour; no signature expected).
     #[must_use]
     pub fn kem_only(kem: KemPublicKey) -> Self {
-        Self {
-            kem,
-            signing: None,
-            preshared_key: None,
-        }
+        Self { kem, signing: None }
     }
 
     /// A peer known by its KEM key *and* a signing key it must prove.
@@ -241,7 +232,6 @@ impl PeerIdentity {
         Self {
             kem,
             signing: Some(signing),
-            preshared_key: None,
         }
     }
 
@@ -262,24 +252,6 @@ impl PeerIdentity {
     #[must_use]
     pub fn signing(&self) -> Option<&SignPublicKey> {
         self.signing.as_ref()
-    }
-
-    /// Attach the configured PSK this peer must use.
-    #[must_use]
-    pub fn with_preshared_key(mut self, psk: SharedSecret) -> Self {
-        self.preshared_key = Some(psk);
-        self
-    }
-
-    /// The configured PSK, if this peer has one.
-    #[must_use]
-    pub fn preshared_key(&self) -> Option<&SharedSecret> {
-        self.preshared_key.as_ref()
-    }
-
-    /// Replace the configured PSK, as a runtime `set` does.
-    pub fn set_preshared_key(&mut self, psk: Option<SharedSecret>) {
-        self.preshared_key = psk;
     }
 }
 

@@ -338,6 +338,31 @@ pub fn initiator_hello(
     timestamp: [u8; TIMESTAMP_SIZE],
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
+    initiator_hello_with_psk(
+        suite,
+        identity,
+        peer,
+        sender_index,
+        timestamp,
+        handshake_seed,
+        None,
+    )
+}
+
+/// As [`initiator_hello`], with an optional configured PSK.
+///
+/// The PSK is a peer secret, not part of the peer's public identity; keeping it
+/// out of [`PeerIdentity`] means equality and public-key encoding cannot
+/// accidentally include it.
+pub fn initiator_hello_with_psk(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer: &PeerIdentity,
+    sender_index: u32,
+    timestamp: [u8; TIMESTAMP_SIZE],
+    handshake_seed: &[u8; 32],
+    psk: Option<&SharedSecret>,
+) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
     let suite_id = suite.suite_id();
     let peer_public = peer.kem();
 
@@ -394,7 +419,7 @@ pub fn initiator_hello(
         peer_signing: peer.signing().cloned(),
         init_hello: init_hello.clone(),
         static_legs: encapsulation.shared_secrets,
-        psk: peer.preshared_key().cloned(),
+        psk: psk.cloned(),
     };
     Ok((init_hello, state))
 }
@@ -550,6 +575,27 @@ pub fn responder_accept(
     sender_index: u32,
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+    responder_accept_with_psk(
+        suite,
+        identity,
+        peer,
+        info,
+        sender_index,
+        handshake_seed,
+        None,
+    )
+}
+
+/// As [`responder_accept`], with an optional configured PSK.
+pub fn responder_accept_with_psk(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer: &PeerIdentity,
+    info: &InitHelloInfo,
+    sender_index: u32,
+    handshake_seed: &[u8; 32],
+    psk: Option<&SharedSecret>,
+) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
     let suite_id = suite.suite_id();
     let peer_public = peer.kem();
 
@@ -611,7 +657,7 @@ pub fn responder_accept(
         &legs,
         peer_public.as_bytes(),
         identity.public().as_bytes(),
-        peer.preshared_key(),
+        psk,
     )?;
 
     // The confirmation goes in RespHello itself, so the initiator authenticates
@@ -691,8 +737,37 @@ pub fn responder_process_init(
     sender_index: u32,
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+    responder_process_init_with_psk(
+        suite,
+        identity,
+        peer,
+        init_hello,
+        sender_index,
+        handshake_seed,
+        None,
+    )
+}
+
+/// As [`responder_process_init`], with an optional configured PSK.
+pub fn responder_process_init_with_psk(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer: &PeerIdentity,
+    init_hello: &[u8],
+    sender_index: u32,
+    handshake_seed: &[u8; 32],
+    psk: Option<&SharedSecret>,
+) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
     let info = responder_identify(suite, identity, init_hello)?;
-    responder_accept(suite, identity, peer, &info, sender_index, handshake_seed)
+    responder_accept_with_psk(
+        suite,
+        identity,
+        peer,
+        &info,
+        sender_index,
+        handshake_seed,
+        psk,
+    )
 }
 
 /// Step 3 (initiator): consume `RespHello`, verify the responder, derive keys,

@@ -129,13 +129,14 @@ impl Device {
         let own_index = self.alloc_index();
         let mut seed = [0u8; 32];
         rng.fill(&mut seed);
-        let accepted = responder_accept(
+        let accepted = responder_accept_with_psk(
             &*suite,
             &self.identity,
             self.peers[index].config.identity(),
             &info,
             own_index,
             &seed,
+            self.peers[index].config.preshared_key(),
         );
         let Ok((resp_hello, state)) = accepted else {
             return;
@@ -264,13 +265,14 @@ impl Device {
             return;
         }
 
-        let rebuilt = initiator_hello(
+        let rebuilt = initiator_hello_with_psk(
             &*suite,
             &self.identity,
             self.peers[index].config.identity(),
             init.sender_index,
             *init.timestamp.as_bytes(),
             &init.seed,
+            self.peers[index].config.preshared_key(),
         );
         let Ok((_, state)) = rebuilt else {
             self.peers[index].handshake = Handshake::Initiating(init);
@@ -399,13 +401,14 @@ impl Device {
         rng.fill(&mut seed);
         let timestamp = clock.wall;
 
-        let built = initiator_hello(
+        let built = initiator_hello_with_psk(
             &*suite,
             &self.identity,
             self.peers[index].config.identity(),
             sender_index,
             *timestamp.as_bytes(),
             &seed,
+            self.peers[index].config.preshared_key(),
         );
         let Ok((init_hello, state)) = built else {
             return;

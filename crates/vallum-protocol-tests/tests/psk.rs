@@ -9,8 +9,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use vallum_core::{
-    initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    HandshakeError, PeerIdentity, SessionKeys, StaticIdentity,
+    initiator_hello_with_psk, initiator_process_resp, responder_process_conf,
+    responder_process_init_with_psk, HandshakeError, PeerIdentity, SessionKeys, StaticIdentity,
 };
 use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_crypto_sdk::SdkSuite;
@@ -23,12 +23,8 @@ fn psk(byte: u8) -> SharedSecret {
     SharedSecret::new([byte; 32])
 }
 
-fn peer(identity: &StaticIdentity, psk: Option<&SharedSecret>) -> PeerIdentity {
-    let peer = PeerIdentity::from_identity(identity);
-    match psk {
-        Some(psk) => peer.with_preshared_key(psk.clone()),
-        None => peer,
-    }
+fn peer(identity: &StaticIdentity) -> PeerIdentity {
+    PeerIdentity::from_identity(identity)
 }
 
 struct Exchange {
@@ -48,21 +44,23 @@ fn run(
     let initiator = StaticIdentity::generate(suite, &[0x11; 32])?;
     let responder = StaticIdentity::generate(suite, &[0x22; 32])?;
 
-    let (init_hello, i_state) = initiator_hello(
+    let (init_hello, i_state) = initiator_hello_with_psk(
         suite,
         &initiator,
-        &peer(&responder, initiator_psk),
+        &peer(&responder),
         0x0A0B_0C0D,
         TIMESTAMP,
         &[0x33; 32],
+        initiator_psk,
     )?;
-    let (resp_hello, r_state) = responder_process_init(
+    let (resp_hello, r_state) = responder_process_init_with_psk(
         suite,
         &responder,
-        &peer(&initiator, responder_psk),
+        &peer(&initiator),
         &init_hello,
         0xE0E1_E2E3,
         &[0x44; 32],
+        responder_psk,
     )?;
     let (init_conf, i_keys) = initiator_process_resp(suite, i_state, &initiator, &resp_hello)?;
     let r_keys = responder_process_conf(suite, r_state, &init_conf)?;

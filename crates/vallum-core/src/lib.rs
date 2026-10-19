@@ -122,9 +122,10 @@ pub use data::{
 };
 pub use error::{DataError, HandshakeError};
 pub use handshake::{
-    initiator_hello, initiator_process_resp, peer_hint, resp_tag, responder_accept,
-    responder_identify, responder_process_conf, responder_process_init, verify_resp_tag,
-    InitHelloInfo, InitiatorState, ResponderState, SessionKeys, PEER_HINT_SIZE, RESP_TAG_SIZE,
+    initiator_hello, initiator_hello_with_psk, initiator_process_resp, peer_hint, resp_tag,
+    responder_accept, responder_accept_with_psk, responder_identify, responder_process_conf,
+    responder_process_init, responder_process_init_with_psk, verify_resp_tag, InitHelloInfo,
+    InitiatorState, ResponderState, SessionKeys, PEER_HINT_SIZE, RESP_TAG_SIZE,
 };
 pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity, Validity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};

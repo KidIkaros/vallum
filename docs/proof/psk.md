@@ -23,10 +23,12 @@ knows the two public keys can compute it. This phase adds the real one.
 
 ## 2. Design
 
-- The PSK is an optional `SharedSecret` on the peer's configured identity
-  (`PeerIdentity::with_preshared_key`), so it threads through
-  `PeerConfig` → the handshake without a new wire field or a new argument on
-  every step.
+- The PSK is an optional `SharedSecret` on `PeerConfig`, **not** on the public
+  `PeerIdentity`. The handshake takes it explicitly
+  (`initiator_hello_with_psk`, `responder_accept_with_psk`,
+  `responder_process_init_with_psk`), and the default functions pass `None`.
+  This keeps identity equality and public-key encoding free of the secret, and
+  preserves every existing call site's byte-identical default path.
 - Mix point, after the existing UKS mix:
 
   ```
