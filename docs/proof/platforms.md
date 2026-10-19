@@ -40,7 +40,15 @@ in (supported / experimental).
 
 ---
 
-## 3. What this does **not** claim
+## 3. The signifier
+
+`vallum --version` prints `0.1.0 (linux-only)` and `--help` states the tier and
+points here. A user on another platform learns the boundary before building,
+rather than from a wall of `cfg` errors.
+
+---
+
+## 4. What this does **not** claim
 
 - No macOS/Windows/BSD binary is built or tested here.
 - No cross-compilation CI job is added yet; the current workflow stays
