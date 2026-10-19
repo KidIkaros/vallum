@@ -1,0 +1,222 @@
+/*
+ * Vallum — symbolic model of the P1/P4 handshake and epoch axis (P6.8 wire).
+ *
+ * Scope and correspondence with the Rust code:
+ *
+ *   Register_key   — StaticIdentity::generate        (one static KEM key per name)
+ *   InitHello      — handshake::initiator_hello      (op A, MEX, peer hint)
+ *   RespHello      — handshake::responder_identify + responder_accept
+ *                                                    (ops B and C, TR, key schedule,
+ *                                                     conf_r, conf_i, PRE_TAG)
+ *   InitConf       — handshake::initiator_process_resp
+ *   RespConf       — handshake::responder_process_conf
+ *   Reveal_Ltk     — the eCK long-term-key revelation oracle
+ *   Reveal_Session — the P4 epoch oracle (a compromised epoch's root)
+ *
+ * Modelling choices, each argued in docs/proof/tamarin.md:
+ *
+ *   * A KEM is modelled as public-key encryption of the shared secret:
+ *     `dec(enc(pk(sk), r), sk) = r`. The "shared secret" of a leg is its
+ *     encapsulation randomness, which is the standard symbolic abstraction.
+ *     The hybrid combiner is `kdf` over the three leg secrets — the P0
+ *     combiner lemma is *assumed*, not reproved here.
+ *   * `psk` is `h(<pk_i, pk_r>)` — public by construction (the UKS fix), so it
+ *     is modelled as a hash of public values and adds no secrecy.
+ *   * The peer hint is omitted: D11 states it is a routing index, not
+ *     authenticated, and the responder's lookup is modelled by the peer name in
+ *     the InitHello. Nothing the hint protects is a symbolic property.
+ *   * `PRE_TAG` is modelled as a pattern the initiator requires on RespHello,
+ *     keyed by `tagkey(rA)`. A message that does not carry it cannot be matched,
+ *     which is what the code's check does.
+ *   * `ts` is a fresh value bound into TR; replay prevention itself is P2's
+ *     timestamp guard and is not modelled.
+ */
+
+theory Vallum
+begin
+
+builtins: hashing
+
+functions: pk/1, enc/2, dec/2, kdf/2, tagkey/1, mac/2
+
+equations: dec(enc(pk(sk), r), sk) = r
+
+/* ── static identities ─────────────────────────────────────────────── */
+
+rule Register_key:
+  [ Fr(~ltk) ]
+  -->
+  [ !Ltk($A, ~ltk), !Pk($A, pk(~ltk)), Out(pk(~ltk)) ]
+
+rule Reveal_Ltk:
+  [ !Ltk($A, ltk) ]
+  --[ RevealLtk($A) ]->
+  [ Out(ltk) ]
+
+/* ── InitHello: op A, MEX-bound, plus the peer hint (see header) ───── */
+
+rule InitHello:
+  let rA   = h(<~freshA, ltkI>)          // MEX: KDF(fresh, sigma_i)
+      ctA  = enc(pkR, rA)
+      epkI = pk(~ephI)
+  in
+  [ !Ltk($I, ltkI), !Pk($R, pkR),
+    Fr(~freshA), Fr(~ephI), Fr(~ts) ]
+  --[ SentInitHello($I, $R) ]->
+  [ StInit1($I, $R, ltkI, ~ephI, rA, ctA, epkI, ~ts),
+    Out(<'InitHello', $I, $R, ctA, epkI, ~ts>) ]
+
+/* ── RespHello: ops B and C, the key schedule, and PRE_TAG ─────────── */
+
+rule RespHello:
+  let rA    = dec(ctA, ltkR)
+      rB    = ~freshB
+      ctB   = enc(epkI, rB)
+      rC    = h(<~freshC, ltkR>)          // MEX on op C
+      ctC   = enc(pkI, rC)
+      TR    = h(<'TR', ctA, epkI, ts, ctB, ctC>)
+      psk   = h(<pkI, pkR>)               // public by construction
+      key   = kdf(TR, <rA, rB, rC, psk>)
+      confR = kdf(key, TR)
+      confI = kdf(key, <TR, confR>)
+      tag   = mac(tagkey(rA), <ctB, ctC, confR>)
+  in
+  [ !Ltk($R, ltkR), !Pk($I, pkI), !Pk($R, pkR),
+    Fr(~freshB), Fr(~freshC),
+    In(<'InitHello', $I, $R, ctA, epkI, ts>) ]
+  /* The responder's half of agreement: sending `RespHello` *is* the
+     commitment. `InitConf` may never arrive (an adversary can drop it), so a
+     `Commit` emitted only on receipt would make agreement fail for a reason
+     that is not a protocol flaw. */
+  --[ RunningResp($I, $R, key) ]->
+  [ StResp1($I, $R, key, confI),
+    Out(<'RespHello', $I, $R, ctB, ctC, confR, tag>) ]
+
+/* ── InitConf: the initiator authenticates the responder, then confirms */
+
+rule InitConf:
+  let rB    = dec(ctB, ephI)
+      rC    = dec(ctC, ltkI)
+      TR    = h(<'TR', ctA, epkI, ts, ctB, ctC>)
+      psk   = h(<pkI, pkR>)
+      key   = kdf(TR, <rA, rB, rC, psk>)
+      confR = kdf(key, TR)
+      confI = kdf(key, <TR, confR>)
+  in
+  [ StInit1($I, $R, ltkI, ephI, rA, ctA, epkI, ts),
+    !Pk($I, pkI), !Pk($R, pkR),
+    In(<'RespHello', $I, $R, ctB, ctC, confR, mac(tagkey(rA), <ctB, ctC, confR>)>) ]
+  --[ CommitInit($I, $R, key) ]->
+  [ StInitDone($I, $R, key),
+    Out(<'InitConf', $I, $R, confI>) ]
+
+/* ── RespConf: the responder accepts the initiator's confirmation ───── */
+
+rule RespConf:
+  [ StResp1($I, $R, key, confI),
+    In(<'InitConf', $I, $R, confI>) ]
+  --[ CommitResp($I, $R, key) ]->
+  [ StRespDone($I, $R, key) ]
+
+/* ── the P4 epoch oracle: a compromised epoch's root ────────────────── */
+
+rule Reveal_Session_Init:
+  [ StInitDone($I, $R, key) ]
+  --[ RevealSession($I, $R, key) ]->
+  [ Out(key) ]
+
+rule Reveal_Session_Resp:
+  [ StRespDone($I, $R, key) ]
+  --[ RevealSession($I, $R, key) ]->
+  [ Out(key) ]
+
+/* ── lemmas ─────────────────────────────────────────────────────────── */
+
+lemma executable:
+  exists-trace
+  "Ex I R key #i. CommitInit(I, R, key)@i"
+
+/* A completed session key is never derivable, for a *clean* session: neither
+   static key revealed, and the session's own epoch not revealed. Corruption is
+   not a secrecy claim — revealing both statics lets the adversary forge a
+   session it can complete (it can compute `rA` from op A and choose `rB`/`rC`
+   itself), which is why the clean-session conjuncts are explicit rather than
+   left implicit. `pfs` below states the stronger after-completion claim. */
+lemma key_secrecy:
+  "not (Ex I R key #i #j.
+     CommitInit(I, R, key)@i
+     & K(key)@j
+     & not (Ex #r. RevealSession(I, R, key)@r)
+     & not (Ex #r1. RevealLtk(I)@r1)
+     & not (Ex #r2. RevealLtk(R)@r2))"
+
+lemma key_secrecy_responder:
+  "not (Ex I R key #i #j.
+     CommitResp(I, R, key)@i
+     & K(key)@j
+     & not (Ex #r. RevealSession(I, R, key)@r)
+     & not (Ex #r1. RevealLtk(I)@r1)
+     & not (Ex #r2. RevealLtk(R)@r2))"
+
+/* Mutual authentication: each side's completion implies the other's, on the
+   same names and the same key. */
+lemma agreement_initiator:
+  "All I R key #i.
+     CommitInit(I, R, key)@i
+     & not (Ex #r1. RevealLtk(I)@r1)
+     & not (Ex #r2. RevealLtk(R)@r2)
+   ==> (Ex #j. RunningResp(I, R, key)@j)"
+
+lemma agreement_responder:
+  "All I R key #i.
+     CommitResp(I, R, key)@i
+     & not (Ex #r1. RevealLtk(I)@r1)
+     & not (Ex #r2. RevealLtk(R)@r2)
+   ==> (Ex #j. CommitInit(I, R, key)@j)"
+
+/* ...and exactly once: the confirmations are not replayable into a second
+   session between the same pair. */
+/* Written as "the responder runs at most once per (I, R, key)". Together with
+   `agreement_initiator` (at least once) that is injective agreement, and it is
+   the form the prover can discharge: two runs would have to share the key
+   term, hence the same fresh op-B/op-C randomness. */
+lemma injective_agreement_initiator:
+  "All I R key #j1 #j2.
+     RunningResp(I, R, key)@j1
+     & RunningResp(I, R, key)@j2
+   ==> #j1 = #j2"
+
+/* Forward secrecy: the key stays secret provided neither static key was
+   revealed *before* completion — op B's ephemeral secret is gone and was never
+   a function of either static key, so later reveals buy nothing.
+
+   The ordering is written as "no reveal earlier than #i", not as "there is a
+   reveal later than #i". `!Ltk` is persistent, so the reveal rule can fire more
+   than once; an existential later reveal is then satisfied by a second firing
+   while an earlier one leaked the key. The universal-absence form has no such
+   loophole. */
+lemma pfs:
+  "not (Ex I R key #i #j.
+     CommitInit(I, R, key)@i
+     & K(key)@j
+     & not (Ex #r. RevealSession(I, R, key)@r)
+     & not (Ex #r1. RevealLtk(I)@r1 & #r1 < #i)
+     & not (Ex #r2. RevealLtk(R)@r2 & #r2 < #i))"
+
+/* Post-compromise security as *root independence* (P4): an epoch's root is
+   revealed, and the next epoch's key — a fresh handshake, not a chain — is
+   still secret. The time/memory-tradeoff bound that motivates dropping the
+   symmetric chain is not a symbolic property and is argued in
+   docs/proof/ratchet-pcs.md, not here. */
+lemma pcs_root_independence:
+  "not (Ex I R k1 k2 #i1 #i2 #r #j.
+     CommitInit(I, R, k1)@i1
+     & CommitInit(I, R, k2)@i2
+     & #i1 < #i2
+     & RevealSession(I, R, k1)@r
+     & K(k2)@j
+     & not (Ex #r2. RevealSession(I, R, k2)@r2)
+     & not (Ex #r1. RevealLtk(I)@r1)
+     & not (Ex #r2b. RevealLtk(R)@r2b))"
+
+end
