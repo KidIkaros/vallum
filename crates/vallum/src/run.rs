@@ -3,13 +3,15 @@
 //! The loop: three sources of events, one device, and the actions it asks for.
 //!
 //! ```text
-//!   TUN reader thread ──┐
-//!   UDP reader thread ──┼──▶ mpsc ──▶ Device::handle / poll ──▶ Action
-//!   a 100 ms timeout  ──┘                                        │
-//!                                                    ┌───────────┴───────────┐
-//!                                                    ▼                       ▼
-//!                                              socket.send_to          tun.write_packet
+//!   TUN reader ─┐
+//!   UDP reader ─┼─▶ mpsc ─▶ Segments ─▶ Device ─▶ Action ─┬─▶ Segments ─▶ socket.send_to
+//!   100 ms tick ┘          reassemble  handle/poll        └─▶ tun.write_packet
 //! ```
+//!
+//! The [`Segments`] envelope wraps the socket on both directions, so the device
+//! works in whole messages and no message depends on IP fragmentation: a
+//! tri-hybrid `InitHello` is 4 609 bytes, and a NAT cannot translate the IP
+//! fragments that would carry it. See `vallum_tunnel::segment`.
 //!
 //! Only the main thread touches the [`Device`]. The two reader threads do one
 //! thing: block on their device and hand the bytes over. That is the whole reason
@@ -39,7 +41,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use vallum_tunnel::{Action, Clock, Device, Event, Randomness};
+use vallum_tunnel::{Action, Clock, Device, Event, Randomness, Segments};
 
 use crate::clock::TimeSource;
 use crate::error::Error;
@@ -146,6 +148,10 @@ pub struct LoopStats {
     pub packets_failed: u64,
     /// Handshakes that completed.
     pub established: u64,
+    /// Messages delivered out of reassembled fragments.
+    pub reassembled: u64,
+    /// Fragments refused, and half-assembled messages abandoned.
+    pub fragments_dropped: u64,
 }
 
 /// Everything the loop needs from the operating system.
@@ -203,6 +209,11 @@ pub fn run(
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
+    // One segmenter for the whole device: outbound it cuts a message that does
+    // not fit a datagram into fragments, inbound it puts them back together, so
+    // the device below only ever sees whole messages and nothing depends on IP
+    // fragmentation to get a handshake across.
+    let mut segments = Segments::new();
 
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
@@ -230,7 +241,12 @@ pub fn run(
             }
             Ok(Input::Datagram(source, bytes)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
-                Some(Event::Datagram { source, bytes })
+                // A fragment is held here; only a whole message is an event. The
+                // loop still ticks, which is what expires a half-assembled
+                // message that never finished.
+                segments
+                    .inbound(clock.monotonic_ms(), source, bytes)
+                    .map(|bytes| Event::Datagram { source, bytes })
             }
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -248,13 +264,17 @@ pub fn run(
 
         for action in actions {
             match action {
-                Action::Send { destination, bytes } => match socket.send_to(&bytes, destination) {
-                    Ok(()) => stats.datagrams_sent += 1,
-                    Err(error) => {
-                        stats.datagrams_failed += 1;
-                        log_debug!(log, "send to {destination} failed: {error}");
+                Action::Send { destination, bytes } => {
+                    for datagram in segments.outbound(bytes, rng) {
+                        match socket.send_to(&datagram, destination) {
+                            Ok(()) => stats.datagrams_sent += 1,
+                            Err(error) => {
+                                stats.datagrams_failed += 1;
+                                log_debug!(log, "send to {destination} failed: {error}");
+                            }
+                        }
                     }
-                },
+                }
                 Action::Deliver { packet } => match writer.write_packet(&packet) {
                     Ok(_) => stats.packets_delivered += 1,
                     Err(error) => {
@@ -276,15 +296,20 @@ pub fn run(
         }
     }
 
+    stats.reassembled = segments.reassembled();
+    stats.fragments_dropped = segments.dropped();
+
     log_info!(
         log,
         "tunnel down: {} datagrams out ({} failed), {} packets delivered ({} failed), \
-         {} handshakes",
+         {} handshakes, {} messages reassembled ({} fragment drops)",
         stats.datagrams_sent,
         stats.datagrams_failed,
         stats.packets_delivered,
         stats.packets_failed,
         stats.established,
+        stats.reassembled,
+        stats.fragments_dropped,
     );
     Ok(stats)
 }

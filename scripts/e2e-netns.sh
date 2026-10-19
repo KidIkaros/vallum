@@ -200,35 +200,48 @@ write_config b "$INNER_B" "$OUTER_B:$PORT" ""                 "$INNER_A" "$PUB_A
 # The adversary lives in ns2, but the `InitHello` it will replay is captured on
 # veth-a, where it leaves ns1. Capturing on the sending side keeps the recorded
 # pid a plain `python3` (created with `exec` below), so the EXIT trap can kill it
-# without an `nsenter` wrapper in between. The handshake is larger than the veth
-# MTU, so the capture reassembles IP fragments before it sees a whole message —
-# which is itself the measured fact this gate reports below.
+# without an `nsenter` wrapper in between.
+#
+# P6.7 means the handshake arrives as whole UDP datagrams instead of IP
+# fragments, so the capture reassembles the *Vallum* envelope — and records the
+# two quantities the gate is about: how many datagrams the InitHello took, and
+# the largest UDP payload that crossed, which is what decides whether the kernel
+# has anything to fragment at all.
 say "arming the capture on veth-a"
-python3 - "$WORK/inithello.bin" <<'PY' > "$WORK/sniff.log" 2>&1 &
+python3 - "$WORK/inithello.bin" "$WORK/segments.txt" <<'PY' > "$WORK/sniff.log" 2>&1 &
 import socket, sys, time
 
-out = sys.argv[1]
+out, report = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
 s.bind(("veth-a", 0))
 s.settimeout(0.5)
 deadline = time.time() + 15
-fragments = {}
+pieces = {}
+largest = 0
+seen = 0
+fragments = 0
 
 
-def assemble(parts):
-    """The IPv4 payload, if the fragments form a contiguous run."""
+def assemble(parts, total):
+    """The message, if the fragments form a contiguous run covering it."""
     if 0 not in parts:
         return None
     data = b""
     offset = 0
-    while True:
+    while offset < total:
         if offset not in parts:
             return None
-        chunk, more = parts[offset]
+        chunk = parts[offset]
         data += chunk
         offset += len(chunk)
-        if not more:
-            return data
+    return data
+
+
+def write(message, count):
+    with open(out, "wb") as handle:
+        handle.write(message)
+    with open(report, "w") as handle:
+        handle.write(f"{count} {largest} {seen}\n")
 
 
 while time.time() < deadline:
@@ -242,18 +255,26 @@ while time.time() < deadline:
     ihl = (ip[0] & 0xF) * 4
     if ip[9] != 17:  # UDP
         continue
-    key = (int.from_bytes(ip[4:6], "big"), ip[12:20])
-    flags = int.from_bytes(ip[6:8], "big")
-    offset = (flags & 0x1FFF) * 8
-    more = bool(flags & 0x2000)
-    parts = fragments.setdefault(key, {})
-    parts[offset] = (ip[ihl:], more)
-    data = assemble(parts)
-    # Reassembled IPv4 payload = UDP header (8) then the message. `01 01` is
-    # protocol version 1, message type `InitHello`.
-    if data and data[8:10] == b"\x01\x01":
-        with open(out, "wb") as handle:
-            handle.write(data[8:])
+    payload = ip[ihl + 8:]
+    seen += 1
+    largest = max(largest, len(payload))
+    if payload[:2] == b"\x01\x07":
+        # Version 1, the segment envelope: message_id, offset, total, then data.
+        message_id = int.from_bytes(payload[2:6], "big")
+        offset = int.from_bytes(payload[6:8], "big")
+        total = int.from_bytes(payload[8:10], "big")
+        parts = pieces.setdefault(message_id, {})
+        if offset not in parts:
+            fragments += 1
+        parts[offset] = payload[10:]
+        whole = assemble(parts, total)
+        # `01 01` is version 1, message type `InitHello`.
+        if whole is not None and whole[:2] == b"\x01\x01":
+            write(whole, fragments)
+            break
+    elif payload[:2] == b"\x01\x01":
+        # Unfragmented: the message fits one datagram after all.
+        write(payload, 1)
         break
 else:
     sys.exit("no complete InitHello appeared on veth-a")
@@ -320,7 +341,17 @@ CAPTURED=$(wc -c < "$WORK/inithello.bin" | tr -d ' ')
 # `mac1` field: a 16 B MAC under a 4 B tag and length. Pinning the number here is
 # what turns the size table in docs/proof/daemon.md into a live check.
 [ "$CAPTURED" = 4629 ] || bad "captured $CAPTURED bytes of InitHello, expected 4629"
-printf '   captured %s bytes on the wire: 4609 B message + 20 B mac1 field\n' "$CAPTURED"
+read -r SEGMENTS LARGEST SEEN < "$WORK/segments.txt"
+printf '   captured %s bytes after reassembly: 4609 B message + 20 B mac1 field\n' "$CAPTURED"
+printf '   it crossed as %s Vallum fragments, the largest UDP payload being %s B\n' \
+    "$SEGMENTS" "$LARGEST"
+# One `InitHello` datagram would mean the envelope never engaged, and the rest of
+# this gate would be measuring nothing.
+[ "$SEGMENTS" -gt 1 ] \
+    || bad "the InitHello crossed in one datagram; the segmentation envelope never engaged"
+[ "$SEGMENTS" -eq 4 ] \
+    || printf '   note   %s fragments for 4629 B at a 1442 B payload (ceil(4629/1442) = 4)\n' "$SEGMENTS"
+ok "the InitHello crossed as whole UDP datagrams and reassembled byte for byte"
 
 # ── the other direction, over the session A started ──────────────────
 
@@ -342,33 +373,32 @@ fi
 
 # ── what the outer network actually saw ──────────────────────────────
 
-FRAG_A_AFTER=$(snmp_here FragCreates)
-FRAG_B_AFTER=$(snmp_ns2 FragCreates)
-REASM_A_AFTER=$(snmp_here ReasmReqds)
-REASM_B_AFTER=$(snmp_ns2 ReasmReqds)
+FRAG_A=$(snmp_here FragCreates)
+FRAG_B=$(snmp_ns2 FragCreates)
+REASM_A=$(snmp_here ReasmReqds)
+REASM_B=$(snmp_ns2 ReasmReqds)
 
 say "outer IP behaviour during establishment and the checks above"
 printf '   ns1, daemon A:  FragCreates +%s   ReasmReqds +%s\n' \
-    "$((FRAG_A_AFTER - FRAG_A_BEFORE))" "$((REASM_A_AFTER - REASM_A_BEFORE))"
+    "$((FRAG_A - FRAG_A_BEFORE))" "$((REASM_A - REASM_A_BEFORE))"
 printf '   ns2, daemon B:  FragCreates +%s   ReasmReqds +%s\n' \
-    "$((FRAG_B_AFTER - FRAG_B_BEFORE))" "$((REASM_B_AFTER - REASM_B_BEFORE))"
-printf '   veth MTU:       1500\n'
-if [ "$((FRAG_A_AFTER - FRAG_A_BEFORE))" -gt 0 ] || [ "$((FRAG_B_AFTER - FRAG_B_BEFORE))" -gt 0 ]; then
-    printf '   note   the handshake exceeded the outer MTU and was fragmented.\n'
-    printf '          Frozen sizes (crates/vallum-core/tests/interop.rs): the\n'
-    printf '          tri-hybrid InitHello is 4609 B of message (including a 40 B\n'
-    printf '          sealed peer hint) plus a 20 B mac1 field = 4629 B, and the\n'
-    printf '          RespHello is 4378 B with no mac1 (mac1 is InitHello-only).\n'
-    printf '          With 20 B of IPv4 and 8 B of UDP per datagram that is\n'
-    printf '          ceil(4657/1480) = 4 and ceil(4406/1480) = 3 fragments. The\n'
-    printf '          counters above should match those two numbers.\n'
-    printf '          This is the limitation docs/proof/daemon.md records: there is no\n'
-    printf '          application-layer segmentation, so the handshake depends on IP\n'
-    printf '          fragmentation, and a middlebox that drops fragments drops the\n'
-    printf '          tunnel.\n'
-else
-    printf '   note   no outer fragmentation was observed here.\n'
+    "$((FRAG_B - FRAG_B_BEFORE))" "$((REASM_B - REASM_B_BEFORE))"
+printf '   veth MTU:       1500   largest UDP payload our capture saw: %s\n' "${LARGEST:-?}"
+# The point of P6.7, stated as the kernel sees it. Every UDP payload Vallum emits
+# is at most 1452 B, so with 28 B of IPv4+UDP headers no datagram exceeds the
+# 1500-byte veth MTU and the kernel has nothing to fragment. This is an
+# independent proof of the same statement the capture's `largest` measures: one
+# counts fragments, the other measures lengths.
+if [ "$((FRAG_A - FRAG_A_BEFORE))" -ne 0 ] || [ "$((FRAG_B - FRAG_B_BEFORE))" -ne 0 ]; then
+    bad "the kernel fragmented our handshake; the envelope did not cover it"
 fi
+if [ "$((REASM_A - REASM_A_BEFORE))" -ne 0 ] || [ "$((REASM_B - REASM_B_BEFORE))" -ne 0 ]; then
+    bad "the kernel reassembled IP fragments; nothing should have arrived in pieces"
+fi
+LARGEST=${LARGEST:-0}
+[ "$LARGEST" -le 1452 ] \
+    || bad "a $LARGEST-byte UDP payload crossed veth-a; the envelope budget is 1452 B"
+ok "no IP fragment was created or reassembled, and no datagram exceeded the budget"
 
 # ── the idle peer keeps the path warm ────────────────────────────────
 #
@@ -449,9 +479,8 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("0.0.0.0", 0))
 
 
-def probe(destination, payload, window):
-    """Send one datagram, then count and measure every reply for `window` seconds."""
-    sock.sendto(payload, (destination, port))
+def drain(window):
+    """Count and measure every reply that arrives for `window` seconds."""
     replies = []
     deadline = time.time() + window
     while True:
@@ -466,6 +495,12 @@ def probe(destination, payload, window):
         replies.append(len(data))
 
 
+def probe(destination, payload, window):
+    """Send one datagram, then watch for replies."""
+    sock.sendto(payload, (destination, port))
+    return drain(window)
+
+
 junk = []
 for payload in (b"", b"\x00", os.urandom(1024), os.urandom(16384), os.urandom(65507)):
     junk += probe(b_address, payload, 0.25)
@@ -476,11 +511,40 @@ for payload in (os.urandom(2048), os.urandom(65507)):
 # the admission gate refuses it before any KEM work.
 forged = probe(b_address, b"\x01\x01\x00\x03" + os.urandom(4600), 0.25)
 
+
+def fragment(message_id, offset, total, data=b""):
+    """The segment envelope: version 1, code 0x07, id, offset, total, data."""
+    return (
+        b"\x01\x07"
+        + message_id.to_bytes(4, "big")
+        + offset.to_bytes(2, "big")
+        + total.to_bytes(2, "big")
+        + data
+    )
+
+
+# The surface P6.7 added, and the same rule applies to it: a fragment is
+# unauthenticated input of exactly the standing a whole datagram has, so none of
+# this may draw a reply. A lone first fragment, an envelope claiming a message
+# larger than the 16 KiB cap, one claiming an offset past the end of its own
+# message, and a flood of first fragments under random message ids — each of
+# which is a candidate slot in the 16-entry reassembly table, which is the thing
+# this probe is really measuring: whether a flood can exhaust it or draw an
+# answer.
+fragments = probe(b_address, fragment(1, 0, 4629, os.urandom(1442)), 0.25)
+fragments += probe(b_address, fragment(2, 0, 65535, os.urandom(64)), 0.25)
+fragments += probe(b_address, fragment(3, 9000, 4629, os.urandom(64)), 0.25)
+for _ in range(64):
+    ident = int.from_bytes(os.urandom(4), "big")
+    sock.sendto(fragment(ident, 0, 4629, os.urandom(1442)), (b_address, port))
+fragments += drain(0.5)
+
 # The genuine article, from a different source address.
 replay = probe(b_address, init_hello, 1.0)
 
 print(f"junk={len(junk)}")
 print(f"forged={len(forged)}")
+print(f"fragments={len(fragments)}")
 print(f"replay={len(replay)}")
 print(f"replay_bytes={sum(replay)}")
 PY
@@ -490,6 +554,7 @@ field() { printf '%s\n' "$ATTACK" | awk -F= -v key="$1" '$1 == key { print $2 }'
 
 junk_replies=$(field junk)
 forged_replies=$(field forged)
+fragment_replies=$(field fragments)
 replay_replies=$(field replay)
 replay_bytes=$(field replay_bytes)
 
@@ -497,6 +562,8 @@ replay_bytes=$(field replay_bytes)
 ok "empty, 1-byte, 1 KiB, 16 KiB and 65 507-byte datagrams drew no reply"
 [ "$forged_replies" = 0 ] || bad "a header with no mac1 drew $forged_replies replies"
 ok "a well-formed header with no mac1 drew no reply"
+[ "$fragment_replies" = 0 ] || bad "fragments drew $fragment_replies reply datagrams"
+ok "68 fragments, including a 64-deep flood under random ids, drew no reply"
 [ "$replay_replies" = 0 ] || bad "a replayed InitHello drew $replay_replies replies ($replay_bytes bytes)"
 ok "a replayed InitHello drew no reply"
 

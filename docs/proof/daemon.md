@@ -27,8 +27,9 @@ needs root or `CAP_NET_ADMIN`, instead of printing a bare `Operation not
 permitted`.
 
 **(b) The handshake does not fit in a packet, and the tunnel depends on IP
-fragmentation.** There is no application-layer segmentation anywhere in the stack:
-one UDP datagram is one `Message`. A tri-hybrid `InitHello` is 4609 B of message
+fragmentation.** As of P6.4 there was no application-layer segmentation anywhere in
+the stack: one UDP datagram was one `Message`. A tri-hybrid `InitHello` is 4609 B
+of message
 (including a 40 B sealed peer hint) plus a 20 B `mac1` field — a 16 B MAC under a
 4 B tag and length — for **4629 B** on the wire, and the `RespHello` is **4378 B**
 with no `mac1` at all (`mac1` is carried on `InitHello` only). Both go against a
@@ -47,6 +48,15 @@ the fix.
 > The fragment counts were right for the wrong reason (both pairings round up to
 > 4 and 3), which is why the error survived: the live capture the pentest added
 > measures the actual bytes, not the arithmetic.
+>
+> **Closed in P6.7.** The limitation is gone. `vallum-core::segment` frames a
+> message that does not fit a datagram into fragments that are each a complete UDP
+> datagram, and `vallum-tunnel::Segments` reassembles them below the `Device`, so
+> nothing in the protocol moved and the frozen vectors are unchanged. The counters
+> this section used to report now read `+0`, which is the fix stated as a
+> measurement: see [`segment.md`](segment.md). The prediction recorded here — "a
+> future framing level (which is a wire change)" — was wrong about the wire: the
+> envelope sits *below* the message layer, so it is not a wire change at all.
 
 **(c) There is no persistent keepalive, so a NAT-bound responder is silent.**
 `KEEPALIVE_TIMEOUT_MS` is WireGuard's rule — send a keepalive after 10 s of
@@ -264,17 +274,20 @@ with opposite roles; B's config has no endpoint, so B learned A's address from t
 handshake; the reverse direction succeeds; a 1228-byte inner packet succeeds; both
 daemons exit on `SIGTERM` after logging their counters.
 
-The measured output of a clean run on this host:
+The measured output of a clean run on this host, as of P6.7:
 
 ```text
-ns1, daemon A:  FragCreates +4   ReasmReqds +3
-ns2, daemon B:  FragCreates +3   ReasmReqds +4
+ns1, daemon A:  FragCreates +0   ReasmReqds +0
+ns2, daemon B:  FragCreates +0   ReasmReqds +0
+   it crossed as 4 Vallum fragments, the largest UDP payload being 1452 B
 ```
 
-which is `ceil((4629 + 28)/1480) = 4` for the `InitHello` and
-`ceil((4378 + 28)/1480) = 3` for the `RespHello`, and the same numbers mirrored.
-The fragmentation in §0b is therefore a measurement, not an inference from message
-sizes.
+The `+4`/`+3` this section used to report were `ceil((4629 + 28)/1480) = 4` for
+the `InitHello` and `ceil((4378 + 28)/1480) = 3` for the `RespHello`. They now
+cross as datagrams the kernel never has a reason to touch: the capture reassembles
+the segmentation envelope and reports 4629 B, and the kernel counters stay at
+zero. Those are two independent measurements of the same statement. See
+[`segment.md`](segment.md).
 
 A note on the round-trip times it prints: the first packet pays the handshake, and
 this is an unoptimised build in a test namespace. Those numbers are not a
@@ -284,10 +297,15 @@ performance claim and should not be quoted as one.
 
 ## 5. What P6.4 does **not** claim
 
-1. **No application-layer segmentation.** One datagram is one message, so the
-   handshake relies on IP fragmentation (§0b). A path that drops fragments cannot
-   establish a tunnel. Fixing it means a new framing level — a wire change, and
-   the frozen vectors would move.
+1. ~~**No application-layer segmentation.**~~ **Closed in P6.7:**
+   [`segment.md`](segment.md) adds the envelope. A message larger than
+   `segment::MAX_OUTER_DATAGRAM` (1452 B) is cut into fragments that are each a
+   whole UDP datagram and reassembled below the `Device`, so a NAT — which cannot
+   translate an IP fragment with no transport header — no longer sees anything to
+   drop. The prediction recorded in P6.4 that this "is a wire change, and the
+   frozen vectors would move" was **wrong**, and the reason is worth keeping: the
+   envelope sits below the message layer, so the messages themselves are
+   byte-identical and the vectors did not move.
 2. **No persistent keepalive.** A responder behind NAT with nothing to send is
    unreachable until it sends something (§0c). The config does not pretend
    otherwise. **Closed in P6.6:** [`keepalive.md`](keepalive.md) adds the timer and

@@ -378,7 +378,20 @@ fn two_daemons_establish_and_carry_traffic_both_ways() {
         stats.datagrams_sent
     );
     assert_eq!(stats.packets_delivered, 1, "A delivered {stats:?}");
-    let _ = b.stop();
+    // The `InitHello` (4 609 B) and the `RespHello` (4 378 B) do not fit a
+    // datagram, so a tunnel that came up at all came up through the segmentation
+    // envelope. Both sides had to reassemble one, which is the loop's socket-side
+    // wiring in both directions — the property this test exists to pin, since a
+    // device fed whole messages would never notice the difference.
+    assert!(
+        stats.reassembled >= 1,
+        "A assembled no message, so nothing was segmented: {stats:?}"
+    );
+    let stats_b = b.stop();
+    assert!(
+        stats_b.reassembled >= 1,
+        "B assembled no message, so A sent no fragments: {stats_b:?}"
+    );
 }
 
 #[test]

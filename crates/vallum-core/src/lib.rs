@@ -89,6 +89,16 @@
 //! ([`data::Sender::seal_padded`]), so the on-wire length is a chosen quantity
 //! rather than a leak of the payload's size.
 //! See `docs/proof/traffic-shaping.md`.
+//!
+//! ## Segmentation (P6.7)
+//!
+//! [`segment`] is the envelope that keeps a message off the IP fragment path. A
+//! tri-hybrid `InitHello` is 4 609 bytes — four IP fragments, and a NAT cannot
+//! translate fragments that carry no transport header, so a fragmented
+//! handshake is a handshake a NAT silently drops. A message larger than
+//! [`segment::MAX_OUTER_DATAGRAM`] is cut into fragments that are each a whole
+//! UDP datagram, and reassembled before the message layer sees it.
+//! See `docs/proof/segment.md`.
 
 #![forbid(unsafe_code)]
 
@@ -99,6 +109,7 @@ pub mod handshake;
 pub mod identity;
 pub mod keys;
 pub mod replay;
+pub mod segment;
 pub mod session;
 pub mod shaping;
 pub mod timer;
@@ -118,6 +129,10 @@ pub use handshake::{
 pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
 pub use replay::{ReplayFilter, REPLAY_WINDOW};
+pub use segment::{
+    Fragment, FRAGMENT_CODE, FRAGMENT_HEADER_LEN, MAX_FRAGMENT_DATA, MAX_OUTER_DATAGRAM,
+    REASSEMBLY_TIMEOUT_MS,
+};
 pub use session::{Session, RETAIN_PREVIOUS_EPOCH_MS};
 pub use shaping::{Action, Branch, Effect, Event, Machine, Shaper, State, MACHINE_END, UNLIMITED};
 pub use timer::{TimerAction, Timers};

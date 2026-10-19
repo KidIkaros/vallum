@@ -37,8 +37,8 @@
 //! Three things, and the third is the one that needs care:
 //!
 //! 1. **A monotonic epoch counter.** `epoch` is folded into every key
-//!    ([`DataKeys::derive`]), so it must never repeat, and the session refuses to
-//!    wrap ([`DataError::EpochExhausted`]).
+//!    ([`crate::DataKeys::derive`]), so it must never repeat, and the session
+//!    refuses to wrap ([`DataError::EpochExhausted`]).
 //! 2. **A fixed suite.** The epoch axis rides on one [`CryptoSuite`]'s schedule;
 //!    a rekey that presents a different suite is rejected
 //!    ([`DataError::SuiteChanged`]) rather than quietly mixed in.

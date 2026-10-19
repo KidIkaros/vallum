@@ -28,8 +28,9 @@
 //! 1. **No duplicate tags** — a repeated tag is rejected outright, so a field
 //!    can never be shadowed by a later one.
 //! 2. **A hard size cap** — a message over [`MAX_HANDSHAKE_MESSAGE`] is refused
-//!    on both build and parse, so a handshake is never split across IP
-//!    fragments. Nothing relies on fragmentation.
+//!    on both build and parse. The cap bounds memory, it does not bound a
+//!    datagram: a message this large fits no real path, and
+//!    [`segment`](crate::segment) is what carries one in pieces.
 
 use crate::error::HandshakeError;
 
@@ -43,16 +44,20 @@ pub const HEADER_LEN: usize = 8;
 ///
 /// The largest message the default tri-hybrid suite produces is well under this
 /// (about 4.6 KiB). A handshake that does not fit is a protocol error, never a
-/// fragmentation opportunity.
+/// fragmentation opportunity — but a message that does not fit one *datagram* is
+/// not an error, and is not left to IP fragmentation: [`segment`](crate::segment)
+/// carries it as a sequence of whole UDP datagrams, each one with the transport
+/// header a NAT needs to translate it.
 pub const MAX_HANDSHAKE_MESSAGE: usize = 16 * 1024;
 
 /// Hard cap on a single data message, in bytes.
 ///
 /// Deliberately the same value as [`MAX_HANDSHAKE_MESSAGE`]. A tunnelled
 /// layer-3 packet is MTU-bounded — comfortably under 2 KiB — so this cap is a
-/// memory bound against a hostile peer, not a fragmentation budget. One parser
-/// and one cap for both planes means there is no second framing implementation
-/// to get subtly wrong.
+/// memory bound against a hostile peer, not a packet-size budget; what fits a
+/// datagram is [`segment`](crate::segment)'s decision, for both planes. One
+/// parser and one cap for both planes means there is no second framing
+/// implementation to get subtly wrong.
 pub const MAX_DATA_MESSAGE: usize = MAX_HANDSHAKE_MESSAGE;
 
 /// Length of a TAI64N timestamp, as in WireGuard.

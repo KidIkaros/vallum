@@ -21,10 +21,11 @@
 //!
 //! # The shape of a tunnel
 //!
-//! A [`Device`] holds a [`StaticIdentity`] and a table of [`PeerConfig`]s. Each
-//! peer's `allowed_ips` are both the destinations routed to it and the source
-//! addresses accepted from it — WireGuard's cryptokey routing, with the inbound
-//! direction enforced as the anti-spoofing rule. Nothing about the crypto is
+//! A [`Device`] holds a [`vallum_core::StaticIdentity`] and a table of
+//! [`PeerConfig`]s. Each peer's `allowed_ips` are both the destinations routed
+//! to it and the source addresses accepted from it — WireGuard's cryptokey
+//! routing, with the inbound direction enforced as the anti-spoofing rule.
+//! Nothing about the crypto is
 //! negotiated: the peer table is policy, and a mismatch fails the handshake
 //! closed.
 //!
@@ -59,6 +60,8 @@
 //!   checks that keep a peer from speaking for a host it was not given.
 //! - [`peer`] — the public peer configuration and its handle.
 //! - [`device`] — the peer table, the handshake driver, and the data plane.
+//! - [`segment`] — the envelope that keeps a large message off the IP fragment
+//!   path: splits outbound messages, reassembles inbound fragments.
 
 #![forbid(unsafe_code)]
 
@@ -67,6 +70,7 @@ pub mod error;
 pub mod peer;
 pub mod rng;
 pub mod routing;
+pub mod segment;
 
 pub use device::{
     Action, Clock, Device, Event, PeerStats, MAX_INJECTION_BURST, MAX_QUEUED_BYTES,
@@ -76,3 +80,4 @@ pub use error::ConfigError;
 pub use peer::{PeerConfig, PeerId};
 pub use rng::Randomness;
 pub use routing::{packet_destination, packet_source, AllowedIps, IpNet};
+pub use segment::{Segments, MAX_REASSEMBLIES};

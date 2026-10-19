@@ -30,6 +30,8 @@
 use std::fmt;
 use std::io;
 
+use vallum_core::segment::MAX_OUTER_DATAGRAM;
+
 /// The default inner MTU. See the module docs for the arithmetic.
 pub const DEFAULT_MTU: u16 = 1380;
 
@@ -39,12 +41,31 @@ pub const DEFAULT_MTU: u16 = 1380;
 /// it can be configured but is a request to break IPv4, not to run a tunnel.
 pub const MIN_MTU: u16 = 576;
 
-/// The largest inner MTU that never fragments on an IPv6 outer path.
+/// Bytes of Vallum framing around one inner packet in a data message.
 ///
-/// `1500 - 48 (IPv6 + UDP) - 58 (Vallum data overhead) = 1394`. Above this a
-/// data packet is still correct, but it is one IP fragment on a v6 path, which
-/// is exactly what [`DEFAULT_MTU`] exists to avoid.
-pub const SAFE_MTU_IPV6_OUTER: u16 = 1394;
+/// `HEADER_LEN(8) + 4 + COUNTER(8) + 4 + PAYLOAD_LEN(2) + tag(32)`: the fixed
+/// header, the counter TLV, the ciphertext TLV, the authenticated length prefix
+/// inside the AEAD, and the tag. The tag is the one term a suite supplies, which
+/// is why [`vallum_core::segment`] caps the *datagram* rather than trusting this
+/// number: a padded or larger-tagged message that overruns the budget is fragmented
+/// instead of put on the wire too big.
+pub const DATA_OVERHEAD: usize = 58;
+
+/// The largest inner MTU that never fragments on a 1500-byte IPv6 outer path.
+///
+/// `1500 - 40 (IPv6) - 8 (UDP) = 1452` is the largest datagram either plane
+/// emits ([`MAX_OUTER_DATAGRAM`]), so the inner MTU whose data message is exactly
+/// that is `1452 - 58 = 1394`. Above this a data packet is still correct, but it
+/// is one IP fragment on a v6 path, which is exactly what [`DEFAULT_MTU`] exists
+/// to avoid.
+pub const SAFE_MTU_IPV6_OUTER: u16 = (MAX_OUTER_DATAGRAM - DATA_OVERHEAD) as u16;
+
+const _: () = assert!(SAFE_MTU_IPV6_OUTER == 1394);
+
+// The default MTU's data message is one datagram, so segmentation is a no-op on
+// the data plane as configured and costs nothing: it exists for the handshake,
+// whose messages are three times the budget.
+const _: () = assert!(DEFAULT_MTU as usize + DATA_OVERHEAD <= MAX_OUTER_DATAGRAM);
 
 /// The reading half.
 pub trait TunReader: Send {
