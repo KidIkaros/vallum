@@ -47,9 +47,9 @@ use origin_crypto_sdk::signing::wire::HybridSig;
 use origin_crypto_sdk::x25519::{X25519KeyPair, X25519PublicKey};
 
 use vallum_crypto::{
-    AeadError, Ciphertext, CryptoSuite, Encapsulation, KemError, KemPublicKey, KemRole,
-    KemSecretKey, KdfError, LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey,
-    SuiteError, WireSizes, KEM_ENCAPS_RANDOMNESS,
+    AeadError, Ciphertext, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole,
+    KemSecretKey, LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, SuiteError,
+    WireSizes, KEM_ENCAPS_RANDOMNESS,
 };
 
 /// Suite id: `X25519 + sntrup761`.
@@ -76,18 +76,24 @@ impl SdkSuite {
     /// The default suite: tri-hybrid `X25519 + sntrup761 + ML-KEM-768`.
     #[cfg(feature = "ml-kem")]
     pub fn tri_hybrid() -> Self {
-        Self { id: SUITE_TRI_HYBRID }
+        Self {
+            id: SUITE_TRI_HYBRID,
+        }
     }
 
     /// `X25519 + sntrup761` — the non-NIST-pure fallback.
     pub fn x25519_sntrup761() -> Self {
-        Self { id: SUITE_X25519_SNTRUP761 }
+        Self {
+            id: SUITE_X25519_SNTRUP761,
+        }
     }
 
     /// `X25519 + ML-KEM-768`.
     #[cfg(feature = "ml-kem")]
     pub fn x25519_ml_kem_768() -> Self {
-        Self { id: SUITE_X25519_MLKEM768 }
+        Self {
+            id: SUITE_X25519_MLKEM768,
+        }
     }
 
     /// Resolve a suite id from the wire.
@@ -472,10 +478,7 @@ impl CryptoSuite for SdkSuite {
         ChaCha20Blake3::decrypt(key, nonce, ct, ad).map_err(|e| AeadError::new(e.to_string()))
     }
 
-    fn sign_keygen(
-        &self,
-        seed: &[u8; 32],
-    ) -> Result<(SignPublicKey, SignSecretKey), SigError> {
+    fn sign_keygen(&self, seed: &[u8; 32]) -> Result<(SignPublicKey, SignSecretKey), SigError> {
         let bundle =
             HybridSigningKeyBundle::from_seed_cached(seed, SIGN_DOMAIN).map_err(sig_err)?;
         let mut pk = Vec::with_capacity(32 + falcon_sizes::PUBLIC_KEY);

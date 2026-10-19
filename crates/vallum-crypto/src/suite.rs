@@ -135,9 +135,18 @@ macro_rules! byte_buffer {
     };
 }
 
-byte_buffer!(KemPublicKey, "A hybrid KEM public key (all legs concatenated).");
-byte_buffer!(Ciphertext, "A hybrid KEM ciphertext (all legs concatenated).");
-byte_buffer!(SignPublicKey, "A hybrid signing public key (Ed25519 ‖ Falcon-1024).");
+byte_buffer!(
+    KemPublicKey,
+    "A hybrid KEM public key (all legs concatenated)."
+);
+byte_buffer!(
+    Ciphertext,
+    "A hybrid KEM ciphertext (all legs concatenated)."
+);
+byte_buffer!(
+    SignPublicKey,
+    "A hybrid signing public key (Ed25519 ‖ Falcon-1024)."
+);
 
 /// A hybrid KEM secret key (all legs concatenated). Zeroized on drop.
 #[derive(Clone, PartialEq, Eq)]
@@ -343,10 +352,7 @@ pub trait CryptoSuite: Send + Sync + 'static {
     // ── Signatures (hybrid identity) ─────────────────────────────────
 
     /// Derive a hybrid signing key pair from a 32-byte seed.
-    fn sign_keygen(
-        &self,
-        seed: &[u8; 32],
-    ) -> Result<(SignPublicKey, SignSecretKey), SigError>;
+    fn sign_keygen(&self, seed: &[u8; 32]) -> Result<(SignPublicKey, SignSecretKey), SigError>;
 
     /// Sign `msg`, returning the encoded hybrid signature.
     fn sign(&self, sk: &SignSecretKey, msg: &[u8]) -> Result<Vec<u8>, SigError>;

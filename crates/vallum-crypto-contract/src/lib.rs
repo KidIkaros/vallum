@@ -62,7 +62,11 @@ fn check_sizes<S: CryptoSuite + ?Sized>(suite: &S) {
     let sizes: WireSizes = suite.sizes();
     let legs = suite.leg_kinds();
 
-    assert_eq!(sizes.leg_count, legs.len(), "leg_count vs leg_kinds mismatch");
+    assert_eq!(
+        sizes.leg_count,
+        legs.len(),
+        "leg_count vs leg_kinds mismatch"
+    );
     assert!(sizes.leg_count >= 2, "a hybrid suite must have >= 2 legs");
     assert_eq!(sizes.shared_secret, 32, "shared-secret size");
     assert_eq!(sizes.hash, 32, "hash size");
@@ -78,8 +82,12 @@ fn check_kem_keygen<S: CryptoSuite + ?Sized>(suite: &S) {
     let sizes = suite.sizes();
     let seed = [0x5Au8; 32];
 
-    let (pk_a, sk_a) = suite.kem_keygen(&seed, KemRole::Static).expect("kem_keygen");
-    let (pk_b, _) = suite.kem_keygen(&seed, KemRole::Static).expect("kem_keygen");
+    let (pk_a, sk_a) = suite
+        .kem_keygen(&seed, KemRole::Static)
+        .expect("kem_keygen");
+    let (pk_b, _) = suite
+        .kem_keygen(&seed, KemRole::Static)
+        .expect("kem_keygen");
     assert_eq!(
         pk_a.as_bytes(),
         pk_b.as_bytes(),
@@ -90,7 +98,9 @@ fn check_kem_keygen<S: CryptoSuite + ?Sized>(suite: &S) {
     assert_eq!(sk_a.len(), sizes.kem_sk, "secret-key size");
 
     // Static and ephemeral derivations must not collide.
-    let (pk_e, _) = suite.kem_keygen(&seed, KemRole::Ephemeral).expect("kem_keygen");
+    let (pk_e, _) = suite
+        .kem_keygen(&seed, KemRole::Ephemeral)
+        .expect("kem_keygen");
     assert_ne!(
         pk_a.as_bytes(),
         pk_e.as_bytes(),
@@ -122,7 +132,11 @@ fn check_kem_roundtrip<S: CryptoSuite + ?Sized>(
         .iter()
         .zip(enc_again.shared_secrets.iter())
     {
-        assert_eq!(a.as_bytes(), b.as_bytes(), "encaps secrets not deterministic");
+        assert_eq!(
+            a.as_bytes(),
+            b.as_bytes(),
+            "encaps secrets not deterministic"
+        );
     }
 
     // Distinct randomness must change the ciphertext.
@@ -150,11 +164,7 @@ fn check_kem_roundtrip<S: CryptoSuite + ?Sized>(
     (pk, sk, enc, dec)
 }
 
-fn check_kem_tamper<S: CryptoSuite + ?Sized>(
-    suite: &S,
-    sk: &KemSecretKey,
-    enc: &Encapsulation,
-) {
+fn check_kem_tamper<S: CryptoSuite + ?Sized>(suite: &S, sk: &KemSecretKey, enc: &Encapsulation) {
     let bytes = enc.ciphertext.as_bytes();
     let mut tampered = bytes.to_vec();
     tampered[0] ^= 1;
@@ -216,7 +226,9 @@ fn check_aead<S: CryptoSuite + ?Sized>(suite: &S) {
     let nonce = [9u8; 24];
     let ad = b"vallum/ad";
 
-    let ct = suite.aead_seal(&key, &nonce, ad, b"hello world").expect("seal");
+    let ct = suite
+        .aead_seal(&key, &nonce, ad, b"hello world")
+        .expect("seal");
     assert_eq!(ct.len(), 11 + sizes.aead_tag, "AEAD ciphertext+tag size");
 
     let pt = suite.aead_open(&key, &nonce, ad, &ct).expect("open");

@@ -12,8 +12,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use vallum_crypto::{
-    AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole,
-    KemSecretKey, LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
+    AeadError, CryptoSuite, Encapsulation, KdfError, KemError, KemPublicKey, KemRole, KemSecretKey,
+    LegKind, SharedSecret, SigError, SignPublicKey, SignSecretKey, WireSizes,
     KEM_ENCAPS_RANDOMNESS,
 };
 use vallum_crypto_contract::{assert_default_legs, run_contract};
@@ -43,7 +43,10 @@ fn suite_0x0003_tri_hybrid_is_default() {
 
 #[test]
 fn unknown_suite_is_rejected() {
-    assert!(SdkSuite::from_id(0x0100).is_err(), "reserved range accepted");
+    assert!(
+        SdkSuite::from_id(0x0100).is_err(),
+        "reserved range accepted"
+    );
     assert!(SdkSuite::from_id(0xFFFF).is_err(), "bogus suite accepted");
 }
 
