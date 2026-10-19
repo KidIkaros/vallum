@@ -15,8 +15,9 @@
 
 use vallum_core::wire::tag;
 use vallum_core::{
-    initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    HandshakeError, Message, MessageBuilder, PeerIdentity, SessionKeys, StaticIdentity,
+    initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
+    responder_process_conf, responder_process_init, HandshakeError, Message, MessageBuilder,
+    PeerIdentity, SessionKeys, StaticIdentity, PEER_HINT_SIZE,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -481,6 +482,169 @@ fn dump_frozen_vectors() {
     }
 }
 
+// ── 4. peer identification (P6) ──────────────────────────────────────
+
+/// A responder resolves *which peer* is calling from the sealed hint, before it
+/// has authenticated anyone. Both ends derive the hint from the peer's static
+/// public key, so no extra configuration is needed to look it up.
+#[test]
+fn the_peer_hint_names_the_initiator_before_authentication() {
+    let suite = SdkSuite::from_id(0x0003).expect("tri-hybrid");
+    let (a, b, c, _) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, _) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 7, TIMESTAMP, &c).unwrap();
+
+    let info = responder_identify(&suite, &responder, &init_hello).unwrap();
+    assert_eq!(info.suite_id(), 0x0003);
+    assert_eq!(info.sender_index(), 7);
+    assert_eq!(info.timestamp(), &TIMESTAMP);
+    assert_eq!(info.peer_hint(), &peer_hint(&suite, initiator.public()));
+    // A different identity means a different hint — this is what makes it an
+    // index into a peer table.
+    let other = StaticIdentity::generate(&suite, &[0x77u8; 32]).unwrap();
+    assert_ne!(info.peer_hint(), &peer_hint(&suite, other.public()));
+}
+
+/// The hint is *sealed*, not merely truncated: its value does not appear
+/// anywhere in the message, so a passive observer cannot confirm which
+/// configured peer is connecting.
+#[test]
+fn the_hint_does_not_appear_in_cleartext() {
+    let suite = SdkSuite::from_id(0x0003).expect("tri-hybrid");
+    let (a, b, c, _) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, _) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let hint = peer_hint(&suite, initiator.public());
+    assert!(
+        !init_hello
+            .windows(PEER_HINT_SIZE)
+            .any(|window| window == hint),
+        "the peer hint leaked into the wire bytes"
+    );
+}
+
+/// The hint is checked, never trusted. Resolving it to a peer it does not name
+/// is refused rather than completing a session under the wrong peer.
+#[test]
+fn a_hint_that_names_another_peer_is_refused() {
+    let suite = SdkSuite::from_id(0x0003).expect("tri-hybrid");
+    let (a, b, c, d) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+    let other = StaticIdentity::generate(&suite, &[0x77u8; 32]).unwrap();
+
+    let (init_hello, _) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+    let info = responder_identify(&suite, &responder, &init_hello).unwrap();
+
+    assert_eq!(
+        responder_accept(&suite, &responder, &peer(&other), &info, 2, &d).unwrap_err(),
+        HandshakeError::PeerHintMismatch
+    );
+    // The peer the hint *does* name goes through — through the same two phases.
+    assert!(responder_accept(&suite, &responder, &peer(&initiator), &info, 2, &d).is_ok());
+}
+
+/// A tampered, truncated, or stripped hint is a framing/AEAD failure. Stripping
+/// it is not a way to skip the check.
+#[test]
+fn a_tampered_or_missing_hint_is_rejected() {
+    let suite = SdkSuite::from_id(0x0003).expect("tri-hybrid");
+    let (a, b, c, _) = seeds();
+    let initiator = StaticIdentity::generate(&suite, &a).unwrap();
+    let responder = StaticIdentity::generate(&suite, &b).unwrap();
+
+    let (init_hello, _) =
+        initiator_hello(&suite, &initiator, &peer(&responder), 1, TIMESTAMP, &c).unwrap();
+
+    // Flip one bit of the sealed hint (the last field of the message).
+    let mut tampered = init_hello.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    assert!(matches!(
+        responder_identify(&suite, &responder, &tampered),
+        Err(HandshakeError::Aead(_))
+    ));
+
+    // Rebuild the message with the hint field truncated and with it missing
+    // altogether: both are wire errors, not a silent accept.
+    let msg = Message::parse(&init_hello).unwrap();
+    let sealed = msg.require(tag::PEER_HINT).unwrap();
+    for hint_field in [&sealed[..PEER_HINT_SIZE], &[][..]] {
+        let mut builder = MessageBuilder::new(msg.header());
+        builder
+            .field(tag::STATIC_CT, msg.require(tag::STATIC_CT).unwrap())
+            .unwrap();
+        builder
+            .field(tag::EPHEMERAL_PK, msg.require(tag::EPHEMERAL_PK).unwrap())
+            .unwrap();
+        builder
+            .field(tag::TIMESTAMP, msg.require(tag::TIMESTAMP).unwrap())
+            .unwrap();
+        if !hint_field.is_empty() {
+            builder.field(tag::PEER_HINT, hint_field).unwrap();
+        }
+        let rebuilt = builder.finish().unwrap();
+        assert!(
+            matches!(
+                responder_identify(&suite, &responder, &rebuilt),
+                Err(HandshakeError::Wire(_))
+            ),
+            "a hint field of {} bytes was accepted",
+            hint_field.len()
+        );
+    }
+}
+
+/// The product shape: one responder, two initiators. Each `InitHello` resolves
+/// to its own peer by hint, and both handshakes complete independently.
+#[test]
+fn a_responder_picks_the_right_peer_out_of_several() {
+    let suite = SdkSuite::from_id(0x0003).expect("tri-hybrid");
+    let responder = StaticIdentity::generate(&suite, &[0x22u8; 32]).unwrap();
+
+    let mut keys = Vec::new();
+    for (i, seed) in [[0x11u8; 32], [0x55u8; 32]].into_iter().enumerate() {
+        let initiator = StaticIdentity::generate(&suite, &seed).unwrap();
+        let (init_hello, i_state) = initiator_hello(
+            &suite,
+            &initiator,
+            &peer(&responder),
+            0x10 + i as u32,
+            TIMESTAMP,
+            &[0x33u8; 32],
+        )
+        .unwrap();
+
+        let info = responder_identify(&suite, &responder, &init_hello).unwrap();
+        assert_eq!(info.peer_hint(), &peer_hint(&suite, initiator.public()));
+        let (resp_hello, r_state) = responder_accept(
+            &suite,
+            &responder,
+            &peer(&initiator),
+            &info,
+            0x20 + i as u32,
+            &[0x44u8; 32],
+        )
+        .unwrap();
+
+        let (init_conf, i_keys) =
+            initiator_process_resp(&suite, i_state, &initiator, &resp_hello).unwrap();
+        let r_keys = responder_process_conf(&suite, r_state, &init_conf).unwrap();
+
+        assert_eq!(i_keys.key.as_bytes(), r_keys.key.as_bytes());
+        keys.push(i_keys.key.as_bytes().to_vec());
+    }
+    // The two sessions are distinct: sharing the responder does not share a key.
+    assert_ne!(keys[0], keys[1]);
+}
+
 #[test]
 fn frozen_vectors_match() {
     // Frozen from `dump_frozen_vectors`. Regenerate with:
@@ -491,6 +655,11 @@ fn frozen_vectors_match() {
     // pins all three KEM operations; `conf_r`/`conf_i` pin the two confirmation
     // stages. If any of these fail after a provider swap, the swap changed
     // protocol-visible bytes and the contract is broken.
+    //
+    // One `InitHello` field is *not* in the transcript: the P6 peer hint, which
+    // is sealed under op A and carries no key material. It is pinned by
+    // `init_hello_len` instead — a scheme change that altered the hint would
+    // change the length even though `TR` and every key below stayed put.
     struct Vector {
         suite_id: u16,
         init_hello_len: usize,
@@ -505,7 +674,7 @@ fn frozen_vectors_match() {
     const VECTORS: &[Vector] = &[
         Vector {
             suite_id: 0x0001,
-            init_hello_len: 2293,
+            init_hello_len: 2337,
             resp_hello_len: 2202,
             init_conf: "010300010a0b0c0d00100020eec128c04c9bbb41982b13ea0408773ef6d4e9ccdb97237656b2a7e9f6c9489600050004e0e1e2e3",
             transcript: "846d88879dd8511e8f692fa43ec622153b0ba64dac36c92c2a864f31a7fcbc07",
@@ -515,7 +684,7 @@ fn frozen_vectors_match() {
         },
         Vector {
             suite_id: 0x0002,
-            init_hello_len: 2368,
+            init_hello_len: 2412,
             resp_hello_len: 2300,
             init_conf: "010300020a0b0c0d00100020bbcb651aa14240f8300d8e6d7d38e53b940a2030a630f48ba1978ecccd86c4b100050004e0e1e2e3",
             transcript: "f36118a94977124c29cfd976408445660450803a101d8e939703a7b234626697",
@@ -525,7 +694,7 @@ fn frozen_vectors_match() {
         },
         Vector {
             suite_id: 0x0003,
-            init_hello_len: 4565,
+            init_hello_len: 4609,
             resp_hello_len: 4378,
             init_conf: "010300030a0b0c0d0010002052171e405c34b707362b25c1b3ad823b83161dc6f0ba6c4b58e0e59d32a18ec200050004e0e1e2e3",
             transcript: "6c22bee37269a2a89aae4752718fbce53c8210659b5a4ddc84424e165436a9fc",

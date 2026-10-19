@@ -5,11 +5,47 @@
 //! ```text
 //! Initiator                                              Responder
 //! ─────────                                              ─────────
-//! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP ──▶   [static key]
+//! InitHello    ── STATIC_CT (A), EPHEMERAL_PK, TIMESTAMP,
+//!                  PEER_HINT ──────────────────────────────▶   [static key]
 //!              ◀── EPHEMERAL_CT (B), STATIC_CT (C),
 //!                  CONFIRMATION (conf_r), IDENTITY_SIG ────    RespHello
 //! InitConf     ── CONFIRMATION (conf_i), IDENTITY_SIG ───▶      [verify]
 //! ```
+//!
+//! ## Peer identification (P6)
+//!
+//! A responder has to decide *which configured peer* an `InitHello` came from
+//! before it can build `RespHello`, because op C is encapsulated to the
+//! initiator's **static** key. WireGuard gets that for free: its init message
+//! carries the initiator's static key encrypted to the responder's static key,
+//! so the responder decrypts it and looks the peer up. Vallum's op A is a hybrid
+//! KEM encapsulation to that same key, and a KEM yields a shared secret, not an
+//! identity — so nothing in `STATIC_CT` names the initiator.
+//!
+//! P6 therefore adds one field. `PEER_HINT` is
+//! `AEAD(KDF(salt = "vallum/peer-hint/seal/v1", ikm = ss_A), H("vallum/peer-hint/v1", …))`
+//! — a short fingerprint of the initiator's static **public** KEM key, sealed
+//! under a key derived from op A. Op A is encapsulated to the *responder's*
+//! static key, so both ends can compute that key before the peer is known: the
+//! initiator from the encapsulation it just made, the responder from the
+//! decapsulation it just did. That is the whole trick, and it is what
+//! [`responder_identify`] exposes as a separate phase.
+//!
+//! Read the trust model carefully, because it is asymmetric:
+//!
+//! * **Confidential.** A passive observer holds neither op A's shared secret nor
+//!   the responder's static key, so it learns nothing about which peer is
+//!   connecting — the same property WireGuard's encrypted static key has.
+//! * **Not authenticated.** Anyone who knows the responder's *public* key can
+//!   encapsulate op A and derive the seal key, so anyone can produce a hint
+//!   naming any peer. It is therefore resolved by the transport and then
+//!   *checked* by [`responder_accept`]: the hint must name the peer the caller
+//!   resolved. A forged hint can only create a handshake that fails at
+//!   `InitConf`, never a session under the wrong peer.
+//!
+//! The hint is also deliberately short (8 bytes). It is an index, not an
+//! identity: op C and the confirmations are what authenticate, and a hint
+//! collision costs one wasted attempt.
 //!
 //! ## Identity (P3)
 //!
@@ -104,6 +140,7 @@ use crate::identity::{
     sign_transcript, verify_transcript, PeerIdentity, StaticIdentity, IDENTITY_INIT_DOMAIN,
     IDENTITY_RESP_DOMAIN,
 };
+use crate::keys::NONCE_SIZE;
 use crate::wire::{
     tag, Message, MessageBuilder, MessageHeader, MessageType, CONFIRMATION_SIZE, PROTOCOL_VERSION,
     TIMESTAMP_SIZE,
@@ -139,6 +176,24 @@ const CONFIRM_I_INFO: &[u8] = b"vallum/confirm/init/v1";
 const CONFIRM_R_INFO: &[u8] = b"vallum/confirm/resp/v1";
 /// Hash domain for comparing confirmation values.
 const CONFIRM_CMP_DOMAIN: &[u8] = b"vallum/confirm-cmp/v1";
+
+// ── peer hint (P6) ───────────────────────────────────────────────────
+
+/// Length of the peer hint, in bytes.
+///
+/// Eight bytes is a birthday bound of 2^32 peers and a negligible false-match
+/// rate for any real deployment, while adding only 44 bytes to `InitHello`. A
+/// hint is never *trusted* — the transport resolves it to a configured peer and
+/// [`responder_accept`] checks the two agree — so a collision costs one wasted
+/// attempt, not a wrong session.
+pub const PEER_HINT_SIZE: usize = 8;
+
+/// Hash domain for the hint value.
+const PEER_HINT_DOMAIN: &[u8] = b"vallum/peer-hint/v1";
+/// Salt for the key that seals the hint.
+const PEER_HINT_SALT: &[u8] = b"vallum/peer-hint/seal/v1";
+/// Label for the key that seals the hint.
+const PEER_HINT_KEY_INFO: &[u8] = b"vallum/peer-hint/key/v1";
 
 // ── identity ─────────────────────────────────────────────────────────
 
@@ -293,6 +348,56 @@ fn derive_seed(
         .kdf(HANDSHAKE_SALT, seed, info, &mut out)
         .map_err(HandshakeError::Kdf)?;
     Ok(out)
+}
+
+/// The peer hint for a static KEM public key.
+///
+/// A short fingerprint of the *key*, not of a name: the responder derives it
+/// from each peer's configured public key, so the hint needs no extra
+/// configuration and no registry. It fingerprints a public value, which is
+/// exactly why it is sealed rather than sent as a bare truncation — an
+/// unsealed hint would let a passive observer confirm which configured peer is
+/// connecting, and even recover the key by brute force over a small peer set.
+#[must_use]
+pub fn peer_hint(suite: &dyn CryptoSuite, public: &KemPublicKey) -> [u8; PEER_HINT_SIZE] {
+    let digest = suite.hash(
+        PEER_HINT_DOMAIN,
+        &frame(&[&suite.suite_id().to_be_bytes(), public.as_bytes()]),
+    );
+    let mut hint = [0u8; PEER_HINT_SIZE];
+    hint.copy_from_slice(&digest[..PEER_HINT_SIZE]);
+    hint
+}
+
+/// Derive the key and nonce that seal a peer hint from op A's shared secrets.
+///
+/// Both endpoints can compute this, and — the entire point — both can do so
+/// before the peer is identified: the initiator from the encapsulation it just
+/// made, the responder from the decapsulation it just did with its own static
+/// secret.
+///
+/// The hint is **confidential, not authenticated**. Anyone who knows the
+/// responder's public key can encapsulate op A and so derive this key; the seal
+/// stops a passive observer from reading *who is talking* and nothing more. What
+/// authenticates a peer is op C plus the confirmations, not this.
+///
+/// Op A's randomness is MEX-bound and per-handshake, so the key is unique and the
+/// nonce need not be on the wire.
+fn hint_crypt(
+    suite: &dyn CryptoSuite,
+    legs: &[SharedSecret],
+) -> Result<([u8; 32], [u8; NONCE_SIZE]), HandshakeError> {
+    let parts: Vec<&[u8]> = legs.iter().map(|leg| &leg.as_bytes()[..]).collect();
+    let mut out = [0u8; 32 + NONCE_SIZE];
+    suite
+        .kdf(PEER_HINT_SALT, &frame(&parts), PEER_HINT_KEY_INFO, &mut out)
+        .map_err(HandshakeError::Kdf)?;
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&out[..32]);
+    let mut nonce = [0u8; NONCE_SIZE];
+    nonce.copy_from_slice(&out[32..]);
+    Ok((key, nonce))
 }
 
 /// MEX: `KDF(salt = fresh, ikm = static_secret, info = "vallum/mex/v1")`.
@@ -524,10 +629,23 @@ pub fn initiator_hello(
         suite_id,
         sender_index,
     };
+    // P6: the sealed peer hint. It is derived from op A's shared secret, which
+    // only a holder of the *responder's* static secret can reproduce — so a
+    // passive observer cannot read which peer is calling, while the responder
+    // can, and can therefore resolve the peer before it builds op C.
+    let (hint_key, hint_nonce) = hint_crypt(suite, &encapsulation.shared_secrets)?;
+    let sealed_hint = suite.aead_seal(
+        &hint_key,
+        &hint_nonce,
+        &header.encode(),
+        &peer_hint(suite, identity.public()),
+    )?;
+
     let mut builder = MessageBuilder::new(header);
     builder.field(tag::STATIC_CT, encapsulation.ciphertext.as_bytes())?;
     builder.field(tag::EPHEMERAL_PK, ephemeral_public.as_bytes())?;
     builder.field(tag::TIMESTAMP, &timestamp)?;
+    builder.field(tag::PEER_HINT, &sealed_hint)?;
     let init_hello = builder.finish()?;
 
     let state = InitiatorState {
@@ -546,30 +664,85 @@ pub fn initiator_hello(
     Ok((init_hello, state))
 }
 
-/// Step 2 (responder): consume `InitHello`, build `RespHello`, retain state.
+/// What an `InitHello` reveals **before its sender is authenticated** (P6).
 ///
-/// `RespHello` carries the responder's **confirmation value** (`conf_r`), which
-/// proves to the initiator that this responder holds `σ_r`. It is derived from
-/// the Op A decapsulation below.
+/// Decapsulating op A needs only the responder's *own* static secret, so it can
+/// be done on a message from an unknown address — and that is what makes the
+/// sealed peer hint readable. Everything here is still unauthenticated: the
+/// sender is not identified until [`responder_accept`] completes and
+/// `InitConf` verifies.
 ///
-/// `peer` is the *initiator's* identity, known from peer configuration.
+/// `Debug` cannot leak: the secrets are [`SharedSecret`], which redacts.
+#[derive(Debug)]
+pub struct InitHelloInfo {
+    suite_id: u16,
+    sender_index: u32,
+    timestamp: [u8; TIMESTAMP_SIZE],
+    ephemeral_public: KemPublicKey,
+    static_ct: Vec<u8>,
+    peer_hint: [u8; PEER_HINT_SIZE],
+    /// Op A's per-leg secrets, recovered by decapsulation.
+    static_legs: Vec<SharedSecret>,
+}
+
+impl InitHelloInfo {
+    /// The suite id this message is bound to.
+    #[must_use]
+    pub fn suite_id(&self) -> u16 {
+        self.suite_id
+    }
+
+    /// The initiator's session index, which `RespHello` must echo.
+    #[must_use]
+    pub fn sender_index(&self) -> u32 {
+        self.sender_index
+    }
+
+    /// The initiator's timestamp, still unvalidated (P2 checks it at `InitConf`).
+    #[must_use]
+    pub fn timestamp(&self) -> &[u8; TIMESTAMP_SIZE] {
+        &self.timestamp
+    }
+
+    /// The peer this message *claims* to come from.
+    ///
+    /// Confidential but **not** authenticated: resolve it against your peer
+    /// table, then let [`responder_accept`] check that the two agree. A forged
+    /// hint can only name a peer the initiator does not hold the key for, which
+    /// fails at `InitConf` — it can never complete a session under the wrong
+    /// peer.
+    #[must_use]
+    pub fn peer_hint(&self) -> &[u8; PEER_HINT_SIZE] {
+        &self.peer_hint
+    }
+}
+
+/// Step 2a (responder): read an `InitHello` far enough to choose a peer.
+///
+/// This is the phase that has to come first for any responder with more than one
+/// configured peer, and the reason the `PEER_HINT` field exists at all. WireGuard
+/// gets peer identification for free because its init message carries the
+/// initiator's static key *encrypted to the responder's static key*; Vallum's op A
+/// is a KEM encapsulation to that same key and yields a shared secret rather than
+/// an identity, so the identity travels beside it — sealed under that shared
+/// secret, which both ends can compute before the peer is known.
+///
+/// The admission gate (`mac1`/`mac2`) should run **before** this: it is cheap,
+/// whereas this decapsulates op A.
 ///
 /// # Errors
 ///
-/// [`HandshakeError::Wire`] on a malformed or unexpected message,
-/// [`HandshakeError::SuiteMismatch`] on a suite mismatch, or
-/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] / [`HandshakeError::Sign`]
-/// if a crypto operation fails.
-pub fn responder_process_init(
+/// [`HandshakeError::WrongMessageType`] / [`HandshakeError::SuiteMismatch`] on a
+/// message that is not an `InitHello` for this suite, [`HandshakeError::Wire`]
+/// on a missing or mis-sized field (including a missing hint — stripping it is
+/// not a way to skip the check), [`HandshakeError::Kem`] if op A fails, or
+/// [`HandshakeError::Aead`] if the hint does not unseal.
+pub fn responder_identify(
     suite: &dyn CryptoSuite,
     identity: &StaticIdentity,
-    peer: &PeerIdentity,
     init_hello: &[u8],
-    sender_index: u32,
-    handshake_seed: &[u8; 32],
-) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+) -> Result<InitHelloInfo, HandshakeError> {
     let suite_id = suite.suite_id();
-    let peer_public = peer.kem();
     let message = Message::parse(init_hello)?;
     message.expect_type(MessageType::InitHello)?;
     message.expect_suite(suite_id)?;
@@ -577,18 +750,85 @@ pub fn responder_process_init(
     let static_ct = message.require(tag::STATIC_CT)?;
     let ephemeral_pk = message.require(tag::EPHEMERAL_PK)?;
     let timestamp = message.require_array::<TIMESTAMP_SIZE>(tag::TIMESTAMP)?;
+    let sealed_hint = message.require(tag::PEER_HINT)?;
+
+    let expected_len = PEER_HINT_SIZE + suite.sizes().aead_tag;
+    if sealed_hint.len() != expected_len {
+        return Err(HandshakeError::Wire(format!(
+            "peer hint is {} bytes, expected {expected_len}",
+            sealed_hint.len()
+        )));
+    }
 
     // Op A: recover our share by decapsulating the initiator's static ciphertext.
-    let a_legs = suite
+    // Our own static secret is all this needs, which is exactly why the hint can
+    // be read on a message from an unidentified sender.
+    let static_legs = suite
         .kem_decaps(identity.secret(), static_ct)
         .map_err(HandshakeError::Kem)?;
 
+    let (hint_key, hint_nonce) = hint_crypt(suite, &static_legs)?;
+    let header = MessageHeader {
+        version: PROTOCOL_VERSION,
+        message_type: MessageType::InitHello,
+        suite_id,
+        sender_index: message.sender_index(),
+    };
+    let plain = suite.aead_open(&hint_key, &hint_nonce, &header.encode(), sealed_hint)?;
+    let peer_hint = <[u8; PEER_HINT_SIZE]>::try_from(plain.as_slice()).map_err(|_| {
+        HandshakeError::Wire(format!("unsealed peer hint is {} bytes", plain.len()))
+    })?;
+
+    Ok(InitHelloInfo {
+        suite_id,
+        sender_index: message.sender_index(),
+        timestamp,
+        ephemeral_public: KemPublicKey::new(ephemeral_pk.to_vec()),
+        static_ct: static_ct.to_vec(),
+        peer_hint,
+        static_legs,
+    })
+}
+
+/// Step 2b (responder): build `RespHello` for a **resolved** peer, retain state.
+///
+/// `RespHello` carries the responder's **confirmation value** (`conf_r`), which
+/// proves to the initiator that this responder holds `σ_r`. It is derived from
+/// the Op A decapsulation already done in [`responder_identify`].
+///
+/// `peer` is the initiator's identity *as resolved by the caller*. The hint in
+/// `info` is checked against it, so a caller whose lookup and whose hint
+/// disagree is told ([`HandshakeError::PeerHintMismatch`]) rather than
+/// completing a session under a peer the initiator did not name.
+///
+/// # Errors
+///
+/// [`HandshakeError::PeerHintMismatch`] if `info` names another peer,
+/// [`HandshakeError::Kem`] / [`HandshakeError::Kdf`] / [`HandshakeError::Sign`]
+/// if a crypto operation fails, or [`HandshakeError::Wire`] if `RespHello`
+/// cannot be framed.
+pub fn responder_accept(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer: &PeerIdentity,
+    info: &InitHelloInfo,
+    sender_index: u32,
+    handshake_seed: &[u8; 32],
+) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+    let suite_id = suite.suite_id();
+    let peer_public = peer.kem();
+
+    // The hint is confidential, not authenticated, so it is *checked* rather
+    // than trusted: it must name the peer the caller resolved.
+    if info.peer_hint != peer_hint(suite, peer_public) {
+        return Err(HandshakeError::PeerHintMismatch);
+    }
+
     // Op B: responder → initiator ephemeral, plain fresh randomness (the
     // ephemeral key is itself fresh, so MEX has nothing to add).
-    let ephemeral_public = KemPublicKey::new(ephemeral_pk.to_vec());
     let b_fresh = derive_seed(suite, handshake_seed, B_FRESH_INFO)?;
     let b = suite
-        .kem_encaps(&ephemeral_public, &b_fresh)
+        .kem_encaps(&info.ephemeral_public, &b_fresh)
         .map_err(HandshakeError::Kem)?;
 
     // Op C: responder → initiator static, MEX-bound to our own static secret.
@@ -605,7 +845,7 @@ pub fn responder_process_init(
         sender_index,
     };
 
-    let mut legs = a_legs;
+    let mut legs = info.static_legs.clone();
     legs.extend_from_slice(&b.shared_secrets);
     legs.extend_from_slice(&c.shared_secrets);
 
@@ -615,10 +855,10 @@ pub fn responder_process_init(
     let transcript_init = transcript_init(
         suite,
         suite_id,
-        message.sender_index(),
-        ephemeral_pk,
-        static_ct,
-        &timestamp,
+        info.sender_index,
+        info.ephemeral_public.as_bytes(),
+        &info.static_ct,
+        &info.timestamp,
     );
     let transcript_resp = transcript_resp(
         suite,
@@ -643,7 +883,7 @@ pub fn responder_process_init(
     let mut builder = MessageBuilder::new(header);
     builder.field(tag::EPHEMERAL_CT, b.ciphertext.as_bytes())?;
     builder.field(tag::STATIC_CT, c.ciphertext.as_bytes())?;
-    builder.field(tag::RECEIVER_INDEX, &message.sender_index().to_be_bytes())?;
+    builder.field(tag::RECEIVER_INDEX, &info.sender_index.to_be_bytes())?;
     builder.field(tag::CONFIRMATION, confirm_responder.as_bytes())?;
     // P3: our hybrid identity signature over TR. Present exactly when we hold a
     // signing identity — a peer that requires one rejects its absence.
@@ -674,19 +914,43 @@ pub fn responder_process_init(
         confirm_initiator,
         confirm_responder,
         own_index: sender_index,
-        peer_index: message.sender_index(),
+        peer_index: info.sender_index,
     };
 
     let state = ResponderState {
         suite_id,
         sender_index,
-        peer_index: message.sender_index(),
+        peer_index: info.sender_index,
         resp_hello: resp_hello.clone(),
-        timestamp,
+        timestamp: info.timestamp,
         peer_signing: peer.signing().cloned(),
         keys,
     };
     Ok((resp_hello, state))
+}
+
+/// Step 2, single-peer: [`responder_identify`], then [`responder_accept`].
+///
+/// For a responder that already knows who it is talking to — a two-party
+/// deployment, or a transport that has resolved the source address and only
+/// needs the hint to be *consistent* with it. A responder with several peers
+/// should call the two phases itself and resolve [`InitHelloInfo::peer_hint`]
+/// against its peer table, which needs no extra machinery: this function is
+/// exactly those two steps.
+///
+/// # Errors
+///
+/// As [`responder_identify`] and [`responder_accept`].
+pub fn responder_process_init(
+    suite: &dyn CryptoSuite,
+    identity: &StaticIdentity,
+    peer: &PeerIdentity,
+    init_hello: &[u8],
+    sender_index: u32,
+    handshake_seed: &[u8; 32],
+) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
+    let info = responder_identify(suite, identity, init_hello)?;
+    responder_accept(suite, identity, peer, &info, sender_index, handshake_seed)
 }
 
 /// Step 3 (initiator): consume `RespHello`, verify the responder, derive keys,

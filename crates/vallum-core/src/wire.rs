@@ -148,6 +148,14 @@ pub mod tag {
     pub const RECEIVER_INDEX: u16 = 0x0005;
     /// A data message's 64-bit packet counter (P2).
     pub const COUNTER: u16 = 0x0006;
+    /// The sealed peer hint on an `InitHello` (P6).
+    ///
+    /// A short fingerprint of the initiator's static KEM public key, sealed so
+    /// only the responder can read it. The responder needs it because op A is
+    /// encapsulated to the responder's *own* static key and so says nothing
+    /// about who sent it, while op C — the leg that names the initiator — cannot
+    /// be built until the peer is known. See [`crate::handshake`].
+    pub const PEER_HINT: u16 = 0x0007;
     /// A key-confirmation value ([`super::CONFIRMATION_SIZE`] bytes).
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).

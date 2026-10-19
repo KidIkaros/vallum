@@ -111,8 +111,9 @@ pub use data::{
 };
 pub use error::{DataError, HandshakeError};
 pub use handshake::{
-    initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
-    InitiatorState, ResponderState, SessionKeys,
+    initiator_hello, initiator_process_resp, peer_hint, responder_accept, responder_identify,
+    responder_process_conf, responder_process_init, InitHelloInfo, InitiatorState, ResponderState,
+    SessionKeys, PEER_HINT_SIZE,
 };
 pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};

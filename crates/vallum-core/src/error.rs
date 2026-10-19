@@ -61,6 +61,15 @@ pub enum HandshakeError {
     /// A peer's hybrid identity signature did not verify — a forgery, a
     /// substitution, or a message/transcript mismatch.
     IdentityInvalid,
+    /// The sealed peer hint did not name the peer the caller resolved it to.
+    ///
+    /// The hint is *confidential but not authenticated* (anyone who knows the
+    /// responder's public key can produce one), so it is never trusted on its
+    /// own: the transport resolves it to a configured peer, and this error
+    /// means the caller's resolution and the hint disagreed — a spoofed hint, a
+    /// stale peer table, or a bug. Fail closed rather than complete a handshake
+    /// under a peer the initiator did not name.
+    PeerHintMismatch,
     /// An operation needed a signing identity and this endpoint has none.
     NoSigningIdentity,
     /// A hybrid-KEM operation failed.
@@ -111,6 +120,10 @@ impl fmt::Display for HandshakeError {
                 "HandshakeError: unexpected identity signature (no signing key configured for this peer)"
             ),
             Self::IdentityInvalid => write!(f, "HandshakeError: identity signature did not verify"),
+            Self::PeerHintMismatch => write!(
+                f,
+                "HandshakeError: the sealed peer hint did not name the resolved peer"
+            ),
             Self::NoSigningIdentity => {
                 write!(f, "HandshakeError: this endpoint has no signing identity")
             }

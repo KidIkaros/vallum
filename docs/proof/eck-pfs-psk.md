@@ -103,9 +103,14 @@ is why op B deliberately uses *plain* randomness while A and C use MEX (§5, D1)
 | **Accept** (responder) | return from `responder_process_conf` after `conf_i` verifies | guarded by `verify_confirmation` |
 | Test key | `SessionKeys::key` | `ROOT`-derived, pre-data-plane |
 
-Wire-format names: `InitHello = STATIC_CT(A) ‖ EPHEMERAL_PK ‖ TIMESTAMP`,
+Wire-format names: `InitHello = STATIC_CT(A) ‖ EPHEMERAL_PK ‖ TIMESTAMP ‖ PEER_HINT`,
 `RespHello = EPHEMERAL_CT(B) ‖ STATIC_CT(C) ‖ RECEIVER_INDEX ‖ CONFIRMATION(conf_r)`,
 `InitConf = CONFIRMATION(conf_i) ‖ RECEIVER_INDEX`.
+
+`PEER_HINT` is the P6 addition (D11): the only `InitHello` field **not** folded into
+`TR`, because it carries no key material and is not part of the security argument.
+It is a sealed index for peer resolution, and [`responder_accept`] checks it rather
+than trusting it.
 
 ---
 
@@ -179,10 +184,11 @@ is at least as strong; "open" means it is a named obligation, not a hand-wave.
 | **D4** | `conf`/`zero` are `AEAD.Enc(κ, 0, H, ∅)` — empty-plaintext AEAD under keys from the seed chain | KDF outputs keyed by `KEY`, bound to `TR`/`TR2` | **Covered** with a substituted assumption: the proof term `2·Adv^auth-aead` becomes a confirmation-forgery term under the dual-PRF assumption on the suite KDF. Same property (only a key holder can produce it), different primitive. |
 | **D5** | WireGuard's `msg.response` `zero` repurposed as responder confirmation | `CONFIRMATION` tag in `RespHello` | **No deviation** — this *is* PQ-WireGuard's step 15. Called out here because the paper's summary bullets omit it; see §0. |
 | **D6** | explicit `InitConf` last message | same | **No deviation.** |
-| **D7** | `1tk ← AEAD.Enc(κ3, 0, H3, H(spk_i))` hides the initiator's identity; `time` is authenticated under κ4; `zero`/mac fields | P1 sends `TIMESTAMP` in the clear and nothing identity-bearing; no `1tk` | **Open — deferred to P2/P3 by design.** Identity hiding and DoS mitigation are *not* eCK-PFS-PSK properties (PQ-WireGuard obtains them from the Tamarin model). P1 clears the plaintext field so the P3 identity work is visible. |
+| **D7** | `1tk ← AEAD.Enc(κ3, 0, H3, H(spk_i))` hides the initiator's identity; `time` is authenticated under κ4; `zero`/mac fields | P1 sent `TIMESTAMP` in the clear and nothing identity-bearing; no `1tk` | **Open — deferred to P2/P3 by design.** Identity hiding and DoS mitigation are *not* eCK-PFS-PSK properties (PQ-WireGuard obtains them from the Tamarin model). P1 cleared the plaintext field so the P3 identity work is visible. **P6 amendment:** the peer hint (D11) is identity-bearing after all, and is sealed for exactly this reason — the posture below is preserved. |
 | **D8** | `m1`/`m2` (mac1/mac2 cookie DoS checks) | absent in P1 | **Open — P2.** Pure DoS mitigation, explicitly outside eCK-PFS-PSK. |
 | **D9** | running chained hash over wire bytes; fields interleaved | three staged hashes over parsed fields | **Covered.** Same structural property (`conf_r` commits to the transcript before it, `conf_i` to the transcript including it). Reviewed in §3. |
 | **D10** | `psk` may be a real out-of-band secret, restoring DoS protection independent of key secrecy | no configured-secret PSK in P1 | **Open — plan §10 open decision.** Until then, Vallum's `psk` is *public* and provides UKS-linking only, **not** the compromise-resilience a secret PSK would give. Named limitation. |
+| **D11** | the initiator's static key is sent as `1tk`, encrypted to the responder's static key, so the responder resolves *which peer* in one decapsulation | `PEER_HINT`: a sealed 8-byte fingerprint of the initiator's static **public** KEM key — `H("vallum/peer-hint/v1", frame([suite_id, spk_i]))` — sealed under `KDF(salt = "vallum/peer-hint/seal/v1", ikm = ss_A)`, framed as a fixed `len = 8 + aead_tag` field | **Covered — an addendum to P1, not a change to its argument.** The hint carries no key material and is *not* folded into `TR`; it changes no transcript and no derived key (the frozen vectors are byte-identical apart from `InitHello`'s length). It grants a passive observer nothing: it holds neither `σ_r` nor `ss_A`, so it cannot read the hint — D7's identity-hiding posture is *preserved*. It is deliberately **not authenticated** (anyone may encapsulate op A to the public `σ_r` and forge one), which is why `responder_accept` *checks* it against the resolved peer: a forged hint can only produce a handshake that fails at `InitConf`, never a session under the wrong peer. WireGuard hides the whole static key; Vallum ships a sealed index instead — 40 bytes on `InitHello` rather than ~2.4 kB, paid for by an explicit resolution step in the transport. |
 
 ---
 
@@ -274,11 +280,16 @@ current suite, not of the construction.**
    properties in the source paper, and the paper itself flags that the symbolic
    model's implicit KEM assumptions for identity hiding are *not* implied by the
    standard assumptions — an extra requirement on the CCA KEM. Vallum inherits
-   that caveat and must not assume identity hiding comes free.
+   that caveat and must not assume identity hiding comes free. The P6 peer hint
+   (D11) adds a *confidential* field, and only that: confidentiality of an index
+   is not identity hiding in this sense, and no authenticity is claimed for it.
 4. **No data-plane or ratchet claims.** P2/P4.
 5. **`psk` is not a secret.** D10. No compromise-resilience from it.
 6. **No timing/constant-time claim.** P1 asserts structure, not side-channel
    resistance; that is the `dudect`-style work in plan §8.
+7. **The peer hint is not an authentication or identification claim.** It is
+   bound into no transcript and proves nothing on its own (D11). Authentication
+   remains `conf_r`/`conf_i` (P1) plus the identity signature (P3).
 
 ---
 
@@ -293,6 +304,8 @@ current suite, not of the construction.**
 | initiator confirmation verified | `responder_process_conf` | `forged_confirmation_is_rejected` |
 | transcript binding prevents replay across handshakes | `transcript_*` | `a_responder_confirmation_cannot_be_replayed_from_another_handshake` |
 | suite degradation rejected | `expect_suite` | `suite_downgrade_is_rejected` |
+| peer hint names the initiator and is checked, not trusted | `handshake.rs::{peer_hint, responder_identify, responder_accept}` | `the_peer_hint_names_the_initiator_before_authentication`, `a_hint_that_names_another_peer_is_refused`, `a_responder_picks_the_right_peer_out_of_several` |
+| peer hint is sealed (no cleartext, no tampering, not strippable) | `handshake.rs::hint_crypt` | `the_hint_does_not_appear_in_cleartext`, `a_tampered_or_missing_hint_is_rejected` |
 | byte-exact protocol surface | all of the above | `frozen_vectors_match` |
 
 ---
