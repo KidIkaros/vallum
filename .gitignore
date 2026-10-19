@@ -1,4 +1,7 @@
 /target
+**/target/
+*.rpm
+*.deb
 
 # Runtime state and secrets
 *.pid
