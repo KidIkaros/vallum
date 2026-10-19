@@ -11,7 +11,7 @@ seal), P6.8 (the wire the numbers describe).
 
 ## 1. Method
 
-- Criterion 0.5.1, release profile, single-threaded.
+- Criterion 0.8.2, release profile, single-threaded.
 - Handshake: sample size 20, warm-up 0.5 s, measurement 2 s per benchmark.
 - Data plane: sample size 50, same windows.
 - Machine: Intel Core i7-10750H @ 2.60 GHz, Linux 7.0.0-38-generic, rustc 1.97.1,
@@ -38,24 +38,24 @@ Median time per stage. "Full" is one complete exchange: `InitHello` →
 
 | Suite | initiator_hello | responder_identify | responder_accept | initiator_process_resp | full |
 |---|---|---|---|---|---|
-| 0x0001 X25519+sntrup761 | 24.96 ms | 13.03 ms | 9.57 ms | 26.20 ms | 74.26 ms |
-| 0x0002 X25519+ML-KEM-768 | 502.9 µs | 357.1 µs | 695.5 µs | 828.2 µs | 2.45 ms |
-| 0x0003 tri-hybrid | 25.38 ms | 13.47 ms | 11.89 ms | 19.02 ms | 54.18 ms |
-| 0x0003 tri-hybrid, signed | 19.09 ms | 9.57 ms | 8.04 ms | 20.29 ms | 55.98 ms |
+| 0x0001 X25519+sntrup761 | 17.94 ms | 9.40 ms | 6.85 ms | 18.74 ms | 52.72 ms |
+| 0x0002 X25519+ML-KEM-768 | 358.6 µs | 251.6 µs | 504.6 µs | 581.1 µs | 1.81 ms |
+| 0x0003 tri-hybrid | 18.47 ms | 9.51 ms | 7.23 ms | 19.06 ms | 54.27 ms |
+| 0x0003 tri-hybrid, signed | 18.47 ms | 9.46 ms | 8.05 ms | 20.26 ms | 56.30 ms |
 
 **The number that matters is the gap between rows 2 and 3.** The tri-hybrid is
-dominated by sntrup761: the ML-KEM suite completes an exchange in 2.45 ms, the
-sntrup761 suites take 54–74 ms. The custom NTRU Prime implementation costs
-roughly 13 ms per decapsulation and 25 ms per keygen+encapsulation on this host —
+dominated by sntrup761: the ML-KEM suite completes an exchange in 1.81 ms, the
+sntrup761 suites take 53–55 ms. The custom NTRU Prime implementation costs
+roughly 9.4 ms per decapsulation and 18 ms per keygen+encapsulation on this host —
 two orders of magnitude above the reference sntrup761 figures (~0.1–0.2 ms). That
 is a property of the SDK implementation, not of the protocol: the same wire, the
 same schedule, with a different KEM leg is 20–30× cheaper. It is recorded here
-because a default suite that costs 50 ms per handshake is an operational fact,
+because a default suite that costs ~54 ms per handshake is an operational fact,
 and because it is the strongest argument for the code-based/alternative-suite
 work in §10.
 
 The signed row is not slower in the handshake stage because Falcon's cost is a
-verification (~0.3 ms) against a ~13 ms decapsulation; the signature's real cost
+verification (~0.3 ms) against a ~9.5 ms decapsulation; the signature's real cost
 is the wire (+1649 B per field) and the one-time keygen, both in
 `hybrid-identity.md`.
 
@@ -65,10 +65,10 @@ is the wire (+1649 B per field) and the one-time keygen, both in
 
 | Payload | seal | open | seal throughput | open throughput |
 |---|---|---|---|---|
-| 64 B | 937 ns | 850 ns | 65.1 MiB/s | 71.8 MiB/s |
-| 512 B | 2.00 µs | 1.86 µs | 243.6 MiB/s | 262.6 MiB/s |
-| 1380 B | 4.24 µs | 3.82 µs | 310.4 MiB/s | 344.3 MiB/s |
-| padded to 1400 | 4.10 µs | — | 325.9 MiB/s | — |
+| 64 B | 941 ns | 780 ns | 64.9 MiB/s | 78.2 MiB/s |
+| 512 B | 2.01 µs | 1.77 µs | 242.8 MiB/s | 276.0 MiB/s |
+| 1380 B | 4.07 µs | 3.93 µs | 323.2 MiB/s | 334.6 MiB/s |
+| padded to 1400 | 4.13 µs | — | 323.2 MiB/s | — |
 
 At the default inner MTU a data packet costs ~4 µs in each direction, so the
 crypto is not the bottleneck at any realistic packet rate; the padded seal costs

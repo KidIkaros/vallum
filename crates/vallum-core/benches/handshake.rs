@@ -13,7 +13,9 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use vallum_core::{
     initiator_hello, initiator_process_resp, responder_process_conf, responder_process_init,
     PeerIdentity, StaticIdentity,

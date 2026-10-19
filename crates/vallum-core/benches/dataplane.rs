@@ -9,7 +9,9 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use vallum_core::data::{establish, Receiver, Sender};
 use vallum_core::keys::Role;
 use vallum_core::{

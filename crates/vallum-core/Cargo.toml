@@ -18,7 +18,7 @@ vallum-crypto.workspace = true
 
 [dev-dependencies]
 vallum-crypto-sdk.workspace = true
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "handshake"

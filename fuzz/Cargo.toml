@@ -1,0 +1,52 @@
+[package]
+name = "vallum-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace: the fuzz crate builds with the nightly sanitizer and must
+# not join the main workspace (whose lints and stable toolchain are deliberate).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.vallum-core]
+path = "../crates/vallum-core"
+
+[dependencies.vallum-tunnel]
+path = "../crates/vallum-tunnel"
+
+[dependencies.vallum-crypto-sdk]
+path = "../crates/vallum-crypto-sdk"
+
+[[bin]]
+name = "message_parse"
+path = "fuzz_targets/message_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_decode"
+path = "fuzz_targets/handshake_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shaping"
+path = "fuzz_targets/shaping.rs"
+test = false
+doc = false
+bench = false

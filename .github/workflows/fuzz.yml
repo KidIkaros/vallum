@@ -1,0 +1,82 @@
+# Fuzzing: a smoke run on every change, a long run every night.
+#
+# The targets and their invariants are described in docs/proof/fuzzing.md.
+# `scripts/fuzz.sh` is the same gate locally; this workflow adds the corpus cache
+# and the artifact upload, which are the two things a crash needs to be
+# reproducible.
+#
+# Both repositories are checked out as siblings because the fuzz workspace's path
+# dependencies reach into the main workspace, which pins the SDK by path.
+
+name: fuzz
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  schedule:
+    # 03:17 UTC — off the hour, so it does not race every other nightly job.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }} (${{ github.event_name == 'schedule' && '900s' || '60s' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [message_parse, handshake_decode, replay, shaping]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vallum
+      - uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: vallum/fuzz/corpus/${{ matrix.target }}
+          key: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-${{ matrix.target }}-
+
+      - name: Run
+        working-directory: vallum
+        shell: bash
+        run: |
+          set -euo pipefail
+          seconds=60
+          if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
+          mkdir -p "fuzz/corpus/${{ matrix.target }}"
+          cp -n "fuzz/seeds/${{ matrix.target }}"/* "fuzz/corpus/${{ matrix.target }}"/ 2>/dev/null || true
+          cargo +nightly fuzz run "${{ matrix.target }}" -- \
+            -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10
+
+      - name: Upload any crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            vallum/fuzz/artifacts/${{ matrix.target }}
+            vallum/fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30
