@@ -68,9 +68,12 @@ tri-hybrid handshake single-packet.
 - **Cons**: NIST selected HQC instead in IR 8545. BIKE's IND-CCA security for
   long-term static keys depends on the decoder's low failure rate; weak-key and
   m-gathering analyses can exceed the allowed contribution, and the BIKE team's
-  2024 material still lists weak-key/error-floor open questions. Vallum's
-  code-based leg would be a long-term static KEM, so the ephemeral/IND-CPA
-  shortcut does not fit.
+  2024 material still lists weak-key/error-floor open questions. A 2026
+  deep-learning attack against the latest unprotected BGF reference
+  implementation recovered a private-key-dependent 16-bit sequence with 95.68%
+  perfect sequence recovery; it is not a full key recovery, but it demonstrates
+  continued implementation-leakage risk. Vallum's code-based leg would be a
+  long-term static KEM, so the ephemeral/IND-CPA shortcut does not fit.
 - **Why not**: not safe for Vallum's static-key model, not the selected
   standard, and would require decoder, key-binding, weak-key-filtering, DFR,
   and side-channel proof work before it could be reconsidered.
@@ -98,6 +101,8 @@ tri-hybrid handshake single-packet.
 - BIKE and SIDH are explicitly excluded rather than left as vague options.
 - BIKE's weak-key/decoder-failure constraint is recorded as a static-key
   mismatch, not merely as a NIST selection result.
+- BIKE's implementation-level leakage evidence is recorded without overstating
+  it as an algorithmic break.
 
 ### Negative
 - Vallum still has no non-lattice post-quantum leg.
@@ -109,10 +114,13 @@ tri-hybrid handshake single-packet.
 - HQC parameters may still change before FIPS 207 is final. Mitigation: track the
   draft, pin a final parameter set, and require vectors and audit before
   enabling it.
-- BIKE weak-key analyses may evolve. Mitigation: BIKE may only be reconsidered
-  if a standardized implementation demonstrates a decoder with an adequately
-  bounded failure rate, binds the public key into the ciphertext, filters weak
-  keys, and passes side-channel review; it remains excluded now.
+- BIKE weak-key and side-channel analyses may evolve. Mitigation: BIKE may only
+  be reconsidered if a standardized implementation demonstrates a decoder with
+  an adequately bounded failure rate, binds the public key into the ciphertext,
+  filters weak keys, and passes side-channel review; it remains excluded now.
+- Any code-based implementation, including HQC, may leak through power or
+  timing behavior. Mitigation: require constant-time properties, independent
+  side-channel review, and attack-surface documentation before SDK integration.
 - A future code-based primitive may receive damaging cryptanalysis. Mitigation:
   keep it optional, keep the current tri-hybrid default, and require vectors,
   benchmarks, audit, and Tamarin review before enabling it by default.
