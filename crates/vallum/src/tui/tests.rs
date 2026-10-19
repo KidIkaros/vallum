@@ -204,6 +204,124 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
 }
 
 #[test]
+fn narrow_dashboard_keeps_peer_traffic_and_security_state_visible() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let peer = super::app::PeerView {
+        name: "remote-build-runner".to_owned(),
+        fingerprint: "8899aabbccddeeff".to_owned(),
+        endpoint: "192.0.2.24:51820".to_owned(),
+        allowed_ips: vec!["10.7.0.2/32".to_owned()],
+        keepalive: Some(25),
+        tx_bytes: 2048,
+        rx_bytes: 1024,
+        preshared_key: true,
+        ..super::app::PeerView::default()
+    };
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer],
+        ..DeviceView::default()
+    });
+    let app = App::new(vec![interface]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw narrow dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("keepalive 25s"));
+    assert!(text.contains("handshake"));
+    assert!(text.contains("rx 1.0K / tx 2.0K"));
+    assert!(text.contains("PSK configured"));
+}
+
+#[test]
+fn expanded_peer_table_fits_ipv6_endpoints_and_transfer_totals() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let peers = vec![super::app::PeerView {
+        name: "field-laptop".to_owned(),
+        fingerprint: "7766554433221100".to_owned(),
+        endpoint: "[2001:db8::12]:51820".to_owned(),
+        allowed_ips: vec!["10.7.0.3/32".to_owned()],
+        last_handshake: Some((1_792_446_590, 0)),
+        tx_bytes: 72_000,
+        rx_bytes: 543_210,
+        epoch: 2,
+        ..super::app::PeerView::default()
+    }];
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers,
+        ..DeviceView::default()
+    });
+    let app = App::new(vec![interface]);
+    let mut terminal = Terminal::new(TestBackend::new(160, 36)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw wide dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("[2001:db8::12]:51820"));
+    assert!(text.contains("530.5K/70.3K"));
+}
+
+#[test]
+fn disconnected_control_marks_the_retained_snapshot_as_stale() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/tmp/vallum-control-socket-that-does-not-exist"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![interface]);
+    super::actions::refresh(&mut app);
+    assert!(app
+        .current()
+        .is_some_and(|interface| { interface.device.is_some() && interface.error.is_some() }));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw stale dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("STALE"));
+    assert!(text.contains("Peers (stale snapshot)"));
+}
+
+#[test]
 fn escape_closes_the_qr_modal() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut app = App::new(Vec::new());

@@ -22,12 +22,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
 fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     let compact = area.width < 130;
+    let stale_snapshot = app
+        .current()
+        .is_some_and(|interface| interface.device.is_some() && interface.error.is_some());
     let header_height = if app.interfaces.is_empty() {
         3
-    } else if compact {
-        5
+    } else if stale_snapshot {
+        6
     } else {
-        4
+        5
     };
     let chunks = Layout::vertical([
         Constraint::Length(header_height),
@@ -90,6 +93,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         })
         .collect();
     lines.push(Line::from(tabs));
+    if interface.device.is_some() && interface.error.is_some() {
+        lines.push(Line::from(Span::styled(
+            "STALE · control unavailable; showing last snapshot (r retries)",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    }
     match &interface.device {
         Some(device) => {
             if compact {
@@ -158,18 +167,20 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
 
 fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let Some(device) = app.current_device() else {
+        let message = app
+            .current()
+            .and_then(|interface| interface.error.as_deref())
+            .unwrap_or("No device data. Press r to retry.");
         frame.render_widget(
-            Paragraph::new("No device data. Press r to retry.")
-                .block(Block::default().borders(Borders::ALL).title("Peers")),
+            Paragraph::new(message).block(Block::default().borders(Borders::ALL).title("Peers")),
             area,
         );
         return;
     };
-    let expanded = area.width >= 160;
+    let expanded = area.width >= 101;
     let header = if expanded {
         Row::new(vec![
             "name",
-            "fingerprint",
             "endpoint",
             "allowed",
             "handshake",
@@ -189,7 +200,6 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
         if expanded {
             Row::new(vec![
                 Cell::from(peer.name.clone()),
-                Cell::from(peer.fingerprint.clone()),
                 Cell::from(peer.endpoint.clone()),
                 Cell::from(peer.allowed_ips.join(",")),
                 Cell::from(App::handshake_age(peer)),
@@ -208,10 +218,9 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     });
     let widths = if expanded {
         vec![
-            Constraint::Length(12),
-            Constraint::Length(16),
-            Constraint::Length(21),
-            Constraint::Length(18),
+            Constraint::Length(20),
+            Constraint::Length(24),
+            Constraint::Length(14),
             Constraint::Length(9),
             Constraint::Length(13),
             Constraint::Length(6),
@@ -225,19 +234,29 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Constraint::Length(15),
         ]
     };
+    let table_title = if app
+        .current()
+        .is_some_and(|interface| interface.error.is_some())
+    {
+        "Peers (stale snapshot)"
+    } else if expanded {
+        "Peers"
+    } else {
+        "Peers (select for details)"
+    };
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(if expanded {
-            "Peers"
-        } else {
-            "Peers (select for details)"
-        }))
+        .block(Block::default().borders(Borders::ALL).title(table_title))
         .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
     let mut state = TableState::default().with_selected(Some(app.peer_selected));
     frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if area.height < 11 {
+        draw_compact_details(frame, area, app);
+        return;
+    }
     let mut lines = Vec::new();
     if let Some(peer) = app.current_peer() {
         lines.push(Line::from(Span::styled(
@@ -301,6 +320,49 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("Details"))
             .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_compact_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lines = if let Some(peer) = app.current_peer() {
+        vec![
+            Line::from(format!("{} [{}]", peer.name, peer.fingerprint)),
+            Line::from(format!(
+                "endpoint {} · keepalive {}",
+                peer.endpoint,
+                peer.keepalive
+                    .map_or_else(|| "off".to_owned(), |value| format!("{value}s"))
+            )),
+            Line::from(format!("allowed {}", peer.allowed_ips.join(", "))),
+            Line::from(format!("handshake {}", App::handshake_age(peer))),
+            Line::from(format!(
+                "rx {} / tx {} · PSK {}",
+                bytes(peer.rx_bytes),
+                bytes(peer.tx_bytes),
+                if peer.preshared_key {
+                    "configured"
+                } else {
+                    "none"
+                }
+            )),
+        ]
+    } else {
+        let mut lines = vec![Line::from("No peer selected.")];
+        if let Some(device) = app.current_device() {
+            lines.push(Line::from(format!("device {}", device.interface)));
+            lines.push(Line::from(format!(
+                "offload {} · UDP batching {}",
+                on_off(device.offload),
+                on_off(device.batching)
+            )));
+        }
+        lines
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .wrap(Wrap { trim: true }),
         area,
     );
 }

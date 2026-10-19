@@ -39,7 +39,8 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
   age, rx/tx totals and rates, epoch, and PSK presence. Dataplane offload and
   UDP batching appear in the details pane. The table hides secondary columns on
   narrower terminals, and the dashboard switches to a stacked peer/detail
-  layout below 100 columns.
+  layout below 100 columns. If the control socket drops, the UI marks retained
+  data as a stale snapshot and `r` retries instead of presenting it as live.
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not
