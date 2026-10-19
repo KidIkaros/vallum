@@ -30,6 +30,16 @@ jobs:
         with:
           workspaces: vallum
 
+      - name: Check the tag matches the workspace version
+        working-directory: vallum
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="vallum") | .version')
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo version $version"
+            exit 1
+          }
+
       - name: Build the release binaries
         working-directory: vallum
         run: cargo build --release -p vallum -p vallum-quick
