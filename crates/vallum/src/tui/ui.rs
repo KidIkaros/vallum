@@ -60,7 +60,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Line::from("Start one with `vallum-quick up <config>` or pass --config/--control."),
         ];
         frame.render_widget(
-            Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Vallum")),
             area,
         );
         return;
