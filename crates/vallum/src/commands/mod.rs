@@ -4,5 +4,6 @@
 
 pub mod bench;
 pub mod control;
+pub mod doctor;
 pub mod keys;
 pub mod run;

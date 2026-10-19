@@ -27,6 +27,8 @@ toml = "0.8"
 
 # The CLI. A binary may exit on a bad argument; `clap` does that and prints why.
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6"
+serde_json = "1"
 
 # The one place randomness is allowed to come from the operating system. The
 # transport takes a `Randomness`, so the daemon is the only crate that binds that

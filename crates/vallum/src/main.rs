@@ -4,12 +4,13 @@
 
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use vallum::commands::bench::BenchArgs;
 use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
+use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
 use vallum::commands::run::RunArgs;
-use vallum::commands::{bench, control, keys, run};
+use vallum::commands::{bench, control, doctor, keys, run};
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +57,17 @@ enum Command {
     Showconf(ShowconfArgs),
     /// Measure the data plane's seal/open cost on this host.
     Bench(BenchArgs),
+    /// Check the platform, config, control socket, and helper tools.
+    Doctor(DoctorArgs),
+    /// Print a shell completion script.
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct CompletionsArgs {
+    /// The shell to generate for.
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 fn main() -> ExitCode {
@@ -71,6 +83,16 @@ fn main() -> ExitCode {
         Command::Syncconf(args) => control::syncconf(&args),
         Command::Showconf(args) => control::showconf(&args),
         Command::Bench(args) => bench::bench(&args),
+        Command::Doctor(args) => doctor::doctor(&args),
+        Command::Completions(args) => {
+            clap_complete::generate(
+                args.shell,
+                &mut Cli::command(),
+                "vallum",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

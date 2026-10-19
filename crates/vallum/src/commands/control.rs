@@ -2,7 +2,11 @@
 
 //! `show`, `showconf`, `setconf`, `addconf`, and `syncconf`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Args;
 use vallum_crypto::SharedSecret;
@@ -27,6 +31,18 @@ pub struct ShowArgs {
     /// Print the raw UAPI response.
     #[arg(long)]
     dump: bool,
+
+    /// Emit the secret-free JSON view.
+    #[arg(long)]
+    json: bool,
+
+    /// Refresh the view until Ctrl-C.
+    #[arg(long)]
+    watch: bool,
+
+    /// Refresh interval for `--watch`, in milliseconds.
+    #[arg(long, default_value = "1000", value_name = "MS")]
+    interval: u64,
 
     /// Print only one field (endpoints, allowed-ips, transfer, ...).
     #[arg(long, value_name = "FIELD")]
@@ -83,10 +99,27 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
 }
 
 pub fn show(args: &ShowArgs) -> Result<(), Error> {
+    if args.json && args.watch {
+        return Err(Error::Usage(
+            "`--json` and `--watch` are different modes; choose one".to_owned(),
+        ));
+    }
     let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    if args.watch {
+        return watch(&path, args);
+    }
     let reply = control::request(&path, "get=1\n")?;
     if args.dump {
         print!("{reply}");
+        return Ok(());
+    }
+    if args.json {
+        let response = crate::uapi::parse_response(&reply);
+        let value = crate::uapi::response_json(&response);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).map_err(|e| Error::Usage(e.to_string()))?
+        );
         return Ok(());
     }
     if let Some(field) = args.field.as_deref() {
@@ -97,6 +130,28 @@ pub fn show(args: &ShowArgs) -> Result<(), Error> {
         "{}",
         crate::uapi::render_human(&crate::uapi::parse_response(&reply))
     );
+    Ok(())
+}
+
+fn watch(path: &Path, args: &ShowArgs) -> Result<(), Error> {
+    let stop = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&stop))
+        .map_err(Error::Io)?;
+    let interval = Duration::from_millis(args.interval.max(100));
+    while !stop.load(Ordering::Relaxed) {
+        let reply = control::request(path, "get=1\n")?;
+        print!("\x1b[2J\x1b[H");
+        if let Some(field) = args.field.as_deref() {
+            print_field(&reply, field);
+        } else {
+            print!(
+                "{}",
+                crate::uapi::render_human(&crate::uapi::parse_response(&reply))
+            );
+        }
+        std::io::stdout().flush().map_err(Error::Io)?;
+        std::thread::sleep(interval);
+    }
     Ok(())
 }
 

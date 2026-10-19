@@ -658,6 +658,129 @@ fn escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Render a `set` request, the inverse of [`parse`].
+#[must_use]
+pub fn render_set(set: &Set) -> String {
+    let mut out = String::from("set=1\n");
+    if let Some(key) = set.private_key {
+        out.push_str(&format!("{}={}\n", field::PRIVATE_KEY, hex_encode(&key)));
+    }
+    if let Some(port) = set.listen_port {
+        out.push_str(&format!("{}={port}\n", field::LISTEN_PORT));
+    }
+    if let Some(mark) = set.fwmark {
+        out.push_str(&format!("{}={mark}\n", field::FWMARK));
+    }
+    if set.replace_peers {
+        out.push_str(&format!("{}=true\n", field::REPLACE_PEERS));
+    }
+    for peer in &set.peers {
+        if let Some(public_key) = &peer.public_key {
+            out.push_str(&format!(
+                "{}={}\n",
+                field::PUBLIC_KEY,
+                hex_encode(public_key)
+            ));
+        }
+        if let Some(psk) = peer.preshared_key {
+            let value = psk.map_or_else(|| "00".repeat(32), |key| hex_encode(&key));
+            out.push_str(&format!("{}={value}\n", field::PRESHARED_KEY));
+        }
+        if let Some(endpoint) = peer.endpoint {
+            match endpoint {
+                Some(address) => out.push_str(&format!("{}={address}\n", field::ENDPOINT)),
+                None => out.push_str(&format!("{}=(none)\n", field::ENDPOINT)),
+            }
+        }
+        if let Some(keepalive) = peer.keepalive {
+            out.push_str(&format!(
+                "{}={keepalive}\n",
+                field::PERSISTENT_KEEPALIVE_INTERVAL
+            ));
+        }
+        for prefix in &peer.allowed_ips {
+            out.push_str(&format!("{}={prefix}\n", field::ALLOWED_IP));
+        }
+        if peer.remove {
+            out.push_str(&format!("{}=true\n", field::REMOVE));
+        }
+        if peer.update_only {
+            out.push_str(&format!("{}=true\n", field::UPDATE_ONLY));
+        }
+        if peer.replace_allowed_ips {
+            out.push_str(&format!("{}=true\n", field::REPLACE_ALLOWED_IPS));
+        }
+    }
+    out
+}
+
+/// A secret-free JSON view of a `get` response.
+#[must_use]
+pub fn response_json(response: &Response) -> serde_json::Value {
+    let get = |key: &str| response.field(key).unwrap_or("");
+    let addresses: Vec<&str> = response
+        .device
+        .iter()
+        .filter(|(key, _)| key == field::VALLUM_ADDRESS)
+        .map(|(_, value)| value.as_str())
+        .collect();
+    let peers: Vec<serde_json::Value> = response
+        .peers
+        .iter()
+        .map(|peer| {
+            let peer_field = |key: &str| {
+                peer.iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_str())
+                    .unwrap_or("")
+            };
+            let allowed: Vec<&str> = peer
+                .iter()
+                .filter(|(key, _)| key == field::ALLOWED_IP)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            let last = peer_field(field::LAST_HANDSHAKE_TIME_SEC);
+            serde_json::json!({
+                "name": peer_field(field::VALLUM_NAME),
+                "fingerprint": peer_field(field::VALLUM_FINGERPRINT),
+                "public_line": peer_field(field::VALLUM_PUBLIC_LINE),
+                "endpoint": peer_field(field::ENDPOINT),
+                "allowed_ips": allowed,
+                "last_handshake": if last.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!({
+                        "sec": last.parse::<u64>().unwrap_or(0),
+                        "nsec": peer_field(field::LAST_HANDSHAKE_TIME_NSEC).parse::<u32>().unwrap_or(0),
+                    })
+                },
+                "tx_bytes": peer_field(field::TX_BYTES).parse::<u64>().unwrap_or(0),
+                "rx_bytes": peer_field(field::RX_BYTES).parse::<u64>().unwrap_or(0),
+                "keepalive": peer_field(field::PERSISTENT_KEEPALIVE_INTERVAL).parse::<u16>().ok(),
+                "epoch": peer_field(field::VALLUM_EPOCH).parse::<u64>().unwrap_or(0),
+                "preshared_key": !peer_field(field::PRESHARED_KEY).is_empty(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "interface": get(field::VALLUM_INTERFACE),
+        "listen_port": get(field::LISTEN_PORT).parse::<u16>().ok(),
+        "fwmark": get(field::FWMARK).parse::<u32>().ok(),
+        "suite": get(field::VALLUM_SUITE),
+        "fingerprint": get(field::VALLUM_FINGERPRINT),
+        "public_line": get(field::VALLUM_PUBLIC_LINE),
+        "addresses": addresses,
+        "offload": get(field::VALLUM_OFFLOAD) == "true",
+        "batching": get(field::VALLUM_BATCHING) == "true",
+        "capabilities": {
+            "set_private_key": get(field::VALLUM_CAN_SET_PRIVATE_KEY) == "true",
+            "set_listen_port": get(field::VALLUM_CAN_SET_LISTEN_PORT) == "true",
+            "set_fwmark": get(field::VALLUM_CAN_SET_FWMARK) == "true",
+        },
+        "peers": peers,
+    })
+}
+
 /// The success reply to a `set`.
 #[must_use]
 pub fn render_ok() -> String {
@@ -873,6 +996,54 @@ mod tests {
         assert!(parse("set=1\npublic_key=zz\n").is_err());
         assert!(parse("set=1\nallowed_ip=10.7.0.2/32\n").is_err());
         assert!(parse("set=1\nlisten_port=nope\n").is_err());
+    }
+
+    #[test]
+    fn a_set_renders_and_parses_back() {
+        let set = Set {
+            private_key: Some([0x11; 32]),
+            listen_port: Some(51820),
+            fwmark: Some(7),
+            replace_peers: true,
+            peers: vec![Peer {
+                public_key: Some(vec![0x22; 32]),
+                preshared_key: Some(Some([0x33; 32])),
+                endpoint: Some(Some("203.0.113.9:51820".parse().unwrap())),
+                keepalive: Some(25),
+                allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
+                remove: false,
+                update_only: true,
+                replace_allowed_ips: true,
+            }],
+        };
+        let text = render_set(&set);
+        assert_eq!(parse(&text), Ok(Request::Set(set)));
+    }
+
+    #[test]
+    fn the_json_view_has_no_secrets() {
+        let response = Response {
+            device: vec![
+                ("private_key".to_owned(), "aa".repeat(32)),
+                ("vallum_interface".to_owned(), "vallum0".to_owned()),
+                ("listen_port".to_owned(), "51820".to_owned()),
+                (
+                    "vallum_fingerprint".to_owned(),
+                    "0011223344556677".to_owned(),
+                ),
+            ],
+            peers: vec![vec![
+                ("vallum_name".to_owned(), "laptop".to_owned()),
+                ("preshared_key".to_owned(), "cc".repeat(32)),
+                ("tx_bytes".to_owned(), "10".to_owned()),
+            ]],
+        };
+        let json = response_json(&response);
+        let text = json.to_string();
+        assert!(!text.contains(&"aa".repeat(32)));
+        assert!(!text.contains(&"cc".repeat(32)));
+        assert_eq!(json["interface"], "vallum0");
+        assert_eq!(json["peers"][0]["preshared_key"], true);
     }
 
     #[test]
