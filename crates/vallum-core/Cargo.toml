@@ -18,3 +18,12 @@ vallum-crypto.workspace = true
 
 [dev-dependencies]
 vallum-crypto-sdk.workspace = true
+criterion = "0.5"
+
+[[bench]]
+name = "handshake"
+harness = false
+
+[[bench]]
+name = "dataplane"
+harness = false
