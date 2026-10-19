@@ -19,7 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -193,16 +193,31 @@ impl DatagramSocket for UdpTransport {
 /// socket and a short read timeout; after each timeout it compares the
 /// generation and, if it changed, reads from the new one. The old `Arc` drops
 /// when the last reader releases it.
+struct SocketState {
+    current: Arc<dyn DatagramSocket>,
+    generation: u64,
+}
+
+/// A socket that can be replaced while the reader is blocked on it.
+///
+/// `listen_port` and `fwmark` are runtime properties, so the daemon needs to
+/// swap the socket without restarting. The reader holds a clone of the current
+/// socket and a short read timeout; after each timeout it compares the
+/// generation and, if it changed, reads from the new one. The old `Arc` drops
+/// when the last reader releases it.
+///
+/// The socket and its generation are one value in one lock: a reader can never
+/// see a new socket with an old generation, or the reverse.
 pub struct SharedSocket {
-    current: Mutex<Arc<dyn DatagramSocket>>,
-    generation: AtomicU64,
+    state: Mutex<SocketState>,
 }
 
 impl std::fmt::Debug for SharedSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (generation, socket) = self.current();
         f.debug_struct("SharedSocket")
-            .field("generation", &self.generation())
-            .field("local_addr", &self.local_addr().ok())
+            .field("generation", &generation)
+            .field("local_addr", &socket.local_addr().ok())
             .finish()
     }
 }
@@ -212,34 +227,40 @@ impl SharedSocket {
     #[must_use]
     pub fn new(socket: Arc<dyn DatagramSocket>) -> Self {
         Self {
-            current: Mutex::new(socket),
-            generation: AtomicU64::new(0),
+            state: Mutex::new(SocketState {
+                current: socket,
+                generation: 0,
+            }),
         }
     }
 
     /// The current generation and socket.
     #[must_use]
     pub fn current(&self) -> (u64, Arc<dyn DatagramSocket>) {
-        let socket = match self.current.lock() {
-            Ok(current) => Arc::clone(&current),
-            Err(poisoned) => Arc::clone(&poisoned.into_inner()),
-        };
-        (self.generation.load(Ordering::Acquire), socket)
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.generation, Arc::clone(&state.current))
     }
 
     /// The current generation, without cloning the socket.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
     }
 
     /// Replace the socket and bump the generation.
     pub fn replace(&self, socket: Arc<dyn DatagramSocket>) {
-        match self.current.lock() {
-            Ok(mut current) => *current = socket,
-            Err(poisoned) => *poisoned.into_inner() = socket,
-        }
-        self.generation.fetch_add(1, Ordering::Release);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.current = socket;
+        state.generation = state.generation.wrapping_add(1);
     }
 
     /// Send a batch on the current socket.

@@ -232,10 +232,12 @@ pub fn run(
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
 
     // The control socket holds its own sender, so the channel is not closed by
-    // the readers going away; the loop still exits on the shutdown flag.
-    let control_context = control.as_ref().map(|server| server.context.clone());
-    if let Some(server) = &control {
-        control::serve(server.path.clone(), tx.clone(), shutdown.clone())?;
+    // the readers going away; the loop still exits on the shutdown flag. The
+    // context stays on this thread: the server thread only parses and forwards.
+    let mut control = control;
+    let control_path = control.as_ref().map(|server| server.path.clone());
+    if let Some(path) = &control_path {
+        control::serve(path.clone(), tx.clone(), shutdown.clone())?;
     }
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
@@ -258,8 +260,8 @@ pub fn run(
 
         let event = match rx.recv_timeout(tick) {
             Ok(Input::Control { request, reply }) => {
-                let body = match &control_context {
-                    Some(context) => control::handle(&mut device, context, request),
+                let body = match control.as_mut() {
+                    Some(server) => control::handle(&mut device, &mut server.context, request),
                     None => crate::uapi::render_errno(38), // ENOSYS
                 };
                 let _ = reply.send(body);
@@ -351,8 +353,8 @@ pub fn run(
         }
     }
 
-    if let Some(server) = &control {
-        let _ = std::fs::remove_file(&server.path);
+    if let Some(path) = &control_path {
+        let _ = std::fs::remove_file(path);
     }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();

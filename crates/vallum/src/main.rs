@@ -10,8 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::AtomicU32;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, Parser, Subcommand};
@@ -309,16 +308,16 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             budget: resolved.outer_budget,
             control: resolved.control.clone().map(|path| control::ControlServer {
                 path,
-                context: Arc::new(control::ControlContext {
+                context: control::ControlContext {
                     interface: interface_name,
                     addresses: resolved.addresses.clone(),
-                    private_key: seed,
+                    private_key: SharedSecret::new(seed),
                     private_key_path: key_path.clone(),
-                    listen: Mutex::new(bound),
-                    fwmark: AtomicU32::new(resolved.fwmark),
+                    listen: bound,
+                    fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),
                     suite,
-                }),
+                },
             }),
         },
         &mut rng,

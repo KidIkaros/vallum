@@ -16,9 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -43,7 +42,7 @@ const ETIMEDOUT: i32 = 110;
 /// What the control plane needs to describe the device.
 pub struct ControlContext {
     /// The private-key seed, as the daemon holds it.
-    pub private_key: [u8; 32],
+    pub private_key: SharedSecret,
     /// The path the seed was read from, for a config export.
     pub private_key_path: PathBuf,
     /// The kernel interface name.
@@ -51,9 +50,9 @@ pub struct ControlContext {
     /// The interface addresses.
     pub addresses: Vec<vallum_tunnel::Prefix>,
     /// The bound UDP address.
-    pub listen: Mutex<SocketAddr>,
+    pub listen: SocketAddr,
     /// The socket mark.
-    pub fwmark: AtomicU32,
+    pub fwmark: u32,
     /// The swappable socket, for a runtime rebind.
     pub socket: Arc<crate::net::SharedSocket>,
     /// The suite, for a runtime identity change.
@@ -63,9 +62,9 @@ pub struct ControlContext {
 impl fmt::Debug for ControlContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ControlContext")
-            .field("listen", &self.listen.lock().ok().map(|v| *v))
-            .field("fwmark", &self.fwmark.load(Ordering::Relaxed))
-            .field("private_key", &"<redacted>")
+            .field("listen", &self.listen)
+            .field("fwmark", &self.fwmark)
+            .field("private_key", &self.private_key)
             .finish_non_exhaustive()
     }
 }
@@ -75,8 +74,8 @@ impl fmt::Debug for ControlContext {
 pub struct ControlServer {
     /// The path to bind.
     pub path: PathBuf,
-    /// The context used to answer `get`.
-    pub context: Arc<ControlContext>,
+    /// The context used to answer `get`; owned by the loop.
+    pub context: ControlContext,
 }
 
 /// Bind the socket and serve requests until shutdown.
@@ -161,10 +160,13 @@ pub fn request(path: &Path, body: &str) -> Result<String, crate::error::Error> {
 
 /// Answer one request against the device.
 #[must_use]
-pub fn handle(device: &mut Device, context: &ControlContext, request: Request) -> String {
+pub fn handle(device: &mut Device, context: &mut ControlContext, request: Request) -> String {
     match request {
         Request::Get => uapi::render_get(&snapshot(device, context)),
-        Request::Set(set) => apply(device, context, set),
+        Request::Set(set) => match apply(device, context, set) {
+            Ok(()) => uapi::render_ok(),
+            Err(errno) => uapi::render_errno(errno),
+        },
     }
 }
 
@@ -192,20 +194,15 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             epoch: device.epoch(id).unwrap_or(0),
         });
     }
-    let listen = *context
-        .listen
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let fwmark = context.fwmark.load(Ordering::Acquire);
     uapi::DeviceState {
         interface: context.interface.clone(),
-        private_key: context.private_key,
+        private_key: context.private_key.clone(),
         private_key_path: context.private_key_path.display().to_string(),
         public_key: device.public_key().as_bytes().to_vec(),
         public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
         fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
-        listen,
-        fwmark,
+        listen: context.listen,
+        fwmark: context.fwmark,
         suite: device.suite_id(),
         addresses: context.addresses.clone(),
         offload: false,
@@ -219,7 +216,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
     }
 }
 
-fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
+fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<(), i32> {
     if let Some(seed) = set.private_key {
         let identity = if device.has_signing() {
             StaticIdentity::generate_with_signing(&*context.suite, &seed)
@@ -229,16 +226,13 @@ fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
         };
         match identity {
             Ok(identity) => device.set_identity(identity),
-            Err(_) => return uapi::render_errno(EINVAL),
+            Err(_) => return Err(EINVAL),
         }
     }
     // A device-level change is a rebind: bind the new socket first, and only
     // swap it in once it exists. A failure leaves the running socket untouched.
-    let current_listen = *context
-        .listen
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let current_mark = context.fwmark.load(Ordering::Acquire);
+    let current_listen = context.listen;
+    let current_mark = context.fwmark;
     let desired_port = set.listen_port.unwrap_or(current_listen.port());
     let desired_mark = set.fwmark.unwrap_or(current_mark);
     if desired_port != current_listen.port() || desired_mark != current_mark {
@@ -247,13 +241,10 @@ fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
             Ok(socket) => {
                 let bound = socket.local_addr().unwrap_or(address);
                 context.socket.replace(Arc::new(socket));
-                *context
-                    .listen
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = bound;
-                context.fwmark.store(desired_mark, Ordering::Release);
+                context.listen = bound;
+                context.fwmark = desired_mark;
             }
-            Err(error) => return uapi::render_errno(errno_for(&error)),
+            Err(error) => return Err(errno_for(&error)),
         }
     }
     if set.replace_peers {
@@ -261,11 +252,9 @@ fn apply(device: &mut Device, context: &ControlContext, set: Set) -> String {
     }
     let expected_key_len = context.suite.sizes().kem_pk;
     for peer in set.peers {
-        if let Err(errno) = apply_peer(device, peer, expected_key_len) {
-            return uapi::render_errno(errno);
-        }
+        apply_peer(device, peer, expected_key_len)?;
     }
-    uapi::render_ok()
+    Ok(())
 }
 
 fn errno_for(error: &io::Error) -> i32 {
@@ -359,10 +348,10 @@ mod tests {
         ControlContext {
             interface: "vallum0".to_owned(),
             addresses: Vec::new(),
-            private_key: [9u8; 32],
+            private_key: SharedSecret::new([9u8; 32]),
             private_key_path: PathBuf::from("test.key"),
-            listen: Mutex::new(listen),
-            fwmark: AtomicU32::new(0),
+            listen,
+            fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
         }
@@ -376,16 +365,16 @@ mod tests {
         let mut rng = ZeroRng;
         let mut device =
             Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
-        let context = context(suite);
+        let mut context = context(suite);
 
         let body = format!(
             "set=1\npublic_key={}\nallowed_ip=10.7.0.2/32\n",
             crate::keys::hex_encode(peer.public().as_bytes())
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
 
-        let reply = handle(&mut device, &context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get);
         assert!(reply.contains("allowed_ip=10.7.0.2/32"));
         assert!(reply.contains("vallum_epoch=0"));
     }
@@ -398,18 +387,18 @@ mod tests {
         let mut rng = ZeroRng;
         let mut device =
             Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
-        let context = context(suite);
+        let mut context = context(suite);
         let key = crate::keys::hex_encode(peer.public().as_bytes());
 
         let add = uapi::parse(&format!(
             "set=1\npublic_key={key}\nallowed_ip=10.7.0.2/32\n"
         ))
         .expect("a legal set");
-        assert!(handle(&mut device, &context, add).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
         let remove =
             uapi::parse(&format!("set=1\npublic_key={key}\nremove=true\n")).expect("a legal set");
-        assert!(handle(&mut device, &context, remove).contains("errno=0"));
-        let reply = handle(&mut device, &context, Request::Get);
+        assert!(handle(&mut device, &mut context, remove).contains("errno=0"));
+        let reply = handle(&mut device, &mut context, Request::Get);
         assert!(!reply.contains(&format!("public_key={key}")));
     }
 
@@ -420,13 +409,13 @@ mod tests {
         let mut rng = ZeroRng;
         let mut device =
             Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
-        let context = context(suite);
+        let mut context = context(suite);
         let before = context.socket.generation();
 
         let request = uapi::parse("set=1\nlisten_port=0\n").expect("a legal set");
-        assert!(handle(&mut device, &context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
         assert!(context.socket.generation() > before);
-        assert_ne!(context.listen.lock().expect("listen").port(), 0);
+        assert_ne!(context.listen.port(), 0);
     }
 
     #[test]
@@ -437,12 +426,12 @@ mod tests {
         let mut rng = ZeroRng;
         let mut device =
             Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
-        let context = context(suite);
+        let mut context = context(suite);
         let body = format!(
             "set=1\npublic_key={}\nupdate_only=true\n",
             crate::keys::hex_encode(peer.public().as_bytes())
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &context, request).contains("errno=2"));
+        assert!(handle(&mut device, &mut context, request).contains("errno=2"));
     }
 }

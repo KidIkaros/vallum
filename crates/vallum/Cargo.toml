@@ -52,6 +52,9 @@ netlink-sys = "0.9"
 rustix = { version = "1", features = ["net", "time"] }
 
 [dev-dependencies]
+# Property tests for the UAPI codec: a parser on a socket boundary should be
+# exercised with more than the examples we thought of.
+proptest = "1.6"
 # The gate drives the real stack: it builds the config from TOML, expands keys
 # the way the CLI does, and runs two daemons against an in-process network. That
 # means the test names the same lower crates the daemon does.

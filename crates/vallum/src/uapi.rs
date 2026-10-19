@@ -11,6 +11,7 @@
 
 use std::net::SocketAddr;
 
+use vallum_crypto::SharedSecret;
 use vallum_tunnel::Prefix;
 
 use crate::keys::{hex_decode, hex_encode};
@@ -209,7 +210,7 @@ pub struct DeviceState {
     /// The kernel interface name.
     pub interface: String,
     /// The private-key seed, as the daemon holds it.
-    pub private_key: [u8; 32],
+    pub private_key: SharedSecret,
     /// The path the seed was read from, for a config export.
     pub private_key_path: String,
     /// The KEM public key.
@@ -280,7 +281,10 @@ pub struct PeerState {
 #[must_use]
 pub fn render_get(state: &DeviceState) -> String {
     let mut out = String::new();
-    out.push_str(&format!("private_key={}\n", hex_encode(&state.private_key)));
+    out.push_str(&format!(
+        "private_key={}\n",
+        hex_encode(state.private_key.as_bytes())
+    ));
     out.push_str(&format!(
         "vallum_private_key_path={}\n",
         state.private_key_path
@@ -543,6 +547,150 @@ pub fn render_errno(errno: i32) -> String {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn a_prefix() -> impl Strategy<Value = Prefix> {
+        prop::sample::select(vec![
+            "10.7.0.1/24",
+            "10.7.0.2/32",
+            "0.0.0.0/0",
+            "fd00:7::1/64",
+            "fd00:7::2/128",
+        ])
+        .prop_map(|text| text.parse().expect("a valid prefix"))
+    }
+
+    fn an_address() -> impl Strategy<Value = SocketAddr> {
+        (0u16..=65535).prop_map(|port| SocketAddr::from(([127, 0, 0, 1], port)))
+    }
+
+    fn a_name() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9._:/-]{0,32}"
+    }
+
+    fn a_peer() -> impl Strategy<Value = PeerState> {
+        (
+            a_name(),
+            proptest::collection::vec(any::<u8>(), 0..64),
+            a_name(),
+            prop::array::uniform8(any::<u8>()),
+            prop::option::of(prop::array::uniform32(any::<u8>())),
+            prop::option::of(an_address()),
+            prop::option::of((any::<u64>(), any::<u32>())),
+            any::<u64>(),
+            any::<u64>(),
+            prop::option::of(any::<u16>()),
+            proptest::collection::vec(a_prefix(), 0..3),
+            any::<u64>(),
+        )
+            .prop_map(
+                |(
+                    name,
+                    public_key,
+                    public_line,
+                    fingerprint,
+                    preshared_key,
+                    endpoint,
+                    last_handshake,
+                    tx_bytes,
+                    rx_bytes,
+                    keepalive,
+                    allowed_ips,
+                    epoch,
+                )| PeerState {
+                    name,
+                    public_key,
+                    public_line,
+                    fingerprint,
+                    preshared_key,
+                    endpoint,
+                    last_handshake,
+                    tx_bytes,
+                    rx_bytes,
+                    keepalive,
+                    allowed_ips,
+                    epoch,
+                },
+            )
+    }
+
+    fn a_state() -> impl Strategy<Value = DeviceState> {
+        (
+            a_name(),
+            prop::array::uniform32(any::<u8>()),
+            proptest::collection::vec(any::<u8>(), 0..64),
+            a_name(),
+            prop::array::uniform8(any::<u8>()),
+            an_address(),
+            any::<u32>(),
+            any::<u16>(),
+            proptest::collection::vec(a_prefix(), 0..3),
+            (any::<bool>(), any::<bool>(), any::<bool>()),
+            proptest::collection::vec(a_peer(), 0..3),
+        )
+            .prop_map(
+                |(
+                    interface,
+                    seed,
+                    public_key,
+                    public_line,
+                    fingerprint,
+                    listen,
+                    fwmark,
+                    suite,
+                    addresses,
+                    (set_private_key, set_listen_port, set_fwmark),
+                    peers,
+                )| DeviceState {
+                    interface,
+                    private_key: SharedSecret::new(seed),
+                    private_key_path: "test.key".to_owned(),
+                    public_key,
+                    public_line,
+                    fingerprint,
+                    listen,
+                    fwmark,
+                    suite,
+                    addresses,
+                    offload: false,
+                    batching: false,
+                    capabilities: Capabilities {
+                        set_private_key,
+                        set_listen_port,
+                        set_fwmark,
+                    },
+                    peers,
+                },
+            )
+    }
+
+    proptest! {
+        #[test]
+        fn parse_never_panics(text in ".*") {
+            let _ = parse(&text);
+        }
+
+        #[test]
+        fn parse_response_never_panics(text in ".*") {
+            let _ = parse_response(&text);
+        }
+
+        #[test]
+        fn a_get_response_round_trips(state in a_state()) {
+            let response = parse_response(&render_get(&state));
+            let port = state.listen.port().to_string();
+            let fwmark = state.fwmark.to_string();
+            prop_assert_eq!(response.peers.len(), state.peers.len());
+            prop_assert_eq!(response.field("listen_port"), Some(port.as_str()));
+            prop_assert_eq!(response.field("vallum_interface"), Some(state.interface.as_str()));
+            prop_assert_eq!(response.field("fwmark"), Some(fwmark.as_str()));
+            for (index, peer) in state.peers.iter().enumerate() {
+                let tx = peer.tx_bytes.to_string();
+                prop_assert_eq!(response.peer_field(index, "vallum_name"), Some(peer.name.as_str()));
+                prop_assert_eq!(response.peer_field(index, "tx_bytes"), Some(tx.as_str()));
+            }
+        }
+    }
 
     #[test]
     fn a_get_is_one_line() {
@@ -604,7 +752,7 @@ mod tests {
     fn a_get_response_is_parseable_by_eye_and_ends_with_errno() {
         let state = DeviceState {
             interface: "vallum0".to_owned(),
-            private_key: [1u8; 32],
+            private_key: SharedSecret::new([1u8; 32]),
             private_key_path: "test.key".to_owned(),
             public_key: vec![2u8; 32],
             public_line: "vallum1:0003:02:-".to_owned(),
@@ -648,7 +796,7 @@ mod tests {
     fn a_response_splits_device_and_peers() {
         let state = DeviceState {
             interface: "vallum0".to_owned(),
-            private_key: [1u8; 32],
+            private_key: SharedSecret::new([1u8; 32]),
             private_key_path: "test.key".to_owned(),
             public_key: vec![2u8; 32],
             public_line: "vallum1:0003:02:-".to_owned(),
