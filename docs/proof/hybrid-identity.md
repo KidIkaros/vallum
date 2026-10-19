@@ -258,10 +258,12 @@ public key, so there is no artefact a third party can check. Vallum's document i
 such an artefact, and the binding it forges — KEM key ↔ signing key — is the one
 the handshake then re-proves per session by signing `TR`.
 
-What this does **not** include: no revocation, no validity window, no name
-constraints, no chain depth. It is one signature over one binding. A deployment
-that needs revocation has to supply it (the label is free-form for exactly this
-reason). Stated, not implied.
+What this does **not** include: no revocation, no name constraints, no chain
+depth. It is one signature over one binding. **H8 added a validity window**
+(`not_before`/`not_after`, inside the signed body); see
+[`identity-validity.md`](identity-validity.md). Revocation is still out of scope —
+a deployment that needs it has to supply it (the label is free-form for exactly
+this reason). Stated, not implied.
 
 ---
 
@@ -306,7 +308,8 @@ identity, never per handshake**: `sign_keygen` goes through the SDK's
 2. **No new hardness assumption** — but also **no new hardness theorem**. §3.1 is
    key derivation, not a dual-use theorem; the security of the identity is the
    security of the hybrid signature (`min(Ed25519, Falcon-1024)`) plus the KDF.
-3. **No revocation / expiry / name constraints.** §5.
+3. **No revocation or name constraints.** §5. H8 added a signed validity window;
+   revocation remains out of scope.
 4. **No privacy.** The identity signature reveals *who* is talking to an observer
    who can guess the candidate public key (the signature is not encrypted; the
    PKI is not anonymous). PQ-WireGuard's identity hiding is a different property

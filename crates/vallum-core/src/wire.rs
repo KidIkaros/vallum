@@ -180,6 +180,10 @@ pub mod tag {
     pub const KEM_PUBLIC: u16 = 0x0022;
     /// A signing public key inside an identity document (P3).
     pub const SIGN_PUBLIC: u16 = 0x0023;
+    /// An identity document's `not_before`, unix seconds (H8).
+    pub const NOT_BEFORE: u16 = 0x0024;
+    /// An identity document's `not_after`, unix seconds, exclusive (H8).
+    pub const NOT_AFTER: u16 = 0x0025;
     /// WireGuard-style `mac1` cookie (P2).
     pub const MAC1: u16 = 0x0030;
     /// WireGuard-style `mac2` cookie (P2).

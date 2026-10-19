@@ -314,7 +314,40 @@ pub struct IdentityDocument {
     label: Vec<u8>,
     kem: KemPublicKey,
     signing: SignPublicKey,
+    /// The window this document asserts, in unix seconds.
+    validity: Validity,
     signature: Vec<u8>,
+}
+
+/// The validity window of an identity document, in unix seconds.
+///
+/// `not_before` is inclusive and `not_after` exclusive, the same shape TLS
+/// certificates use. The core is clock-free: the caller supplies `now`, exactly
+/// as the handshake takes a caller-supplied `Tai64n`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Validity {
+    /// The first second at which the document is valid.
+    pub not_before: u64,
+    /// The first second at which it is **no longer** valid.
+    pub not_after: u64,
+}
+
+impl Validity {
+    /// A window. An empty window (`not_before >= not_after`) is legal to build
+    /// and never valid — issuing one is a caller bug the verifier refuses.
+    #[must_use]
+    pub fn new(not_before: u64, not_after: u64) -> Self {
+        Self {
+            not_before,
+            not_after,
+        }
+    }
+
+    /// Whether `now` falls inside the window.
+    #[must_use]
+    pub fn contains(&self, now: u64) -> bool {
+        self.not_before <= now && now < self.not_after
+    }
 }
 
 impl IdentityDocument {
@@ -328,12 +361,14 @@ impl IdentityDocument {
         label: &[u8],
         kem: KemPublicKey,
         signing: SignPublicKey,
+        validity: Validity,
         issuer: &SignSecretKey,
     ) -> Result<Self, HandshakeError> {
         let mut doc = Self {
             label: label.to_vec(),
             kem,
             signing,
+            validity,
             signature: Vec::new(),
         };
         let input = doc.signature_input(suite.suite_id());
@@ -351,6 +386,7 @@ impl IdentityDocument {
         suite: &dyn CryptoSuite,
         identity: &StaticIdentity,
         label: &[u8],
+        validity: Validity,
     ) -> Result<Self, HandshakeError> {
         let signing = identity
             .signing()
@@ -360,6 +396,7 @@ impl IdentityDocument {
             label,
             identity.public().clone(),
             signing.public().clone(),
+            validity,
             signing.secret(),
         )
     }
@@ -369,6 +406,8 @@ impl IdentityDocument {
             IDENTITY_DOC_DOMAIN,
             &suite_id.to_be_bytes(),
             &self.label,
+            &self.validity.not_before.to_be_bytes(),
+            &self.validity.not_after.to_be_bytes(),
             self.kem.as_bytes(),
             self.signing.as_bytes(),
         ])
@@ -385,9 +424,33 @@ impl IdentityDocument {
     }
 
     /// Whether this document is self-signed (its own signing key issued it).
+    ///
+    /// Structural only: it says nothing about the validity window.
     #[must_use]
     pub fn is_self_signed(&self, suite: &dyn CryptoSuite) -> bool {
         self.is_valid(suite, &self.signing)
+    }
+
+    /// Whether `issuer` signed this document **and** `now_unix` is inside its
+    /// window.
+    ///
+    /// Acceptance must use this, not [`Self::is_valid`]: the latter is the
+    /// structural check, and a valid signature over an expired window is still
+    /// an expired document.
+    #[must_use]
+    pub fn is_valid_at(
+        &self,
+        suite: &dyn CryptoSuite,
+        issuer: &SignPublicKey,
+        now_unix: u64,
+    ) -> bool {
+        self.is_valid(suite, issuer) && self.validity.contains(now_unix)
+    }
+
+    /// The window this document asserts.
+    #[must_use]
+    pub fn validity(&self) -> Validity {
+        self.validity
     }
 
     /// The document label — the identity text it asserts.
@@ -429,6 +492,8 @@ impl IdentityDocument {
         };
         let mut builder = MessageBuilder::new(header);
         builder.field(tag::IDENTITY_LABEL, &self.label)?;
+        builder.field(tag::NOT_BEFORE, &self.validity.not_before.to_be_bytes())?;
+        builder.field(tag::NOT_AFTER, &self.validity.not_after.to_be_bytes())?;
         builder.field(tag::KEM_PUBLIC, self.kem.as_bytes())?;
         builder.field(tag::SIGN_PUBLIC, self.signing.as_bytes())?;
         builder.field(tag::IDENTITY_SIG, &self.signature)?;
@@ -447,28 +512,47 @@ impl IdentityDocument {
         message.expect_type(MessageType::IdentityDoc)?;
         Ok(Self {
             label: message.require(tag::IDENTITY_LABEL)?.to_vec(),
+            // Both are required: a document without a window is refused rather
+            // than read as "valid forever". There are no deployed documents, so
+            // the fail-closed choice costs nothing and removes the weakest
+            // possible default.
+            validity: Validity::new(
+                u64::from_be_bytes(message.require_array::<8>(tag::NOT_BEFORE)?),
+                u64::from_be_bytes(message.require_array::<8>(tag::NOT_AFTER)?),
+            ),
             kem: KemPublicKey::new(message.require(tag::KEM_PUBLIC)?.to_vec()),
             signing: SignPublicKey::new(message.require(tag::SIGN_PUBLIC)?.to_vec()),
             signature: message.require(tag::IDENTITY_SIG)?.to_vec(),
         })
     }
 
-    /// Validate against `issuer` and turn the document into a configurable peer.
+    /// Validate against `issuer`, check the window, and turn the document into a
+    /// configurable peer.
     ///
     /// This is the certificate path in one call: the peer is trusted only if the
-    /// issuer signed *this* binding of KEM key and signing key.
+    /// issuer signed *this* binding of KEM key and signing key, **and** `now_unix`
+    /// is inside the window. The clock is the caller's; the core has none.
     ///
     /// # Errors
     ///
     /// [`HandshakeError::IdentityInvalid`] if the issuer's signature does not
-    /// verify.
+    /// verify, [`HandshakeError::IdentityNotYetValid`] if `now_unix` is before
+    /// the window, or [`HandshakeError::IdentityExpired`] if it is at or past the
+    /// end.
     pub fn to_peer(
         &self,
         suite: &dyn CryptoSuite,
         issuer: &SignPublicKey,
+        now_unix: u64,
     ) -> Result<PeerIdentity, HandshakeError> {
         if !self.is_valid(suite, issuer) {
             return Err(HandshakeError::IdentityInvalid);
+        }
+        if now_unix < self.validity.not_before {
+            return Err(HandshakeError::IdentityNotYetValid);
+        }
+        if now_unix >= self.validity.not_after {
+            return Err(HandshakeError::IdentityExpired);
         }
         Ok(PeerIdentity::with_signing(
             self.kem.clone(),
@@ -486,6 +570,13 @@ mod tests {
     fn suite() -> SdkSuite {
         SdkSuite::tri_hybrid()
     }
+
+    /// A wide window around `NOW`, so the tests are not clock-dependent.
+    const VALIDITY: Validity = Validity {
+        not_before: 1_000,
+        not_after: 4_000_000_000,
+    };
+    const NOW: u64 = 2_000;
 
     #[test]
     fn one_seed_yields_independent_kem_and_signing_keys() {
@@ -565,7 +656,7 @@ mod tests {
     fn identity_document_round_trips_and_verifies() {
         let suite = suite();
         let id = StaticIdentity::generate_with_signing(&suite, &[0x31u8; 32]).unwrap();
-        let doc = IdentityDocument::self_sign(&suite, &id, b"alice@example").unwrap();
+        let doc = IdentityDocument::self_sign(&suite, &id, b"alice@example", VALIDITY).unwrap();
 
         assert_eq!(doc.label(), b"alice@example");
         assert_eq!(doc.kem().as_bytes(), id.public().as_bytes());
@@ -581,7 +672,7 @@ mod tests {
         assert!(decoded.is_self_signed(&suite));
 
         // A peer configured from the document carries both halves.
-        let peer = decoded.to_peer(&suite, doc.signing()).unwrap();
+        let peer = decoded.to_peer(&suite, doc.signing(), NOW).unwrap();
         assert_eq!(peer.kem().as_bytes(), id.public().as_bytes());
         assert_eq!(
             peer.signing().unwrap().as_bytes(),
@@ -593,7 +684,7 @@ mod tests {
     fn a_tampered_document_is_rejected() {
         let suite = suite();
         let id = StaticIdentity::generate_with_signing(&suite, &[0x41u8; 32]).unwrap();
-        let doc = IdentityDocument::self_sign(&suite, &id, b"bob").unwrap();
+        let doc = IdentityDocument::self_sign(&suite, &id, b"bob", VALIDITY).unwrap();
 
         // Swap in a different KEM key: the issuer's signature no longer covers it.
         let other = StaticIdentity::generate_with_signing(&suite, &[0x42u8; 32]).unwrap();
@@ -604,12 +695,13 @@ mod tests {
             doc.signing().clone(),
             // The attacker does not hold the issuer's secret, so it signs with
             // its own — which is not the document's signing key.
+            VALIDITY,
             other.signing().unwrap().secret(),
         )
         .unwrap();
         assert!(!forged.is_self_signed(&suite));
         assert!(matches!(
-            forged.to_peer(&suite, doc.signing()),
+            forged.to_peer(&suite, doc.signing(), NOW),
             Err(HandshakeError::IdentityInvalid)
         ));
 
@@ -623,7 +715,7 @@ mod tests {
         // An identity without a signing half cannot self-sign.
         let kem_only = StaticIdentity::generate(&suite, &[0x43u8; 32]).unwrap();
         assert!(matches!(
-            IdentityDocument::self_sign(&suite, &kem_only, b"x"),
+            IdentityDocument::self_sign(&suite, &kem_only, b"x", VALIDITY),
             Err(HandshakeError::NoSigningIdentity)
         ));
     }
@@ -632,7 +724,7 @@ mod tests {
     fn a_document_with_a_missing_field_is_a_framing_error() {
         let suite = suite();
         let id = StaticIdentity::generate_with_signing(&suite, &[0x51u8; 32]).unwrap();
-        let doc = IdentityDocument::self_sign(&suite, &id, b"carol").unwrap();
+        let doc = IdentityDocument::self_sign(&suite, &id, b"carol", VALIDITY).unwrap();
         let bytes = doc.encode(suite.suite_id()).unwrap();
 
         // Rebuild without the signature field.

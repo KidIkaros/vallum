@@ -22,7 +22,7 @@ use vallum_core::wire::{tag, Message, MessageBuilder};
 use vallum_core::{
     initiator_hello, initiator_process_resp, resp_tag, responder_process_conf,
     responder_process_init, HandshakeError, IdentityDocument, PeerIdentity, SessionKeys,
-    StaticIdentity, RESP_TAG_SIZE,
+    StaticIdentity, Validity, RESP_TAG_SIZE,
 };
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
@@ -38,6 +38,13 @@ const R_IDX: u32 = 0x2222_2222;
 /// binding, this test fails rather than silently following.
 const RESP_DOMAIN: &[u8] = b"vallum/identity/resp/v1";
 const INIT_DOMAIN: &[u8] = b"vallum/identity/init/v1";
+
+/// A wide window around `NOW`, so these tests are not clock-dependent.
+const VALIDITY: Validity = Validity {
+    not_before: 1_000,
+    not_after: 4_000_000_000,
+};
+const NOW: u64 = 2_000;
 
 /// A KEM + hybrid-signature identity.
 fn identity(suite: &SdkSuite, seed: &[u8; 32]) -> StaticIdentity {
@@ -603,6 +610,76 @@ fn a_signature_does_not_replay_across_sessions() {
 // ── identity documents (the certificate path) ────────────────────────
 
 #[test]
+fn a_document_is_only_valid_inside_its_window() {
+    let suite = SdkSuite::tri_hybrid();
+    let ca = identity(&suite, &[0x81u8; 32]);
+    let subject = identity(&suite, &[0x82u8; 32]);
+    let ca_pk = ca.signing_public().unwrap();
+    let validity = Validity::new(1_000, 2_000);
+
+    let doc = IdentityDocument::issue(
+        &suite,
+        b"subject@example",
+        subject.public().clone(),
+        subject.signing_public().unwrap().clone(),
+        validity,
+        ca.signing().unwrap().secret(),
+    )
+    .unwrap();
+
+    // Inclusive start, exclusive end.
+    assert!(!doc.is_valid_at(&suite, ca_pk, 999));
+    assert!(doc.is_valid_at(&suite, ca_pk, 1_000));
+    assert!(doc.is_valid_at(&suite, ca_pk, 1_999));
+    assert!(!doc.is_valid_at(&suite, ca_pk, 2_000));
+
+    // `to_peer` says *why* rather than collapsing both ends into one error.
+    assert!(matches!(
+        doc.to_peer(&suite, ca_pk, 999),
+        Err(HandshakeError::IdentityNotYetValid)
+    ));
+    assert!(matches!(
+        doc.to_peer(&suite, ca_pk, 2_000),
+        Err(HandshakeError::IdentityExpired)
+    ));
+    assert!(doc.to_peer(&suite, ca_pk, 1_500).is_ok());
+}
+
+#[test]
+fn a_document_without_a_window_is_refused() {
+    let suite = SdkSuite::tri_hybrid();
+    let id = identity(&suite, &[0x83u8; 32]);
+    let doc = IdentityDocument::self_sign(&suite, &id, b"nowindow", VALIDITY).unwrap();
+    let bytes = doc.encode(suite.suite_id()).unwrap();
+
+    for field in [tag::NOT_BEFORE, tag::NOT_AFTER] {
+        let stripped = without_field(&bytes, field);
+        assert!(
+            matches!(
+                IdentityDocument::decode(&stripped),
+                Err(HandshakeError::Wire(_))
+            ),
+            "a document without {field:#06x} decoded"
+        );
+    }
+}
+
+#[test]
+fn a_tampered_window_breaks_the_signature() {
+    let suite = SdkSuite::tri_hybrid();
+    let id = identity(&suite, &[0x84u8; 32]);
+    let doc = IdentityDocument::self_sign(&suite, &id, b"window", VALIDITY).unwrap();
+    let bytes = doc.encode(suite.suite_id()).unwrap();
+
+    // Extend the window in the encoded body; the signature covers both fields.
+    let mut extended = VALIDITY.not_after.to_be_bytes();
+    extended[7] = extended[7].wrapping_add(1);
+    let tampered = with_field(&bytes, tag::NOT_AFTER, &extended);
+    let decoded = IdentityDocument::decode(&tampered).expect("still well formed");
+    assert!(!decoded.is_valid(&suite, doc.signing()));
+}
+
+#[test]
 fn an_identity_document_configures_a_peer_end_to_end() {
     let suite = SdkSuite::tri_hybrid();
     let ca = identity(&suite, &[0x71u8; 32]);
@@ -616,6 +693,7 @@ fn an_identity_document_configures_a_peer_end_to_end() {
         b"initiator@example",
         initiator.public().clone(),
         initiator.signing_public().unwrap().clone(),
+        VALIDITY,
         ca.signing().unwrap().secret(),
     )
     .unwrap();
@@ -624,6 +702,7 @@ fn an_identity_document_configures_a_peer_end_to_end() {
         b"responder@example",
         responder.public().clone(),
         responder.signing_public().unwrap().clone(),
+        VALIDITY,
         ca.signing().unwrap().secret(),
     )
     .unwrap();
@@ -632,8 +711,8 @@ fn an_identity_document_configures_a_peer_end_to_end() {
     // whole certificate path: decode, check the issuer, configure the peer.
     let init_doc = IdentityDocument::decode(&init_doc.encode(suite.suite_id()).unwrap()).unwrap();
     let resp_doc = IdentityDocument::decode(&resp_doc.encode(suite.suite_id()).unwrap()).unwrap();
-    let peer_i = init_doc.to_peer(&suite, ca_pk).unwrap();
-    let peer_r = resp_doc.to_peer(&suite, ca_pk).unwrap();
+    let peer_i = init_doc.to_peer(&suite, ca_pk, NOW).unwrap();
+    let peer_r = resp_doc.to_peer(&suite, ca_pk, NOW).unwrap();
 
     // The document's KEM key is the one the handshake must encapsulate to.
     let (init_hello, i_state) =
@@ -659,11 +738,12 @@ fn an_identity_document_configures_a_peer_end_to_end() {
         b"responder@example",
         responder.public().clone(),
         responder.signing_public().unwrap().clone(),
+        VALIDITY,
         rogue.signing().unwrap().secret(),
     )
     .unwrap();
     assert!(matches!(
-        forged.to_peer(&suite, ca_pk),
+        forged.to_peer(&suite, ca_pk, NOW),
         Err(HandshakeError::IdentityInvalid)
     ));
 }

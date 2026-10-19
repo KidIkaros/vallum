@@ -127,7 +127,7 @@ pub use handshake::{
     responder_identify, responder_process_conf, responder_process_init, verify_resp_tag,
     InitHelloInfo, InitiatorState, ResponderState, SessionKeys, PEER_HINT_SIZE, RESP_TAG_SIZE,
 };
-pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity};
+pub use identity::{IdentityDocument, PeerIdentity, SigningIdentity, StaticIdentity, Validity};
 pub use keys::{DataKeys, Role, COUNTER_SIZE, DATA_KEY_SIZE, NONCE_PREFIX_SIZE, NONCE_SIZE};
 pub use replay::{ReplayFilter, REPLAY_WINDOW};
 pub use segment::{

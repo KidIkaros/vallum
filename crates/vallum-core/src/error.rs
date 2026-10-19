@@ -61,6 +61,14 @@ pub enum HandshakeError {
     /// A peer's hybrid identity signature did not verify — a forgery, a
     /// substitution, or a message/transcript mismatch.
     IdentityInvalid,
+    /// An identity document's validity window has not opened yet (H8).
+    IdentityNotYetValid,
+    /// An identity document's validity window has closed (H8).
+    ///
+    /// The window is `not_before <= now < not_after`, in unix seconds supplied
+    /// by the verifier; revocation is not modelled, so an expired document is
+    /// the only way a previously valid one stops being accepted.
+    IdentityExpired,
     /// The sealed peer hint did not name the peer the caller resolved it to.
     ///
     /// The hint is *confidential but not authenticated* (anyone who knows the
@@ -128,6 +136,10 @@ impl fmt::Display for HandshakeError {
                 "HandshakeError: unexpected identity signature (no signing key configured for this peer)"
             ),
             Self::IdentityInvalid => write!(f, "HandshakeError: identity signature did not verify"),
+            Self::IdentityNotYetValid => {
+                write!(f, "HandshakeError: identity document is not valid yet")
+            }
+            Self::IdentityExpired => write!(f, "HandshakeError: identity document has expired"),
             Self::PeerHintMismatch => write!(
                 f,
                 "HandshakeError: the sealed peer hint did not name the resolved peer"
