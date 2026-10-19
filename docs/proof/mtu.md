@@ -103,9 +103,13 @@ bounds (`a_narrow_outer_mtu_derives_the_inner_mtu`,
    protocol feature, not a knob. The operator states the path.
 2. **No per-destination budget.** One daemon, one outer path. A peer reached over
    a different path needs a different deployment.
-3. **No IPv4 `DF` control.** `IPV6_DONTFRAG` is set on v6 sockets; IPv4 has no
-   safe setter in `nix`, so an overstated `outer_mtu` on a v4 path still lets the
-   kernel fragment. The warning is the mitigation.
+3. **No IPv4 `DF` control — accepted by design.** `IPV6_DONTFRAG` is set on v6
+   sockets. Neither `nix` 0.31 (`IpMtu` is a getter) nor `socket2` 0.6 exposes
+   `IP_MTU_DISCOVER`, and setting it through `libc` would need `unsafe`, which
+   every Vallum-owned crate forbids. So an overstated `outer_mtu` on a v4 path
+   can still be fragmented by the kernel. The knob is the control, `EMSGSIZE` is
+   logged when the kernel does report it, and this is recorded rather than
+   papered over.
 4. **No upward adaptation.** Jumbo paths are not used; the cap is 1452.
 5. **No change to the receiver's bounds.** `MAX_FRAGMENT_DATA` still caps a
    fragment at 1442; a smaller budget is always below it.
