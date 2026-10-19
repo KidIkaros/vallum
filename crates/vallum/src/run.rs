@@ -292,28 +292,14 @@ pub fn run(
             None => device.poll(reading, rng),
         };
 
+        // Collect the datagrams one event produced, so a burst (a handshake's
+        // fragments, or several peers' packets) is one `sendmmsg`.
+        let mut outbound: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
         for action in actions {
             match action {
                 Action::Send { destination, bytes } => {
                     for datagram in segments.outbound(bytes, destination, rng) {
-                        match send_datagram(&socket, &datagram, destination) {
-                            Ok(()) => stats.datagrams_sent += 1,
-                            Err(error) => {
-                                stats.datagrams_failed += 1;
-                                if is_message_too_long(&error) {
-                                    if mtu_warned.insert(destination) {
-                                        log_warn!(
-                                            log,
-                                            "send to {destination} exceeded the path MTU; \
-                                             lower interface.outer_mtu (currently a \
-                                             {budget}-byte datagram budget)"
-                                        );
-                                    }
-                                } else {
-                                    log_debug!(log, "send to {destination} failed: {error}");
-                                }
-                            }
-                        }
+                        outbound.push((destination, datagram));
                     }
                 }
                 Action::Deliver { packet } => match writer.write_packet(&packet) {
@@ -332,6 +318,34 @@ pub fn run(
                         log,
                         "peer `{name}` established at epoch {epoch} as {role:?}"
                     );
+                }
+            }
+        }
+
+        if !outbound.is_empty() {
+            let total = outbound.len();
+            let sent = socket.send_many(&outbound).unwrap_or(0).min(total);
+            stats.datagrams_sent += sent as u64;
+            // The transport stops at the first failure; retry the rest one by
+            // one so the per-destination `EMSGSIZE` warning is not lost.
+            for (destination, datagram) in outbound.iter().skip(sent) {
+                match send_datagram(&socket, datagram, *destination) {
+                    Ok(()) => stats.datagrams_sent += 1,
+                    Err(error) => {
+                        stats.datagrams_failed += 1;
+                        if is_message_too_long(&error) {
+                            if mtu_warned.insert(*destination) {
+                                log_warn!(
+                                    log,
+                                    "send to {destination} exceeded the path MTU; \
+                                     lower interface.outer_mtu (currently a \
+                                     {budget}-byte datagram budget)"
+                                );
+                            }
+                        } else {
+                            log_debug!(log, "send to {destination} failed: {error}");
+                        }
+                    }
                 }
             }
         }

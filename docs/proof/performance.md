@@ -25,15 +25,16 @@ per-packet copies are.
 |---|---|---|
 | Batched UDP receive | `nix::sys::socket::recvmmsg` is a **safe** function over `MultiHeaders`/`MultiResults` (Linux, 0.31) | Available |
 | Batched UDP send | `nix::sys::socket::sendmmsg` is **safe** in the same way | Available |
-| TUN GSO/GRO (`IFF_VNET_HDR`, `TUNSETOFFLOAD`) | `tun2` has the flags internally, but `PlatformConfig::vnet_hdr` is `pub(crate)`; `Configuration::platform_config` exposes only a closure over a type whose fields are private | **Blocked by the crate** |
-| Multi-queue (`IFF_MULTI_QUEUE`) | Same: `queues_num` is private to `tun2` | **Blocked by the crate** |
+| TUN `IFF_VNET_HDR` | `tun2` exposes `PlatformConfig::vnet_hdr(bool)` through `Configuration::platform_config` | **Available** |
+| `TUNSETOFFLOAD` (GSO/TSO/checksum offload) | Not implemented in `tun2` 4.0; the daemon would need the ioctl **and** virtio-header segmentation/checksum handling | **The real blocker** |
+| Multi-queue (`IFF_MULTI_QUEUE`) | `Configuration::queues(n)` exists, but Linux returns `InvalidQueuesNumber` for `n != 1` | **Blocked by the crate's Linux path** |
 | Safe raw ioctls | `nix`'s ioctl macros would generate the calls, but creating the TUN ourselves means duplicating `tun2`'s ownership and lifecycle | Not worth it without the crate's support |
 
-The blocker is concrete: `tun2` 4.0's `platform_config` closure receives a
-`PlatformConfig` whose `vnet_hdr` and `queues_num` are `pub(crate)`. There is no
-public setter. GSO/GRO without it means either patching/forking `tun2` or
-hand-rolling `TUNSETIFF`/`TUNSETOFFLOAD` — the latter is a second TUN backend,
-not a performance tweak.
+The earlier note was wrong on one point: `vnet_hdr` **is** public, and
+`Configuration::queues` exists. What is missing is `TUNSETOFFLOAD` and the
+daemon's handling of the 10-byte virtio header and GSO super-packets — copying
+IP headers, adjusting lengths and checksums, and segmenting before sealing.
+That is the real work, not a private-field workaround.
 
 ---
 
@@ -42,13 +43,13 @@ not a performance tweak.
 - **GSO/GRO and multi-queue: deferred.** The headline win needs a `tun2` change
   (public setters, or a documented offload API) or an owned TUN backend. That is
   its own project, and it must not be smuggled in as an `unsafe` block.
-- **Batched UDP I/O: available but not implemented in this cut.** The send path
-  is one datagram per `Action::Send`, with per-destination `EMSGSIZE` accounting;
-  batching would need a per-message result path (`MultiResults`) and a redesign
-  of that accounting. The measured win without GSO/GRO is modest, so it is
-  deferred together rather than shipped half-done.
-- **No regression:** the baseline stays as recorded; nothing in this phase
-  changes the data path.
+- **Batched UDP I/O: implemented.** `DatagramSocket::send_many` defaults to a
+  loop; `UdpTransport` uses `sendmmsg` on Linux. The loop collects the datagrams
+  one event produced, sends them in one call, and retries the unsent tail
+  individually so the per-destination `EMSGSIZE` warning is preserved.
+  `show` reports `vallum_batching=true` on Linux.
+- **No regression:** the baseline stays as recorded. Batching changes the send
+  syscall count, not the bytes or the crypto.
 
 ---
 

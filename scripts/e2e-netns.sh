@@ -379,6 +379,8 @@ grep -q 'allowed_ip=' "$WORK/show.dump" || bad "show did not report allowed IPs"
 grep -q '^fwmark=4660$' "$WORK/show.dump" || bad "show did not report the fwmark"
 grep -q '^vallum_can_set_listen_port=true$' "$WORK/show.dump" \
     || bad "the capability line does not advertise a runtime rebind"
+grep -q '^vallum_batching=true$' "$WORK/show.dump" \
+    || bad "the daemon does not report batched sends"
 grep -q '^private_key=' "$WORK/show.dump" || bad "show --dump lost the private key"
 grep -q '^  private_key=' "$WORK/show.txt" && bad "the default show printed the private key"
 grep -q '^  preshared_key=' "$WORK/show.txt" && bad "the default show printed the PSK"

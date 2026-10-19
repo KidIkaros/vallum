@@ -209,7 +209,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
         suite: device.suite_id(),
         addresses: context.addresses.clone(),
         offload: false,
-        batching: false,
+        batching: cfg!(target_os = "linux"),
         capabilities: uapi::Capabilities {
             set_private_key: true,
             set_listen_port: true,

@@ -40,7 +40,17 @@ in (supported / experimental).
 
 ---
 
-## 3. The signifier
+## 3. What has been checked
+
+- The pure-Rust crates (`vallum-crypto`, `vallum-core`, `vallum-tunnel`) check
+  clean for `x86_64-apple-darwin` from this Linux host:
+  `cargo check --target x86_64-apple-darwin -p vallum-core -p vallum-tunnel -p vallum-crypto`.
+- The daemon cannot be cross-checked from Linux: the SDK's C dependencies
+  (`blake3`, `zstd-sys`) invoke the host `cc` with `-arch`/Apple flags and fail
+  without an Apple toolchain. CI now has a `macos-inner` job (gating) and an
+  experimental `macos-daemon` job on a macOS runner, where Apple clang exists.
+
+## 4. The signifier
 
 `vallum --version` prints `0.1.0 (linux-only)` and `--help` states the tier and
 points here. A user on another platform learns the boundary before building,
@@ -48,7 +58,7 @@ rather than from a wall of `cfg` errors.
 
 ---
 
-## 4. What this does **not** claim
+## 5. What this does **not** claim
 
 - No macOS/Windows/BSD binary is built or tested here.
 - No cross-compilation CI job is added yet; the current workflow stays

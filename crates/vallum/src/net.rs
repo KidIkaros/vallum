@@ -36,6 +36,21 @@ pub trait DatagramSocket: Send + Sync {
     /// closed socket.
     fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()>;
 
+    /// Send several datagrams, returning how many the transport accepted.
+    ///
+    /// The default is a loop; a real transport may batch. A return below
+    /// `batch.len()` means the rest were not sent and the caller may retry them.
+    ///
+    /// # Errors
+    ///
+    /// If the first send fails, or the transport refuses the batch.
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        for (destination, bytes) in batch {
+            self.send_to(bytes, *destination)?;
+        }
+        Ok(batch.len())
+    }
+
     /// Receive one datagram, blocking until one arrives or the socket closes.
     ///
     /// A datagram larger than `buf` is truncated the way [`UdpSocket`] truncates
@@ -122,6 +137,46 @@ impl DatagramSocket for UdpTransport {
         self.socket.send_to(bytes, destination).map(|_| ())
     }
 
+    #[cfg(target_os = "linux")]
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        use std::io::IoSlice;
+        use std::os::fd::AsRawFd;
+
+        use nix::sys::socket::{sendmmsg, ControlMessage, MsgFlags, MultiHeaders, SockaddrStorage};
+
+        if batch.is_empty() {
+            return Ok(0);
+        }
+        let mut headers = MultiHeaders::preallocate(batch.len(), None);
+        let slices: Vec<[IoSlice<'_>; 1]> = batch
+            .iter()
+            .map(|(_, bytes)| [IoSlice::new(bytes)])
+            .collect();
+        let addresses: Vec<Option<SockaddrStorage>> = batch
+            .iter()
+            .map(|(destination, _)| Some(SockaddrStorage::from(*destination)))
+            .collect();
+        let cmsgs: &[ControlMessage<'_>] = &[];
+        let results = sendmmsg(
+            self.socket.as_raw_fd(),
+            &mut headers,
+            slices.iter(),
+            &addresses,
+            cmsgs,
+            MsgFlags::empty(),
+        )
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+        Ok(results.count())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        for (destination, bytes) in batch {
+            self.send_to(bytes, *destination)?;
+        }
+        Ok(batch.len())
+    }
+
     fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         self.socket.recv_from(buf)
     }
@@ -185,6 +240,15 @@ impl SharedSocket {
             Err(poisoned) => *poisoned.into_inner() = socket,
         }
         self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Send a batch on the current socket.
+    ///
+    /// # Errors
+    ///
+    /// As the transport reports.
+    pub fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        self.current().1.send_many(batch)
     }
 
     /// The current socket's local address.
@@ -357,6 +421,27 @@ fn poisoned<T>(_: T) -> io::Error {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_many_delivers_every_datagram() {
+        let receiver =
+            UdpTransport::bind("127.0.0.1:0".parse().expect("receiver")).expect("bind receiver");
+        let address = receiver.local_addr().expect("local addr");
+        let sender =
+            UdpTransport::bind("127.0.0.1:0".parse().expect("sender")).expect("bind sender");
+        let batch = vec![
+            (address, b"one".to_vec()),
+            (address, b"two".to_vec()),
+            (address, b"three".to_vec()),
+        ];
+        assert_eq!(sender.send_many(&batch).expect("send batch"), 3);
+
+        let mut buffer = [0u8; 16];
+        for expected in [b"one".as_slice(), b"two", b"three"] {
+            let (n, _) = receiver.recv_from(&mut buffer).expect("receive");
+            assert_eq!(&buffer[..n], expected);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
