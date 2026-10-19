@@ -112,9 +112,11 @@ keeps its session.
 
 ## 6. What this does **not** claim (yet)
 
-1. **`listen_port` and `fwmark` changes are `EOPNOTSUPP`.** They need a socket
-   rebind; the plan's next cut is the `SocketHandle` swap. A `set` that repeats
-   the current value is accepted, so `syncconf` is idempotent.
+1. **`listen_port` changes are `EOPNOTSUPP`.** They need a socket rebind; the
+   plan's next cut is the `SocketHandle` swap. `fwmark` is applied at startup and
+   reported, but a *runtime* change is also `EOPNOTSUPP` (see `socket-ops.md`). A
+   `set` that repeats the current value is accepted, so `syncconf` is
+   idempotent.
 2. **`private_key` changes are accepted** and tear down every session and
    handshake, because they were authenticated as the old key.
 3. **A PSK change applies to the next handshake.** The live session keeps

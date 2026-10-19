@@ -199,8 +199,8 @@ returns `Unsupported` rather than half-working.
 TOML, because an operator edits it by hand. `[interface]` names the interface, the
 key file, the address/prefix (`address`, or `addresses` for a dual-stack or
 multi-address interface), the MTU (default `1380`), the outer MTU (default
-`1500`), the user/group to become, and the listen address (default
-`0.0.0.0:51820`); each `[[peer]]` carries a name, a public line, an optional
+`1500`), the control socket, the `SO_MARK`, the user/group to become, and the
+listen address (default `0.0.0.0:51820`); each `[[peer]]` carries a name, a public line, an optional
 endpoint, and `allowed_ips`; `[log]` sets `trace`…`error`.
 
 `deny_unknown_fields` is on every table. The failure it prevents is not

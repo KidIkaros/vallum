@@ -70,7 +70,22 @@ impl UdpTransport {
     ///
     /// If the address is in use, or cannot be bound.
     pub fn bind(address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_fwmark(address, 0)
+    }
+
+    /// Bind with an `SO_MARK`, for policy routing.
+    ///
+    /// # Errors
+    ///
+    /// If the address cannot be bound, or the mark cannot be set (it needs
+    /// `CAP_NET_ADMIN`).
+    pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
         let socket = UdpSocket::bind(address)?;
+        #[cfg(target_os = "linux")]
+        if fwmark != 0 {
+            nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &fwmark)
+                .map_err(|e| io::Error::other(format!("SO_MARK: {e}")))?;
+        }
         // Ask the kernel to report an oversize datagram with `EMSGSIZE` instead
         // of fragmenting it. This is the other half of H6's "loud failure": the
         // `outer_mtu` knob bounds what is emitted, and this makes a path that

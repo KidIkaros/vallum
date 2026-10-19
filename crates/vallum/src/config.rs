@@ -126,6 +126,11 @@ pub struct Interface {
     /// resolved against the config, like the key file.
     #[serde(default)]
     pub control: Option<PathBuf>,
+    /// A socket mark for policy routing, as `SO_MARK`. `0` means unset.
+    ///
+    /// Requires `CAP_NET_ADMIN`; it is applied before the privilege drop.
+    #[serde(default)]
+    pub fwmark: Option<u32>,
     /// The outer path's MTU. Defaults to 1500.
     ///
     /// This is how a narrower path — PPPoE at 1492, an IPsec tunnel at 1400 — is
@@ -262,6 +267,8 @@ pub struct Resolved {
     pub listen: SocketAddr,
     /// The control socket, if configured.
     pub control: Option<PathBuf>,
+    /// The socket mark; `0` means unset.
+    pub fwmark: u32,
     /// The daemon's own identity, expanded from the key file.
     pub identity: StaticIdentity,
     /// The peer table.
@@ -288,6 +295,7 @@ impl std::fmt::Debug for Resolved {
             .field("mtu", &self.mtu)
             .field("listen", &self.listen)
             .field("control", &self.control)
+            .field("fwmark", &self.fwmark)
             .field("peer_count", &self.peers.len())
             .field("level", &self.level)
             .field("warnings", &self.warnings)
@@ -668,9 +676,9 @@ impl Config {
                 }
             }
             if let Some(text) = entry.endpoint.as_deref() {
-                let endpoint = text.parse::<SocketAddr>().map_err(|e| Error::Invalid {
+                let endpoint = resolve_endpoint(text).map_err(|why| Error::Invalid {
                     path: path.to_path_buf(),
-                    what: format!("{}: endpoint `{text}`: {e}", where_()),
+                    what: format!("{}: endpoint `{text}`: {why}", where_()),
                 })?;
                 config = config.with_endpoint(endpoint);
             }
@@ -710,6 +718,7 @@ impl Config {
             mtu,
             listen,
             control,
+            fwmark: self.interface.fwmark.unwrap_or(0),
             identity,
             peers,
             level,
@@ -718,6 +727,37 @@ impl Config {
             outer_budget: budget,
         })
     }
+}
+
+/// Resolve an endpoint: an address literal, or a hostname with bounded retries.
+///
+/// WireGuard's `wg` resolves hostnames at set time; so does this. A name is not
+/// re-resolved periodically — that would silently move a peer, and the endpoint
+/// is a security-relevant value.
+fn resolve_endpoint(text: &str) -> Result<SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+
+    if let Ok(address) = text.parse::<SocketAddr>() {
+        return Ok(address);
+    }
+    let retries: u32 = std::env::var("VALLUM_ENDPOINT_RESOLUTION_RETRIES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3);
+    let mut last = String::new();
+    for attempt in 0..=retries {
+        match text.to_socket_addrs() {
+            Ok(mut addresses) => match addresses.next() {
+                Some(address) => return Ok(address),
+                None => last = "no addresses".to_owned(),
+            },
+            Err(error) => last = error.to_string(),
+        }
+        if attempt < retries {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    Err(format!("could not resolve: {last}"))
 }
 
 /// Parse one prefix, refusing the IPv4-mapped IPv6 trap.

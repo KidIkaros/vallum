@@ -197,10 +197,14 @@ write_config() { # $1 name  $2 inner CIDR  $3 listen  $4 peer endpoint  $5 peer 
 # keep the path warm, because B is the end a NAT would forget: it never speaks
 # until spoken to. A one-second cadence makes the keepalive observable inside the
 # few seconds this script runs for.
-write_config a "$INNER_A/24" "$OUTER_A:$PORT" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
+# A binds port 0: the kernel picks one, and the control plane must report the
+# real port rather than the configured `0`.
+write_config a "$INNER_A/24" "$OUTER_A:0" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
 write_config b "$INNER_B/24" "$OUTER_B:$PORT" ""                 "$INNER_A/32" "$PUB_A" 1
 # G2: A serves the control UAPI on a socket beside its config.
 sed -i '/^listen = /a control = "control.sock"' "$WORK/a.toml"
+# G3: a socket mark, applied before the privilege drop.
+sed -i '/^listen = /a fwmark = 4660' "$WORK/a.toml"
 
 # G1: a configured PSK on both ends. Every lifecycle below inherits it, so the
 # whole gate runs with a PSK rather than one special case.
@@ -372,7 +376,13 @@ grep -q '^errno=0$' "$WORK/show.dump" || bad "show did not end with errno=0"
 grep -q '^interface ' "$WORK/show.txt" || bad "show did not report the interface"
 grep -q '^peer ' "$WORK/show.txt" || bad "show did not report the peer"
 grep -q 'allowed_ip=' "$WORK/show.dump" || bad "show did not report allowed IPs"
+grep -q '^fwmark=4660$' "$WORK/show.dump" || bad "show did not report the fwmark"
+PORT_NOW=$(sed -n 's/^listen_port=//p' "$WORK/show.dump")
+[ -n "$PORT_NOW" ] && [ "$PORT_NOW" -ne 0 ] \
+    || bad "listen_port is $PORT_NOW, not the bound port"
 ok "the control socket reports the device and its peer"
+ok "the bound port ($PORT_NOW) is reported, not the configured 0"
+ok "the socket mark is reported"
 
 "$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
 ok "syncconf applied an unchanged config idempotently"
@@ -465,7 +475,7 @@ ok "no IP fragment was created or reassembled, and no datagram exceeded the budg
 # A keepalive is a single datagram, so it never fragments; the fragment counters
 # read just above are unaffected by it.
 say "listening on veth-a for 2.5 s with no traffic, watching B keep the path warm"
-KEEPALIVES=$(python3 - "$OUTER_A" "$PORT" <<'PY'
+KEEPALIVES=$(python3 - "$OUTER_A" "${PORT_NOW:-$PORT}" <<'PY'
 import socket, sys, time
 
 a_address, port = sys.argv[1], int(sys.argv[2])
@@ -519,13 +529,14 @@ ok "the idle peer kept its NAT binding warm on its own"
 # answered any of these would print a reply count here and fail.
 say "adversary in ns2: junk, oversized datagrams, and a replayed handshake"
 
-ATTACK=$(in_ns python3 - "$WORK/inithello.bin" "$OUTER_A" "$OUTER_B" "$PORT" <<'PY'
+ATTACK=$(in_ns python3 - "$WORK/inithello.bin" "$OUTER_A" "$OUTER_B" "$PORT" "${PORT_NOW:-$PORT}" <<'PY'
 import os
 import socket
 import sys
 import time
 
-capture, a_address, b_address, port = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+capture, a_address, b_address = sys.argv[1], sys.argv[2], sys.argv[3]
+port, a_port = int(sys.argv[4]), int(sys.argv[5])
 with open(capture, "rb") as handle:
     init_hello = handle.read()
 
@@ -559,7 +570,9 @@ junk = []
 for payload in (b"", b"\x00", os.urandom(1024), os.urandom(16384), os.urandom(65507)):
     junk += probe(b_address, payload, 0.25)
 for payload in (os.urandom(2048), os.urandom(65507)):
-    junk += probe(a_address, payload, 0.25)
+    # A listens on the port the kernel picked, not the configured 0.
+    sock.sendto(payload, (a_address, a_port))
+    junk += drain(0.25)
 
 # Version 1, `InitHello`, suite 3, a plausible index, then noise. No `mac1`, so
 # the admission gate refuses it before any KEM work.

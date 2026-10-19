@@ -204,7 +204,11 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_warn!(log, "{warning}");
     }
 
-    let socket: Arc<dyn DatagramSocket> = Arc::new(UdpTransport::bind(resolved.listen)?);
+    let socket: Arc<dyn DatagramSocket> = Arc::new(UdpTransport::bind_with_fwmark(
+        resolved.listen,
+        resolved.fwmark,
+    )?);
+    let bound = socket.local_addr().unwrap_or(resolved.listen);
 
     // Everything privileged is done: the interface exists, the socket is bound,
     // and the key has been read. From here the daemon needs no more than the two
@@ -245,7 +249,7 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log,
         "starting: interface `{}`, listening on {}, {} peer(s)",
         parts.name,
-        resolved.listen,
+        bound,
         device.peer_count(),
     );
 
@@ -264,8 +268,8 @@ fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
                 path,
                 context: control::ControlContext {
                     private_key: seed,
-                    listen: socket.local_addr().unwrap_or(resolved.listen),
-                    fwmark: 0,
+                    listen: bound,
+                    fwmark: resolved.fwmark,
                     suite,
                 },
             }),
