@@ -339,10 +339,12 @@ performance claim and should not be quoted as one.
    treats packets as opaque bytes, but nothing in this phase carries v6 end to end.
 4. **No routing-table management.** The daemon installs nothing and spawns
    nothing. A peer outside the interface prefix produces a warning, not a route.
-5. **No privilege separation.** The process runs as the user that started it and
-   keeps the TUN descriptor for its lifetime. There is no capability drop, no
-   sandbox, and no per-peer isolation. Running it as root is the simple thing, not
-   the safe thing, and this phase does not claim otherwise.
+5. **No privilege separation in P6.4.** The process ran as the user that started
+   it and kept the TUN descriptor for its lifetime. H5 adds
+   `interface.user`/`interface.group`: after the interface and socket are open,
+   the daemon drops supplementary groups, `setgid`, `setuid`, sets
+   `PR_SET_NO_NEW_PRIVS`, and verifies the ids. Still no `seccomp`, no sandbox,
+   and no per-peer isolation — see `privileges.md`.
 6. **No performance or scale claim.** The under-load threshold (64 queued
    packets), the 100 ms tick, and the reader→loop queue bound (256 packets, ≈4 MiB
    — enforced by the channel, see `pentest.md` F1) are reasoned, not tuned. Nothing

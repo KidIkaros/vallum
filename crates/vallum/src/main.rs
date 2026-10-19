@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use vallum::clock::{SystemClock, TimeSource};
-use vallum::config::Config;
+use vallum::config::{self, Config};
 use vallum::entropy;
 use vallum::keys;
 use vallum::logging::Logger;
 use vallum::net::{DatagramSocket, UdpTransport};
+use vallum::privileges;
 use vallum::run::{self, Shutdown};
 use vallum::tun::{self, InterfaceSpec};
 use vallum::{log_info, log_warn, Error};
@@ -36,6 +37,15 @@ use vallum_tunnel::Device;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Use a private key file that its group or the world can read.
+    ///
+    /// Refused by default: a key that someone else can read is not private, and
+    /// a warning in a log is not a control. Pass this only when the exposure is
+    /// deliberate — a sealed volume, a test fixture — and note that the warning
+    /// is still logged.
+    #[arg(long, global = true)]
+    allow_insecure_key_permissions: bool,
 }
 
 #[derive(Subcommand)]
@@ -87,9 +97,9 @@ struct PubkeyArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.command {
-        Command::Run(args) => run_tunnel(&args),
+        Command::Run(args) => run_tunnel(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keygen(&args),
-        Command::Pubkey(args) => pubkey(&args),
+        Command::Pubkey(args) => pubkey(&args, cli.allow_insecure_key_permissions),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -101,8 +111,14 @@ fn main() -> ExitCode {
 }
 
 /// `run`.
-fn run_tunnel(args: &RunArgs) -> Result<(), Error> {
+fn run_tunnel(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let config = Config::load(&args.config)?;
+
+    // The key's mode is checked before the file is expanded: a key the group or
+    // the world can read is refused, not warned about. The override is explicit
+    // and still produces a warning once the logger exists.
+    let key_path = config::resolve_key_path(&args.config, &config.interface.private_key);
+    let insecure_key = keys::check_permissions(&key_path, allow_insecure_key)?;
 
     // The suite is a property of the key, not of a flag: a seed is only a key
     // under the suite it was expanded with, so the key file is the one place it
@@ -112,6 +128,12 @@ fn run_tunnel(args: &RunArgs) -> Result<(), Error> {
 
     let resolved = config.resolve(&args.config, &suite)?;
     let log = Logger::new(resolved.level);
+    if let Some(warning) = insecure_key {
+        log_warn!(
+            log,
+            "{warning} (allowed by --allow-insecure-key-permissions)"
+        );
+    }
     for warning in &resolved.warnings {
         log_warn!(log, "{warning}");
     }
@@ -137,6 +159,14 @@ fn run_tunnel(args: &RunArgs) -> Result<(), Error> {
     }
 
     let socket: Arc<dyn DatagramSocket> = Arc::new(UdpTransport::bind(resolved.listen)?);
+
+    // Everything privileged is done: the interface exists, the socket is bound,
+    // and the key has been read. From here the daemon needs no more than the two
+    // file descriptors it already holds, so it sheds what it was started with.
+    if let Some(privileges) = &resolved.privileges {
+        privileges::drop_to(privileges)?;
+        log_info!(log, "dropped privileges to {}", privileges.describe());
+    }
 
     let device = Device::new(
         Arc::new(suite),
@@ -215,11 +245,13 @@ fn keygen(args: &KeygenArgs) -> Result<(), Error> {
 }
 
 /// `pubkey`.
-fn pubkey(args: &PubkeyArgs) -> Result<(), Error> {
-    let file = keys::load_secret(&args.private_key)?;
-    if let Some(warning) = keys::permission_warning(&args.private_key) {
-        eprintln!("vallum: warning: {warning}");
+fn pubkey(args: &PubkeyArgs, allow_insecure_key: bool) -> Result<(), Error> {
+    // Reading the key at all is the exposure, so `pubkey` enforces the same rule
+    // as `run`: the mode is checked before the file is read.
+    if let Some(warning) = keys::check_permissions(&args.private_key, allow_insecure_key)? {
+        eprintln!("vallum: warning: {warning} (allowed by --allow-insecure-key-permissions)");
     }
+    let file = keys::load_secret(&args.private_key)?;
     let suite = SdkSuite::from_id(file.suite)
         .map_err(|e| Error::Suite(format!("key file names a suite this build cannot use: {e}")))?;
     let identity = keys::identity(&suite, &file)?;

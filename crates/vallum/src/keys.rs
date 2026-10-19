@@ -302,7 +302,33 @@ pub fn identity(suite: &dyn CryptoSuite, file: &SecretFile) -> Result<StaticIden
     Ok(identity)
 }
 
-/// Warn if a key file is readable by anyone but its owner.
+/// Refuse a private key file that a group or the world can read.
+///
+/// P6.5 accepted this as F7 ("warn, do not refuse"). That disposition is
+/// reversed here: a warning in a log is not a control, and the file is the one
+/// thing whose exposure makes every other security property moot. The override
+/// exists because there are deliberate cases (a sealed volume, a test fixture),
+/// and when it is used the exposure is still returned so it can be logged.
+///
+/// # Errors
+///
+/// [`Error::KeyPermissions`] when the mode is loose and `allow_insecure` is
+/// false.
+pub fn check_permissions(path: &Path, allow_insecure: bool) -> Result<Option<String>, Error> {
+    let Some(detail) = permission_warning(path) else {
+        return Ok(None);
+    };
+    if allow_insecure {
+        Ok(Some(detail))
+    } else {
+        Err(Error::KeyPermissions {
+            path: path.to_path_buf(),
+            detail,
+        })
+    }
+}
+
+/// Describe why a key file is readable by anyone but its owner, if it is.
 ///
 /// Returns the warning rather than logging it, so the caller decides where it
 /// goes and a test can assert on it.

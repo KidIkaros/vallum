@@ -38,6 +38,9 @@ signal-hook = "0.3"
 # default features are off so no async runtime is pulled in.
 [target.'cfg(target_os = "linux")'.dependencies]
 tun2 = { version = "4.0", default-features = false }
+# Privilege separation. Safe wrappers over setgroups/setgid/setuid/prctl, so
+# every Vallum-owned crate keeps `unsafe_code = "forbid"`.
+nix = { version = "0.31", features = ["user", "process"] }
 
 [dev-dependencies]
 # The gate drives the real stack: it builds the config from TOML, expands keys

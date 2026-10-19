@@ -89,6 +89,18 @@ pub struct Interface {
     /// The UDP address to listen on.
     #[serde(default)]
     pub listen: Option<String>,
+    /// The user to become after the interface and socket are open.
+    ///
+    /// Absent means "keep the privileges the process started with", which is
+    /// what every deployment before this field did.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// The group to become. Defaults to the user's primary group.
+    ///
+    /// A group without a user is legal — it drops the group id only — and is
+    /// warned about, because it is rarely what an operator means.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// One `[[peer]]` table.
@@ -196,6 +208,9 @@ pub struct Resolved {
     pub level: Level,
     /// Things the operator should know. Logged, not fatal.
     pub warnings: Vec<String>,
+    /// Who to become after the privileged setup. `None` keeps the process as it
+    /// started.
+    pub privileges: Option<crate::privileges::Privileges>,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -211,6 +226,7 @@ impl std::fmt::Debug for Resolved {
             .field("peer_count", &self.peers.len())
             .field("level", &self.level)
             .field("warnings", &self.warnings)
+            .field("privileges", &self.privileges)
             .finish_non_exhaustive()
     }
 }
@@ -307,11 +323,20 @@ impl Config {
         // Read the key file before anything else: it is the one thing whose
         // absence makes every other check pointless. A relative path is taken
         // relative to the config, so the pair travels together.
+        //
+        // The file's mode is *not* checked here: the CLI owns that decision,
+        // because refusing a key is a startup policy with an explicit override,
+        // not a property of a config file. See `keys::check_permissions`.
         let key_path = resolve_key_path(path, &self.interface.private_key);
         let secret: SecretFile = keys::load_secret(&key_path)?;
-        if let Some(warning) = keys::permission_warning(&key_path) {
-            warnings.push(warning);
-        }
+
+        // Privilege separation is resolved here, but applied by the daemon after
+        // the interface and socket exist — see `privileges::drop_to`.
+        let privileges = crate::privileges::resolve(
+            self.interface.user.as_deref(),
+            self.interface.group.as_deref(),
+            &mut warnings,
+        )?;
         let identity = keys::identity(suite, &secret)?;
 
         let mut peers = Vec::with_capacity(self.peers.len());
@@ -464,6 +489,7 @@ impl Config {
             peers,
             level,
             warnings,
+            privileges,
         })
     }
 }

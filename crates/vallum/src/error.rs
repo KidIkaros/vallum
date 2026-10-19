@@ -83,6 +83,23 @@ pub enum Error {
     /// The operator asked for something that cannot be done, and the message
     /// says what to run instead.
     Usage(String),
+
+    /// A private key file is readable by someone other than its owner.
+    ///
+    /// Refused rather than warned about (P6.5's F7): a key that a group or the
+    /// world can read is not a private key, and a warning in a log is not a
+    /// control. `--allow-insecure-key-permissions` is the explicit override for
+    /// the cases where the operator has a reason.
+    KeyPermissions {
+        /// The file.
+        path: PathBuf,
+        /// The mode and what it means.
+        detail: String,
+    },
+
+    /// Privilege separation failed: a lookup, a `set*id`, or the verification
+    /// after it.
+    Privileges(String),
 }
 
 impl fmt::Display for Error {
@@ -116,6 +133,13 @@ impl fmt::Display for Error {
             Self::Suite(why) => write!(f, "{why}"),
             Self::Identity(why) => write!(f, "{why}"),
             Self::Usage(why) => write!(f, "{why}"),
+            Self::KeyPermissions { path, detail } => write!(
+                f,
+                "{}: {detail}\n  hint: chmod 600 it, or pass \
+                 --allow-insecure-key-permissions if this is deliberate",
+                path.display()
+            ),
+            Self::Privileges(why) => write!(f, "privilege separation failed: {why}"),
         }
     }
 }
