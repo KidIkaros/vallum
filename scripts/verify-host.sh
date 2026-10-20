@@ -220,14 +220,6 @@ say "metrics on the live daemon"
 "$VALLUM" metrics --control /run/vallum/$IFACE.sock | grep -q "vallum_peers_handshaked 1" || bad "no handshaked peer in metrics"
 ok "metrics reports a handshaked peer"
 
-say "rotation, live"
-"$VALLUM" keygen --output "$WORK/new.key" --suite 3 > "$WORK/new.pub" || bad "keygen"
-"$VALLUM" peer rotate laptop --config "$SCONFIG" --public-key-file "$WORK/new.pub" \
-    > "$WORK/rotate.log" 2>&1 || { cat "$WORK/rotate.log"; bad "peer rotate"; }
-ping -c1 -W3 "$CLI_IP" >/dev/null 2>&1 && ok "tunnel survives rotation" || warn "ping dropped during rotation"
-"$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
-ok "rotated and finalized"
-
 # ── detach reverts DNS ───────────────────────────────────────────────────────
 say "vallum-quick detach"
 "$QUICK" detach "$WORK/client/laptop.toml" > "$WORK/detach.log" 2>&1 || { cat "$WORK/detach.log"; bad "detach"; }
@@ -298,6 +290,21 @@ else
         sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
     } > /tmp/vallum-host-dns.log 2>&1
 fi
+
+# Rotation is exercised with a live client: the old key keeps working while
+# the new one is installed, and `finalize` retires it. It has to come after the
+# egress checks, because finalize invalidates the key this client holds.
+say "rotation, live"
+"$VALLUM" keygen --output "$WORK/new.key" --suite 3 > "$WORK/new.pub" || bad "keygen"
+"$VALLUM" peer rotate laptop --config "$SCONFIG" --public-key-file "$WORK/new.pub" \
+    > "$WORK/rotate.log" 2>&1 || { cat "$WORK/rotate.log"; bad "peer rotate"; }
+if ip netns exec vallumtest-ns ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
+    ok "the tunnel survives rotation (the previous key is still accepted)"
+else
+    warn "traffic stopped after rotation"
+fi
+"$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
+ok "rotated and finalized"
 
 ip netns exec vallumtest-ns "$QUICK" detach "$WORK/client/ns.toml" >/dev/null 2>&1
 kill "$ns_pid" 2>/dev/null; ns_pid=""
