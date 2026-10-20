@@ -133,6 +133,17 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         )),
     }
 
+    if let Some(resolved) = &config {
+        // A port of 0 is an ephemeral client; anything else is a server, and a
+        // server that cannot forward or is not reachable is not working.
+        if resolved.listen.port() != 0 {
+            checks.push(check_forwarding(resolved));
+            checks.push(check_firewall(resolved.listen.port()));
+        }
+        checks.push(check_service(args.config.as_deref()));
+        checks.push(check_config_mode(args.config.as_deref()));
+    }
+
     for tool in ["ip", "systemctl", "journalctl", "resolvconf", "nft"] {
         let found = which(tool);
         checks.push(Check::new(
@@ -215,4 +226,193 @@ fn which(program: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+}
+
+fn output(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn sysctl(path: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|value| value.trim() == "1")
+}
+
+/// A server has to forward, or clients reach nothing but the server.
+fn check_forwarding(resolved: &crate::config::Resolved) -> Check {
+    let has_v4 = resolved
+        .addresses
+        .iter()
+        .any(|prefix| prefix.as_ipnet().addr().is_ipv4());
+    let has_v6 = resolved
+        .addresses
+        .iter()
+        .any(|prefix| prefix.as_ipnet().addr().is_ipv6());
+    let mut missing = Vec::new();
+    if has_v4 && !sysctl("/proc/sys/net/ipv4/ip_forward") {
+        missing.push("net.ipv4.ip_forward");
+    }
+    if has_v6 && !sysctl("/proc/sys/net/ipv6/conf/all/forwarding") {
+        missing.push("net.ipv6.conf.all.forwarding");
+    }
+    if missing.is_empty() {
+        Check::new(
+            "forwarding",
+            Status::Pass,
+            "IP forwarding is enabled for every address family the tunnel uses",
+        )
+    } else {
+        Check::new(
+            "forwarding",
+            Status::Warn,
+            format!(
+                "{} is off; clients will not reach beyond this host — \
+                 `vallum server init` enables it",
+                missing.join(" and ")
+            ),
+        )
+    }
+}
+
+/// The UDP port has to be reachable from outside, or nothing connects.
+fn check_firewall(port: u16) -> Check {
+    let state = crate::hostnet::inspect();
+    let (status, detail) = match state.firewall {
+        crate::hostnet::Firewall::Ufw => {
+            let allowed = output("ufw", &["status"]).is_some_and(|status| {
+                status.lines().any(|line| {
+                    line.contains(&format!("{port}/udp")) && line.to_lowercase().contains("allow")
+                })
+            });
+            (
+                if allowed { Status::Pass } else { Status::Warn },
+                if allowed {
+                    format!("ufw allows UDP {port}")
+                } else {
+                    format!("ufw does not allow UDP {port}; run `ufw allow {port}/udp`")
+                },
+            )
+        }
+        crate::hostnet::Firewall::Firewalld => {
+            let allowed = output("firewall-cmd", &[&format!("--query-port={port}/udp")]).is_some();
+            (
+                if allowed { Status::Pass } else { Status::Warn },
+                if allowed {
+                    format!("firewalld allows UDP {port}")
+                } else {
+                    format!(
+                        "firewalld does not allow UDP {port}; run \
+                         `firewall-cmd --permanent --add-port={port}/udp`"
+                    )
+                },
+            )
+        }
+        crate::hostnet::Firewall::Nftables => {
+            let allowed = output("nft", &["list", "ruleset"])
+                .is_some_and(|rules| rules.contains(&format!("dport {port}")));
+            (
+                if allowed { Status::Pass } else { Status::Warn },
+                if allowed {
+                    format!("nftables accepts UDP {port}")
+                } else {
+                    format!(
+                        "no nftables rule accepts UDP {port}; add one to the chain that \
+                         drops it, or run `vallum server init --force`"
+                    )
+                },
+            )
+        }
+        crate::hostnet::Firewall::None => (
+            Status::Pass,
+            "no host firewall detected, so nothing is blocking the port".to_owned(),
+        ),
+    };
+    Check::new("firewall", status, detail)
+}
+
+/// Whether the unit that should own this config is running.
+fn check_service(config: Option<&Path>) -> Check {
+    let Some(path) = config else {
+        return Check::new(
+            "service",
+            Status::Warn,
+            "no --config given, so there is no unit to look up",
+        );
+    };
+    if !Path::new("/run/systemd/system").exists() {
+        return Check::new(
+            "service",
+            Status::Warn,
+            "no systemd on this host; the daemon is run directly",
+        );
+    }
+    let instance = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0");
+    let unit = format!("vallum@{instance}");
+    // `systemctl is-active` exits non-zero for anything but `active`, so the
+    // status is the text, not the exit code.
+    let state = std::process::Command::new("systemctl")
+        .args(["is-active", &unit])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    match state.as_str() {
+        "active" => Check::new("service", Status::Pass, format!("{unit} is active")),
+        "inactive" => Check::new(
+            "service",
+            Status::Warn,
+            format!("{unit} is inactive; `systemctl enable --now {unit}`"),
+        ),
+        "failed" => Check::new(
+            "service",
+            Status::Fail,
+            format!("{unit} failed; `journalctl -u {unit}` has the reason"),
+        ),
+        other => Check::new("service", Status::Warn, format!("{unit} is {other}")),
+    }
+}
+
+/// A config can name a PSK file, so it should not be group- or world-readable.
+fn check_config_mode(config: Option<&Path>) -> Check {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = config else {
+        return Check::new("config mode", Status::Warn, "no --config given");
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Check::new(
+            "config mode",
+            Status::Warn,
+            format!("cannot read {}", path.display()),
+        );
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        Check::new(
+            "config mode",
+            Status::Pass,
+            format!("{mode:04o} (owner only)"),
+        )
+    } else {
+        Check::new(
+            "config mode",
+            Status::Warn,
+            format!(
+                "{mode:04o} is group/world readable; `chmod 600 {}`",
+                path.display()
+            ),
+        )
+    }
 }

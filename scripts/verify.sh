@@ -15,6 +15,8 @@ echo "== tests"
 cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
+echo "== shell syntax"
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh
 echo "== supply chain"
 cargo deny check
 echo "== TUI snapshot"

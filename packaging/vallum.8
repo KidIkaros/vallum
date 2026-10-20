@@ -49,8 +49,28 @@ Check the platform, config, control socket, and helper tools.
 .B completions SHELL
 Print a completion script for bash, zsh, fish, or PowerShell.
 .TP
-.B import-bundle FILE [--output-dir DIR] [--force]
-Import a client `.vallum-bundle` as a config and a 0600 key file.
+.B server init [--config FILE] [--endpoint HOST:PORT] [--address CIDR] [--listen ADDR:PORT]
+.PP
+Prepare this host as a tunnel server: generate or reuse the key, write the
+config, enable IP forwarding, open the UDP port, install the masquerade rule,
+and install and start the systemd units. Idempotent. `--dry-run` prints the
+plan; `--no-nat`, `--no-firewall`, `--no-forward`, `--no-host`, and
+`--no-service` disable individual steps; `--json` is the machine interface.
+.TP
+.B peer add NAME (--public-key LINE | --public-key-file FILE | --bundle-out FILE) [--address CIDR] [--allowed-ips LIST] [--endpoint HOST:PORT] [--keepalive SECS] [--psk] [--client-config-out FILE] [--forget-key] [--json]
+.PP
+Enrol a peer. Allocates an address from the interface's subnets unless one is
+given, refuses an overlapping prefix, writes the config without reformatting it,
+and applies it to a running daemon. `--public-key` keeps the private key on the
+device; `--bundle-out` generates it here and writes a client bundle.
+.TP
+.B peer list | show NAME | remove NAME [--json]
+Manage the configured peers. `list` prints a fingerprint rather than the 4.7 KB
+public line; `show --full` prints the line.
+.TP
+.B import-bundle FILE [--output-dir DIR] [--force] [--install]
+Import a client `.vallum-bundle` as a config and a 0600 key file. `--install`
+writes to `/etc/vallum`, installs the units, and starts the tunnel.
 .TP
 .B tui [--config FILE | --control SOCKET | --config-dir DIR] [--snapshot]
 Open the terminal operations console. `--snapshot` renders one frame headlessly.

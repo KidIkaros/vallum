@@ -10,10 +10,12 @@ use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::import::ImportArgs;
 use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
+use vallum::commands::peer::PeerArgs;
 use vallum::commands::run::RunArgs;
+use vallum::commands::server::ServerArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
-use vallum::commands::{bench, control, doctor, import, keys, run};
+use vallum::commands::{bench, control, doctor, import, keys, peer, run, server};
 use vallum::Error;
 
 #[derive(Parser)]
@@ -21,9 +23,10 @@ use vallum::Error;
     name = "vallum",
     version = concat!(env!("CARGO_PKG_VERSION"), " (linux-only)"),
     about = "Vallum — hybrid post-quantum layer-3 tunnel",
-    long_about = "A hybrid post-quantum VPN. Keys are generated with `keygen`, exchanged \
-                  by hand, and the tunnel is started with `run`.\n\n\
-                  The daemon is Linux-only this release; see docs/proof/platforms.md."
+    long_about = "A hybrid post-quantum VPN. `vallum server init` prepares a server \
+                  (key, config, forwarding, firewall, NAT, service), `vallum peer add` enrols \
+                  a device, and `vallum import-bundle` sets up the client.\n\n\
+                  The daemon is Linux-only this release; see docs/deployment/server.md."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -63,6 +66,10 @@ enum Command {
     Bench(BenchArgs),
     /// Check the platform, config, control socket, and helper tools.
     Doctor(DoctorArgs),
+    /// Prepare this host to be a tunnel server.
+    Server(ServerArgs),
+    /// Enrol, list, inspect, and remove peers.
+    Peer(PeerArgs),
     /// Import a client `.vallum-bundle` file.
     ImportBundle(ImportArgs),
     /// Operate a tunnel in a terminal dashboard.
@@ -93,6 +100,8 @@ fn main() -> ExitCode {
         Command::Showconf(args) => control::showconf(&args),
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),
+        Command::Server(args) => server::server(&args),
+        Command::Peer(args) => peer::peer(&args),
         Command::ImportBundle(args) => import::import(&args),
         #[cfg(feature = "tui")]
         Command::Tui(args) => vallum::commands::tui::run(&args),
@@ -110,6 +119,16 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
             ExitCode::SUCCESS
+        }
+        // A precondition that was not met attempted nothing, and a partial run
+        // names what is already in place. Automation distinguishes them.
+        Err(Error::Precondition(message)) => {
+            eprintln!("vallum: {message}");
+            ExitCode::from(2)
+        }
+        Err(Error::Partial(message)) => {
+            eprintln!("vallum: {message}");
+            ExitCode::from(3)
         }
         Err(error) => {
             eprintln!("vallum: {error}");

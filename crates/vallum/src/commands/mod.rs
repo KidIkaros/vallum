@@ -7,6 +7,8 @@ pub mod control;
 pub mod doctor;
 pub mod import;
 pub mod keys;
+pub mod peer;
 pub mod run;
+pub mod server;
 #[cfg(feature = "tui")]
 pub mod tui;

@@ -43,9 +43,11 @@ pub mod bundle;
 pub mod clock;
 pub mod commands;
 pub mod config;
+pub mod config_edit;
 pub mod control;
 pub mod entropy;
 pub mod error;
+pub mod hostnet;
 pub mod keys;
 pub mod logging;
 pub mod net;
@@ -58,3 +60,15 @@ pub mod tui;
 pub mod uapi;
 
 pub use error::Error;
+
+/// Write a line to stdout, ignoring a closed pipe.
+///
+/// `println!` panics when the reader goes away (`vallum peer list | head`), and
+/// a command that did its work should not die because a pager stopped reading.
+#[macro_export]
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}

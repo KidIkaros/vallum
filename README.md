@@ -101,6 +101,30 @@ the other. This does **not** protect against a break of the lattice family
 itself — a code-based leg would be needed for that, and the SDK does not ship
 one (recorded as an open limitation).
 
+## Deploy
+
+A Vallum server is one command, and a client is another. Both are the same
+daemon; only the config differs.
+
+```sh
+# server: install a release, then key + config + forwarding + firewall + NAT + service
+sudo ./scripts/install.sh --from-release --endpoint vpn.example.com --address 10.7.0.1/24
+
+# enrol a device; it receives one bundle file and imports it
+sudo vallum peer add laptop --bundle-out laptop.vallum-bundle --forget-key
+sudo vallum import-bundle laptop.vallum-bundle --install   # on the device
+```
+
+`vallum server init` is idempotent and `--dry-run` prints the whole plan before
+anything is touched. `vallum peer add --public-key` is the other custody model:
+the device generates its own key and only its public line travels.
+
+Guides: [server](docs/deployment/server.md) ·
+[client](docs/deployment/client.md) ·
+[site-to-site](docs/deployment/site-to-site.md) ·
+[automation](docs/deployment/automation.md) ·
+[troubleshooting](docs/deployment/troubleshooting.md).
+
 ## Layout
 
 ```
@@ -115,8 +139,10 @@ crates/
   vallum-protocol-tests/          suite-dependent tests and benchmarks
   vallum-quick/                   routes, DNS, firewall and hooks (admin tool)
   vallum/                         the daemon: TOML, TUN, UDP, privileges, CLI
-packaging/                        systemd unit, man pages, completion
-scripts/install.sh                first install and client add/remove
+packaging/                        systemd units, man pages, completion
+docs/deployment/                  server, client, site-to-site, automation, troubleshooting
+scripts/install.sh                install a release, then `vallum server init`
+scripts/release.sh                build and publish a release locally
 fuzz/                             cargo-fuzz workspace (four targets)
 docs/proof/                       one artefact per gate
   eck-pfs-psk · committing-aead-multikey · hybrid-identity · ratchet-pcs

@@ -457,6 +457,28 @@ pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
     expect_ok(path.as_path(), &reply)
 }
 
+/// Apply a config to the daemon its own `control` field names.
+///
+/// This is the `vallum peer` path: the config was just edited, and the running
+/// daemon should learn about it without a restart. A socket that is not there
+/// is not an error — the config is written, and the service will read it when it
+/// starts.
+pub fn syncconf_running(config: &Path) -> Result<bool, Error> {
+    let loaded = Config::load(config)?;
+    let Some(declared) = loaded.interface.control.as_ref() else {
+        return Ok(false);
+    };
+    let socket = config::resolve_key_path(config, declared);
+    if !socket.exists() {
+        return Ok(false);
+    }
+    syncconf(&SetconfArgs {
+        config: config.to_path_buf(),
+        control: Some(socket),
+    })?;
+    Ok(true)
+}
+
 fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
     if reply.lines().any(|line| line == "errno=0") {
         return Ok(());

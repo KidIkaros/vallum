@@ -78,18 +78,28 @@ the explicit trade: the operator asked for a shell; a packet did not.
 
 ## 4. The installer
 
-`scripts/install.sh` supports Debian/Ubuntu and Fedora/RHEL:
+`scripts/install.sh` is a **bootstrap**, not the provisioning logic. It installs
+a release (or a local build) into `/usr/bin` with the two units, the man pages
+and the completion, then hands off to `vallum server init`:
 
-- installs `nftables`, the binaries, and `/etc/vallum`; a client QR is shown only
-  when `qrencode` is already present;
-- generates the server key and a config with a control socket and `fwmark`;
-- installs and enables the template unit;
-- adds a NAT table for the tunnel subnet;
-- `--add-client NAME` allocates the next address, appends the peer, runs
-  `syncconf`, writes the client config, and prints a QR;
-- `--remove-client NAME` removes the peer block and the client files;
-- `--uninstall` reverses it;
-- `--dry-run` prints every command without running it.
+- `--from-release [TAG]` downloads the tarball and `SHA256SUMS`, verifies the
+  checksum, and installs it. The repository is private, so this needs `GH_TOKEN`
+  unless the assets are reachable anonymously.
+- `--local` installs `target/release` (or `target/debug`); this is the developer
+  path.
+- `--install-only` stops after the files are in place.
+- Everything else is passed through to `vallum server init`, so `--endpoint`,
+  `--address`, `--no-nat`, `--no-firewall`, `--no-forward`, `--no-service`, and
+  `--dry-run` work here without being duplicated.
+- `--add-client NAME` and `--remove-client NAME` are shims over
+  `vallum peer add`/`peer remove`.
+- `--uninstall` stops and removes both units, the binaries, `/etc/vallum`, the
+  NAT table, and the sysctl file.
+
+The setup itself — key, config, forwarding, firewall, NAT, units — lives in
+`vallum server init` (ADR-0013) so it has one implementation, unit tests, and a
+`--json` form. `scripts/release.sh` is the release pipeline, because hosted
+Actions is unavailable on this plan.
 
 ---
 

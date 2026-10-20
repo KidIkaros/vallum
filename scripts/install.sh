@@ -1,43 +1,40 @@
 #!/usr/bin/env bash
 #
-# Vallum installer for Debian/Ubuntu and Fedora/RHEL.
+# Install Vallum, then prepare this host as a tunnel server.
 #
-# This is the host-level tool, not the daemon: it installs the binaries, writes a
-# server config, sets up NAT, and adds/removes clients. It never asks the daemon
-# to run a shell.
-#
-#   scripts/install.sh                 # install, or add a client if installed
-#   scripts/install.sh --add-client N  # add a client and print its QR
-#   scripts/install.sh --remove-client N
+#   scripts/install.sh                     # install, then `vallum server init`
+#   scripts/install.sh --install-only      # binaries, units, man pages only
+#   scripts/install.sh --from-release      # download the latest release first
+#   scripts/install.sh --from-release v0.1.4
+#   scripts/install.sh --local             # install target/release, no download
+#   scripts/install.sh --add-client NAME   # enrol a client (writes a bundle)
+#   scripts/install.sh --remove-client NAME
 #   scripts/install.sh --uninstall
-#   scripts/install.sh --dry-run ...
 #
+# Everything after `--` is passed to `vallum server init`, so the full set of
+# setup flags (`--endpoint`, `--address`, `--no-nat`, `--dry-run`, ...) works
+# here without being repeated in this script.
+#
+# The repository is private, so `--from-release` needs `GH_TOKEN` or
+# `GITHUB_TOKEN` unless the release assets are reachable anonymously.
 set -euo pipefail
 
-DRY=0
+REPO="KidIkaros/vallum"
+BIN_DIR="/usr/bin"
+CONFIG_DIR="/etc/vallum"
+RUNTIME_DIR="/run/vallum"
+UNIT_DIR="/etc/systemd/system"
+SYSCTL_FILE="/etc/sysctl.d/90-vallum.conf"
+
+MODE="local"
+VERSION=""
 UNINSTALL=0
+INSTALL_ONLY=0
+DRY=0
 ADD_CLIENT=""
 REMOVE_CLIENT=""
-PORT=51820
-SUBNET=10.7.0
-SERVER_ADDR=$SUBNET.1
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --dry-run) DRY=1 ;;
-        --uninstall) UNINSTALL=1 ;;
-        --add-client) shift; ADD_CLIENT=${1:-} ;;
-        --remove-client) shift; REMOVE_CLIENT=${1:-} ;;
-        --port) shift; PORT=${1:-51820} ;;
-        --subnet) shift; SUBNET=${1:-10.7.0}; SERVER_ADDR=$SUBNET.1 ;;
-        -h|--help)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
-            exit 0
-            ;;
-        *) echo "unknown argument: $1" >&2; exit 1 ;;
-    esac
-    shift
-done
+ENDPOINT=""
+PASSTHRU=()
 
 say() { printf '\n== %s\n' "$*"; }
 run() {
@@ -53,194 +50,244 @@ need_root() {
         exit 1
     fi
 }
-detect_os() {
-    if [ -r /etc/debian_version ]; then
-        OS=debian
-    elif [ -r /etc/fedora-release ] || [ -r /etc/redhat-release ]; then
-        OS=rhel
-    else
-        echo "unsupported distribution: Debian/Ubuntu or Fedora/RHEL only" >&2
-        exit 1
-    fi
-}
-install_deps() {
-    case "$OS" in
-        debian) run apt-get update; run apt-get install -y nftables ;;
-        rhel) run dnf install -y nftables ;;
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --from-release)
+            MODE="release"
+            if [ $# -gt 1 ] && [ "${2#-}" = "$2" ]; then
+                VERSION=$2
+                shift
+            fi
+            ;;
+        --local) MODE="local" ;;
+        --install-only) INSTALL_ONLY=1 ;;
+        --add-client) shift; ADD_CLIENT=${1:-} ;;
+        --remove-client) shift; REMOVE_CLIENT=${1:-} ;;
+        --endpoint) shift; ENDPOINT=${1:-}; PASSTHRU+=(--endpoint "$ENDPOINT") ;;
+        --uninstall) UNINSTALL=1 ;;
+        --dry-run) DRY=1; PASSTHRU+=(--dry-run) ;;
+        --help|-h)
+            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        --) shift; PASSTHRU+=("$@"); break ;;
+        *) PASSTHRU+=("$1") ;;
+    esac
+    shift
+done
+
+# ── release download ────────────────────────────────────────────────
+
+arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "x86_64" ;;
+        aarch64|arm64)
+            echo "unsupported: release artifacts are x86_64 only" >&2
+            exit 1
+            ;;
+        *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
     esac
 }
-bin_src() {
-    for candidate in target/release/vallum target/debug/vallum; do
-        [ -x "$candidate" ] && { echo "$candidate"; return; }
+
+auth_header() {
+    local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if [ -n "$token" ]; then
+        printf 'Authorization: token %s' "$token"
+    fi
+}
+
+latest_version() {
+    if command -v gh >/dev/null 2>&1; then
+        gh release view --repo "$REPO" --json tagName -q .tagName
+        return
+    fi
+    local header
+    header=$(auth_header)
+    if [ -n "$header" ]; then
+        curl -fsSL -H "$header" "https://api.github.com/repos/$REPO/releases/latest"
+    else
+        curl -fsSL "https://api.github.com/repos/$REPO/releases/latest"
+    fi | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+download_asset() {
+    local tag=$1 name=$2 out=$3
+    local url="https://github.com/$REPO/releases/download/$tag/$name"
+    local header
+    header=$(auth_header)
+    if command -v gh >/dev/null 2>&1 && [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+        gh release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
+        return
+    fi
+    if [ -n "$header" ]; then
+        curl -fsSL -H "$header" -o "$out" "$url"
+    else
+        curl -fsSL -o "$out" "$url"
+    fi
+}
+
+install_from_release() {
+    local tag=$1 work=$2 target sums
+    target="vallum-$tag-x86_64-linux.tar.gz"
+    say "downloading $tag"
+    download_asset "$tag" "$target" "$work/$target"
+    download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
+    ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    tar -C "$work" -xzf "$work/$target"
+    SOURCE_DIR="$work/vallum-$tag-x86_64-linux"
+}
+
+# ── local build ─────────────────────────────────────────────────────
+
+install_from_local() {
+    local candidate
+    for candidate in target/release target/debug; do
+        if [ -x "$candidate/vallum" ] && [ -x "$candidate/vallum-quick" ]; then
+            SOURCE_DIR=$candidate
+            return
+        fi
     done
-    echo "build first: cargo build --release -p vallum -p vallum-quick" >&2
+    echo "no local build found; run 'cargo build --release -p vallum -p vallum-quick'" >&2
+    echo "or pass --from-release to download one" >&2
     exit 1
 }
+
+# ── install ─────────────────────────────────────────────────────────
+
 install_binaries() {
-    local src
-    src=$(bin_src)
-    run install -m 0755 "$src" /usr/local/bin/vallum
-    run install -m 0755 "${src%vallum}vallum-quick" /usr/local/bin/vallum-quick
+    run install -d -m 0755 "$BIN_DIR" "$CONFIG_DIR" "$RUNTIME_DIR"
+    run install -m 0755 "$SOURCE_DIR/vallum" "$BIN_DIR/vallum"
+    run install -m 0755 "$SOURCE_DIR/vallum-quick" "$BIN_DIR/vallum-quick"
 }
-install_config() {
-    run install -d -m 0755 /etc/vallum /run/vallum
-    if [ -f /etc/vallum/server.key ]; then
-        return
-    fi
-    if [ "$DRY" -eq 1 ]; then
-        echo "   would generate /etc/vallum/server.key and /etc/vallum/vallum0.toml"
-        return
-    fi
-    say "generating the server key"
-    run /usr/local/bin/vallum keygen --output /etc/vallum/server.key --suite 3
-    run /usr/local/bin/vallum pubkey --private-key /etc/vallum/server.key \
-        > /etc/vallum/server.pub
-    cat > /etc/vallum/vallum0.toml <<TOML
-[interface]
-name = "vallum0"
-private_key = "server.key"
-address = "$SERVER_ADDR/24"
-listen = "0.0.0.0:$PORT"
-control = "/run/vallum/vallum0.sock"
-fwmark = 4660
 
-[log]
-level = "info"
-
-[quick]
-dns = ["1.1.1.1"]
-table = "auto"
-TOML
-    if [ "$DRY" -eq 0 ]; then
-        chmod 0600 /etc/vallum/server.key
-    fi
-}
-install_service() {
-    run install -m 0644 packaging/vallum@.service /etc/systemd/system/vallum@.service
-    run systemctl daemon-reload
-    run systemctl enable --now vallum@vallum0
-}
-install_nat() {
-    say "installing NAT for $SUBNET.0/24"
-    if [ "$DRY" -eq 1 ]; then
-        echo "   would run: nft add table inet vallum"
-        echo "   would run: nft add chain inet vallum post { type nat hook postrouting priority 100; }"
-        echo "   would run: nft add rule inet vallum post ip saddr $SUBNET.0/24 masquerade"
-        return
-    fi
-    nft list table inet vallum >/dev/null 2>&1 || nft add table inet vallum
-    nft list chain inet vallum post >/dev/null 2>&1 || \
-        nft add chain inet vallum post '{ type nat hook postrouting priority 100; }'
-    nft add rule inet vallum post ip saddr "$SUBNET.0/24" masquerade 2>/dev/null || true
-}
-next_client_ip() {
-    local n=2
-    while grep -q "$SUBNET.$n/32" /etc/vallum/vallum0.toml 2>/dev/null; do
-        n=$((n + 1))
+install_docs() {
+    local unit
+    for unit in vallum@.service vallum-quick@.service; do
+        if [ -f "$SOURCE_DIR/$unit" ]; then
+            run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
+        elif [ -f "packaging/$unit" ]; then
+            run install -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
+        fi
     done
-    echo "$SUBNET.$n"
+    local man
+    for man in vallum.8 vallum-quick.8 vallum.toml.5; do
+        if [ -f "$SOURCE_DIR/$man" ]; then
+            run install -D -m 0644 "$SOURCE_DIR/$man" "/usr/share/man/man${man##*.}/$man"
+        elif [ -f "packaging/$man" ]; then
+            run install -D -m 0644 "packaging/$man" "/usr/share/man/man${man##*.}/$man"
+        fi
+    done
+    if [ -f "$SOURCE_DIR/vallum.bash" ]; then
+        run install -D -m 0644 "$SOURCE_DIR/vallum.bash" \
+            /usr/share/bash-completion/completions/vallum
+    elif [ -f "packaging/vallum.bash" ]; then
+        run install -D -m 0644 "packaging/vallum.bash" \
+            /usr/share/bash-completion/completions/vallum
+    fi
 }
+
+# ── client shims ────────────────────────────────────────────────────
+
 add_client() {
-    local name=$1 ip
+    local name=$1 bundle
     [ -n "$name" ] || { echo "--add-client needs a name" >&2; exit 1; }
-    ip=$(next_client_ip)
-    say "adding client $name at $ip"
+    bundle="$name.vallum-bundle"
+    local args=(peer add "$name" --bundle-out "$bundle" --forget-key)
+    if [ -n "$ENDPOINT" ]; then
+        args+=(--endpoint "$ENDPOINT")
+    fi
     if [ "$DRY" -eq 1 ]; then
-        echo "   would keygen /etc/vallum/clients/$name.key"
-        echo "   would append a [[peer]] for $ip to /etc/vallum/vallum0.toml"
-        echo "   would write /etc/vallum/clients/$name.conf and print its QR"
+        echo "   would run: vallum ${args[*]}"
         return
     fi
-    run install -d -m 0755 /etc/vallum/clients
-    run /usr/local/bin/vallum keygen --output "/etc/vallum/clients/$name.key" --suite 3
-    run /usr/local/bin/vallum pubkey --private-key "/etc/vallum/clients/$name.key" \
-        > "/etc/vallum/clients/$name.pub"
-    {
-        printf '\n[[peer]]\nname = "%s"\n' "$name"
-        printf 'public_key = "%s"\n' "$(cat "/etc/vallum/clients/$name.pub")"
-        printf 'allowed_ips = ["%s/32"]\n' "$ip"
-    } >> /etc/vallum/vallum0.toml
-    run /usr/local/bin/vallum syncconf /etc/vallum/vallum0.toml
-
-    cat > "/etc/vallum/clients/$name.conf" <<CLIENT
-[interface]
-name = "vallum0"
-private_key = "$name.key"
-address = "$ip/24"
-listen = "0.0.0.0:0"
-control = "/run/vallum/vallum0.sock"
-
-[log]
-level = "info"
-
-[[peer]]
-name = "server"
-public_key = "$(cat /etc/vallum/server.pub)"
-endpoint = "$(hostname -I | awk '{print $1}'):$PORT"
-allowed_ips = ["0.0.0.0/0"]
-persistent_keepalive = 25
-CLIENT
-    if command -v qrencode >/dev/null 2>&1 && [ "$DRY" -eq 0 ]; then
-        qrencode -t ANSI256UTF8 < "/etc/vallum/clients/$name.conf"
-    fi
-    echo "client config: /etc/vallum/clients/$name.conf"
+    /usr/bin/vallum "${args[@]}"
+    echo
+    echo "hand $bundle to the device, then there:"
+    echo "   sudo vallum import-bundle $bundle --install"
 }
+
 remove_client() {
     local name=$1
     [ -n "$name" ] || { echo "--remove-client needs a name" >&2; exit 1; }
-    say "removing client $name"
     if [ "$DRY" -eq 1 ]; then
-        echo "   would remove the peer block and /etc/vallum/clients/$name.*"
+        echo "   would run: vallum peer remove $name"
         return
     fi
-    if [ "$DRY" -eq 0 ]; then
-        awk -v name="$name" '
-            /^\[\[peer\]\]/ { block = $0 "\n"; in_peer = 1; next }
-            in_peer { block = block $0 "\n"; if ($0 ~ /^\[/) { in_peer = 0 } }
-            in_peer && block ~ ("name = \"" name "\"") { next }
-            { if (in_peer) { printf "%s", block; in_peer = 0; block = "" } print }
-        ' /etc/vallum/vallum0.toml > /etc/vallum/vallum0.toml.new
-        mv /etc/vallum/vallum0.toml.new /etc/vallum/vallum0.toml
-        rm -f "/etc/vallum/clients/$name.key" "/etc/vallum/clients/$name.pub" \
-              "/etc/vallum/clients/$name.conf"
-    fi
-    run /usr/local/bin/vallum syncconf /etc/vallum/vallum0.toml
+    /usr/bin/vallum peer remove "$name"
 }
+
 uninstall() {
+    local instance
     say "uninstalling"
-    run systemctl disable --now vallum@vallum0
-    run rm -f /etc/systemd/system/vallum@.service
+    for instance in $(systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
+        | awk '{print $1}' | sed 's/\.service$//' | sort -u); do
+        run systemctl disable --now "$instance"
+    done
+    run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-quick@.service"
     run systemctl daemon-reload
-    run rm -rf /etc/vallum /run/vallum
-    run rm -f /usr/local/bin/vallum /usr/local/bin/vallum-quick
+    run rm -rf "$CONFIG_DIR" "$RUNTIME_DIR"
+    run rm -f "$BIN_DIR/vallum" "$BIN_DIR/vallum-quick"
     if [ "$DRY" -eq 0 ]; then
         nft delete table inet vallum 2>/dev/null || true
+        rm -f "$SYSCTL_FILE"
     fi
 }
 
+# ── main ────────────────────────────────────────────────────────────
+
 need_root
-detect_os
 
 if [ "$UNINSTALL" -eq 1 ]; then
     uninstall
     exit 0
 fi
 
-if [ ! -x /usr/local/bin/vallum ]; then
-    say "installing binaries and dependencies"
-    install_deps
+WORK=""
+if [ "$DRY" -eq 0 ]; then
+    WORK=$(mktemp -d)
+    trap 'rm -rf "$WORK"' EXIT
+fi
+
+SOURCE_DIR=""
+if [ "$MODE" = "release" ]; then
+    if [ -z "$VERSION" ]; then
+        VERSION=$(latest_version)
+    fi
+    [ -n "$VERSION" ] || { echo "could not determine the latest release" >&2; exit 1; }
+    if [ "$DRY" -eq 1 ]; then
+        say "would download $VERSION and install it to $BIN_DIR"
+    else
+        install_from_release "$VERSION" "$WORK"
+    fi
+else
+    install_from_local
+fi
+
+if [ "$DRY" -eq 0 ] || [ -n "$SOURCE_DIR" ]; then
     install_binaries
-    install_config
-    install_service
-    install_nat
+    install_docs
+    run systemctl daemon-reload
 fi
 
 if [ -n "$ADD_CLIENT" ]; then
     add_client "$ADD_CLIENT"
-elif [ -n "$REMOVE_CLIENT" ]; then
-    remove_client "$REMOVE_CLIENT"
-else
-    say "done"
-    echo "server config: /etc/vallum/vallum0.toml"
-    echo "add a client:  scripts/install.sh --add-client laptop"
+    exit 0
 fi
+if [ -n "$REMOVE_CLIENT" ]; then
+    remove_client "$REMOVE_CLIENT"
+    exit 0
+fi
+
+if [ "$INSTALL_ONLY" -eq 1 ]; then
+    say "installed"
+    echo "prepare this host:  vallum server init --endpoint <host:port>"
+    exit 0
+fi
+
+say "preparing this host as a tunnel server"
+if [ "$DRY" -eq 1 ]; then
+    echo "   would run: vallum server init ${PASSTHRU[*]:-}"
+    exit 0
+fi
+exec /usr/bin/vallum server init "${PASSTHRU[@]}"

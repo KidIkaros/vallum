@@ -1063,5 +1063,100 @@ wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the corrected path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the corrected path"
 ok "the DF-path daemons exited on SIGTERM"
 
+
+# ── the provisioning path ────────────────────────────────────────────
+#
+# Everything above writes its configs by hand. This lifecycle uses the product
+# path instead: `vallum server init` on each end, then `vallum peer add` to enrol
+# the other, with addresses allocated rather than chosen. A ping here means the
+# commands a person follows actually produce a working tunnel.
+say "provisioning both ends through the CLI"
+
+PROV=$WORK/prov
+mkdir -p "$PROV/a" "$PROV/b"
+
+# The DF-path lifecycle above narrowed the veth to 1200 bytes and did not widen
+# it again. A freshly provisioned config assumes a 1500-byte path, so restore it
+# rather than making the provisioning test depend on the previous test's damage.
+ip link set veth-a mtu 1500
+in_ns ip link set veth-b mtu 1500
+
+"$BIN" server init --config "$PROV/a/vallum0.toml" --address "$INNER_A/24" \
+    --listen "$OUTER_A:$PORT" --endpoint "$OUTER_B:$PORT" \
+    --control "$PROV/a/control.sock" --no-host --no-service \
+    > "$WORK/prov-a-init.log" 2>&1 || bad "A's server init failed; see $WORK/prov-a-init.log"
+"$BIN" server init --config "$PROV/b/vallum0.toml" --address "$INNER_B/24" \
+    --listen "$OUTER_B:$PORT" \
+    --control "$PROV/b/control.sock" --no-host --no-service \
+    > "$WORK/prov-b-init.log" 2>&1 || bad "B's server init failed; see $WORK/prov-b-init.log"
+ok "server init wrote both configs and keys"
+
+[ "$(stat -c %a "$PROV/a/server.key")" = "600" ] || bad "the generated key is not 0600"
+[ "$(stat -c %a "$PROV/a/vallum0.toml")" = "600" ] || bad "the generated config is not 0600"
+ok "the generated key and config are 0600"
+
+"$BIN" pubkey --private-key "$PROV/a/server.key" > "$PROV/a.pub"
+"$BIN" pubkey --private-key "$PROV/b/server.key" > "$PROV/b.pub"
+"$BIN" peer add b --config "$PROV/a/vallum0.toml" --public-key-file "$PROV/b.pub" \
+    --endpoint "$OUTER_B:$PORT" --no-apply > "$WORK/prov-a-peer.log" 2>&1 \
+    || bad "A's peer add failed; see $WORK/prov-a-peer.log"
+"$BIN" peer add a --config "$PROV/b/vallum0.toml" --public-key-file "$PROV/a.pub" \
+    --no-apply > "$WORK/prov-b-peer.log" 2>&1 \
+    || bad "B's peer add failed; see $WORK/prov-b-peer.log"
+grep -q "allowed_ips = \[\"$INNER_B/32\"\]" "$PROV/a/vallum0.toml" \
+    || bad "A's peer did not get $INNER_B/32"
+grep -q "allowed_ips = \[\"$INNER_A/32\"\]" "$PROV/b/vallum0.toml" \
+    || bad "B's peer did not get $INNER_A/32"
+ok "peer add allocated $INNER_B and $INNER_A and wrote both peers"
+
+# A duplicate name is refused rather than silently duplicated.
+if "$BIN" peer add b --config "$PROV/a/vallum0.toml" --public-key-file "$PROV/b.pub" \
+    --no-apply > /dev/null 2>&1; then
+    bad "a duplicate peer name was accepted"
+fi
+ok "a duplicate peer name is refused"
+
+: > "$WORK/prov-b.pid"
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$WORK/prov-b.pid" "$PROV/b/vallum0.toml" > "$WORK/prov-b.log" 2>&1 &
+: > "$WORK/prov-a.pid"
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$WORK/prov-a.pid" "$BIN" "$PROV/a/vallum0.toml" > "$WORK/prov-a.log" 2>&1 &
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if ip link show vallum0 >/dev/null 2>&1 \
+        && in_ns ip link show vallum0 >/dev/null 2>&1; then
+        break
+    fi
+    for pidfile in "$WORK/prov-a.pid" "$WORK/prov-b.pid"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "$(basename "$pidfile" .pid) exited; see $WORK/prov-a.log or prov-b.log"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "a provisioned interface did not come up within 10 s"
+    fi
+    sleep 0.1
+done
+ok "both provisioned daemons brought their interfaces up"
+
+if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+    ok "the provisioned tunnel carries traffic"
+else
+    bad "the provisioned tunnel did not carry traffic; see $WORK/prov-a.log"
+fi
+
+kill_pidfile "$WORK/prov-a.pid"
+kill_pidfile "$WORK/prov-b.pid"
+wait_gone "$WORK/prov-a.pid" 5 || bad "provisioned A ignored SIGTERM"
+wait_gone "$WORK/prov-b.pid" 5 || bad "provisioned B ignored SIGTERM"
+ok "the provisioned daemons exited on SIGTERM"
+
+"$BIN" peer remove b --config "$PROV/a/vallum0.toml" --no-apply > /dev/null 2>&1 \
+    || bad "peer remove failed"
+grep -q 'name = "b"' "$PROV/a/vallum0.toml" && bad "peer remove left the peer behind"
+ok "peer remove took the peer out of the config"
+
 printf '\n== PASS\n'
 INNER
