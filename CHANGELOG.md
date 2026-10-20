@@ -1,9 +1,22 @@
 # Changelog
 
-## 0.2.0
+## 1.5.0
 
-The release that makes Vallum deployable: a server can be brought up and a
-client enrolled without editing TOML by hand.
+The release that makes Vallum deployable and explains itself: one command asks
+what a machine is, and a server can be brought up and a client enrolled without
+editing TOML by hand.
+
+### One entry point
+
+- `vallum setup` asks whether this machine is a server or a client and runs only
+  that role's steps — the server path states exactly what it will change on the
+  host, then offers to enrol the first client and prints the handoff; the client
+  path imports the bundle and says how to run it.
+- Bare `vallum` answers "what now?" instead of dumping twenty subcommands.
+- The dashboard's first screen is the same question; `1`/`2` copy the command
+  for this machine.
+- `vallum setup --server` / `--client FILE` are the scriptable forms; without a
+  terminal it prints both paths and changes nothing.
 
 ### Server provisioning
 
