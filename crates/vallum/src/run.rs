@@ -150,6 +150,8 @@ pub struct LoopStats {
     pub packets_failed: u64,
     /// Handshakes that completed.
     pub established: u64,
+    /// Handshakes refused for a policy reason (expired identity, pinned endpoint).
+    pub refusals: u64,
     /// Messages delivered out of reassembled fragments.
     pub reassembled: u64,
     /// Fragments refused, and half-assembled messages abandoned.
@@ -321,6 +323,13 @@ pub fn run(
                         "peer `{name}` established at epoch {epoch} as {role:?}"
                     );
                 }
+                Action::Refused { peer, reason } => {
+                    stats.refusals += 1;
+                    let name = device
+                        .peer(peer)
+                        .map_or_else(|| peer.to_string(), |config| config.name().to_owned());
+                    log_warn!(log, "peer `{name}`: {}", reason.as_str());
+                }
             }
         }
 
@@ -362,12 +371,13 @@ pub fn run(
     log_info!(
         log,
         "tunnel down: {} datagrams out ({} failed), {} packets delivered ({} failed), \
-         {} handshakes, {} messages reassembled ({} fragment drops)",
+         {} handshakes ({} refused), {} messages reassembled ({} fragment drops)",
         stats.datagrams_sent,
         stats.datagrams_failed,
         stats.packets_delivered,
         stats.packets_failed,
         stats.established,
+        stats.refusals,
         stats.reassembled,
         stats.fragments_dropped,
     );

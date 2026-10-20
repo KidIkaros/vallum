@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use vallum_core::identity::StaticIdentity;
+use vallum_core::identity::{IdentityDocument, PeerIdentity, StaticIdentity, Validity};
 use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_tunnel::{PeerConfig, Prefix};
 
@@ -372,6 +372,29 @@ impl ResolveConfig for Config {
             &mut warnings,
         )?;
         let identity = keys::identity(suite, &secret)?;
+        let issuer = match self.interface.identity_issuer.as_deref() {
+            Some(text) => {
+                let bytes = keys::hex_decode(text).map_err(|why| Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: format!("interface.identity_issuer is not hex: {why}"),
+                })?;
+                let expected = suite.sizes().sign_pk_max;
+                if bytes.len() != expected {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "interface.identity_issuer is {} bytes, but suite 0x{:04x} \
+                             uses {expected}",
+                            bytes.len(),
+                            suite.suite_id()
+                        ),
+                    });
+                }
+                Some(vallum_crypto::SignPublicKey::new(bytes))
+            }
+            None => None,
+        };
+        let now = now_unix();
         let seed_bytes: [u8; 32] = keys::hex_decode(&secret.seed)
             .map_err(|why| Error::Invalid {
                 path: key_path.clone(),
@@ -388,11 +411,37 @@ impl ResolveConfig for Config {
         for (index, entry) in self.peers.iter().enumerate() {
             let where_ = || format!("peer[{index}] `{}`", entry.name);
 
-            let (peer_suite, peer_identity) =
-                keys::decode_public(&entry.public_key).map_err(|e| Error::Invalid {
-                    path: path.to_path_buf(),
-                    what: format!("{}: {e}", where_()),
-                })?;
+            let (peer_suite, peer_identity, validity) =
+                resolve_peer_identity(entry, suite, issuer.as_ref(), now, path, &where_)?;
+            let mut previous = Vec::new();
+            if entry.previous_public_key.is_some()
+                || entry.previous_identity.is_some()
+                || entry.previous_identity_file.is_some()
+            {
+                let (previous_suite, previous_identity, previous_validity) = resolve_identity(
+                    entry.previous_public_key.as_deref(),
+                    entry.previous_identity.as_deref(),
+                    entry.previous_identity_file.as_deref(),
+                    "previous_identity",
+                    suite,
+                    issuer.as_ref(),
+                    now,
+                    path,
+                    &where_,
+                )?;
+                if previous_suite != suite.suite_id() {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "{}: previous key is for suite 0x{previous_suite:04x}, but this \
+                             daemon speaks 0x{:04x}",
+                            where_(),
+                            suite.suite_id()
+                        ),
+                    });
+                }
+                previous.push((previous_identity, previous_validity));
+            }
             if peer_suite != suite.suite_id() {
                 return Err(Error::Invalid {
                     path: path.to_path_buf(),
@@ -508,6 +557,12 @@ impl ResolveConfig for Config {
 
             let mut config =
                 PeerConfig::new(entry.name.clone(), peer_identity).with_allowed_ips(nets.clone());
+            if let Some(validity) = validity {
+                config = config.with_validity(validity);
+            }
+            for (identity, validity) in previous {
+                config = config.with_previous_identity(identity, validity);
+            }
             if let Some(psk) = preshared_key {
                 config = config.with_preshared_key(psk);
             }
@@ -662,6 +717,126 @@ fn parse_net(path: &Path, field: &str, text: &str) -> Result<Prefix, Error> {
 /// together: `vallum run -c /etc/vallum/vallum.toml` finds
 /// `/etc/vallum/private.key` no matter what the working directory is.
 #[must_use]
+/// The wall clock, in Unix seconds.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+/// A peer's identity: a public line, or a document with a window.
+///
+/// The document path verifies the signature **and** the window at load, so a
+/// credential that is already expired is an error naming the peer rather than a
+/// tunnel that silently never comes up. The window is also carried into
+/// [`PeerConfig`] and re-checked at every handshake.
+fn resolve_peer_identity(
+    entry: &vallum_config::PeerEntry,
+    suite: &dyn CryptoSuite,
+    issuer: Option<&vallum_crypto::SignPublicKey>,
+    now: u64,
+    path: &Path,
+    where_: &dyn Fn() -> String,
+) -> Result<(u16, PeerIdentity, Option<Validity>), Error> {
+    let (suite_id, identity, validity) = resolve_identity(
+        entry.public_key.as_deref(),
+        entry.identity.as_deref(),
+        entry.identity_file.as_deref(),
+        "identity",
+        suite,
+        issuer,
+        now,
+        path,
+        where_,
+    )?;
+    Ok((suite_id, identity, validity))
+}
+
+/// Resolve one identity from a public line, an inline document, or a file.
+///
+/// `label` names the field in an error, so a bad `previous_identity_file` says
+/// so rather than pointing at the current one.
+#[allow(clippy::too_many_arguments)]
+fn resolve_identity(
+    public_key: Option<&str>,
+    identity: Option<&str>,
+    identity_file: Option<&Path>,
+    label: &str,
+    suite: &dyn CryptoSuite,
+    issuer: Option<&vallum_crypto::SignPublicKey>,
+    now: u64,
+    path: &Path,
+    where_: &dyn Fn() -> String,
+) -> Result<(u16, PeerIdentity, Option<Validity>), Error> {
+    let invalid = |what: String| Error::Invalid {
+        path: path.to_path_buf(),
+        what: format!("{}: {what}", where_()),
+    };
+
+    let document_text = match (identity, identity_file) {
+        (Some(_), Some(_)) => {
+            return Err(invalid(format!(
+                "{label} and {label}_file are both set; choose one"
+            )))
+        }
+        (Some(text), None) => Some(text.to_owned()),
+        (None, Some(file)) => {
+            let resolved = resolve_key_path(path, file);
+            Some(
+                std::fs::read_to_string(&resolved)
+                    .map_err(|source| Error::IoPath {
+                        action: "read identity document",
+                        path: resolved,
+                        source,
+                    })?
+                    .trim()
+                    .to_owned(),
+            )
+        }
+        (None, None) => None,
+    };
+
+    if document_text.is_some() && public_key.is_some() {
+        return Err(invalid(format!(
+            "{label} and public_key are both set; an identity document already carries the key"
+        )));
+    }
+
+    let Some(text) = document_text else {
+        let line = public_key.ok_or_else(|| {
+            invalid(format!(
+                "no {label}, {label}_file, or public key names this peer"
+            ))
+        })?;
+        let (suite_id, identity) = keys::decode_public(line).map_err(|e| invalid(e.to_string()))?;
+        return Ok((suite_id, identity, None));
+    };
+
+    let bytes = keys::hex_decode(&text).map_err(|why| invalid(format!("{label}: {why}")))?;
+    let document = IdentityDocument::decode(&bytes)
+        .map_err(|why| invalid(format!("{label} document: {why}")))?;
+    let validity = document.validity();
+    let peer = match issuer {
+        Some(issuer) => document.to_peer(suite, issuer, now),
+        None => {
+            if !document.is_self_signed(suite) {
+                return Err(invalid(format!(
+                    "the {label} document is not self-signed, and interface.identity_issuer \
+                     is not set"
+                )));
+            }
+            document.to_peer(suite, document.signing(), now)
+        }
+    }
+    .map_err(|why| {
+        invalid(format!(
+            "{label} document: {why} (window {}..{})",
+            validity.not_before, validity.not_after
+        ))
+    })?;
+    Ok((suite.suite_id(), peer, Some(validity)))
+}
+
 pub fn resolve_key_path(config_path: &Path, declared: &Path) -> PathBuf {
     if declared.is_absolute() {
         return declared.to_path_buf();

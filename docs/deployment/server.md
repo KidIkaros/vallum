@@ -72,6 +72,7 @@ unless you pass `--force`.
 | `--dns ADDR` | repeatable; written to `[quick] dns` and pushed to clients |
 | `--user USER` | drop to this user after the interface and socket are open |
 | `--no-nat` / `--no-firewall` / `--no-forward` | skip that host change |
+| `--control PATH` | the control socket; default `/run/vallum/<name>.sock` |
 | `--no-host` | skip all three (config and service only) |
 | `--no-service` | write the config, do not touch systemd |
 | `--dry-run` | print every step and change nothing |
@@ -164,6 +165,72 @@ refused, because two peers cannot claim the same addresses.
 
 Edits preserve the file's comments and ordering, and every write leaves a
 timestamped backup.
+
+## 6. Rotate a key
+
+A key swap normally means a window where the device cannot connect. Vallum keeps
+the old key as a *previous* identity, so the server can install the new one
+first:
+
+```sh
+# on the device: generate the new key and send its public line
+sudo vallum keygen --output /etc/vallum/new.key --suite 3 > new.pub
+
+# on the server: the new key becomes current, the old one stays accepted
+sudo vallum peer rotate laptop --public-key-file new.pub
+```
+
+Nothing breaks: the device still presents the old key and the server still
+accepts it. Move `new.key` to the device, restart the tunnel, then retire the old
+key:
+
+```sh
+sudo vallum peer finalize laptop
+```
+
+`peer list` shows `ROT yes` while a rotation is open, and `doctor` warns until it
+is finalized. A rotation is only zero-downtime in the direction that matters: the
+**responder** accepts the previous key, so rotate the key of the peer that dials
+*you*. For a server-generated key, `peer rotate … --bundle-out FILE --forget-key`
+writes a bundle instead.
+
+## 7. Identity documents
+
+A public key is a key forever. A document binds the key to a label and a
+validity window, so a credential can expire:
+
+```sh
+# once: a CA key with a signing half
+sudo vallum keygen --output /etc/vallum/ca.key --suite 3 --signing > ca.pub
+
+# trust that CA in the interface
+#   identity_issuer = "<the signing field of ca.pub>"
+
+# per device: issue a 90-day document over its public line
+sudo vallum identity issue --ca-key /etc/vallum/ca.key \
+    --peer-public-file laptop.pub --label laptop --days 90 \
+    --output laptop.identity
+
+sudo vallum peer add laptop --identity laptop.identity
+```
+
+The document is verified at load and at every handshake; an expired one fails
+closed, and `peer list` shows `EXPIRED`. With no `identity_issuer`, a document
+must be self-signed — a key binding with a window, not an authorisation. `vallum
+identity verify` checks one by hand.
+
+## 8. Pin an endpoint
+
+A peer roams by default: a laptop changes networks and the tunnel follows. That
+is also the one place an active man in the middle can redirect a tunnel.
+
+```sh
+sudo vallum peer add laptop --public-key-file laptop.pub \
+    --endpoint 203.0.113.7:51820 --pin-endpoint
+```
+
+A pinned peer refuses a handshake from any other address. It also stops NAT
+rebinding working, which is why it is opt-in and per peer.
 
 ## How the pieces fit
 

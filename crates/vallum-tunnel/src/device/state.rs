@@ -3,6 +3,7 @@
 //! Per-peer runtime state: the handshake slots, the session, the queue, timers.
 
 use super::*;
+use vallum_core::identity::{PeerIdentity, Validity};
 
 // ── per-peer runtime state ───────────────────────────────────────────
 
@@ -82,6 +83,9 @@ pub(super) struct Peer {
     /// The hint we resolve inbound `InitHello`s by, precomputed because it
     /// depends only on the peer's static public key.
     pub(super) hint: [u8; PEER_HINT_SIZE],
+    /// Identities still accepted during a rotation, with their hints and
+    /// windows. Empty outside a rotation.
+    pub(super) previous: Vec<([u8; PEER_HINT_SIZE], PeerIdentity, Option<Validity>)>,
     pub(super) endpoint: Option<SocketAddr>,
     pub(super) session: Option<Session>,
     /// The index of the epoch retained receive-only, kept so it can be unmapped
@@ -119,7 +123,47 @@ pub(super) struct Peer {
 }
 
 impl Peer {
-    pub(super) fn new(config: PeerConfig, hint: [u8; PEER_HINT_SIZE], now_ms: u64) -> Self {
+    /// The identity a hint matched: `0` is the current one, `n > 0` is the
+    /// `n`th previous identity.
+    pub(super) fn identity_at(&self, which: usize) -> &PeerIdentity {
+        if which == 0 {
+            self.config.identity()
+        } else {
+            &self.previous[which - 1].1
+        }
+    }
+
+    /// The window the matched identity asserted, if any.
+    pub(super) fn validity_at(&self, which: usize) -> Option<Validity> {
+        if which == 0 {
+            self.config.validity()
+        } else {
+            self.previous[which - 1].2
+        }
+    }
+
+    /// Whether this peer accepts `kem`, now or during a rotation.
+    pub(super) fn accepts_kem(&self, kem: &[u8]) -> bool {
+        self.config.identity().kem().as_bytes() == kem
+            || self
+                .previous
+                .iter()
+                .any(|(_, identity, _)| identity.kem().as_bytes() == kem)
+    }
+
+    pub(super) fn new(config: PeerConfig, suite: &dyn CryptoSuite, now_ms: u64) -> Self {
+        let hint = peer_hint(suite, config.identity().kem());
+        let previous = config
+            .previous_identities()
+            .iter()
+            .map(|accepted| {
+                (
+                    peer_hint(suite, accepted.identity().kem()),
+                    accepted.identity().clone(),
+                    accepted.validity(),
+                )
+            })
+            .collect();
         let shaper = Shaper::new(config.shaping().to_vec());
         // A configured endpoint is where we dial; roaming may replace it later,
         // but only with an address authenticated traffic arrived from.
@@ -130,6 +174,7 @@ impl Peer {
         Self {
             config,
             hint,
+            previous,
             endpoint,
             session: None,
             previous_own_index: None,

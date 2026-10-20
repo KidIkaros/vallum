@@ -72,9 +72,16 @@ impl Device {
         let Ok(info) = responder_identify(&*suite, &self.identity, bytes) else {
             return;
         };
-        let Some(index) = self.peer_with_hint(info.peer_hint()) else {
+        let Some((index, which)) = self.peer_with_hint(info.peer_hint()) else {
             return;
         };
+        if let Some(reason) = self.validity_refusal(index, which, clock.wall.unix_seconds()) {
+            out.push(Action::Refused {
+                peer: PeerId::from_index(index),
+                reason,
+            });
+            return;
+        }
 
         // (3) A *different* peer's configured endpoint must not disagree with the
         //     hint: that is either a misconfiguration the operator needs to see,
@@ -132,7 +139,7 @@ impl Device {
         let accepted = responder_accept_with_psk(
             &*suite,
             &self.identity,
-            self.peers[index].config.identity(),
+            self.peers[index].identity_at(which),
             &info,
             own_index,
             &seed,
@@ -288,6 +295,10 @@ impl Device {
                 if !self.endpoint_allowed(index, source) {
                     self.peers[index].rejected += 1;
                     self.peers[index].handshake = Handshake::Initiating(init);
+                    out.push(Action::Refused {
+                        peer: PeerId::from_index(index),
+                        reason: Refusal::EndpointPinned,
+                    });
                     return;
                 }
                 self.peers[index].endpoint = Some(source);
@@ -345,6 +356,10 @@ impl Device {
                     // a redirected handshake does not look successful.
                     self.peers[index].rejected += 1;
                     self.remap(index);
+                    out.push(Action::Refused {
+                        peer: PeerId::from_index(index),
+                        reason: Refusal::EndpointPinned,
+                    });
                     return;
                 }
                 // The initiator has now proven the key, so its timestamp may be
@@ -402,6 +417,13 @@ impl Device {
         out: &mut Vec<Action>,
     ) {
         if !matches!(self.peers[index].handshake, Handshake::Idle) {
+            return;
+        }
+        if let Some(reason) = self.validity_refusal(index, 0, clock.wall.unix_seconds()) {
+            out.push(Action::Refused {
+                peer: PeerId::from_index(index),
+                reason,
+            });
             return;
         }
         // No address to dial: the peer must call us. Common for a roaming peer

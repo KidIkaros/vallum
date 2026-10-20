@@ -1116,29 +1116,40 @@ if "$BIN" peer add b --config "$PROV/a/vallum0.toml" --public-key-file "$PROV/b.
 fi
 ok "a duplicate peer name is refused"
 
-: > "$WORK/prov-b.pid"
-in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
-    _ "$BIN" "$WORK/prov-b.pid" "$PROV/b/vallum0.toml" > "$WORK/prov-b.log" 2>&1 &
-: > "$WORK/prov-a.pid"
-bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
-    _ "$WORK/prov-a.pid" "$BIN" "$PROV/a/vallum0.toml" > "$WORK/prov-a.log" 2>&1 &
+start_prov() {
+    : > "$WORK/prov-b.pid"
+    in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+        _ "$BIN" "$WORK/prov-b.pid" "$PROV/b/vallum0.toml" > "$WORK/prov-b.log" 2>&1 &
+    : > "$WORK/prov-a.pid"
+    bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+        _ "$WORK/prov-a.pid" "$BIN" "$PROV/a/vallum0.toml" > "$WORK/prov-a.log" 2>&1 &
 
-DEADLINE=$((SECONDS + 10))
-while :; do
-    if ip link show vallum0 >/dev/null 2>&1 \
-        && in_ns ip link show vallum0 >/dev/null 2>&1; then
-        break
-    fi
-    for pidfile in "$WORK/prov-a.pid" "$WORK/prov-b.pid"; do
-        [ -s "$pidfile" ] || continue
-        kill -0 "$(cat "$pidfile")" 2>/dev/null \
-            || bad "$(basename "$pidfile" .pid) exited; see $WORK/prov-a.log or prov-b.log"
+    local deadline=$((SECONDS + 10))
+    while :; do
+        if ip link show vallum0 >/dev/null 2>&1 \
+            && in_ns ip link show vallum0 >/dev/null 2>&1; then
+            return 0
+        fi
+        for pidfile in "$WORK/prov-a.pid" "$WORK/prov-b.pid"; do
+            [ -s "$pidfile" ] || continue
+            kill -0 "$(cat "$pidfile")" 2>/dev/null \
+                || bad "$(basename "$pidfile" .pid) exited; see $WORK/prov-a.log or prov-b.log"
+        done
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            bad "a provisioned interface did not come up within 10 s"
+        fi
+        sleep 0.1
     done
-    if [ "$SECONDS" -ge "$DEADLINE" ]; then
-        bad "a provisioned interface did not come up within 10 s"
-    fi
-    sleep 0.1
-done
+}
+
+stop_prov() {
+    kill_pidfile "$WORK/prov-a.pid"
+    kill_pidfile "$WORK/prov-b.pid"
+    wait_gone "$WORK/prov-a.pid" 5 || bad "provisioned A ignored SIGTERM"
+    wait_gone "$WORK/prov-b.pid" 5 || bad "provisioned B ignored SIGTERM"
+}
+
+start_prov
 ok "both provisioned daemons brought their interfaces up"
 
 if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
@@ -1147,11 +1158,64 @@ else
     bad "the provisioned tunnel did not carry traffic; see $WORK/prov-a.log"
 fi
 
-kill_pidfile "$WORK/prov-a.pid"
-kill_pidfile "$WORK/prov-b.pid"
-wait_gone "$WORK/prov-a.pid" 5 || bad "provisioned A ignored SIGTERM"
-wait_gone "$WORK/prov-b.pid" 5 || bad "provisioned B ignored SIGTERM"
+stop_prov
 ok "the provisioned daemons exited on SIGTERM"
+
+# ── rotation ─────────────────────────────────────────────────────────
+#
+# A is the initiator, so its key is the one that rotates: B accepts A's old key
+# as the previous identity while A switches. That is the direction that has to
+# work — a responder accepts a previous key, an initiator dials with its current
+# one.
+say "rotating A's key with no outage"
+
+cp "$PROV/a/server.key" "$PROV/a-old.key"
+"$BIN" keygen --output "$PROV/a-new.key" --suite 3 > "$PROV/a-new.pub" 2>/dev/null
+"$BIN" peer rotate a --config "$PROV/b/vallum0.toml" \
+    --public-key-file "$PROV/a-new.pub" --no-apply > "$WORK/prov-rotate.log" 2>&1 \
+    || bad "peer rotate failed; see $WORK/prov-rotate.log"
+grep -q '^previous_public_key = ' "$PROV/b/vallum0.toml" \
+    || bad "peer rotate did not keep the old key as previous_public_key"
+ok "peer rotate kept the old key as the previous identity"
+
+start_prov
+if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+    ok "the old key still works while the rotation is open"
+else
+    bad "the old key stopped working during a rotation; see $WORK/prov-a.log"
+fi
+stop_prov
+
+cp "$PROV/a-new.key" "$PROV/a/server.key"
+start_prov
+if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+    ok "the new key works once the device has it"
+else
+    bad "the new key did not work; see $WORK/prov-a.log"
+fi
+stop_prov
+
+"$BIN" peer finalize a --config "$PROV/b/vallum0.toml" --no-apply \
+    > "$WORK/prov-finalize.log" 2>&1 || bad "peer finalize failed"
+grep -q '^previous_public_key = ' "$PROV/b/vallum0.toml" \
+    && bad "peer finalize left the previous key behind"
+start_prov
+if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+    ok "the tunnel still works after finalize"
+else
+    bad "the tunnel stopped working after finalize; see $WORK/prov-a.log"
+fi
+stop_prov
+
+# The retired key must be refused, or finalize is only cosmetic.
+cp "$PROV/a-old.key" "$PROV/a/server.key"
+start_prov
+if ping -c1 -W2 -q "$INNER_B" >/dev/null 2>&1; then
+    bad "the retired key still completed a handshake"
+fi
+ok "the retired key is refused"
+stop_prov
+cp "$PROV/a-new.key" "$PROV/a/server.key"
 
 "$BIN" peer remove b --config "$PROV/a/vallum0.toml" --no-apply > /dev/null 2>&1 \
     || bad "peer remove failed"

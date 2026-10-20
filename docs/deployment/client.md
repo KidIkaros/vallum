@@ -91,9 +91,32 @@ dns = ["1.1.1.1"]
 table = "auto"
 ```
 
-`vallum-quick` installs the resolvers through `resolvconf` when it is present. If
-it is not, DNS is left to the host and `vallum-quick` says so. On a
-systemd-resolved host, `resolvectl dns vallum0 1.1.1.1` is the equivalent.
+`vallum-quick` picks the backend the host actually has:
+
+- **systemd-resolved**, detected by `resolvectl` being present *and*
+  `/run/systemd/resolve` existing — installed but disabled is a real state, and
+  calling `resolvectl` there fails. It runs `resolvectl dns` and, on a full
+  tunnel, claims the `~.` routing domain so no query leaks to the local resolver.
+  `detach` runs `resolvectl revert`.
+- **resolvconf**, otherwise, through `resolvconf -a`.
+
+If neither exists, DNS is left to the host and `vallum-quick` says so.
+`vallum-quick attach <config> --dry-run` prints the commands the chosen backend
+would run, which is the fastest way to see which path you are on.
+
+## Expiring a credential without a CA
+
+If you generated your own key, you can still attach a validity window:
+
+```sh
+sudo vallum identity self-sign --key /etc/vallum/laptop.key \
+    --label laptop --days 90 --output laptop.identity
+```
+
+Give the document to the server (`vallum peer add laptop --identity
+laptop.identity`) on an interface with no `identity_issuer`. Anyone can mint a
+self-signed document, so this is a rotation aid, not an authorisation — for that,
+the server needs a CA key.
 
 ## MTU
 

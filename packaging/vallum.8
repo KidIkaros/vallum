@@ -43,8 +43,11 @@ Export a config; secrets are omitted unless explicitly requested.
 .B bench [--suite ID] [--bytes N] [--iterations N]
 Measure the data plane's seal/open cost.
 .TP
-.B doctor [--config FILE | --control SOCKET] [--json]
-Check the platform, config, control socket, and helper tools.
+.B doctor [--config FILE | --control SOCKET] [--probe-mtu HOST] [--json]
+Check the platform, config, control socket, forwarding, the firewall port, the
+unit state, and the config's permissions. `--probe-mtu` is the one active
+check: it bisects the path to HOST with `ping -M do` and compares the result
+with `outer_mtu`.
 .TP
 .B completions SHELL
 Print a completion script for bash, zsh, fish, or PowerShell.
@@ -67,6 +70,43 @@ device; `--bundle-out` generates it here and writes a client bundle.
 .B peer list | show NAME | remove NAME [--json]
 Manage the configured peers. `list` prints a fingerprint rather than the 4.7 KB
 public line; `show --full` prints the line.
+.TP
+.B peer rotate NAME (--public-key LINE | --public-key-file FILE | --bundle-out FILE | --identity FILE) [--endpoint HOST:PORT] [--no-apply] [--json]
+.PP
+Install a new identity for a peer and keep the old one as
+.BR previous_public_key .
+The peer accepts both until
+.BR "peer finalize" ,
+so the server can rotate before the device has the new key. A rotation is only
+zero-downtime when the rotating peer is the responder: an initiator dials with
+its current key.
+.TP
+.B peer finalize NAME [--no-apply] [--json]
+Retire the previous identity a rotation kept. The old key is refused afterwards.
+.TP
+.B metrics [--config FILE | --control SOCKET] [--prefix PREFIX]
+Print the daemon's state as Prometheus text exposition. One
+.B get=1
+is one scrape; there is no listener. Labels carry the interface, the peer name
+and its fingerprint, never the public line.
+.TP
+.B identity issue --ca-key FILE (--peer-public LINE | --peer-public-file FILE) --label NAME --days N [--output FILE] [--json]
+Issue an identity document signed by a CA key that carries a signing half. The
+document binds the peer's KEM key and signing key to a label and a validity
+window.
+.TP
+.B identity self-sign --key FILE --label NAME --days N [--output FILE] [--json]
+Issue a self-signed document. It is a key binding with a window, not an
+authorisation: with
+.B interface.identity_issuer
+set, a self-signed document is refused.
+.TP
+.B identity verify [--issuer FILE | --issuer-public LINE] [--suite ID] --document FILE [--json]
+Check a document's signature and window. Without an issuer, a self-signed
+document is checked against its own key.
+.TP
+.B identity show [--suite ID] --document FILE [--json]
+Print a document's label, key sizes, window and fingerprint without verifying it.
 .TP
 .B import-bundle FILE [--output-dir DIR] [--force] [--install]
 Import a client `.vallum-bundle` as a config and a 0600 key file. `--install`

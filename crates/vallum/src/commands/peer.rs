@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand};
 use ipnet::IpNet;
 use serde::Serialize;
+use vallum_core::identity::{IdentityDocument, Validity};
+use vallum_core::PeerIdentity;
 use vallum_crypto::CryptoSuite;
 use vallum_crypto_sdk::SdkSuite;
 use vallum_tunnel::Prefix;
@@ -28,7 +30,7 @@ use crate::bundle::Bundle;
 use crate::commands::control::syncconf_running;
 use crate::commands::server::{detected_endpoint, listen_port, normalise_endpoint};
 use crate::config::{self, Config};
-use crate::config_edit::{self, ConfigFile, PeerRecord};
+use crate::config_edit::{self, ConfigFile, IdentityFields, PeerRecord};
 use crate::{entropy, keys, Error};
 
 #[derive(Debug, Args)]
@@ -47,6 +49,10 @@ pub enum PeerCommand {
     Show(ShowArgs),
     /// Remove a peer.
     Remove(RemoveArgs),
+    /// Install a new identity while the old one keeps working.
+    Rotate(RotateArgs),
+    /// Retire the previous identity a rotation kept.
+    Finalize(FinalizeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -75,6 +81,14 @@ pub struct AddArgs {
     /// its own). Use with `--public-key`.
     #[arg(long, value_name = "FILE", conflicts_with = "bundle_out")]
     pub client_config_out: Option<PathBuf>,
+
+    /// Enrol a peer by its identity document instead of a public line.
+    ///
+    /// The document is verified against `[interface] identity_issuer` (or its
+    /// own signature when no issuer is configured) and its window is checked.
+    /// It is copied to `clients/<name>.identity`.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file", "bundle_out"])]
+    pub identity: Option<PathBuf>,
 
     /// The address to route to the peer. Allocated if absent.
     #[arg(long, value_name = "CIDR")]
@@ -119,6 +133,72 @@ pub struct AddArgs {
     /// Include the full public line in JSON output.
     #[arg(long)]
     pub full: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RotateArgs {
+    /// The peer to rotate.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// The configuration file to edit.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// The peer's new public line.
+    #[arg(long, value_name = "LINE", conflicts_with_all = ["public_key_file", "bundle_out", "identity"])]
+    pub public_key: Option<String>,
+
+    /// A file holding the new public line.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "bundle_out", "identity"])]
+    pub public_key_file: Option<PathBuf>,
+
+    /// Generate the new keypair here and write the client's bundle.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file", "identity"])]
+    pub bundle_out: Option<PathBuf>,
+
+    /// The peer's new identity document.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file", "bundle_out"])]
+    pub identity: Option<PathBuf>,
+
+    /// The address the client dials, for the bundle. Detected if absent.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub endpoint: Option<String>,
+
+    /// A DNS server to push to the client bundle. Repeatable.
+    #[arg(long, value_name = "ADDR")]
+    pub dns: Vec<String>,
+
+    /// Delete the server's copy of the generated key after writing the bundle.
+    #[arg(long)]
+    pub forget_key: bool,
+
+    /// Write the config but do not tell a running daemon.
+    #[arg(long)]
+    pub no_apply: bool,
+
+    /// Emit JSON instead of a report.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FinalizeArgs {
+    /// The peer whose previous identity should be retired.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// The configuration file to edit.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// Write the config but do not tell a running daemon.
+    #[arg(long)]
+    pub no_apply: bool,
+
+    /// Emit JSON instead of a report.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -179,6 +259,8 @@ struct Server {
     suite: SdkSuite,
     suite_id: u16,
     public_line: String,
+    /// The CA key every document must verify against, if one is configured.
+    issuer: Option<vallum_crypto::SignPublicKey>,
 }
 
 /// `vallum peer`.
@@ -193,6 +275,156 @@ pub fn peer(args: &PeerArgs) -> Result<(), Error> {
         PeerCommand::List(args) => list(args),
         PeerCommand::Show(args) => show(args),
         PeerCommand::Remove(args) => remove(args),
+        PeerCommand::Rotate(args) => rotate(args),
+        PeerCommand::Finalize(args) => finalize(args),
+    }
+}
+
+/// A resolved identity for a new or rotated peer.
+struct NewIdentity {
+    identity: PeerIdentity,
+    public_line: String,
+    text: Option<String>,
+    file: Option<String>,
+    validity: Option<Validity>,
+    generated: Option<keys::SecretFile>,
+    key_path: Option<PathBuf>,
+}
+
+/// Resolve a peer's identity from a public line, a document, or a key made here.
+///
+/// `fresh_key` names the generated key with a timestamp, so a rotation never
+/// overwrites the key file the previous bundle referred to.
+#[allow(clippy::too_many_arguments)]
+fn build_identity(
+    server: &Server,
+    directory: &Path,
+    name: &str,
+    public_key: Option<&str>,
+    public_key_file: Option<&Path>,
+    bundle_out: Option<&Path>,
+    identity_path: Option<&Path>,
+    fresh_key: bool,
+) -> Result<NewIdentity, Error> {
+    match (public_key, public_key_file, bundle_out, identity_path) {
+        (Some(line), None, None, None) => {
+            let identity = validate_public_line(server, line)?;
+            Ok(NewIdentity {
+                public_line: keys::encode_public(server.suite_id, &identity),
+                identity,
+                text: None,
+                file: None,
+                validity: None,
+                generated: None,
+                key_path: None,
+            })
+        }
+        (None, Some(path), None, None) => {
+            let text = std::fs::read_to_string(path).map_err(|source| Error::IoPath {
+                action: "read public line",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let identity = validate_public_line(server, &text)?;
+            Ok(NewIdentity {
+                public_line: keys::encode_public(server.suite_id, &identity),
+                identity,
+                text: None,
+                file: None,
+                validity: None,
+                generated: None,
+                key_path: None,
+            })
+        }
+        (None, None, Some(_), None) => {
+            let clients = directory.join("clients");
+            std::fs::create_dir_all(&clients).map_err(|source| Error::IoPath {
+                action: "create",
+                path: clients.clone(),
+                source,
+            })?;
+            let key_name = if fresh_key {
+                format!("{name}-{}.key", now_unix())
+            } else {
+                format!("{name}.key")
+            };
+            let key_path = clients.join(&key_name);
+            let secret = keys::new_secret(server.suite_id, false, entropy::seed());
+            keys::save_secret(&key_path, &secret)?;
+            let identity = keys::identity(&server.suite, &secret)?;
+            Ok(NewIdentity {
+                public_line: keys::encode_public(server.suite_id, &identity.to_peer()),
+                identity: identity.to_peer(),
+                text: None,
+                file: None,
+                validity: None,
+                generated: Some(secret),
+                key_path: Some(key_path),
+            })
+        }
+        (None, None, None, Some(path)) => {
+            let text = std::fs::read_to_string(path).map_err(|source| Error::IoPath {
+                action: "read identity document",
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let text = text.trim().to_owned();
+            let bytes = keys::hex_decode(&text).map_err(|why| {
+                Error::Usage(format!("{}: identity document: {why}", path.display()))
+            })?;
+            let document = IdentityDocument::decode(&bytes)
+                .map_err(|why| Error::Usage(format!("{}: {why}", path.display())))?;
+            let now = now_unix();
+            let window = document.validity();
+            let identity = match &server.issuer {
+                Some(issuer) => document.to_peer(&server.suite, issuer, now),
+                None => {
+                    if !document.is_self_signed(&server.suite) {
+                        return Err(Error::Usage(format!(
+                            "{}: the document is not self-signed, and interface.identity_issuer \
+                             is not set",
+                            path.display()
+                        )));
+                    }
+                    document.to_peer(&server.suite, document.signing(), now)
+                }
+            }
+            .map_err(|why| {
+                Error::Usage(format!(
+                    "{}: {why} (window {}..{})",
+                    path.display(),
+                    window.not_before,
+                    window.not_after
+                ))
+            })?;
+
+            // Keep a copy beside the config so the peer survives the source
+            // file being moved, and so `peer list` can read the window.
+            let clients = directory.join("clients");
+            std::fs::create_dir_all(&clients).map_err(|source| Error::IoPath {
+                action: "create",
+                path: clients.clone(),
+                source,
+            })?;
+            let relative = PathBuf::from("clients").join(format!("{}.identity", name));
+            write_private(&directory.join(&relative), text.as_bytes())?;
+            Ok(NewIdentity {
+                public_line: keys::encode_public(server.suite_id, &identity),
+                identity,
+                text: Some(text),
+                file: Some(relative.to_string_lossy().into_owned()),
+                validity: Some(window),
+                generated: None,
+                key_path: None,
+            })
+        }
+        _ => Err(Error::Usage(
+            "give exactly one of --public-key, --public-key-file, --identity, or --bundle-out:\n  \
+             --public-key LINE       the device generated its own key (recommended)\n  \
+             --identity FILE         a CA-issued or self-signed document\n  \
+             --bundle-out FILE       generate the keypair here and hand over a bundle"
+                .to_owned(),
+        )),
     }
 }
 
@@ -207,42 +439,23 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     }
     let server = load_server(&args.config)?;
 
-    // 1. The peer's public line, from the device or generated here.
-    let mut generated: Option<keys::SecretFile> = None;
-    let public_line = match (&args.public_key, &args.public_key_file, &args.bundle_out) {
-        (Some(line), None, None) => validate_public_line(&server, line)?,
-        (None, Some(path), None) => {
-            let text = std::fs::read_to_string(path).map_err(|source| Error::IoPath {
-                action: "read public line",
-                path: path.clone(),
-                source,
-            })?;
-            validate_public_line(&server, &text)?
-        }
-        (None, None, Some(_)) => {
-            let directory = file.directory().join("clients");
-            std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
-                action: "create",
-                path: directory.clone(),
-                source,
-            })?;
-            let key_path = directory.join(format!("{}.key", args.name));
-            let secret = keys::new_secret(server.suite_id, false, entropy::seed());
-            keys::save_secret(&key_path, &secret)?;
-            let identity = keys::identity(&server.suite, &secret)?;
-            let line = keys::encode_public(server.suite_id, &identity.to_peer());
-            generated = Some(secret);
-            line
-        }
-        _ => {
-            return Err(Error::Usage(
-                "give exactly one of --public-key, --public-key-file, or --bundle-out:\n  \
-                 --public-key LINE       the device generated its own key (recommended)\n  \
-                 --bundle-out FILE       generate the keypair here and hand over a bundle"
-                    .to_owned(),
-            ));
-        }
-    };
+    // 1. The peer's identity: a public line, a document, or a key generated here.
+    let built = build_identity(
+        &server,
+        &file.directory(),
+        &args.name,
+        args.public_key.as_deref(),
+        args.public_key_file.as_deref(),
+        args.bundle_out.as_deref(),
+        args.identity.as_deref(),
+        false,
+    )?;
+    let peer_identity = built.identity.clone();
+    let identity_text = built.text.clone();
+    let identity_file = built.file.clone();
+    let validity = built.validity;
+    let generated = built.generated.clone();
+    let public_line = keys::encode_public(server.suite_id, &peer_identity);
 
     // 2. The address, allocated from the tunnel's own subnets if not given.
     let address = match &args.address {
@@ -306,13 +519,23 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     };
     let record = PeerRecord {
         name: args.name.clone(),
-        public_key: public_line.clone(),
+        // A document names the key; writing both would be a config that says
+        // two different things about the same peer.
+        public_key: if identity_file.is_some() {
+            String::new()
+        } else {
+            public_line.clone()
+        },
         allowed_ips: allowed.clone(),
         endpoint: endpoint.clone(),
         keepalive: args.keepalive,
+        identity: identity_text.clone(),
+        identity_file,
+        validity,
         preshared_key_file: psk_file,
         has_psk: args.psk,
         pin_endpoint: args.pin_endpoint,
+        rotating: false,
     };
     file.add_peer(&record)?;
     file.validate()?;
@@ -382,11 +605,12 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             address: address.to_string(),
             allowed_ips: allowed,
             public_key: args.full.then(|| public_line.clone()),
-            fingerprint: fingerprint(&public_line),
+            fingerprint: fingerprint(identity_text.as_deref().unwrap_or(&public_line)),
             endpoint: endpoint.clone(),
             keepalive: args.keepalive,
             psk: args.psk,
             pin_endpoint: args.pin_endpoint,
+            validity: validity_label(validity, now_unix()),
             bundle: bundle_path.clone(),
             client_config: client_config_path.clone(),
             config: args.config.clone(),
@@ -404,7 +628,13 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     say!("added peer `{}`", args.name);
     say!("   address    {}", address);
     say!("   allowed    {}", allowed.join(", "));
-    say!("   fingerprint {}", fingerprint(&public_line));
+    say!(
+        "   fingerprint {}",
+        fingerprint(identity_text.as_deref().unwrap_or(&public_line))
+    );
+    if validity.is_some() {
+        say!("   identity    {}", validity_label(validity, now_unix()));
+    }
     if let Some(endpoint) = &endpoint {
         say!("   endpoint   {endpoint}");
     }
@@ -448,6 +678,209 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     Ok(())
 }
 
+fn rotate(args: &RotateArgs) -> Result<(), Error> {
+    require_config(&args.config)?;
+    let mut file = ConfigFile::load(&args.config)?;
+    if !file.has_peer(&args.name) {
+        return Err(Error::Usage(format!(
+            "no peer named `{}`; `peer add` creates one",
+            args.name
+        )));
+    }
+    let server = load_server(&args.config)?;
+    let built = build_identity(
+        &server,
+        &file.directory(),
+        &args.name,
+        args.public_key.as_deref(),
+        args.public_key_file.as_deref(),
+        args.bundle_out.as_deref(),
+        args.identity.as_deref(),
+        true,
+    )?;
+
+    let fields = IdentityFields {
+        public_key: if built.file.is_some() {
+            None
+        } else {
+            Some(built.public_line.clone())
+        },
+        identity: built.text.clone(),
+        identity_file: built.file.clone(),
+    };
+    file.rotate_peer(&args.name, &fields)?;
+    file.validate()?;
+    let backup = file.save()?;
+
+    // The bundle, when the server generated the new key.
+    let mut bundle_path = None;
+    if let Some(path) = &args.bundle_out {
+        let secret = built.generated.as_ref().ok_or_else(|| {
+            Error::Usage("--bundle-out needs a key this command generated".to_owned())
+        })?;
+        let peer = file
+            .peers()
+            .into_iter()
+            .find(|peer| peer.name == args.name)
+            .ok_or_else(|| Error::Usage(format!("no peer named `{}`", args.name)))?;
+        let address = peer
+            .allowed_ips
+            .first()
+            .ok_or_else(|| Error::Usage("the peer has no address to put in a bundle".to_owned()))?;
+        let endpoint = bundle_endpoint(args.endpoint.as_deref(), &args.config)?;
+        let psk = read_psk(&peer, &file.directory())?;
+        let config_text = client_config(
+            &args.name,
+            address,
+            &server.public_line,
+            &endpoint,
+            &args.dns,
+            psk.as_deref(),
+        );
+        let bundle = Bundle {
+            version: 1,
+            name: args.name.clone(),
+            config: config_text,
+            key: keys::render_secret(secret),
+        };
+        write_private(
+            path,
+            serde_json::to_string_pretty(&bundle)
+                .map_err(|error| Error::Usage(format!("bundle: {error}")))?
+                .as_bytes(),
+        )?;
+        if args.forget_key {
+            if let Some(key_path) = &built.key_path {
+                let _ = std::fs::remove_file(key_path);
+            }
+        }
+        bundle_path = Some(path.clone());
+    }
+
+    let applied = if args.no_apply {
+        false
+    } else {
+        syncconf_running(&args.config)?
+    };
+
+    if args.json {
+        let report = Rotated {
+            name: args.name.clone(),
+            fingerprint: fingerprint(built.text.as_deref().unwrap_or(&built.public_line)),
+            bundle: bundle_path.clone(),
+            config: args.config.clone(),
+            backup,
+            applied,
+        };
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+
+    say!("rotated peer `{}`", args.name);
+    say!(
+        "   new key    {}",
+        fingerprint(built.text.as_deref().unwrap_or(&built.public_line))
+    );
+    say!(
+        "   old key    kept as previous until `peer finalize {}`",
+        args.name
+    );
+    if let Some(path) = &bundle_path {
+        say!("   bundle     {}", path.display());
+        say!();
+        say!("on the client:");
+        say!("   vallum import-bundle {} --install", path.display());
+    }
+    say!(
+        "   config     {} (backup {})",
+        args.config.display(),
+        backup.display()
+    );
+    say!(
+        "   applied    {}",
+        if applied {
+            "yes"
+        } else {
+            "no — the daemon is not running; start it to apply"
+        }
+    );
+    Ok(())
+}
+
+fn finalize(args: &FinalizeArgs) -> Result<(), Error> {
+    require_config(&args.config)?;
+    let mut file = ConfigFile::load(&args.config)?;
+    let retired = file.finalize_peer(&args.name)?;
+    file.validate()?;
+    let backup = file.save()?;
+    let applied = if args.no_apply {
+        false
+    } else {
+        syncconf_running(&args.config)?
+    };
+
+    if args.json {
+        let report = Finalized {
+            name: args.name.clone(),
+            retired,
+            config: args.config.clone(),
+            backup,
+            applied,
+        };
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+
+    if retired {
+        say!("finalized peer `{}`", args.name);
+        say!("   the previous identity is no longer accepted");
+    } else {
+        say!(
+            "peer `{}` has no previous identity; nothing to retire",
+            args.name
+        );
+    }
+    say!(
+        "   config     {} (backup {})",
+        args.config.display(),
+        backup.display()
+    );
+    say!(
+        "   applied    {}",
+        if applied {
+            "yes"
+        } else {
+            "no — the daemon is not running; start it to apply"
+        }
+    );
+    Ok(())
+}
+
+fn read_psk(peer: &PeerRecord, directory: &Path) -> Result<Option<String>, Error> {
+    let Some(file) = &peer.preshared_key_file else {
+        return Ok(None);
+    };
+    let path = directory.join(file);
+    Ok(Some(
+        std::fs::read_to_string(&path)
+            .map_err(|source| Error::IoPath {
+                action: "read preshared key",
+                path,
+                source,
+            })?
+            .trim()
+            .to_owned(),
+    ))
+}
+
 fn list(args: &ListArgs) -> Result<(), Error> {
     require_config(&args.config)?;
     let file = ConfigFile::load(&args.config)?;
@@ -462,7 +895,11 @@ fn list(args: &ListArgs) -> Result<(), Error> {
                 keepalive: peer.keepalive,
                 psk: peer.has_psk,
                 pin_endpoint: peer.pin_endpoint,
-                fingerprint: fingerprint(&peer.public_key),
+                validity: validity_label(peer.validity, now_unix()),
+                rotating: peer.rotating,
+                fingerprint: peer
+                    .fingerprint_source()
+                    .map_or_else(|| "-".to_owned(), fingerprint),
                 public_key: args.full.then(|| peer.public_key.clone()),
             })
             .collect();
@@ -479,13 +916,15 @@ fn list(args: &ListArgs) -> Result<(), Error> {
         return Ok(());
     }
     say!(
-        "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4}  FINGERPRINT",
+        "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4} {:<9} {:>3}  FINGERPRINT",
         "NAME",
         "ALLOWED IPS",
         "ENDPOINT",
         "KEEPALIVE",
         "PSK",
-        "PIN"
+        "PIN",
+        "VALIDITY",
+        "ROT"
     );
     for peer in &peers {
         let allowed = peer.allowed_ips.join(",");
@@ -495,7 +934,7 @@ fn list(args: &ListArgs) -> Result<(), Error> {
             .clone()
             .unwrap_or_else(|| "(roaming)".to_owned());
         say!(
-            "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4}  {}",
+            "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4} {:<9} {:>3}  {}",
             elide(&peer.name, 16),
             allowed,
             elide(&endpoint, 26),
@@ -503,10 +942,15 @@ fn list(args: &ListArgs) -> Result<(), Error> {
                 .map_or_else(|| "-".to_owned(), |value| format!("{value}s")),
             if peer.has_psk { "yes" } else { "no" },
             if peer.pin_endpoint { "yes" } else { "no" },
-            fingerprint(&peer.public_key),
+            validity_label(peer.validity, now_unix()),
+            if peer.rotating { "yes" } else { "-" },
+            peer.fingerprint_source()
+                .map_or_else(|| "-".to_owned(), fingerprint),
         );
         if args.full {
-            say!("                 {}", peer.public_key);
+            if let Some(line) = peer.fingerprint_source() {
+                say!("                 {line}");
+            }
         }
     }
     Ok(())
@@ -528,7 +972,11 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
             keepalive: peer.keepalive,
             psk: peer.has_psk,
             pin_endpoint: peer.pin_endpoint,
-            fingerprint: fingerprint(&peer.public_key),
+            validity: validity_label(peer.validity, now_unix()),
+            rotating: peer.rotating,
+            fingerprint: peer
+                .fingerprint_source()
+                .map_or_else(|| "-".to_owned(), fingerprint),
             public_key: Some(peer.public_key.clone()),
         };
         say!(
@@ -563,8 +1011,21 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
             "roaming"
         }
     );
-    say!("   fingerprint   {}", fingerprint(&peer.public_key));
-    if args.full {
+    say!(
+        "   identity      {}",
+        validity_label(peer.validity, now_unix())
+    );
+    if peer.rotating {
+        say!("   rotation      in progress; `peer finalize` retires the old key");
+    }
+    say!(
+        "   fingerprint   {}",
+        peer.fingerprint_source()
+            .map_or_else(|| "-".to_owned(), fingerprint)
+    );
+    if peer.public_key.is_empty() {
+        say!("   public line   (none: this peer is named by an identity document)");
+    } else if args.full {
         say!("   public line   {}", peer.public_key);
     } else {
         say!(
@@ -631,6 +1092,7 @@ struct Added {
     keepalive: Option<u16>,
     psk: bool,
     pin_endpoint: bool,
+    validity: String,
     bundle: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_config: Option<PathBuf>,
@@ -647,9 +1109,30 @@ struct Listed {
     keepalive: Option<u16>,
     psk: bool,
     pin_endpoint: bool,
+    validity: String,
+    rotating: bool,
     fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     public_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rotated {
+    name: String,
+    fingerprint: String,
+    bundle: Option<PathBuf>,
+    config: PathBuf,
+    backup: PathBuf,
+    applied: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Finalized {
+    name: String,
+    retired: bool,
+    config: PathBuf,
+    backup: PathBuf,
+    applied: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -659,6 +1142,12 @@ struct Removed {
     config: PathBuf,
     backup: PathBuf,
     applied: bool,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn require_config(path: &Path) -> Result<(), Error> {
@@ -680,14 +1169,32 @@ fn load_server(config_path: &Path) -> Result<Server, Error> {
     let suite = SdkSuite::from_id(file.suite).map_err(|error| Error::Suite(error.to_string()))?;
     let identity = keys::identity(&suite, &file)?;
     let public_line = keys::encode_public(file.suite, &identity.to_peer());
+    let issuer = match config.interface.identity_issuer.as_deref() {
+        Some(text) => {
+            let bytes = keys::hex_decode(text).map_err(|why| {
+                Error::Usage(format!("interface.identity_issuer is not hex: {why}"))
+            })?;
+            let expected = suite.sizes().sign_pk_max;
+            if bytes.len() != expected {
+                return Err(Error::Usage(format!(
+                    "interface.identity_issuer is {} bytes, but suite 0x{:04x} uses {expected}",
+                    bytes.len(),
+                    file.suite
+                )));
+            }
+            Some(vallum_crypto::SignPublicKey::new(bytes))
+        }
+        None => None,
+    };
     Ok(Server {
         suite,
         suite_id: file.suite,
         public_line,
+        issuer,
     })
 }
 
-fn validate_public_line(server: &Server, line: &str) -> Result<String, Error> {
+fn validate_public_line(server: &Server, line: &str) -> Result<vallum_core::PeerIdentity, Error> {
     let (suite, identity) = keys::decode_public(line)?;
     if suite != server.suite_id {
         return Err(Error::Usage(format!(
@@ -707,7 +1214,7 @@ fn validate_public_line(server: &Server, line: &str) -> Result<String, Error> {
             server.suite_id
         )));
     }
-    Ok(line.trim().to_owned())
+    Ok(identity)
 }
 
 fn parse_host_prefix(text: &str) -> Result<IpNet, Error> {
@@ -842,6 +1349,15 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn validity_label(validity: Option<Validity>, now: u64) -> String {
+    match validity {
+        None => "-".to_owned(),
+        Some(window) if now >= window.not_after => "EXPIRED".to_owned(),
+        Some(window) if now < window.not_before => "NOT YET".to_owned(),
+        Some(window) => format!("{}d", (window.not_after - now) / 86_400),
+    }
 }
 
 fn elide(text: &str, width: usize) -> String {

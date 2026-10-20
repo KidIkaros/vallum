@@ -33,6 +33,9 @@ the floor and pushes on the five things it leaves on the table:
 | Key reuse | none | **rejected on purpose** (P3): one master seed → a KEM key *and* an independently derived signing key; no dual-use key |
 | Epoch axis | no epoch, no erasure discipline | rekey is a fresh hybrid handshake (root independence), 2⁴⁸/2⁴⁹ caps, one superseded epoch erased after `REJECT_AFTER_TIME` |
 | Traffic analysis | none | Maybenot-style shaping, off by default, padding inside the AEAD |
+| Identity lifetime | static key, no expiry, no CA | identity documents with a signed validity window (ADR-0014) |
+| Key rotation | manual, with an outage | `peer rotate` keeps the old key accepted until `finalize` (ADR-0014) |
+| Operations | no metrics endpoint, `resolvconf` only | `vallum metrics`, `resolvectl` with a `~.` domain, `doctor --probe-mtu`, `pin_endpoint` (ADR-0014) |
 
 It also keeps the good parts of WireGuard (cryptokey routing, TAI64N, keyed MAC
 cookies, roaming by authenticated source) and strengthens suite negotiation:
@@ -271,7 +274,9 @@ keepalive, segmentation, and the admission tag), all seven proof obligations
 segmentation, IPv6, identity validity, dual-stack addressing), the **G1–G6**
 operational surface (configured PSK, UAPI, runtime rebind, `vallum-quick`,
 batching, platform tier), and the **TUI**. The architecture decisions are in
-[`docs/adr/`](docs/adr/). `docs/proof/` holds one artefact per gate, and each one
+[`docs/adr/`](docs/adr/), including
+[ADR-0014](docs/adr/0014-wireguard-gaps.md), which records the WireGuard gaps
+Vallum closes and the ones it deliberately does not. `docs/proof/` holds one artefact per gate, and each one
 states what it does **not** claim.
 
 Known open items are product decisions rather than missing work: a code-based

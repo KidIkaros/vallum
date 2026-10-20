@@ -148,6 +148,23 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
             checks.push(check_forwarding(resolved));
             checks.push(check_firewall(resolved.listen.port()));
         }
+        let rotating: Vec<&str> = resolved
+            .peers
+            .iter()
+            .filter(|peer| !peer.previous_identities().is_empty())
+            .map(vallum_tunnel::PeerConfig::name)
+            .collect();
+        if !rotating.is_empty() {
+            checks.push(Check::new(
+                "rotation",
+                Status::Warn,
+                format!(
+                    "{} still accepts a previous key; run `vallum peer finalize` once the \
+                     device has the new one",
+                    rotating.join(", ")
+                ),
+            ));
+        }
         checks.push(check_service(args.config.as_deref()));
         checks.push(check_config_mode(args.config.as_deref()));
         if let Some(host) = &args.probe_mtu {

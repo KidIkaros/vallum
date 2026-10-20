@@ -119,8 +119,8 @@ different product:
   the handshake fails closed. That is a new operational obligation: someone must
   renew, and `doctor` must say when.
 - **A previous key is a standing second credential.** Rotation is only safe if it
-  is finished; `peer list` shows `ROTATING`, `doctor` warns after seven days, and
-  `peer finalize` is one command.
+  is finished; `peer list` shows `ROT`, `doctor` warns for as long as a previous
+  key is configured, and `peer finalize` is one command.
 - **`pin_endpoint` is a trade, not a default.** It breaks NAT rebinding on
   purpose; it is opt-in per peer.
 - **The DNS path is now distribution-aware.** Two backends means two code paths,

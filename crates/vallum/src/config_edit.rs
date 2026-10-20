@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use ipnet::IpNet;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+use vallum_core::identity::{IdentityDocument, Validity};
 
 use crate::Error;
 
@@ -24,8 +25,14 @@ const MAX_SCAN: usize = 65_536;
 pub struct PeerRecord {
     /// The operator's name for the peer.
     pub name: String,
-    /// The `vallum1:` public line.
+    /// The `vallum1:` public line, empty when the peer is named by a document.
     pub public_key: String,
+    /// The identity document's text, when the peer uses one.
+    pub identity: Option<String>,
+    /// The document's file, relative to the config, when it lives in one.
+    pub identity_file: Option<String>,
+    /// The window the document asserts.
+    pub validity: Option<Validity>,
     /// The prefixes routed to this peer.
     pub allowed_ips: Vec<String>,
     /// The address dialled, if any.
@@ -38,6 +45,31 @@ pub struct PeerRecord {
     pub has_psk: bool,
     /// Whether the peer refuses to roam from its configured endpoint.
     pub pin_endpoint: bool,
+    /// Whether a rotation is in progress (a previous identity is still accepted).
+    pub rotating: bool,
+}
+
+impl PeerRecord {
+    /// The text a fingerprint is taken over: the public line, or the document.
+    #[must_use]
+    pub fn fingerprint_source(&self) -> Option<&str> {
+        if !self.public_key.is_empty() {
+            Some(&self.public_key)
+        } else {
+            self.identity.as_deref()
+        }
+    }
+}
+
+/// The identity fields a rotation installs.
+#[derive(Debug, Clone, Default)]
+pub struct IdentityFields {
+    /// A new public line, when the device generated the key.
+    pub public_key: Option<String>,
+    /// A new inline document.
+    pub identity: Option<String>,
+    /// A new document file.
+    pub identity_file: Option<String>,
 }
 
 /// A configuration file that can be edited and written back.
@@ -117,7 +149,11 @@ impl ConfigFile {
         let Some(entries) = self.doc.get("peer").and_then(Item::as_array_of_tables) else {
             return Vec::new();
         };
-        entries.iter().map(record).collect()
+        let directory = self.directory();
+        entries
+            .iter()
+            .map(|table| record(table, &directory))
+            .collect()
     }
 
     /// Whether a peer with this name exists.
@@ -196,6 +232,86 @@ impl ConfigFile {
             .map_err(|error| Error::Usage(format!("the edited config does not parse: {error}")))
     }
 
+    /// Replace a peer's identity, keeping the old one as `previous_*`.
+    ///
+    /// This is the rotation write: the new key becomes current and the old one
+    /// stays accepted until `finalize_peer`. Everything else about the peer —
+    /// address, endpoint, PSK, pinning — is untouched.
+    ///
+    /// # Errors
+    ///
+    /// If no peer has that name.
+    pub fn rotate_peer(&mut self, name: &str, new: &IdentityFields) -> Result<(), Error> {
+        let entries = self
+            .doc
+            .get_mut("peer")
+            .and_then(Item::as_array_of_tables_mut)
+            .ok_or_else(|| {
+                Error::Usage("`peer` in the config is not a list of tables".to_owned())
+            })?;
+        let table = entries
+            .iter_mut()
+            .find(|table| table.get("name").and_then(Item::as_str) == Some(name))
+            .ok_or_else(|| Error::Usage(format!("no peer named `{name}`")))?;
+
+        for key in [
+            "previous_public_key",
+            "previous_identity",
+            "previous_identity_file",
+        ] {
+            table.remove(key);
+        }
+        for (current, previous) in [
+            ("public_key", "previous_public_key"),
+            ("identity", "previous_identity"),
+            ("identity_file", "previous_identity_file"),
+        ] {
+            if let Some(item) = table.remove(current) {
+                table.insert(previous, item);
+            }
+        }
+        if let Some(key) = &new.public_key {
+            table.insert("public_key", Item::Value(Value::from(key.as_str())));
+        }
+        if let Some(file) = &new.identity_file {
+            table.insert("identity_file", Item::Value(Value::from(file.as_str())));
+        }
+        if let Some(text) = &new.identity {
+            table.insert("identity", Item::Value(Value::from(text.as_str())));
+        }
+        Ok(())
+    }
+
+    /// Drop the previous identity a rotation kept.
+    ///
+    /// Returns whether anything was there, so the command can say so.
+    ///
+    /// # Errors
+    ///
+    /// If no peer has that name.
+    pub fn finalize_peer(&mut self, name: &str) -> Result<bool, Error> {
+        let entries = self
+            .doc
+            .get_mut("peer")
+            .and_then(Item::as_array_of_tables_mut)
+            .ok_or_else(|| {
+                Error::Usage("`peer` in the config is not a list of tables".to_owned())
+            })?;
+        let table = entries
+            .iter_mut()
+            .find(|table| table.get("name").and_then(Item::as_str) == Some(name))
+            .ok_or_else(|| Error::Usage(format!("no peer named `{name}`")))?;
+        let mut removed = false;
+        for key in [
+            "previous_public_key",
+            "previous_identity",
+            "previous_identity_file",
+        ] {
+            removed |= table.remove(key).is_some();
+        }
+        Ok(removed)
+    }
+
     /// Write the file back, atomically, with a timestamped backup.
     ///
     /// # Errors
@@ -243,10 +359,26 @@ fn string(table: &Table, key: &str) -> Option<String> {
     table.get(key)?.as_str().map(str::to_owned)
 }
 
-fn record(table: &Table) -> PeerRecord {
+fn record(table: &Table, directory: &Path) -> PeerRecord {
+    let identity_file = string(table, "identity_file");
+    let identity = string(table, "identity").or_else(|| {
+        identity_file.as_ref().and_then(|file| {
+            std::fs::read_to_string(directory.join(file))
+                .ok()
+                .map(|text| text.trim().to_owned())
+        })
+    });
+    let validity = identity
+        .as_deref()
+        .and_then(|text| crate::keys::hex_decode(text).ok())
+        .and_then(|bytes| IdentityDocument::decode(&bytes).ok())
+        .map(|document| document.validity());
     PeerRecord {
         name: string(table, "name").unwrap_or_default(),
         public_key: string(table, "public_key").unwrap_or_default(),
+        identity,
+        identity_file,
+        validity,
         allowed_ips: table
             .get("allowed_ips")
             .and_then(Item::as_array)
@@ -269,16 +401,25 @@ fn record(table: &Table) -> PeerRecord {
             .get("pin_endpoint")
             .and_then(Item::as_bool)
             .unwrap_or(false),
+        rotating: table.contains_key("previous_public_key")
+            || table.contains_key("previous_identity")
+            || table.contains_key("previous_identity_file"),
     }
 }
 
 fn table_for(peer: &PeerRecord) -> Table {
     let mut table = Table::new();
     table.insert("name", Item::Value(Value::from(peer.name.as_str())));
-    table.insert(
-        "public_key",
-        Item::Value(Value::from(peer.public_key.as_str())),
-    );
+    if !peer.public_key.is_empty() {
+        table.insert(
+            "public_key",
+            Item::Value(Value::from(peer.public_key.as_str())),
+        );
+    } else if let Some(file) = &peer.identity_file {
+        table.insert("identity_file", Item::Value(Value::from(file.as_str())));
+    } else if let Some(text) = &peer.identity {
+        table.insert("identity", Item::Value(Value::from(text.as_str())));
+    }
     let mut allowed = Array::new();
     for prefix in &peer.allowed_ips {
         allowed.push(prefix.as_str());
@@ -405,9 +546,13 @@ allowed_ips = [\"10.7.0.2/32\"]
             allowed_ips: vec![address.to_owned()],
             endpoint: None,
             keepalive: None,
+            identity: None,
+            identity_file: None,
+            validity: None,
             preshared_key_file: None,
             has_psk: false,
             pin_endpoint: false,
+            rotating: false,
         }
     }
 

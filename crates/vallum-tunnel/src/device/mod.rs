@@ -236,6 +236,39 @@ pub enum Action {
         /// Which end we were in the handshake that produced it.
         role: Role,
     },
+    /// A handshake was refused for a policy reason, not a cryptographic one.
+    ///
+    /// Diagnostic: the caller logs it. Silence here would be the wrong answer —
+    /// an expired credential and a dead network look identical from outside.
+    Refused {
+        /// Which peer.
+        peer: PeerId,
+        /// Why.
+        reason: Refusal,
+    },
+}
+
+/// Why a handshake was refused before it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The peer's identity document is past its `not_after`.
+    IdentityExpired,
+    /// The peer's identity document is before its `not_before`.
+    IdentityNotYetValid,
+    /// A pinned peer answered from an address that is not its endpoint.
+    EndpointPinned,
+}
+
+impl Refusal {
+    /// The reason, for a log line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdentityExpired => "identity document expired",
+            Self::IdentityNotYetValid => "identity document is not valid yet",
+            Self::EndpointPinned => "handshake from an address the peer is pinned away from",
+        }
+    }
 }
 
 /// Per-peer counters, for telemetry or assertions in a test.
@@ -341,8 +374,15 @@ impl Device {
         for existing in &self.peers {
             // The wire identity is the KEM key. The PSK and the signing
             // expectation are policy attached to that identity, not part of
-            // it: two entries with the same KEM key are the same peer.
-            if existing.config.identity().kem().as_bytes() == config.identity().kem().as_bytes() {
+            // it: two entries with the same KEM key are the same peer. A key
+            // still accepted from a rotation counts too, or two peers could
+            // both answer for the same device.
+            let duplicate = existing.accepts_kem(config.identity().kem().as_bytes())
+                || config
+                    .previous_identities()
+                    .iter()
+                    .any(|accepted| existing.accepts_kem(accepted.identity().kem().as_bytes()));
+            if duplicate {
                 return Err(ConfigError::DuplicatePeer {
                     existing: existing.config.name().to_owned(),
                     duplicate: config.name().to_owned(),
@@ -357,9 +397,9 @@ impl Device {
             }
         }
 
-        let hint = peer_hint(&*self.suite, config.identity().kem());
         let id = PeerId::from_index(self.peers.len());
-        self.peers.push(Peer::new(config, hint, self.now_ms));
+        self.peers
+            .push(Peer::new(config, &*self.suite, self.now_ms));
         Ok(id)
     }
 
@@ -518,9 +558,10 @@ impl Device {
     /// Find a peer by its KEM public key, as the UAPI does.
     #[must_use]
     pub fn peer_by_kem(&self, kem: &[u8]) -> Option<PeerId> {
-        self.peers()
-            .find(|(_, config)| config.identity().kem().as_bytes() == kem)
-            .map(|(id, _)| id)
+        self.peers
+            .iter()
+            .position(|peer| peer.accepts_kem(kem))
+            .map(PeerId::from_index)
     }
 
     /// Whether this device's identity carries a signing half.

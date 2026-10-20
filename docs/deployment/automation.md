@@ -68,6 +68,36 @@ and a repair.
 or `config`. `vallum peer remove --json` returns `{name, allowed_ips, config,
 backup, applied}`.
 
+## `vallum metrics`
+
+One scrape is one `get=1`, printed as Prometheus text:
+
+```
+vallum_up 1
+vallum_peers_total 3
+vallum_peers_handshaked 2
+vallum_peer_rx_bytes_total{interface="vallum0",peer="laptop",fingerprint="f1e20541fb69"} 1234
+vallum_peer_handshake_age_seconds{...} 42
+vallum_peer_epoch{...} 3
+vallum_peer_handshaked{...} 1
+```
+
+`--prefix` renames every metric. There is no listener: a systemd timer writes the
+output into `node_exporter`'s textfile directory, or a scraper runs the command
+over SSH. A peer that never handshook reports `-1` for its age, not "now".
+
+## `vallum identity` and rotation
+
+`identity issue` / `self-sign` print the document to stdout (or `--output`), and
+`--json` returns `{document, label, not_before, not_after, days, suite,
+fingerprint, self_signed}`. `identity verify` exits `1` when the document is not
+valid, so a play can gate on it.
+
+`peer rotate --json` returns `{name, fingerprint, bundle, config, backup,
+applied}`; `peer finalize --json` returns `{name, retired, config, backup,
+applied}`. `retired` is `false` when there was no previous identity, which is how
+a script knows a finalize was a no-op.
+
 ## Idempotency
 
 Every provisioning command converges:

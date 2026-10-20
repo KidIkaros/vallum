@@ -137,6 +137,13 @@ pub struct Interface {
     /// warned about, because it is rarely what an operator means.
     #[serde(default)]
     pub group: Option<String>,
+    /// The CA's signing public key, hex-encoded.
+    ///
+    /// When set, every peer's identity document must verify against it. When
+    /// absent, a document must be self-signed: a key binding with a window, not
+    /// an authorisation.
+    #[serde(default)]
+    pub identity_issuer: Option<String>,
 }
 
 /// One `[[peer]]` table.
@@ -146,7 +153,34 @@ pub struct PeerEntry {
     /// A name for logs.
     pub name: String,
     /// The peer's public line. See the `vallum1:` public line.
-    pub public_key: String,
+    ///
+    /// Exactly one of `public_key`, `identity` or `identity_file` names the
+    /// peer's identity.
+    #[serde(default)]
+    pub public_key: Option<String>,
+    /// A CA-issued (or self-signed) identity document, hex-encoded.
+    ///
+    /// The document binds the peer's KEM key, its signing key, a label and a
+    /// validity window, and replaces `public_key`. Whether it must be signed by
+    /// `[interface] identity_issuer` or be self-signed is the interface's
+    /// policy, not the document's.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// A file holding the identity document, relative to the config.
+    #[serde(default)]
+    pub identity_file: Option<PathBuf>,
+    /// The identity this peer used before a rotation.
+    ///
+    /// Accepted alongside the current one, so `peer rotate` can install the new
+    /// key before the device has it and `peer finalize` can retire the old one.
+    #[serde(default)]
+    pub previous_public_key: Option<String>,
+    /// A previous identity document, hex-encoded.
+    #[serde(default)]
+    pub previous_identity: Option<String>,
+    /// A file holding the previous document.
+    #[serde(default)]
+    pub previous_identity_file: Option<PathBuf>,
     /// An address to dial, or absent to roam from the peer's handshakes.
     #[serde(default)]
     pub endpoint: Option<String>,

@@ -16,6 +16,8 @@ sudo vallum doctor --config /etc/vallum/vallum0.toml
 | `firewall` | the UDP port is not open | `ufw allow 51820/udp`, or the nftables chain that drops it |
 | `service` | the unit is inactive or failed | `journalctl -u vallum@<instance>` |
 | `config mode` | the config is group/world readable | `chmod 600`, because it can name a PSK file |
+| `rotation` | a peer still accepts a previous key | `vallum peer finalize <name>` once the device has the new one |
+| `path-mtu` | `doctor --probe-mtu` found a smaller path than `outer_mtu` | set `interface.outer_mtu` to the measured value |
 
 ## The service will not start
 
@@ -59,6 +61,11 @@ Check in this order:
   one. `vallum peer show <name>` says whether one is set.
 - **Key permissions.** A key readable by group or world is refused, not warned
   about. `chmod 600`.
+- **An expired identity document.** The document's window is checked at load and
+  at every handshake; the daemon logs `identity document expired` and `peer list`
+  shows `EXPIRED`. Issue a new document and `peer add`/`peer rotate` it.
+- **A pinned peer answering from a new address.** `pin_endpoint` refuses it by
+  design; remove the pin if the device genuinely roams.
 
 ## It connects, then stops after a while
 
@@ -74,6 +81,15 @@ Check in this order:
 Symptom: SSH and ping work, large transfers hang. The outer path cannot carry the
 inner MTU.
 
+Measure it instead of guessing:
+
+```sh
+sudo vallum doctor --config /etc/vallum/vallum0.toml --probe-mtu 203.0.113.5
+```
+
+That bisects ICMP payload sizes with `ping -M do` and prints the largest that
+crosses, or says it is inconclusive because ICMP is filtered. Then:
+
 ```toml
 [interface]
 outer_mtu = 1400
@@ -84,15 +100,24 @@ fragment. Values above 1500 are refused: the protocol's parse cap is built on it
 
 ## DNS does not work on the client
 
-`vallum-quick` installs DNS through `resolvconf` when it exists. Without it:
+`vallum-quick` chooses between systemd-resolved and `resolvconf`. See which one
+it will use:
 
 ```sh
-resolvectl dns vallum0 1.1.1.1
-resolvectl domain vallum0 '~.'
+sudo vallum-quick attach /etc/vallum/laptop.toml --dry-run
 ```
 
-Check `vallum-quick attach` output: it prints the `resolvconf` call, or says DNS
-was left to the host.
+It prints `resolvectl dns …` plus `resolvectl domain … ~.` on a full tunnel, or
+`resolvconf -a …`, or says neither is installed.
+
+- **On resolved, queries still go to the local resolver.** The `~.` domain is
+  what claims all names; check `resolvectl domain vallum0` and that the config
+  routes `0.0.0.0/0`.
+- **On a split tunnel**, no domain is claimed on purpose: only the names that
+  resolve inside the tunnel should go there.
+- **Ubuntu 24.04** ships `resolvconf` as a resolved shim that fails for
+  `wg-quick`-style interface names. Vallum prefers `resolvectl` when resolved is
+  running, which avoids it.
 
 ## Reading the logs
 

@@ -239,6 +239,7 @@ impl Net {
                 Action::Established { peer, epoch, role } => {
                     self.hosts[host].established.push((peer, epoch, role));
                 }
+                Action::Refused { .. } => {}
             }
         }
         sends
@@ -304,6 +305,7 @@ impl Net {
                             Action::Established { peer, epoch, role } => {
                                 host.established.push((peer, epoch, role));
                             }
+                            Action::Refused { .. } => {}
                         }
                     }
                 }

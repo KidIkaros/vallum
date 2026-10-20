@@ -18,7 +18,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use vallum_core::identity::PeerIdentity;
+use vallum_core::identity::{PeerIdentity, Validity};
 use vallum_core::shaping::Machine;
 use vallum_crypto::SharedSecret;
 
@@ -82,7 +82,38 @@ pub struct PeerConfig {
     persistent_keepalive: Option<Duration>,
     /// Refuse a handshake from any address other than `endpoint`.
     pin_endpoint: bool,
+    /// The window an identity document asserts, if this peer was configured
+    /// with one. Checked at every handshake, so an expired credential fails
+    /// closed even while the daemon runs.
+    validity: Option<Validity>,
+    /// Identities still accepted during a rotation, each with its own window.
+    ///
+    /// A rotation installs the new key here while the device still presents the
+    /// old one, so there is no window in which the peer cannot connect. The
+    /// entry is dropped by `peer finalize`.
+    previous: Vec<AcceptedIdentity>,
     shaping: Vec<Machine>,
+}
+
+/// An identity a peer still accepts, besides its current one.
+#[derive(Debug, Clone)]
+pub struct AcceptedIdentity {
+    identity: PeerIdentity,
+    validity: Option<Validity>,
+}
+
+impl AcceptedIdentity {
+    /// The identity itself.
+    #[must_use]
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+
+    /// The window its document asserted, if it came from one.
+    #[must_use]
+    pub fn validity(&self) -> Option<Validity> {
+        self.validity
+    }
 }
 
 impl PeerConfig {
@@ -102,6 +133,8 @@ impl PeerConfig {
             preshared_key: None,
             persistent_keepalive: None,
             pin_endpoint: false,
+            validity: None,
+            previous: Vec::new(),
             shaping: Vec::new(),
         }
     }
@@ -140,6 +173,36 @@ impl PeerConfig {
     #[must_use]
     pub fn pin_endpoint(&self) -> bool {
         self.pin_endpoint
+    }
+
+    /// Attach the validity window an identity document asserted.
+    #[must_use]
+    pub fn with_validity(mut self, validity: Validity) -> Self {
+        self.validity = Some(validity);
+        self
+    }
+
+    /// The identity window, if this peer was configured with a document.
+    #[must_use]
+    pub fn validity(&self) -> Option<Validity> {
+        self.validity
+    }
+
+    /// Accept one more identity while a rotation is in progress.
+    #[must_use]
+    pub fn with_previous_identity(
+        mut self,
+        identity: PeerIdentity,
+        validity: Option<Validity>,
+    ) -> Self {
+        self.previous.push(AcceptedIdentity { identity, validity });
+        self
+    }
+
+    /// The identities still accepted besides the current one.
+    #[must_use]
+    pub fn previous_identities(&self) -> &[AcceptedIdentity] {
+        &self.previous
     }
 
     /// Require this peer to use a configured preshared key (G1).
