@@ -455,7 +455,7 @@ def render_to_svg(ansi_text, title="vallum tui — vallum0 (post-quantum tri-hyb
 
 def generate_brandkit_board():
     """
-    Generates a 3x3 premium Brand Identity System board (PNG + SVG) for VALLUM
+    Generates a 3x3 premium Brand Identity System board (PNG) for VALLUM
     following the brandkit skill specification: dark charcoal canvas, clean
     presentation grid, strong gutters, geometric construction, and sparse
     high-hierarchy typography.
