@@ -50,6 +50,15 @@ impl Device {
         self.peers.iter().position(|peer| &peer.hint == hint)
     }
 
+    /// Whether a handshake from `source` may be believed for this peer.
+    ///
+    /// An unpinned peer roams: any authenticated source becomes its address.
+    /// A pinned peer accepts only the configured endpoint.
+    pub(super) fn endpoint_allowed(&self, index: usize, source: SocketAddr) -> bool {
+        let config = &self.peers[index].config;
+        !config.pin_endpoint() || config.endpoint() == Some(source)
+    }
+
     /// Reserve a session index that nothing else owns.
     pub(super) fn alloc_index(&mut self) -> u32 {
         loop {

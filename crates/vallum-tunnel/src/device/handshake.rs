@@ -282,7 +282,14 @@ impl Device {
         match initiator_process_resp(&*suite, state, &self.identity, bytes) {
             Ok((init_conf, keys)) => {
                 // The responder has proven the key, so the address it answered
-                // from is now trustworthy for this peer.
+                // from is now trustworthy for this peer — unless the peer is
+                // pinned, in which case an answer from anywhere else is the
+                // roaming-mischief case and is refused.
+                if !self.endpoint_allowed(index, source) {
+                    self.peers[index].rejected += 1;
+                    self.peers[index].handshake = Handshake::Initiating(init);
+                    return;
+                }
                 self.peers[index].endpoint = Some(source);
                 self.install_session(index, &keys, Role::Initiator, clock, out);
                 out.push(Action::Send {
@@ -332,6 +339,14 @@ impl Device {
         let timestamp = Tai64n::from_bytes(*resp.state.timestamp());
         match responder_process_conf(&*suite, resp.state, bytes) {
             Ok(keys) => {
+                if !self.endpoint_allowed(index, source) {
+                    // A pinned peer whose confirmation came from somewhere else:
+                    // refuse it rather than silently keeping the old address, so
+                    // a redirected handshake does not look successful.
+                    self.peers[index].rejected += 1;
+                    self.remap(index);
+                    return;
+                }
                 // The initiator has now proven the key, so its timestamp may be
                 // committed and its address believed.
                 self.peers[index].timestamp_guard.commit(timestamp);

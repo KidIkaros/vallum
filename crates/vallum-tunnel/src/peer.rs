@@ -80,6 +80,8 @@ pub struct PeerConfig {
     /// The configured PSK, if any. A peer secret, not part of the identity.
     preshared_key: Option<SharedSecret>,
     persistent_keepalive: Option<Duration>,
+    /// Refuse a handshake from any address other than `endpoint`.
+    pin_endpoint: bool,
     shaping: Vec<Machine>,
 }
 
@@ -99,6 +101,7 @@ impl PeerConfig {
             endpoint: None,
             preshared_key: None,
             persistent_keepalive: None,
+            pin_endpoint: false,
             shaping: Vec::new(),
         }
     }
@@ -120,6 +123,23 @@ impl PeerConfig {
     pub fn with_endpoint(mut self, endpoint: SocketAddr) -> Self {
         self.endpoint = Some(endpoint);
         self
+    }
+
+    /// Refuse to roam: only a handshake from `endpoint` is accepted.
+    ///
+    /// Pinning without an endpoint is incoherent — there would be no address to
+    /// pin to — so this leaves the flag off and the caller is expected to have
+    /// validated the pair.
+    #[must_use]
+    pub fn with_pinned_endpoint(mut self) -> Self {
+        self.pin_endpoint = self.endpoint.is_some();
+        self
+    }
+
+    /// Whether this peer refuses to roam.
+    #[must_use]
+    pub fn pin_endpoint(&self) -> bool {
+        self.pin_endpoint
     }
 
     /// Require this peer to use a configured preshared key (G1).

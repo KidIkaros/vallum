@@ -22,6 +22,14 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "SOCKET")]
     control: Option<PathBuf>,
 
+    /// Probe the path MTU to this host with `ping -M do` and compare it with
+    /// the config's `outer_mtu`.
+    ///
+    /// This is the one active check: it sends packets. Without the flag,
+    /// `doctor` is read-only.
+    #[arg(long, value_name = "HOST")]
+    probe_mtu: Option<String>,
+
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -142,6 +150,9 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         }
         checks.push(check_service(args.config.as_deref()));
         checks.push(check_config_mode(args.config.as_deref()));
+        if let Some(host) = &args.probe_mtu {
+            checks.push(check_path_mtu(host, resolved));
+        }
     }
 
     for tool in ["ip", "systemctl", "journalctl", "resolvconf", "nft"] {
@@ -385,6 +396,81 @@ fn check_service(config: Option<&Path>) -> Check {
     }
 }
 
+/// The largest ICMP payload that crosses the path, by bisection.
+///
+/// Bounds are the IPv4 minimum reassembly buffer (576 - 28 = 548) and a
+/// 1500-byte Ethernet path (1500 - 28 = 1472). Nine probes at most.
+fn bisect_mtu(mut fits: impl FnMut(u16) -> bool) -> Option<u16> {
+    const MIN: u16 = 548;
+    const MAX: u16 = 1472;
+    if !fits(MIN) {
+        return None;
+    }
+    if fits(MAX) {
+        return Some(MAX);
+    }
+    let mut good = MIN;
+    let mut bad = MAX;
+    while bad - good > 1 {
+        let middle = good + (bad - good) / 2;
+        if fits(middle) {
+            good = middle;
+        } else {
+            bad = middle;
+        }
+    }
+    Some(good)
+}
+
+fn ping_fits(host: &str, payload: u16) -> bool {
+    std::process::Command::new("ping")
+        .args([
+            "-M",
+            "do",
+            "-s",
+            &payload.to_string(),
+            "-c",
+            "1",
+            "-W",
+            "2",
+            host,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Measure the outer path and say whether `outer_mtu` fits it.
+fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
+    let configured = u16::try_from(resolved.outer_budget + 48).unwrap_or(u16::MAX);
+    let Some(payload) = bisect_mtu(|size| ping_fits(host, size)) else {
+        return Check::new(
+            "path-mtu",
+            Status::Warn,
+            format!(
+                "inconclusive: no ICMP reply from {host} at any size (filtered, or no route).                  Measure it by hand: ping -M do -s 1472 {host}"
+            ),
+        );
+    };
+    let measured = payload + 28;
+    if measured >= configured {
+        Check::new(
+            "path-mtu",
+            Status::Pass,
+            format!("{host} carries {measured} bytes; outer_mtu {configured} fits"),
+        )
+    } else {
+        Check::new(
+            "path-mtu",
+            Status::Warn,
+            format!(
+                "{host} carries {measured} bytes, below outer_mtu {configured};                  set `interface.outer_mtu = {measured}` or packets will be dropped"
+            ),
+        )
+    }
+}
+
 /// A config can name a PSK file, so it should not be group- or world-readable.
 fn check_config_mode(config: Option<&Path>) -> Check {
     use std::os::unix::fs::PermissionsExt;
@@ -414,5 +500,39 @@ fn check_config_mode(config: Option<&Path>) -> Check {
                 path.display()
             ),
         )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::bisect_mtu;
+
+    #[test]
+    fn the_search_finds_the_threshold() {
+        assert_eq!(bisect_mtu(|size| size <= 1400), Some(1400));
+        assert_eq!(bisect_mtu(|size| size <= 1471), Some(1471));
+        assert_eq!(bisect_mtu(|size| size <= 548), Some(548));
+    }
+
+    #[test]
+    fn a_path_that_carries_everything_reports_the_ceiling() {
+        assert_eq!(bisect_mtu(|_| true), Some(1472));
+    }
+
+    #[test]
+    fn a_path_that_carries_nothing_is_inconclusive() {
+        assert_eq!(bisect_mtu(|_| false), None);
+    }
+
+    #[test]
+    fn the_search_is_bounded() {
+        let mut probes = 0;
+        let found = bisect_mtu(|size| {
+            probes += 1;
+            size <= 1200
+        });
+        assert_eq!(found, Some(1200));
+        assert!(probes <= 12, "{probes} probes is too many");
     }
 }

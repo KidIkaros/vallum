@@ -38,6 +38,14 @@ pub struct Quick {
     /// DNS servers to install on the interface, through `resolvconf`.
     #[serde(default)]
     pub dns: Vec<String>,
+    /// The routing domain to claim when the interface owns the resolvers.
+    ///
+    /// `~.` makes the tunnel the default route for every name, which is what
+    /// stops a query from leaking to the local resolver on a full tunnel. A
+    /// split tunnel usually wants no domain at all, so the field is optional.
+    /// Ignored by the `resolvconf` backend, which has no such concept.
+    #[serde(default)]
+    pub dns_domain: Option<String>,
     /// `auto`, `off`, or a routing-table number.
     #[serde(default)]
     pub table: Option<String>,
@@ -151,6 +159,15 @@ pub struct PeerEntry {
     /// wrote and the daemon ignores is how a security setting goes missing.
     #[serde(default)]
     pub persistent_keepalive: Option<u16>,
+    /// Refuse a handshake whose source is not `endpoint`.
+    ///
+    /// Roaming is normally desirable: a laptop changes networks and the peer
+    /// follows. It is also the one place an active man in the middle can
+    /// redirect a tunnel (WireGuard calls this "roaming mischief"). A pinned
+    /// peer does not roam, and a handshake from any other address is refused
+    /// rather than accepted. Requires `endpoint`.
+    #[serde(default)]
+    pub pin_endpoint: bool,
     /// A 32-byte preshared key as 64 hex characters, mixed into the handshake.
     ///
     /// The secret sits in the config file, so prefer [`Self::preshared_key_file`]

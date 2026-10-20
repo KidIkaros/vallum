@@ -10,12 +10,13 @@ use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::import::ImportArgs;
 use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
+use vallum::commands::metrics::MetricsArgs;
 use vallum::commands::peer::PeerArgs;
 use vallum::commands::run::RunArgs;
 use vallum::commands::server::ServerArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
-use vallum::commands::{bench, control, doctor, import, keys, peer, run, server};
+use vallum::commands::{bench, control, doctor, import, keys, metrics, peer, run, server};
 use vallum::Error;
 
 #[derive(Parser)]
@@ -70,6 +71,8 @@ enum Command {
     Server(ServerArgs),
     /// Enrol, list, inspect, and remove peers.
     Peer(PeerArgs),
+    /// Print the daemon's state as Prometheus metrics.
+    Metrics(MetricsArgs),
     /// Import a client `.vallum-bundle` file.
     ImportBundle(ImportArgs),
     /// Operate a tunnel in a terminal dashboard.
@@ -102,6 +105,7 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::doctor(&args),
         Command::Server(args) => server::server(&args),
         Command::Peer(args) => peer::peer(&args),
+        Command::Metrics(args) => metrics::metrics(&args),
         Command::ImportBundle(args) => import::import(&args),
         #[cfg(feature = "tui")]
         Command::Tui(args) => vallum::commands::tui::run(&args),

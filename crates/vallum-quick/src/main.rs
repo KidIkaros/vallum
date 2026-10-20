@@ -173,7 +173,12 @@ fn up_after_pre(
     }
 
     if !config.quick.dns.is_empty() {
-        set_dns(interface, &config.quick.dns, dry_run)?;
+        set_dns(
+            interface,
+            &config.quick.dns,
+            dns_domain(config).as_deref(),
+            dry_run,
+        )?;
     }
 
     for hook in &config.quick.post_up {
@@ -287,7 +292,12 @@ fn attach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::E
     }
 
     if !config.quick.dns.is_empty() {
-        set_dns(&interface, &config.quick.dns, dry_run)?;
+        set_dns(
+            &interface,
+            &config.quick.dns,
+            dns_domain(&config).as_deref(),
+            dry_run,
+        )?;
     }
 
     for hook in &config.quick.post_up {
@@ -518,48 +528,144 @@ fn ip(args: &[String], dry_run: bool) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// Which DNS mechanism this host actually has.
+///
+/// `resolvectl` is preferred when `systemd-resolved` is *running*, not merely
+/// installed: the binary exists on hosts where resolved is disabled, and
+/// calling it then fails. `resolvconf` is the fallback, and on Ubuntu 24.04 it
+/// may be resolved's compatibility shim — which is why the running check comes
+/// first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DnsBackend {
+    ResolveCtl,
+    ResolvConf,
+    None,
+}
+
+fn dns_backend_from(present: impl Fn(&str) -> bool, resolved_running: bool) -> DnsBackend {
+    if present("resolvectl") && resolved_running {
+        DnsBackend::ResolveCtl
+    } else if present("resolvconf") {
+        DnsBackend::ResolvConf
+    } else {
+        DnsBackend::None
+    }
+}
+
+fn dns_backend() -> DnsBackend {
+    dns_backend_from(
+        |program| which(program).is_some(),
+        Path::new("/run/systemd/resolve").exists(),
+    )
+}
+
+/// The routing domain to claim, if the interface should own name resolution.
+///
+/// `~.` is what stops a full tunnel from leaking queries to the local resolver.
+/// A split tunnel wants no domain, so nothing is claimed unless the operator
+/// asked for one or the config routes everything.
+fn dns_domain(config: &Config) -> Option<String> {
+    if let Some(domain) = &config.quick.dns_domain {
+        return Some(domain.clone());
+    }
+    let full_tunnel = config
+        .peers
+        .iter()
+        .flat_map(|peer| peer.allowed_ips.iter())
+        .any(|prefix| {
+            prefix
+                .parse::<Prefix>()
+                .is_ok_and(|prefix| prefix.as_ipnet().prefix_len() == 0)
+        });
+    full_tunnel.then(|| "~.".to_owned())
+}
+
 fn set_dns(
     interface: &str,
     servers: &[String],
+    domain: Option<&str>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if which("resolvconf").is_none() {
-        eprintln!("vallum-quick: resolvconf not found; DNS left to the host");
-        return Ok(());
+    match dns_backend() {
+        DnsBackend::ResolveCtl => {
+            let mut args = vec!["dns".to_owned(), interface.to_owned()];
+            args.extend(servers.iter().cloned());
+            if dry_run {
+                println!("resolvectl {}", args.join(" "));
+            } else {
+                let status = Command::new("resolvectl").args(&args).status()?;
+                if !status.success() {
+                    return Err("resolvectl dns failed".into());
+                }
+            }
+            if let Some(domain) = domain {
+                if dry_run {
+                    println!("resolvectl domain {interface} {domain}");
+                } else {
+                    let status = Command::new("resolvectl")
+                        .args(["domain", interface, domain])
+                        .status()?;
+                    if !status.success() {
+                        return Err("resolvectl domain failed".into());
+                    }
+                }
+            }
+            Ok(())
+        }
+        DnsBackend::ResolvConf => {
+            let body: String = servers
+                .iter()
+                .map(|server| format!("nameserver {server}\n"))
+                .collect();
+            if dry_run {
+                println!("resolvconf -a {interface} <<EOF\n{body}EOF");
+                return Ok(());
+            }
+            let mut child = Command::new("resolvconf")
+                .arg("-a")
+                .arg(interface)
+                .stdin(Stdio::piped())
+                .spawn()?;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(body.as_bytes())?;
+            }
+            let status = child.wait()?;
+            if !status.success() {
+                return Err("resolvconf -a failed".into());
+            }
+            Ok(())
+        }
+        DnsBackend::None => {
+            eprintln!(
+                "vallum-quick: neither resolvectl nor resolvconf found; DNS left to the host"
+            );
+            Ok(())
+        }
     }
-    let body: String = servers
-        .iter()
-        .map(|server| format!("nameserver {server}\n"))
-        .collect();
-    if dry_run {
-        println!("resolvconf -a {interface} <<EOF\n{body}EOF");
-        return Ok(());
-    }
-    let mut child = Command::new("resolvconf")
-        .arg("-a")
-        .arg(interface)
-        .stdin(Stdio::piped())
-        .spawn()?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(body.as_bytes())?;
-    }
-    let status = child.wait()?;
-    if !status.success() {
-        return Err("resolvconf -a failed".into());
-    }
-    Ok(())
 }
 
 fn unset_dns(interface: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if which("resolvconf").is_none() {
-        return Ok(());
+    match dns_backend() {
+        DnsBackend::ResolveCtl => {
+            if dry_run {
+                println!("resolvectl revert {interface}");
+                return Ok(());
+            }
+            let _ = Command::new("resolvectl")
+                .args(["revert", interface])
+                .status();
+            Ok(())
+        }
+        DnsBackend::ResolvConf => {
+            if dry_run {
+                println!("resolvconf -d {interface}");
+                return Ok(());
+            }
+            let _ = Command::new("resolvconf").arg("-d").arg(interface).status();
+            Ok(())
+        }
+        DnsBackend::None => Ok(()),
     }
-    if dry_run {
-        println!("resolvconf -d {interface}");
-        return Ok(());
-    }
-    let _ = Command::new("resolvconf").arg("-d").arg(interface).status();
-    Ok(())
 }
 
 fn run_hook(hook: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -688,5 +794,72 @@ mod tests {
     fn a_v6_route_uses_ip_dash_six() {
         let prefix: Prefix = "fd00:7::2/128".parse().unwrap();
         assert!(matches!(prefix.as_ipnet(), ipnet::IpNet::V6(_)));
+    }
+
+    #[test]
+    fn resolvectl_wins_when_resolved_is_running() {
+        let backend = dns_backend_from(
+            |program| program == "resolvectl" || program == "resolvconf",
+            true,
+        );
+        assert_eq!(backend, DnsBackend::ResolveCtl);
+    }
+
+    #[test]
+    fn an_installed_but_stopped_resolved_falls_back_to_resolvconf() {
+        // `resolvectl` exists on hosts where resolved is disabled; calling it
+        // there fails, so the running check decides.
+        let backend = dns_backend_from(
+            |program| program == "resolvectl" || program == "resolvconf",
+            false,
+        );
+        assert_eq!(backend, DnsBackend::ResolvConf);
+    }
+
+    #[test]
+    fn no_dns_tool_is_reported_as_none() {
+        assert_eq!(dns_backend_from(|_| false, true), DnsBackend::None);
+        assert_eq!(dns_backend_from(|_| false, false), DnsBackend::None);
+    }
+
+    fn config_with(name: &str, body: &str) -> Config {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-quick-dns-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            format!("[interface]\nname = \"v0\"\nprivate_key = \"k\"\n{body}"),
+        )
+        .unwrap();
+        Config::load(&path).unwrap()
+    }
+
+    #[test]
+    fn a_full_tunnel_claims_every_name() {
+        let config = config_with(
+            "full",
+            "\n[[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n",
+        );
+        assert_eq!(dns_domain(&config).as_deref(), Some("~."));
+    }
+
+    #[test]
+    fn a_split_tunnel_claims_no_domain() {
+        let config = config_with(
+            "split",
+            "\n[[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"10.7.0.0/24\"]\n",
+        );
+        assert!(dns_domain(&config).is_none());
+    }
+
+    #[test]
+    fn an_explicit_domain_wins_over_the_default() {
+        let config = config_with(
+            "explicit",
+            "\n[quick]\ndns_domain = \"corp.example\"\n\n[[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        assert_eq!(dns_domain(&config).as_deref(), Some("corp.example"));
     }
 }

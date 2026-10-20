@@ -539,6 +539,18 @@ impl ResolveConfig for Config {
                 })?;
                 config = config.with_endpoint(endpoint);
             }
+            if entry.pin_endpoint {
+                if entry.endpoint.is_none() {
+                    return Err(Error::Invalid {
+                        path: path.to_path_buf(),
+                        what: format!(
+                            "{}: pin_endpoint needs an endpoint — there is no address to pin to",
+                            where_()
+                        ),
+                    });
+                }
+                config = config.with_pinned_endpoint();
+            }
             if !entry.shaping.is_empty() {
                 config =
                     config.with_shaping(entry.shaping.iter().map(ShapingSpec::machine).collect());

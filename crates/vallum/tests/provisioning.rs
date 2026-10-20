@@ -264,3 +264,60 @@ fn a_missing_config_is_a_precondition_not_a_failure() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pinning_requires_an_endpoint_and_is_written_to_the_peer() {
+    let dir = scratch("pin");
+    let config = init(&dir);
+    let phone = keygen(&dir, "phone");
+
+    // A pin with no address has nothing to pin to.
+    let (ok, _, stderr) = run(bin()
+        .args(["peer", "add", "phone", "--config"])
+        .arg(&config)
+        .args(["--public-key", &phone, "--pin-endpoint", "--no-apply"]));
+    assert!(!ok);
+    assert!(
+        stderr.contains("--pin-endpoint needs --endpoint"),
+        "{stderr}"
+    );
+
+    let (ok, _, stderr) = run(bin()
+        .args(["peer", "add", "phone", "--config"])
+        .arg(&config)
+        .args([
+            "--public-key",
+            &phone,
+            "--endpoint",
+            "203.0.113.5",
+            "--pin-endpoint",
+            "--no-apply",
+        ]));
+    assert!(ok, "{stderr}");
+
+    let parsed = vallum_config::Config::load(&config).unwrap();
+    assert!(parsed.peers[0].pin_endpoint);
+    assert_eq!(
+        parsed.peers[0].endpoint.as_deref(),
+        Some("203.0.113.5:51820")
+    );
+
+    // The pair is validated at load: a pinned peer with the endpoint removed is
+    // refused rather than silently roaming.
+    let text = std::fs::read_to_string(&config).unwrap();
+    let text = text
+        .lines()
+        .filter(|line| !line.starts_with("endpoint = "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&config, text).unwrap();
+    let (ok, stdout, stderr) = run(bin().args(["doctor", "--config"]).arg(&config));
+    assert!(!ok);
+    let report = format!("{stdout}{stderr}");
+    assert!(
+        report.contains("pin_endpoint needs an endpoint"),
+        "{report}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

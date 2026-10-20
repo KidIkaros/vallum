@@ -92,6 +92,10 @@ pub struct AddArgs {
     #[arg(long, value_name = "SECS")]
     pub keepalive: Option<u16>,
 
+    /// Refuse handshakes from any address other than `--endpoint`.
+    #[arg(long)]
+    pub pin_endpoint: bool,
+
     /// Generate a preshared key and store it next to the config.
     #[arg(long)]
     pub psk: bool,
@@ -290,6 +294,12 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         psk_hex = Some(hex);
     }
 
+    if args.pin_endpoint && args.endpoint.is_none() {
+        return Err(Error::Usage(
+            "--pin-endpoint needs --endpoint: a peer with no address has nothing to pin to"
+                .to_owned(),
+        ));
+    }
     let endpoint = match &args.endpoint {
         Some(text) => Some(endpoint_with_port(text, &args.config)?),
         None => None,
@@ -302,6 +312,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         keepalive: args.keepalive,
         preshared_key_file: psk_file,
         has_psk: args.psk,
+        pin_endpoint: args.pin_endpoint,
     };
     file.add_peer(&record)?;
     file.validate()?;
@@ -375,6 +386,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             endpoint: endpoint.clone(),
             keepalive: args.keepalive,
             psk: args.psk,
+            pin_endpoint: args.pin_endpoint,
             bundle: bundle_path.clone(),
             client_config: client_config_path.clone(),
             config: args.config.clone(),
@@ -449,6 +461,7 @@ fn list(args: &ListArgs) -> Result<(), Error> {
                 endpoint: peer.endpoint.clone(),
                 keepalive: peer.keepalive,
                 psk: peer.has_psk,
+                pin_endpoint: peer.pin_endpoint,
                 fingerprint: fingerprint(&peer.public_key),
                 public_key: args.full.then(|| peer.public_key.clone()),
             })
@@ -466,12 +479,13 @@ fn list(args: &ListArgs) -> Result<(), Error> {
         return Ok(());
     }
     say!(
-        "{:<16} {:<28} {:<26} {:>9} {:>4}  FINGERPRINT",
+        "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4}  FINGERPRINT",
         "NAME",
         "ALLOWED IPS",
         "ENDPOINT",
         "KEEPALIVE",
-        "PSK"
+        "PSK",
+        "PIN"
     );
     for peer in &peers {
         let allowed = peer.allowed_ips.join(",");
@@ -481,13 +495,14 @@ fn list(args: &ListArgs) -> Result<(), Error> {
             .clone()
             .unwrap_or_else(|| "(roaming)".to_owned());
         say!(
-            "{:<16} {:<28} {:<26} {:>9} {:>4}  {}",
+            "{:<16} {:<28} {:<26} {:>9} {:>4} {:>4}  {}",
             elide(&peer.name, 16),
             allowed,
             elide(&endpoint, 26),
             peer.keepalive
                 .map_or_else(|| "-".to_owned(), |value| format!("{value}s")),
             if peer.has_psk { "yes" } else { "no" },
+            if peer.pin_endpoint { "yes" } else { "no" },
             fingerprint(&peer.public_key),
         );
         if args.full {
@@ -512,6 +527,7 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
             endpoint: peer.endpoint.clone(),
             keepalive: peer.keepalive,
             psk: peer.has_psk,
+            pin_endpoint: peer.pin_endpoint,
             fingerprint: fingerprint(&peer.public_key),
             public_key: Some(peer.public_key.clone()),
         };
@@ -538,6 +554,14 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
     say!(
         "   preshared key {}",
         if peer.has_psk { "set" } else { "none" }
+    );
+    say!(
+        "   endpoint pin  {}",
+        if peer.pin_endpoint {
+            "pinned (no roaming)"
+        } else {
+            "roaming"
+        }
     );
     say!("   fingerprint   {}", fingerprint(&peer.public_key));
     if args.full {
@@ -606,6 +630,7 @@ struct Added {
     endpoint: Option<String>,
     keepalive: Option<u16>,
     psk: bool,
+    pin_endpoint: bool,
     bundle: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_config: Option<PathBuf>,
@@ -621,6 +646,7 @@ struct Listed {
     endpoint: Option<String>,
     keepalive: Option<u16>,
     psk: bool,
+    pin_endpoint: bool,
     fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     public_key: Option<String>,

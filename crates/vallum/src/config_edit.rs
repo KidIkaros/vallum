@@ -36,6 +36,8 @@ pub struct PeerRecord {
     pub preshared_key_file: Option<String>,
     /// Whether a preshared key is configured (read from an existing entry).
     pub has_psk: bool,
+    /// Whether the peer refuses to roam from its configured endpoint.
+    pub pin_endpoint: bool,
 }
 
 /// A configuration file that can be edited and written back.
@@ -263,6 +265,10 @@ fn record(table: &Table) -> PeerRecord {
             .and_then(|value| u16::try_from(value).ok()),
         preshared_key_file: string(table, "preshared_key_file"),
         has_psk: table.contains_key("preshared_key") || table.contains_key("preshared_key_file"),
+        pin_endpoint: table
+            .get("pin_endpoint")
+            .and_then(Item::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -292,6 +298,9 @@ fn table_for(peer: &PeerRecord) -> Table {
             "preshared_key_file",
             Item::Value(Value::from(file.as_str())),
         );
+    }
+    if peer.pin_endpoint {
+        table.insert("pin_endpoint", Item::Value(Value::from(true)));
     }
     table
 }
@@ -398,6 +407,7 @@ allowed_ips = [\"10.7.0.2/32\"]
             keepalive: None,
             preshared_key_file: None,
             has_psk: false,
+            pin_endpoint: false,
         }
     }
 
