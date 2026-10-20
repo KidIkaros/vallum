@@ -1,0 +1,361 @@
+{
+  "$schema": "https://raw.githubusercontent.com/universal-tool-calling-protocol/utcp-specification/main/schemas/manual.schema.json",
+  "manual_version": "1.0.0",
+  "utcp_version": "1.0.1",
+  "name": "vallum",
+  "description": "Universal Tool Calling Protocol (UTCP) manual for Vallum — hybrid post-quantum layer-3 tunnel operations, diagnostics, key management, and runtime telemetry.",
+  "tools": [
+    {
+      "name": "vallum_doctor",
+      "description": "Inspect platform readiness, Linux capabilities, helper tools (ip, systemctl, journalctl, resolvconf, nft), and control socket health. Returns a structured JSON report.",
+      "inputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputs": {
+        "type": "array",
+        "description": "Array of system readiness checks with status ('pass', 'warn', 'fail') and diagnostic detail.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": ["pass", "warn", "fail"]
+            }
+          },
+          "required": ["check", "detail", "status"]
+        }
+      },
+      "tags": ["diagnostics", "readiness"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum doctor --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_doctor_config",
+      "description": "Perform a comprehensive health check on a specific Vallum configuration file and its declared control socket. Returns a structured JSON report.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config_path": {
+            "type": "string",
+            "description": "Path to the .toml configuration file to validate."
+          }
+        },
+        "required": ["config_path"]
+      },
+      "outputs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "check": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": ["pass", "warn", "fail"]
+            }
+          },
+          "required": ["check", "detail", "status"]
+        }
+      },
+      "tags": ["diagnostics", "config"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum doctor --json --config UTCP_ARG_config_path_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_show_config",
+      "description": "Inspect a Vallum configuration and its peer definitions offline without requiring a running daemon. Returns structured JSON containing interface settings, addresses, listen port, and peers.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config_path": {
+            "type": "string",
+            "description": "Path to the .toml configuration file to inspect."
+          }
+        },
+        "required": ["config_path"]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "listen": {
+            "type": "string"
+          },
+          "addresses": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "fwmark": {
+            "type": "integer"
+          },
+          "peers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "endpoint": { "type": "string" },
+                "allowed_ips": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "preshared_key": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      },
+      "tags": ["config", "inspection"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum show --json --config UTCP_ARG_config_path_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_show_control",
+      "description": "Query a live running Vallum daemon via its UNIX control socket. Returns real-time interface metrics, active peers, latest handshake timestamps, and transfer bytes in JSON.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "control_socket": {
+            "type": "string",
+            "description": "Path to the UNIX domain control socket (e.g., /run/vallum/vallum0.sock)."
+          }
+        },
+        "required": ["control_socket"]
+      },
+      "outputs": {
+        "type": "object",
+        "description": "Real-time daemon and peer state."
+      },
+      "tags": ["runtime", "telemetry"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum show --json --control UTCP_ARG_control_socket_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_keygen",
+      "description": "Generate a post-quantum hybrid private key file (with strict 0600 permissions) and output the public line for peers. Defaults to tri-hybrid Suite 3 (X25519 + sntrup761 + ML-KEM-768).",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "output_file": {
+            "type": "string",
+            "description": "File path where the private key will be saved."
+          },
+          "suite": {
+            "type": "integer",
+            "description": "Crypto suite ID (default 3 for tri-hybrid PQ).",
+            "default": 3
+          }
+        },
+        "required": ["output_file"]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The public line formatted as 'vallum1:<suite_id>:<kem_public_key>:<signing_key|->'."
+      },
+      "tags": ["keys", "crypto"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum keygen --suite UTCP_ARG_suite_UTCP_END --output UTCP_ARG_output_file_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_pubkey",
+      "description": "Extract and compute the public line from an existing private key file.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "private_key_file": {
+            "type": "string",
+            "description": "Path to the private key file."
+          }
+        },
+        "required": ["private_key_file"]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The public line formatted as 'vallum1:<suite_id>:<kem_public_key>:<signing_key|->'."
+      },
+      "tags": ["keys", "crypto"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum pubkey --private-key UTCP_ARG_private_key_file_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_genpsk",
+      "description": "Generate a 32-byte (64 hex characters) preshared key (PSK) to provide symmetric post-quantum defense against Harvest-Now-Decrypt-Later.",
+      "inputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputs": {
+        "type": "string",
+        "description": "64 hex characters representing the 32-byte preshared key."
+      },
+      "tags": ["keys", "crypto"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum genpsk",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_bench",
+      "description": "Benchmark the post-quantum data plane seal/open cryptographic performance on the current host.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "iterations": {
+            "type": "integer",
+            "description": "Number of iterations to benchmark (default: 2000).",
+            "default": 2000
+          },
+          "bytes": {
+            "type": "integer",
+            "description": "Payload size in bytes (default: 1380).",
+            "default": 1380
+          }
+        }
+      },
+      "outputs": {
+        "type": "string",
+        "description": "Benchmark throughput and latency results."
+      },
+      "tags": ["benchmarking", "crypto"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum bench --iterations UTCP_ARG_iterations_UTCP_END --bytes UTCP_ARG_bytes_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_syncconf",
+      "description": "Apply only the differences between a configuration file and a running Vallum daemon without terminating existing sessions.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config_path": {
+            "type": "string",
+            "description": "Path to the configuration file containing updated peer or interface settings."
+          }
+        },
+        "required": ["config_path"]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "Confirmation of synchronization."
+      },
+      "tags": ["runtime", "config"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum syncconf -c UTCP_ARG_config_path_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_tui_snapshot",
+      "description": "Render a single headless frame of the Vallum TUI dashboard or status views. Bypasses TTY requirements so agents and CI harnesses can inspect visual dashboard state without hanging or crashing.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "description": "Snapshot view mode.",
+            "enum": ["dashboard", "logs", "help", "qr", "empty", "filter", "ping"],
+            "default": "dashboard"
+          },
+          "width": {
+            "type": "integer",
+            "description": "Terminal width in columns.",
+            "default": 120
+          },
+          "height": {
+            "type": "integer",
+            "description": "Terminal height in rows.",
+            "default": 36
+          }
+        }
+      },
+      "outputs": {
+        "type": "string",
+        "description": "ASCII / text frame render of the TUI view."
+      },
+      "tags": ["tui", "snapshot", "diagnostics"],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum tui --snapshot --snapshot-view UTCP_ARG_view_UTCP_END --width UTCP_ARG_width_UTCP_END --height UTCP_ARG_height_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    }
+  ]
+}
