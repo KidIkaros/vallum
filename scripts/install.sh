@@ -281,7 +281,7 @@ fi
 
 if [ "$INSTALL_ONLY" -eq 1 ]; then
     say "installed"
-    echo "prepare this host:  vallum server init --endpoint <host:port>"
+    echo "prepare this host:  sudo vallum setup --server"
     exit 0
 fi
 
