@@ -46,11 +46,15 @@ warn(){ printf '   warn  %s\n' "$*"; }
 
 installed_bins=0
 client_pid=""
+ns_pid=""
 
 cleanup() {
     set +e
     say "cleanup"
     [ -n "$client_pid" ] && kill "$client_pid" 2>/dev/null
+    [ -n "$ns_pid" ] && kill "$ns_pid" 2>/dev/null
+    ip netns del vallumtest-ns >/dev/null 2>&1
+    ip link del veth-a >/dev/null 2>&1
     [ -f "$WORK/client/laptop.toml" ] && "$QUICK" detach "$WORK/client/laptop.toml" >/dev/null 2>&1
     systemctl disable --now "vallum-quick@$IFACE" "vallum@$IFACE" >/dev/null 2>&1
     rm -f "$UNIT_D/vallum@.service" "$UNIT_D/vallum-quick@.service"
@@ -205,52 +209,6 @@ ping -c1 -W3 "$CLI_IP" >/dev/null 2>&1 && ok "tunnel survives rotation" || warn 
 "$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
 ok "rotated and finalized"
 
-# ── DNS through the tunnel, through real NAT ─────────────────────────────────
-# Three layers, so a failure says where: egress, DNS across the tunnel with
-# resolved out of the picture, then the resolver integration itself.
-say "traffic out of the tunnel, through the server's NAT"
-if ping -c1 -W3 -I "$CIFACE" 1.1.1.1 > "$WORK/egress.log" 2>&1; then
-    ok "the tunnel reaches the internet (1.1.1.1 answers)"
-else
-    warn "no ICMP through the tunnel; the DNS checks below will likely fail too"
-fi
-
-say "raw DNS through the tunnel, bypassing resolved"
-if command -v dig >/dev/null 2>&1; then
-    if dig +time=3 +tries=1 -b "$CLI_IP" @1.1.1.1 example.com A > "$WORK/dig.log" 2>&1 && grep -q "ANSWER SECTION" "$WORK/dig.log"; then
-        ok "dig @1.1.1.1 from $CLI_IP answered: $(grep -E '^example.com' "$WORK/dig.log" | head -1)"
-    else
-        warn "raw DNS through the tunnel failed; evidence kept"
-    fi
-else
-    warn "dig not installed; skipping the resolver-independent probe"
-fi
-
-say "DNS over the tunnel (resolved, the ~. domain, and the tunnel)"
-if resolvectl query -i "$CIFACE" example.com > "$WORK/dns.log" 2>&1 && grep -qE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$WORK/dns.log"; then
-    ok "a real name resolved through the tunnel: $(grep -oE '([0-9]+\.){3}[0-9]+' "$WORK/dns.log" | head -1)"
-else
-    warn "DNS over the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
-    {
-        echo "== egress: ping -I $CIFACE 1.1.1.1"
-        cat "$WORK/egress.log" 2>/dev/null
-        echo "== raw: dig @1.1.1.1 from $CLI_IP"
-        cat "$WORK/dig.log" 2>/dev/null
-        echo "== resolvectl query -i $CIFACE example.com"
-        cat "$WORK/dns.log" 2>/dev/null
-        echo "== resolvectl status $CIFACE"
-        resolvectl status "$CIFACE" 2>&1
-        echo "== ip route get 1.1.1.1"
-        ip route get 1.1.1.1 2>&1
-        echo "== ip rule"
-        ip rule 2>&1
-        echo "== nft list table inet vallum"
-        nft list table inet vallum 2>&1
-        echo "== forwarding and rp_filter"
-        sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
-    } > /tmp/vallum-host-dns.log 2>&1
-fi
-
 # ── detach reverts DNS ───────────────────────────────────────────────────────
 say "vallum-quick detach"
 "$QUICK" detach "$WORK/client/laptop.toml" > "$WORK/detach.log" 2>&1 || { cat "$WORK/detach.log"; bad "detach"; }
@@ -258,6 +216,73 @@ if systemctl is-active systemd-resolved >/dev/null 2>&1; then
     resolvectl dns "$CIFACE" 2>/dev/null | grep -q 1.1.1.1 && bad "resolver still installed after detach"
     ok "resolvectl reverted on $CIFACE"
 fi
+
+# ── egress, with the client in its own namespace ─────────────────────────────
+# A full-tunnel client installs a catch-all policy rule. On the *same host* as
+# the server that rule also catches the server's forwarded packets, which come
+# straight back into the tunnel and loop — wg-quick behaves the same way. So
+# the data path is tested where it actually lives: the client in its own
+# network namespace, the server on the host.
+say "a client in its own namespace (egress through the server's NAT)"
+kill "$client_pid" 2>/dev/null; client_pid=""
+ip netns add vallumtest-ns || bad "ip netns add"
+ip link add veth-a type veth peer name veth-b || bad "veth pair"
+ip link set veth-b netns vallumtest-ns
+ip addr add 10.200.0.1/24 dev veth-a
+ip link set veth-a up
+ip netns exec vallumtest-ns ip addr add 10.200.0.2/24 dev veth-b
+ip netns exec vallumtest-ns ip link set veth-b up
+ip netns exec vallumtest-ns ip link set lo up
+ok "veth 10.200.0.1 <-> 10.200.0.2"
+
+# The same client config, dialling the host over the veth, with no `dns` line:
+# systemd-resolved cannot see a link inside a namespace, so `attach` would try
+# `resolvectl` for a device it cannot find.
+sed "s|endpoint = .*|endpoint = \"10.200.0.1:$PORT\"|; /^dns = /d; s|/run/vallum/$CIFACE.sock|/run/vallum/ns.sock|" \
+    "$WORK/client/laptop.toml" > "$WORK/client/ns.toml"
+ip netns exec vallumtest-ns "$VALLUM" run --config "$WORK/client/ns.toml" > "$WORK/ns-client.log" 2>&1 &
+ns_pid=$!
+sleep 1.5
+kill -0 "$ns_pid" 2>/dev/null || { cat "$WORK/ns-client.log"; bad "the namespace client exited"; }
+ip netns exec vallumtest-ns "$QUICK" attach "$WORK/client/ns.toml" > "$WORK/ns-attach.log" 2>&1 \
+    || { cat "$WORK/ns-attach.log"; bad "attach inside the namespace"; }
+ok "client running inside the namespace, routes attached"
+
+sleep 1
+if ip netns exec vallumtest-ns ping -c2 -W3 1.1.1.1 > "$WORK/ns-ping.log" 2>&1; then
+    ok "the tunnel carries traffic to the internet: $(tail -2 "$WORK/ns-ping.log" | head -1)"
+else
+    warn "no ICMP through the tunnel; see $WORK/ns-ping.log"
+fi
+
+if ip netns exec vallumtest-ns dig +time=3 +tries=1 @1.1.1.1 example.com A > "$WORK/ns-dig.log" 2>&1 \
+   && grep -q "ANSWER SECTION" "$WORK/ns-dig.log"; then
+    ok "DNS crosses the tunnel and the server's NAT: $(grep -E '^example.com' "$WORK/ns-dig.log" | head -1)"
+else
+    warn "DNS through the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
+    {
+        echo "== ns ping 1.1.1.1"
+        cat "$WORK/ns-ping.log" 2>/dev/null
+        echo "== ns dig @1.1.1.1 example.com"
+        cat "$WORK/ns-dig.log" 2>/dev/null
+        echo "== host: nft list table inet vallum"
+        nft list table inet vallum 2>&1
+        echo "== host: ip route get 1.1.1.1"
+        ip route get 1.1.1.1 2>&1
+        echo "== host: ip rule"
+        ip rule 2>&1
+        echo "== ns: ip route"
+        ip netns exec vallumtest-ns ip route 2>&1
+        echo "== forwarding and rp_filter"
+        sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
+    } > /tmp/vallum-host-dns.log 2>&1
+fi
+
+ip netns exec vallumtest-ns "$QUICK" detach "$WORK/client/ns.toml" >/dev/null 2>&1
+kill "$ns_pid" 2>/dev/null; ns_pid=""
+ip netns del vallumtest-ns
+ip link del veth-a 2>/dev/null
+ok "namespace client torn down"
 
 say "doctor, live"
 "$VALLUM" doctor --config "$SCONFIG" 2>&1 | head -8

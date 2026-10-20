@@ -80,6 +80,17 @@ Check in this order:
 - **A pinned peer answering from a new address.** `pin_endpoint` refuses it by
   design; remove the pin if the device genuinely roams.
 
+## A client and a server on the same host
+
+A full-tunnel client installs a catch-all policy rule (`ip rule … lookup
+<table>`). On the same host as a server, that rule also catches the server's
+*forwarded* packets, which come straight back into the tunnel and loop until the
+TTL expires. Symptoms: the tunnel itself pings, but nothing reaches the
+internet. `wg-quick` behaves the same way.
+
+Put the client on its own machine, or in its own network namespace. The
+privileged test gate does exactly that (`scripts/verify-host.sh`).
+
 ## It connects, then stops after a while
 
 - **NAT binding expired.** Set `persistent_keepalive = 25` on the client.
