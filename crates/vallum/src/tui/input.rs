@@ -10,10 +10,14 @@ use super::app::{App, Confirm, ConfirmAction, Form, PaletteState, View};
 use super::keymap::{self, Action};
 
 pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    let size = crossterm::terminal::size().unwrap_or((120, 32));
+    handle_mouse_at(app, mouse, size);
+}
+
+pub fn handle_mouse_at(app: &mut App, mouse: MouseEvent, (width, height): (u16, u16)) {
     // Command palette: rows are clickable; a click outside closes it.
     if let Some(palette) = app.palette.take() {
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-            let (width, height) = crossterm::terminal::size().unwrap_or((0, 0));
             let popup = super::ui::palette_rect(Rect::new(0, 0, width, height));
             let first_row = popup.y + 2; // border + input line
             let max_rows = popup.height.saturating_sub(4) as usize;
@@ -47,7 +51,7 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         MouseEventKind::ScrollUp => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_sub(3),
             View::Diff => app.diff_scroll = app.diff_scroll.saturating_sub(3),
-            View::Help => app.help_scroll = app.help_scroll.saturating_sub(3),
+            View::Help => app.help_scroll = app.help_scroll.saturating_add(0).saturating_sub(3),
             View::Dashboard => app.previous_peer(),
         },
         MouseEventKind::Down(MouseButton::Left)
@@ -57,7 +61,21 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                 && app.qr.is_none() =>
         {
             if mouse.row == 1 && !app.interfaces.is_empty() {
-                let mut col_accum = 1;
+                let badge_len = app
+                    .current()
+                    .map_or(11u16, |iface| match iface.service_state {
+                        Some(super::app::ServiceState::Active) => 10,
+                        Some(super::app::ServiceState::Inactive) => 12,
+                        Some(super::app::ServiceState::Activating) => 12,
+                        Some(super::app::ServiceState::Deactivating) => 12,
+                        Some(super::app::ServiceState::Failed) => 10,
+                        None => 11,
+                    });
+                let mut col_accum = 1 + badge_len + 1;
+                if mouse.column >= 1 && mouse.column < 1 + badge_len {
+                    dispatch(app, Action::ToggleService);
+                    return;
+                }
                 for (idx, iface) in app.interfaces.iter().enumerate() {
                     let tab_width =
                         format!(" [{}/{}] {} ", idx + 1, app.interfaces.len(), iface.name)
@@ -66,12 +84,27 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     if mouse.column >= col_accum && mouse.column < col_accum + tab_width {
                         app.selected = idx;
                         app.peer_selected = 0;
-                        break;
+                        return;
                     }
                     col_accum += tab_width;
                 }
+                let toggle_start = col_accum + 1;
+                if mouse.column >= toggle_start && mouse.column < toggle_start + 15 {
+                    dispatch(app, Action::ToggleService);
+                    return;
+                }
             }
-            if mouse.row >= 8 {
+            if !app.filtering && height >= 4 {
+                if mouse.row == height - 2 {
+                    handle_footer_nav_click(app, mouse.column);
+                    return;
+                }
+                if mouse.row == height - 1 && app.toast.is_none() {
+                    handle_footer_action_click(app, mouse.column, width);
+                    return;
+                }
+            }
+            if mouse.row >= 8 && mouse.row < height.saturating_sub(2) {
                 let clicked_row = (mouse.row - 8) as usize;
                 let filtered_count = app.filtered_peers().len();
                 if clicked_row < filtered_count {
@@ -83,9 +116,90 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+fn handle_footer_nav_click(app: &mut App, column: u16) {
+    // " : commands " pill (12 cols) + "  " (2 cols)
+    if column < 12 {
+        dispatch(app, Action::CommandPalette);
+        return;
+    }
+    let mut col = 14u16;
+    let items: &[(&str, &str, Option<Action>)] = &[
+        ("Tab", "iface", Some(Action::NextInterface)),
+        ("↑/↓", "peer", Some(Action::NextPeer)),
+        ("/", "filter", Some(Action::Filter)),
+        ("o", "sort", Some(Action::Sort)),
+        ("│", "", None),
+        ("?", "help", Some(Action::Help)),
+        ("q", "quit", Some(Action::Quit)),
+    ];
+    for &(key, label, action) in items {
+        let span_width = if label.is_empty() {
+            key.chars().count() as u16 + 2
+        } else {
+            key.chars().count() as u16 + 1 + label.chars().count() as u16 + 2
+        };
+        if column >= col && column < col + span_width.saturating_sub(2) {
+            if let Some(act) = action {
+                dispatch(app, act);
+            }
+            return;
+        }
+        col += span_width;
+    }
+}
+
+fn handle_footer_action_click(app: &mut App, column: u16, width: u16) {
+    let compact: &[(&str, &str, Option<Action>)] = &[
+        ("Space", "toggle", Some(Action::ToggleService)),
+        ("a", "add", Some(Action::AddPeer)),
+        ("e", "edit", Some(Action::EditPeer)),
+        ("d", "rm", Some(Action::RemovePeer)),
+        ("i", "import", Some(Action::ImportBundle)),
+        ("b", "bundle", Some(Action::ExportBundle)),
+        ("y", "copy", Some(Action::YankPublicLine)),
+    ];
+    let wide: &[(&str, &str, Option<Action>)] = &[
+        ("Space", "toggle", Some(Action::ToggleService)),
+        ("a", "add", Some(Action::AddPeer)),
+        ("e", "edit", Some(Action::EditPeer)),
+        ("d", "remove", Some(Action::RemovePeer)),
+        ("b", "bundle", Some(Action::ExportBundle)),
+        ("i", "import", Some(Action::ImportBundle)),
+        ("p", "ping", Some(Action::Ping)),
+        ("y", "copy", Some(Action::YankPublicLine)),
+        ("│", "", None),
+        ("C", "config", Some(Action::InterfaceForm)),
+        ("E", "edit", Some(Action::EditConfig)),
+        ("W", "save", Some(Action::SaveRuntime)),
+        ("l", "logs", Some(Action::Logs)),
+        ("r", "refresh", Some(Action::Refresh)),
+    ];
+    let items = if width < 100 { compact } else { wide };
+    let mut col = 0u16;
+    for &(key, label, action) in items {
+        let span_width = if label.is_empty() {
+            key.chars().count() as u16 + 1
+        } else {
+            key.chars().count() as u16 + 1 + label.chars().count() as u16 + 2
+        };
+        if column >= col && column < col + span_width.saturating_sub(2) {
+            if let Some(act) = action {
+                dispatch(app, act);
+            }
+            return;
+        }
+        col += span_width;
+    }
+}
+
 pub fn handle_paste(app: &mut App, text: String) {
     let clean = text.replace(['\r', '\n'], "");
     if clean.is_empty() {
+        return;
+    }
+    if let Some(palette) = app.palette.as_mut() {
+        palette.input.push_str(&clean);
+        palette.selected = 0;
         return;
     }
     if let Some(mut form) = app.form.take() {

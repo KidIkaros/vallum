@@ -157,11 +157,19 @@ the default stays tri-hybrid for KEM diversity.
 
 ### Dogfooding & Operations Showcase
 
-| Live Cockpit & Peer Telemetry | Semantic Journald Logs (`l`) |
+| Live Cockpit & Peer Telemetry | Command Palette (`:` — No Memorized Keys) |
 |:---:|:---:|
-| <img src="assets/vallum-peer-macbook.png" alt="Peer Selection & Details" width="100%"> | <img src="assets/vallum-logs.png" alt="Semantic Logs" width="100%"> |
-| **Peer Ping Connectivity Probe (`p`)** | **Multi-Frame Client Bundle QR (`b`)** |
+| <img src="assets/vallum-peer-macbook.png" alt="Peer Selection & Details" width="100%"> | <img src="assets/vallum-palette.png" alt="Interactive Command Palette" width="100%"> |
+| **Peer Ping Connectivity Probe (`p`)** | **Optical Client Bundle QR (`b` — ISO 18004)** |
 | <img src="assets/vallum-ping.png" alt="Ping Probe" width="100%"> | <img src="assets/vallum-qr.png" alt="Client QR Export" width="100%"> |
+| **Semantic Journald Logs (`l`)** | **VALLUM Onboarding Enclave** |
+| <img src="assets/vallum-logs.png" alt="Semantic Logs" width="100%"> | <img src="assets/vallum-empty.png" alt="Onboarding Enclave" width="100%"> |
+
+### Brand & Visual Identity System
+
+<p align="center">
+  <img src="assets/vallum-brandkit.png" alt="Vallum Brand & Interface System" width="100%">
+</p>
 
 Generate that frame yourself with
 `vallum tui --control /run/vallum/<name>.sock --snapshot --ansi --width 120 --height 32`.

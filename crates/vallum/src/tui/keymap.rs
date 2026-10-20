@@ -56,159 +56,189 @@ pub enum Action {
     Logs,
 }
 
-/// One command-palette entry: name shown, keywords searched.
+/// One command-palette entry: category badge, name shown, keywords searched.
 #[derive(Debug, Clone, Copy)]
 pub struct Command {
     pub action: Action,
+    pub category: &'static str,
     pub name: &'static str,
     pub keywords: &'static str,
 }
 
 /// The palette list, in the order shown when the input is empty.
+/// Commands that open a form or confirmation carry a trailing `…` (GUI Blooper 31).
 pub const COMMANDS: &[Command] = &[
     Command {
         action: Action::ToggleService,
+        category: "SERVICE",
         name: "toggle tunnel service",
         keywords: "start stop up down restart",
     },
     Command {
         action: Action::Refresh,
+        category: "SERVICE",
         name: "refresh snapshot",
         keywords: "reload poll live",
     },
     Command {
         action: Action::AutoRefresh,
+        category: "SERVICE",
         name: "toggle auto-refresh",
         keywords: "poll live timer",
     },
     Command {
         action: Action::AddPeer,
-        name: "add peer",
+        category: "PEER",
+        name: "add peer…",
         keywords: "new device client",
     },
     Command {
         action: Action::EditPeer,
-        name: "edit peer",
+        category: "PEER",
+        name: "edit peer…",
         keywords: "change endpoint keepalive psk",
     },
     Command {
         action: Action::RemovePeer,
-        name: "remove peer",
+        category: "PEER",
+        name: "remove peer…",
         keywords: "delete revoke",
     },
     Command {
         action: Action::Keygen,
-        name: "generate key",
+        category: "PEER",
+        name: "generate key…",
         keywords: "keygen identity",
     },
     Command {
         action: Action::ExportBundle,
-        name: "export client bundle",
+        category: "BUNDLE",
+        name: "export client bundle…",
         keywords: "qr share mobile",
     },
     Command {
         action: Action::ImportBundle,
-        name: "import client bundle",
+        category: "BUNDLE",
+        name: "import client bundle…",
         keywords: "load client config",
     },
     Command {
         action: Action::Ping,
+        category: "PEER",
         name: "ping peer",
         keywords: "test reachability",
     },
     Command {
         action: Action::Filter,
-        name: "filter peers",
+        category: "VIEW",
+        name: "filter peers…",
         keywords: "search find",
     },
     Command {
         action: Action::ClearFilter,
+        category: "VIEW",
         name: "clear filter",
         keywords: "reset show all",
     },
     Command {
         action: Action::Sort,
+        category: "VIEW",
         name: "cycle peer sort",
         keywords: "order name transfer handshake",
     },
     Command {
         action: Action::YankPublicLine,
+        category: "PEER",
         name: "copy public line",
         keywords: "clipboard yank",
     },
     Command {
         action: Action::YankAddress,
+        category: "PEER",
         name: "copy peer address",
         keywords: "clipboard yank endpoint ip",
     },
     Command {
         action: Action::SaveRuntime,
+        category: "CONFIG",
         name: "save runtime config",
         keywords: "write persist disk",
     },
     Command {
         action: Action::RuntimeForm,
-        name: "runtime device form",
+        category: "CONFIG",
+        name: "runtime device form…",
         keywords: "listen port fwmark temporary",
     },
     Command {
         action: Action::InterfaceForm,
-        name: "interface config form",
+        category: "CONFIG",
+        name: "interface config form…",
         keywords: "listen mtu addresses dns table",
     },
     Command {
         action: Action::EditConfig,
-        name: "edit config in $EDITOR",
+        category: "CONFIG",
+        name: "edit config in $EDITOR…",
         keywords: "toml diff backup",
     },
     Command {
         action: Action::Logs,
+        category: "VIEW",
         name: "view logs",
         keywords: "journal journalctl",
     },
     Command {
         action: Action::NextInterface,
+        category: "NAV",
         name: "next interface",
         keywords: "tab switch",
     },
     Command {
         action: Action::PrevInterface,
+        category: "NAV",
         name: "previous interface",
         keywords: "tab switch",
     },
     Command {
         action: Action::NextPeer,
+        category: "NAV",
         name: "next peer",
         keywords: "select down",
     },
     Command {
         action: Action::PrevPeer,
+        category: "NAV",
         name: "previous peer",
         keywords: "select up",
     },
     Command {
         action: Action::FirstPeer,
+        category: "NAV",
         name: "first peer",
         keywords: "home top",
     },
     Command {
         action: Action::LastPeer,
+        category: "NAV",
         name: "last peer",
         keywords: "end bottom",
     },
     Command {
         action: Action::Help,
+        category: "VIEW",
         name: "help",
         keywords: "keys guide shortcuts",
     },
     Command {
         action: Action::Quit,
+        category: "SYSTEM",
         name: "quit",
         keywords: "exit close",
     },
 ];
 
-/// Palette rows whose name or keywords contain the input (case-insensitive).
+/// Palette rows whose name, category, or keywords contain the input (case-insensitive).
 /// An empty input lists everything.
 #[must_use]
 pub fn matching_commands(input: &str) -> Vec<&'static Command> {
@@ -218,19 +248,21 @@ pub fn matching_commands(input: &str) -> Vec<&'static Command> {
         .filter(|command| {
             needle.is_empty()
                 || command.name.to_lowercase().contains(&needle)
+                || command.category.to_lowercase().contains(&needle)
                 || command.keywords.to_lowercase().contains(&needle)
         })
         .collect()
 }
 
 /// First index of the visible window so `selected` stays on screen when the
-/// filtered list exceeds `max_rows`.
+/// filtered list exceeds `max_rows`, without scrolling the list while the
+/// selection is still within the first page.
 #[must_use]
 pub fn window_start(len: usize, selected: usize, max_rows: usize) -> usize {
-    if len <= max_rows {
+    if len <= max_rows || max_rows == 0 || selected < max_rows {
         0
     } else {
-        selected.min(len - max_rows)
+        (selected + 1 - max_rows).min(len - max_rows)
     }
 }
 

@@ -1329,3 +1329,86 @@ fn peer_fingerprint_falls_back_to_public_line_when_omitted_by_uapi() {
     let device = DeviceView::from_response(&response);
     assert_eq!(device.peers[0].fingerprint, "8b7e6d5c4b3a2918");
 }
+
+#[test]
+fn palette_window_stays_anchored_on_first_page_and_matches_categories() {
+    use super::keymap::{matching_commands, window_start, Action};
+
+    assert_eq!(window_start(28, 0, 14), 0);
+    assert_eq!(window_start(28, 3, 14), 0);
+    assert_eq!(window_start(28, 13, 14), 0);
+    assert_eq!(window_start(28, 14, 14), 1);
+    assert_eq!(window_start(28, 27, 14), 14);
+
+    let bundle_cmds = matching_commands("BUNDLE");
+    assert_eq!(bundle_cmds.len(), 2);
+    assert_eq!(bundle_cmds[0].action, Action::ExportBundle);
+    assert_eq!(bundle_cmds[1].action, Action::ImportBundle);
+}
+
+#[test]
+fn fitts_law_footer_and_header_clicks_trigger_actions_and_palette_accepts_paste() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = App::new(Vec::new());
+    // Bottom-left `: commands` pill on row 30 (height 32 -> nav row is 30)
+    super::input::handle_mouse_at(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 30,
+            modifiers: KeyModifiers::NONE,
+        },
+        (120, 32),
+    );
+    assert!(app.palette.is_some());
+
+    // Paste into open palette
+    super::input::handle_paste(&mut app, "add peer\n".to_owned());
+    assert_eq!(
+        app.palette.as_ref().map(|p| p.input.as_str()),
+        Some("add peer")
+    );
+    app.palette = None;
+
+    // Click 'a add' capsule on action row 31 ("Space toggle  " is 14 cols -> 'a add' starts at 14)
+    super::input::handle_mouse_at(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 31,
+            modifiers: KeyModifiers::NONE,
+        },
+        (120, 32),
+    );
+    assert!(app.form.is_some());
+    app.form = None;
+
+    // Header row-1 interface tab click accounts for the status badge width
+    let iface0 = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    let iface1 = super::app::Interface::new(
+        "vallum1".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum1.sock"),
+    );
+    let mut app = App::new(vec![iface0, iface1]);
+    assert_eq!(app.selected, 0);
+    // Badge " ◌ NO UNIT " (11) + " " (1) + " [1/2] vallum0 " (15) -> tab 1 starts at col 13, tab 2 at col 28
+    super::input::handle_mouse_at(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 30,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        (120, 32),
+    );
+    assert_eq!(app.selected, 1);
+}

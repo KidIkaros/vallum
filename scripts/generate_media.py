@@ -453,6 +453,243 @@ def render_to_svg(ansi_text, title="vallum tui — vallum0 (post-quantum tri-hyb
     return "\n".join(svg_parts)
 
 
+def generate_brandkit_board():
+    """
+    Generates a 3x3 premium Brand Identity System board (PNG + SVG) for VALLUM
+    following the brandkit skill specification: dark charcoal canvas, clean
+    presentation grid, strong gutters, geometric construction, and sparse
+    high-hierarchy typography.
+    """
+    W, H = 1800, 1260
+    GUTTER = 24
+    MARGIN_X = 36
+    MARGIN_TOP = 64
+    MARGIN_BOT = 36
+
+    grid_w = W - MARGIN_X * 2 - GUTTER * 2
+    grid_h = H - MARGIN_TOP - MARGIN_BOT - GUTTER * 2
+    cw = grid_w // 3
+    ch = grid_h // 3
+
+    img = Image.new("RGBA", (W, H), color="#07090d")
+    draw = ImageDraw.Draw(img)
+
+    f_hero = ImageFont.truetype(FONT_BOLD, 44)
+    f_title = ImageFont.truetype(FONT_BOLD, 24)
+    f_sub = ImageFont.truetype(FONT_BOLD, 16)
+    f_body = ImageFont.truetype(FONT_REGULAR, 14)
+    f_small = ImageFont.truetype(FONT_REGULAR, 12)
+    f_label = ImageFont.truetype(FONT_BOLD, 11)
+
+    # Top deck header bar
+    draw.text((MARGIN_X, 22), "◆ VALLUM  //  BRAND & INTERFACE SYSTEM", font=f_sub, fill="#f0f6fc")
+    draw.text(
+        (W - MARGIN_X - 420, 24),
+        "IKAROS DIGITAL × ATOMGUARD  ·  0x0003 TRI-HYBRID",
+        font=f_small,
+        fill="#6e7681",
+    )
+
+    def cell_rect(col, row):
+        x0 = MARGIN_X + col * (cw + GUTTER)
+        y0 = MARGIN_TOP + row * (ch + GUTTER)
+        return x0, y0, x0 + cw, y0 + ch
+
+    def draw_card(col, row, index_str, label_str, bg="#0d1117", border="#21262d"):
+        x0, y0, x1, y1 = cell_rect(col, row)
+        draw.rounded_rectangle([(x0, y0), (x1, y1)], radius=12, fill=bg, outline=border, width=1)
+        draw.text((x0 + 22, y0 + 18), index_str, font=f_label, fill="#39c5cf")
+        draw.text((x0 + 52, y0 + 18), label_str, font=f_label, fill="#6e7681")
+        return x0, y0, x1, y1
+
+    # 01 / LOGO COVER
+    x0, y0, x1, y1 = draw_card(0, 0, "01", "PRIMARY WORDMARK & SEAL", bg="#0b0f16", border="#30363d")
+    cx, cy = (x0 + x1) // 2, (y0 + y1) // 2 - 12
+    # Boundary crossing line: ──●──◆──●──
+    draw.line([(cx - 120, cy - 42), (cx + 120, cy - 42)], fill="#30363d", width=2)
+    draw.ellipse([(cx - 70, cy - 48), (cx - 58, cy - 36)], fill="#39c5cf")
+    draw.ellipse([(cx + 58, cy - 48), (cx + 70, cy - 36)], fill="#39c5cf")
+    draw.polygon([(cx, cy - 54), (cx + 12, cy - 42), (cx, cy - 30), (cx - 12, cy - 42)], fill="#39c5cf")
+    draw.text((cx - 115, cy - 12), "◆ VALLUM", font=f_hero, fill="#f0f6fc")
+    draw.text((cx - 122, cy + 54), "EVERY BOUNDARY UNDER WATCH.", font=f_sub, fill="#39c5cf")
+    draw.text((x0 + 22, y1 - 32), "L3 POST-QUANTUM TUNNEL", font=f_small, fill="#6e7681")
+
+    # 02 / SYMBOL CONSTRUCTION
+    x0, y0, x1, y1 = draw_card(1, 0, "02", "BOUNDARY GEOMETRY  (1:1 GRID)")
+    gx0, gy0 = x0 + 40, y0 + 56
+    gw, gh = cw - 80, ch - 96
+    for step in range(0, gw + 1, 32):
+        draw.line([(gx0 + step, gy0), (gx0 + step, gy0 + gh)], fill="#161b22", width=1)
+    for step in range(0, gh + 1, 32):
+        draw.line([(gx0, gy0 + step), (gx0 + gw, gy0 + step)], fill="#161b22", width=1)
+    mcx, mcy = gx0 + gw // 2, gy0 + gh // 2
+    draw.line([(gx0 + 24, mcy), (gx0 + gw - 24, mcy)], fill="#39c5cf", width=2)
+    draw.line([(mcx, gy0 + 18), (mcx, gy0 + gh - 18)], fill="#30363d", width=1)
+    draw.ellipse([(mcx - 110, mcy - 10), (mcx - 90, mcy + 10)], fill="#0d1117", outline="#39c5cf", width=3)
+    draw.ellipse([(mcx + 90, mcy - 10), (mcx + 110, mcy + 10)], fill="#0d1117", outline="#39c5cf", width=3)
+    draw.polygon([(mcx, mcy - 26), (mcx + 26, mcy), (mcx, mcy + 26), (mcx - 26, mcy)], fill="#161b22", outline="#39c5cf")
+    draw.polygon([(mcx, mcy - 12), (mcx + 12, mcy), (mcx, mcy + 12), (mcx - 12, mcy)], fill="#39c5cf")
+    draw.text((mcx - 135, mcy + 22), "INITIATOR", font=f_label, fill="#8b949e")
+    draw.text((mcx - 42, mcy + 34), "RAMPART GATE", font=f_label, fill="#39c5cf")
+    draw.text((mcx + 68, mcy + 22), "RESPONDER", font=f_label, fill="#8b949e")
+
+    # 03 / DIGITAL COCKPIT SURFACE
+    x0, y0, x1, y1 = draw_card(2, 0, "03", "COCKPIT TELEMETRY SURFACE")
+    bx0, by0, bx1, by1 = x0 + 24, y0 + 54, x1 - 24, y1 - 24
+    draw.rounded_rectangle([(bx0, by0), (bx1, by1)], radius=8, fill="#090d12", outline="#30363d", width=1)
+    draw.text((bx0 + 14, by0 + 10), "◆ Vallum ❯ TUNNEL CONTROL", font=f_small, fill="#39c5cf")
+    draw.rounded_rectangle([(bx0 + 14, by0 + 36), (bx0 + 108, by0 + 60)], radius=4, fill="#2ea043")
+    draw.text((bx0 + 22, by0 + 40), "● ACTIVE", font=f_small, fill="#0d1117")
+    draw.rounded_rectangle([(bx0 + 118, by0 + 36), (bx0 + 250, by0 + 60)], radius=4, fill="#39c5cf")
+    draw.text((bx0 + 126, by0 + 40), "[1/1] vallum0", font=f_small, fill="#0d1117")
+    draw.text((bx0 + 14, by0 + 72), "CONTROL LIVE · last reply 0s · systemd active", font=f_small, fill="#3fb950")
+    draw.text((bx0 + 14, by0 + 96), "suite 0x0003 (tri-hybrid)   listen 0.0.0.0:51820", font=f_small, fill="#c9d1d9")
+    # Mini sparkline bars
+    samples = [5, 8, 12, 10, 16, 22, 19, 15, 24, 28, 25, 20, 26, 30, 27, 23, 29, 32, 26, 24, 28, 30]
+    sx = bx0 + 14
+    sy_base = by1 - 22
+    draw.text((sx, sy_base - 52), "▼ RX 1.4 MB/s   ▲ TX 3.7 MB/s", font=f_small, fill="#39c5cf")
+    for idx, val in enumerate(samples):
+        bh = val
+        draw.rectangle([(sx + idx * 18, sy_base - bh), (sx + idx * 18 + 13, sy_base)], fill="#39c5cf" if idx % 2 == 0 else "#bc8cff")
+
+    # 04 / BRAND ESSENCE
+    x0, y0, x1, y1 = draw_card(0, 1, "04", "BRAND POSTURE & VOICE")
+    draw.text((x0 + 28, y0 + 64), "Calm authority.", font=f_title, fill="#f0f6fc")
+    draw.text((x0 + 28, y0 + 100), "Honest telemetry.", font=f_title, fill="#39c5cf")
+    draw.text((x0 + 28, y0 + 136), "Zero crypto lock-in.", font=f_title, fill="#8b949e")
+    draw.line([(x0 + 28, y0 + 182), (x1 - 28, y0 + 182)], fill="#21262d", width=1)
+    draw.text((x0 + 28, y0 + 200), "Built for network operators who need immediate", font=f_body, fill="#c9d1d9")
+    draw.text((x0 + 28, y0 + 224), "answers: is the boundary up, is control live,", font=f_body, fill="#c9d1d9")
+    draw.text((x0 + 28, y0 + 248), "and which peers have fresh handshakes.", font=f_body, fill="#c9d1d9")
+
+    # 05 / SEMANTIC COLOR SYSTEM
+    x0, y0, x1, y1 = draw_card(1, 1, "05", "SEMANTIC SIGNAL PALETTE")
+    swatches = [
+        ("#0D1117", "OBSIDIAN", "Canvas"),
+        ("#39C5CF", "SIGNAL CYAN", "Focus / Nav"),
+        ("#3FB950", "LIVE GREEN", "Healthy"),
+        ("#D29922", "STALE AMBER", "Aging / Warn"),
+        ("#FF7B72", "FAULT CORAL", "Unavailable"),
+        ("#BC8CFF", "TX VIOLET", "Outbound"),
+    ]
+    sw_w = (cw - 64) // 3
+    sw_h = 104
+    for idx, (hex_c, name, role) in enumerate(swatches):
+        sc = idx % 3
+        sr = idx // 3
+        sx0 = x0 + 22 + sc * (sw_w + 10)
+        sy0 = y0 + 56 + sr * (sw_h + 14)
+        draw.rounded_rectangle([(sx0, sy0), (sx0 + sw_w, sy0 + sw_h)], radius=8, fill="#161b22", outline="#30363d", width=1)
+        draw.rounded_rectangle([(sx0 + 8, sy0 + 8), (sx0 + sw_w - 8, sy0 + 48)], radius=5, fill=hex_c, outline="#30363d", width=1)
+        draw.text((sx0 + 10, sy0 + 56), name, font=f_label, fill="#f0f6fc")
+        draw.text((sx0 + 10, sy0 + 74), f"{hex_c} · {role}", font=f_label, fill="#8b949e")
+
+    # 06 / TYPOGRAPHY SPECIMEN
+    x0, y0, x1, y1 = draw_card(2, 1, "06", "TYPOGRAPHY  ·  JETBRAINS MONO")
+    draw.text((x0 + 26, y0 + 54), "Aa Bb 0123", font=f_hero, fill="#f0f6fc")
+    draw.text((x0 + 26, y0 + 118), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", font=f_sub, fill="#39c5cf")
+    draw.text((x0 + 26, y0 + 144), "0123456789  [2a01:4f8::1]:51820", font=f_body, fill="#c9d1d9")
+    draw.line([(x0 + 26, y0 + 178), (x1 - 26, y0 + 178)], fill="#21262d", width=1)
+    draw.text((x0 + 26, y0 + 194), "PUBLIC LINE IDENTITY FORMAT", font=f_label, fill="#6e7681")
+    draw.text((x0 + 26, y0 + 216), "vallum1:0003:8b7e6d5c4b3a2918:...", font=f_body, fill="#3fb950")
+    draw.text((x0 + 26, y0 + 244), "Tabular alignment · zero ambiguity", font=f_small, fill="#8b949e")
+
+    # 07 / OPTICAL PROVISIONING (QR SEAL)
+    x0, y0, x1, y1 = draw_card(0, 2, "07", "OPTICAL PROVISIONING  (ISO 18004)")
+    # Draw crisp mini 21x21 QR pattern with 2-module white quiet zone
+    qr_size = 21
+    quiet = 2
+    mod_px = 8
+    plate_px = (qr_size + quiet * 2) * mod_px
+    qx0 = x0 + 28
+    qy0 = y0 + 58
+    draw.rectangle([(qx0, qy0), (qx0 + plate_px, qy0 + plate_px)], fill="#ffffff")
+
+    def draw_finder(fx, fy):
+        for r in range(7):
+            for c in range(7):
+                if r in (0, 6) or c in (0, 6) or (2 <= r <= 4 and 2 <= c <= 4):
+                    px = qx0 + (quiet + fx + c) * mod_px
+                    py = qy0 + (quiet + fy + r) * mod_px
+                    draw.rectangle([(px, py), (px + mod_px, py + mod_px)], fill="#000000")
+
+    draw_finder(0, 0)
+    draw_finder(qr_size - 7, 0)
+    draw_finder(0, qr_size - 7)
+    for r in range(qr_size):
+        for c in range(qr_size):
+            in_tl = r < 8 and c < 8
+            in_tr = r < 8 and c >= qr_size - 8
+            in_bl = r >= qr_size - 8 and c < 8
+            if not (in_tl or in_tr or in_bl):
+                if (r == 6 or c == 6) and (r + c) % 2 == 0:
+                    dark = True
+                else:
+                    dark = ((r * 17 + c * 31 + r * c) % 5) in (0, 2)
+                if dark:
+                    px = qx0 + (quiet + c) * mod_px
+                    py = qy0 + (quiet + r) * mod_px
+                    draw.rectangle([(px, py), (px + mod_px, py + mod_px)], fill="#000000")
+
+    rx_info = qx0 + plate_px + 22
+    draw.rounded_rectangle([(rx_info, qy0 + 4), (x1 - 24, qy0 + 30)], radius=4, fill="#39c5cf")
+    draw.text((rx_info + 10, qy0 + 9), "● VALLUM1 BUNDLE", font=f_small, fill="#0d1117")
+    draw.rounded_rectangle([(rx_info, qy0 + 40), (x1 - 24, qy0 + 66)], radius=4, fill="#d29922")
+    draw.text((rx_info + 10, qy0 + 45), "⚠ SECRET KEY MATERIAL", font=f_small, fill="#0d1117")
+    draw.text((rx_info, qy0 + 84), "Half-block 1:1 square", font=f_body, fill="#f0f6fc")
+    draw.text((rx_info, qy0 + 108), "modules + 2px quiet zone", font=f_body, fill="#f0f6fc")
+    draw.text((rx_info, qy0 + 138), "hash  e8a12c4b", font=f_small, fill="#39c5cf")
+    draw.text((rx_info, qy0 + 160), "frame 1/1 [████████]", font=f_small, fill="#3fb950")
+
+    # 08 / TRI-HYBRID CRYPTO ARCHITECTURE
+    x0, y0, x1, y1 = draw_card(1, 2, "08", "CRYPTOGRAPHIC BOUNDARY ARCHITECTURE")
+    legs = [
+        ("LEG 01 · CLASSICAL", "X25519 ECDH", "#c9d1d9"),
+        ("LEG 02 · NTRU LATTICE", "sntrup761 KEM", "#39c5cf"),
+        ("LEG 03 · NIST FIPS 203", "ML-KEM-768", "#3fb950"),
+    ]
+    for idx, (tag, alg, col_hex) in enumerate(legs):
+        ly = y0 + 58 + idx * 54
+        draw.rounded_rectangle([(x0 + 24, ly), (x0 + 310, ly + 42)], radius=6, fill="#161b22", outline="#30363d", width=1)
+        draw.text((x0 + 36, ly + 6), tag, font=f_label, fill="#8b949e")
+        draw.text((x0 + 36, ly + 22), alg, font=f_small, fill=col_hex)
+        draw.line([(x0 + 310, ly + 21), (x0 + 356, y0 + 136)], fill="#39c5cf", width=2)
+
+    draw.rounded_rectangle([(x0 + 356, y0 + 88), (x1 - 24, y0 + 184)], radius=8, fill="#0b161e", outline="#39c5cf", width=2)
+    draw.text((x0 + 372, y0 + 102), "HKDF-SHA3-256", font=f_sub, fill="#39c5cf")
+    draw.text((x0 + 372, y0 + 128), "CryptoSuite Trait", font=f_body, fill="#f0f6fc")
+    draw.text((x0 + 372, y0 + 152), "0x0003 Tri-Hybrid", font=f_small, fill="#3fb950")
+    draw.text((x0 + 24, y1 - 34), "MEX-bound static ops · mutual confirmation · eCK-PFS-PSK", font=f_small, fill="#8b949e")
+
+    # 09 / UI COMPONENT SYSTEM
+    x0, y0, x1, y1 = draw_card(2, 2, "09", "INTERACTION & COMPONENT SYSTEM")
+    # Command palette pill
+    draw.rounded_rectangle([(x0 + 24, y0 + 58), (x0 + 168, y0 + 86)], radius=5, fill="#39c5cf")
+    draw.text((x0 + 34, y0 + 64), ": commands", font=f_sub, fill="#0d1117")
+    draw.rounded_rectangle([(x0 + 182, y0 + 58), (x0 + 310, y0 + 86)], radius=5, fill="#2ea043")
+    draw.text((x0 + 194, y0 + 64), "● ACTIVE", font=f_sub, fill="#0d1117")
+    draw.rounded_rectangle([(x0 + 324, y0 + 58), (x1 - 24, y0 + 86)], radius=5, fill="#30363d")
+    draw.text((x0 + 338, y0 + 64), "RECENT · 14s", font=f_sub, fill="#3fb950")
+
+    # Palette row preview
+    draw.rounded_rectangle([(x0 + 24, y0 + 104), (x1 - 24, y0 + 194)], radius=6, fill="#090d12", outline="#30363d", width=1)
+    draw.text((x0 + 36, y0 + 114), ": add peer▌", font=f_body, fill="#39c5cf")
+    draw.rounded_rectangle([(x0 + 32, y0 + 138), (x1 - 32, y0 + 162)], radius=4, fill="#39c5cf")
+    draw.text((x0 + 40, y0 + 142), "▸ PEER    add peer…                               a", font=f_small, fill="#0d1117")
+    draw.text((x0 + 40, y0 + 166), "  BUNDLE  export client bundle… (charlie)       b x", font=f_small, fill="#c9d1d9")
+
+    # Toast bar preview
+    draw.rounded_rectangle([(x0 + 24, y1 - 52), (x0 + 56, y1 - 26)], radius=4, fill="#d29922")
+    draw.text((x0 + 34, y1 - 47), "▸", font=f_sub, fill="#0d1117")
+    draw.text((x0 + 68, y1 - 46), "ping 10.7.0.3: reply in 18.2 ms", font=f_body, fill="#e3b341")
+
+    brandkit_png = os.path.join(ASSETS_DIR, "vallum-brandkit.png")
+    img.convert("RGB").save(brandkit_png)
+    print(f"  Generated 3x3 Brandkit board -> {brandkit_png}")
+
+
+
 def main():
     os.makedirs(ASSETS_DIR, exist_ok=True)
     sock_path = "/tmp/vallum_media.sock"
@@ -466,6 +703,7 @@ def main():
     frames_spec = [
         ("dashboard", "assets/vallum-cockpit.png", "assets/vallum-cockpit.svg", "vallum tui — Cockpit Dashboard (Peer 1 Active)"),
         ("peer1", "assets/vallum-peer-macbook.png", None, "vallum tui — Selected Charlie's MacBook"),
+        ("palette", "assets/vallum-palette.png", None, "vallum tui — Command Palette (':' Interactive Dispatch)"),
         ("ping", "assets/vallum-ping.png", None, "vallum tui — Peer Ping Connectivity Probe"),
         ("filter", "assets/vallum-filter.png", None, "vallum tui — Interactive PSK Filter"),
         ("logs", "assets/vallum-logs.png", "assets/vallum-logs.svg", "vallum tui — Semantic Journald Logs"),
@@ -474,7 +712,7 @@ def main():
     ]
 
     captured_images = []
-    durations = [2000, 1500, 2200, 1800, 2500, 2200, 2000]
+    durations = [2000, 1500, 1800, 2200, 1800, 2500, 2200, 2000]
 
     for view, png_rel, svg_rel, title in frames_spec:
         print(f"  Rendering view '{view}' -> {png_rel}")
@@ -494,6 +732,8 @@ def main():
                 f.write(svg_content)
 
     stop_event.set()
+
+    generate_brandkit_board()
 
     # Generate Animated GIF
     gif_path = os.path.join(ASSETS_DIR, "vallum-demo.gif")

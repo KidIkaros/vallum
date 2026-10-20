@@ -417,42 +417,129 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
         text.push(Line::from(""));
         text.push(Line::from(vec![
             Span::styled(
-                "◆ VALLUM",
+                " ◆ VALLUM ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  ──●──◆──●──  ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  ──●──◆──●──  a boundary with a protected crossing",
-                Style::default().fg(Color::DarkGray),
+                "EVERY BOUNDARY UNDER WATCH",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
-        text.push(Line::from(Span::styled(
-            "  post-quantum layer-3 tunnel · ML-KEM-768 / tri-hybrid",
-            Style::default().fg(Color::Gray),
-        )));
+        text.push(Line::from(vec![
+            Span::styled("  suite 0x0003 ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "X25519 + sntrup761 + ML-KEM-768 (tri-hybrid)",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                " · layer-3 post-quantum tunnel",
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
         text.push(Line::from(""));
     }
 
-    text.push(Line::from(Span::styled(
-        "No Vallum interface found",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
+    text.push(Line::from(vec![
+        Span::styled("◌ ", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            "No Vallum interface found",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " — choose an onboarding path below:",
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
     text.push(Line::from(""));
-    text.push(Line::from(
-        "Inspect a running tunnel: vallum tui --control /run/vallum/<name>.sock",
-    ));
-    text.push(Line::from(
-        "Start a tunnel: sudo vallum-quick up /etc/vallum/<name>.toml",
-    ));
-    text.push(Line::from(
-        "Or pass --config /path/to/config.toml or --config-dir DIR.",
-    ));
+    text.push(Line::from(vec![
+        Span::styled(
+            " 01 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Start a tunnel     ", Style::default().fg(Color::White)),
+        Span::styled(
+            "sudo vallum-quick up /etc/vallum/<name>.toml",
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+    text.push(Line::from(vec![
+        Span::styled(
+            " 02 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Inspect a daemon   ", Style::default().fg(Color::White)),
+        Span::styled(
+            "vallum tui --control /run/vallum/<name>.sock",
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+    text.push(Line::from(vec![
+        Span::styled(
+            " 03 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Load a config      ", Style::default().fg(Color::White)),
+        Span::styled(
+            "vallum tui --config /path/to/config.toml  (or --config-dir DIR)",
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+    text.push(Line::from(""));
+    text.push(Line::from(vec![Span::styled(
+        "── Interactive Actions ──────────────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )]));
+    text.push(Line::from(vec![
+        Span::styled(
+            " i ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Import a client bundle (.vallum-bundle) directly   ",
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(
+            " : ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Open command palette   ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            " g ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Generate keypair", Style::default().fg(Color::Gray)),
+    ]));
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
-        "Tip: Press i to import a client bundle (.vallum-bundle) directly.",
+        "  Ikaros Digital × Atomguard · zero-compromise post-quantum systems engineering",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -992,43 +1079,97 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(hint), area);
 }
 
+fn help_row(keys: &'static str, desc: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {keys:<17} "),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(desc, Style::default().fg(Color::White)),
+    ])
+}
+
+fn help_section(title: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {title} "),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 fn draw_help(frame: &mut Frame<'_>, app: &App) {
     let text = vec![
-        Line::from("Space / s         toggle tunnel up / down"),
-        Line::from("Tab / Shift-Tab   switch interface (or click tab)"),
-        Line::from("j / k, arrows     select peer (or click row / scroll wheel)"),
-        Line::from("/                 filter peers by name, IP, endpoint, or fingerprint"),
-        Line::from("o                 cycle peer sorting (natural, handshake, transfer, name)"),
-        Line::from("Home / End        jump to first / last peer"),
-        Line::from("PgUp / PgDn       scroll 5 peers / scroll logs & diff"),
-        Line::from("g / G             jump to top / bottom (logs, diff, help)"),
-        Line::from("a                 add peer"),
-        Line::from("e                 edit name, endpoint, allowed IPs, keepalive, PSK"),
-        Line::from("d                 remove peer (with confirmation preview)"),
-        Line::from("i                 import client bundle (.vallum-bundle) into daemon"),
-        Line::from("g                 generate a key and prefill the add form"),
-        Line::from("b                 export client bundle and show animated QR"),
-        Line::from("y                 copy peer public line (OSC 52 + wl-copy/xclip)"),
-        Line::from("Y                 copy peer address / endpoint (same reporting)"),
-        Line::from("p                 ping selected peer's tunnel IP (runs off-loop)"),
-        Line::from(":                 command palette — every action by name, click or Enter"),
-        Line::from("W                 write/save runtime configuration to disk"),
-        Line::from("c                 edit runtime listen port and fwmark (temporary)"),
-        Line::from("C                 edit listen/MTU/fwmark/addresses/DNS/table (on disk)"),
-        Line::from("E                 edit TOML in $EDITOR (with diff review)"),
-        Line::from("l                 show journald logs (scroll with j/k/PgUp/PgDn)"),
-        Line::from("r                 refresh device snapshot"),
-        Line::from("R                 toggle auto-refresh (1s poll on/off)"),
-        Line::from("? / F1            open or close this help"),
-        Line::from("q / Q / Ctrl-C    quit / close view"),
+        Line::from(vec![
+            Span::styled(
+                " ◆ VALLUM ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  ──●──◆──●──  OPERATIONS COCKPIT REFERENCE",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::from(""),
-        Line::from("CONTROL reports UAPI reachability; systemd unit state is separate."),
-        Line::from("Handshake tags: RECENT <5m, AGING <1h, OLD >1h, or NEVER."),
-        Line::from("Forms: Tab moves fields, arrows edit text, Ctrl-U clears."),
-        Line::from("Keys are remappable: vallum tui --keys FILE or"),
-        Line::from("~/.config/vallum/tui-keys.toml (e.g. add_peer = \"n\")."),
-        Line::from("Secrets are masked; private keys and PSK are never rendered."),
-        Line::from("Developed in partnership by Ikaros Digital × Atomguard."),
+        help_section("Command Palette & Navigation (or click footer / rows)"),
+        help_row(
+            ":",
+            "command palette — every action by name, click or Enter",
+        ),
+        help_row("Tab / Shift-Tab", "switch interface (or click header tab)"),
+        help_row("j / k, arrows", "select peer (or click row / scroll wheel)"),
+        help_row("/", "filter peers by name, IP, endpoint, or fingerprint"),
+        help_row(
+            "o",
+            "cycle peer sorting (natural, handshake, transfer, name)",
+        ),
+        help_row("Home / End", "jump to first / last peer"),
+        help_row("PgUp / PgDn", "scroll 5 peers / scroll logs & diff"),
+        help_row("g / G", "jump to top / bottom (logs, diff, help)"),
+        Line::from(""),
+        help_section("Peer Management & Optical Provisioning"),
+        help_row("a", "add peer…"),
+        help_row("e", "edit name, endpoint, allowed IPs, keepalive, PSK…"),
+        help_row("d", "remove peer (with confirmation preview)…"),
+        help_row("g", "generate a key and prefill the add form…"),
+        help_row("b / x", "export client bundle and show scannable QR…"),
+        help_row("i", "import client bundle (.vallum-bundle) into daemon…"),
+        help_row("p", "ping selected peer's tunnel IP (runs off-loop)"),
+        help_row("y", "copy peer public line (OSC 52 + wl-copy/xclip)"),
+        help_row("Y", "copy peer address / endpoint (same reporting)"),
+        Line::from(""),
+        help_section("Tunnel Service & Configuration"),
+        help_row(
+            "Space / s",
+            "toggle tunnel up / down (or click status badge)",
+        ),
+        help_row("c", "edit runtime listen port and fwmark (temporary)…"),
+        help_row("C", "edit listen/MTU/fwmark/addresses/DNS/table (on disk)…"),
+        help_row("E", "edit TOML in $EDITOR (with side-by-side diff review)…"),
+        help_row("W", "write/save runtime configuration to disk"),
+        help_row(
+            "l",
+            "show journald logs (scroll with j/k/PgUp/PgDn, f follow)",
+        ),
+        help_row("r / R", "refresh snapshot now / toggle 1s auto-refresh"),
+        help_row("? / F1", "open or close this help"),
+        help_row("q / Q / Ctrl-C", "quit / close view"),
+        Line::from(""),
+        help_section("Operational Semantics & Security"),
+        Line::from("  CONTROL reports UAPI reachability; systemd unit state is separate."),
+        Line::from("  Handshake tags: RECENT <5m, AGING <1h, OLD >1h, or NEVER."),
+        Line::from("  Forms: Tab moves fields, arrows edit text, Ctrl-U clears."),
+        Line::from("  Keys are remappable: vallum tui --keys FILE or"),
+        Line::from("  ~/.config/vallum/tui-keys.toml (e.g. add_peer = \"n\")."),
+        Line::from("  Secrets are masked; private keys and PSK are never rendered."),
+        Line::from("  Developed in partnership by Ikaros Digital × Atomguard."),
     ];
     let visible = usize::from(frame.area().height.saturating_sub(2));
     let scroll_y = (app.help_scroll as u16).min(text.len().saturating_sub(visible) as u16);
@@ -1585,7 +1726,44 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 /// The command palette popup rect; also used by the mouse hit test.
 pub(crate) fn palette_rect(area: Rect) -> Rect {
-    centered(area, 60, 55)
+    centered(area, 68, 60)
+}
+
+fn palette_command_context(app: &App, action: super::keymap::Action) -> (Option<String>, bool) {
+    use super::keymap::Action;
+    let peer_name = app.current_peer().map(|peer| {
+        if !peer.name.is_empty() {
+            peer.name.clone()
+        } else {
+            peer.fingerprint.clone()
+        }
+    });
+    let has_device = app.current_device().is_some();
+    let has_iface = app.current().is_some();
+    match action {
+        Action::EditPeer | Action::RemovePeer | Action::ExportBundle | Action::Ping => {
+            if let Some(name) = peer_name {
+                (Some(format!("({name})")), true)
+            } else {
+                (Some("(no peer selected)".to_owned()), false)
+            }
+        }
+        Action::YankPublicLine | Action::YankAddress => {
+            if let Some(name) = peer_name {
+                (Some(format!("({name})")), true)
+            } else if has_device {
+                (Some("(device)".to_owned()), true)
+            } else {
+                (Some("(no target)".to_owned()), false)
+            }
+        }
+        Action::RuntimeForm => (None, has_device),
+        Action::ToggleService
+        | Action::InterfaceForm
+        | Action::EditConfig
+        | Action::SaveRuntime => (None, has_iface),
+        _ => (None, true),
+    }
 }
 
 fn draw_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -1594,21 +1772,42 @@ fn draw_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let popup = palette_rect(area);
     frame.render_widget(Clear, popup);
-    let block = modal_block("COMMANDS  ·  type to filter · enter runs · esc closes");
+    let block = modal_block("COMMAND PALETTE  ·  type to filter · enter/click runs · esc closes");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
+    let commands = super::keymap::matching_commands(&palette.input);
+    let count_label = format!("{}/{} ", commands.len(), super::keymap::COMMANDS.len());
     let input = Line::from(vec![
-        Span::styled(":", Style::default().fg(Color::Cyan)),
-        Span::raw(&palette.input),
+        Span::styled(
+            " : ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            &palette.input,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("▌", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!(
+                "{:>width$}",
+                count_label,
+                width = (inner.width as usize).saturating_sub(palette.input.chars().count() + 5)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(input),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
 
-    let commands = super::keymap::matching_commands(&palette.input);
     let max_rows = popup.height.saturating_sub(4) as usize;
     let offset = super::keymap::window_start(commands.len(), palette.selected, max_rows);
     if commands.is_empty() {
@@ -1624,28 +1823,46 @@ fn draw_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let index = offset + visible;
         let selected = index == palette.selected;
         let keys = app.keymap.keys_for(command.action).join(" ");
-        let style = if selected {
+        let (ctx_suffix, available) = palette_command_context(app, command.action);
+        let full_name = if let Some(suffix) = ctx_suffix {
+            format!("{} {}", command.name, suffix)
+        } else {
+            command.name.to_owned()
+        };
+        let base_style = if selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
+        } else if !available {
+            Style::default().fg(Color::DarkGray)
         } else {
-            Style::default()
+            Style::default().fg(Color::White)
         };
-        let name_width = inner.width.saturating_sub(keys.chars().count() as u16 + 3);
-        let name: String = command.name.chars().take(name_width as usize).collect();
+        let cat_style = if selected {
+            base_style
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let prefix = format!(
+            "{} {:<7} ",
+            if selected { "▸" } else { " " },
+            command.category
+        );
+        let prefix_len = prefix.chars().count() as u16;
+        let keys_len = keys.chars().count() as u16;
+        let name_width = inner.width.saturating_sub(prefix_len + keys_len + 2);
+        let name: String = full_name.chars().take(name_width as usize).collect();
         let pad = inner
             .width
-            .saturating_sub(name.chars().count() as u16 + keys.chars().count() as u16 + 2);
+            .saturating_sub(prefix_len + name.chars().count() as u16 + keys_len + 1);
         let row = Line::from(vec![
+            Span::styled(prefix, cat_style),
+            Span::styled(name, base_style),
+            Span::styled(" ".repeat(pad as usize), base_style),
             Span::styled(
-                format!("{} {}", if selected { "▸" } else { " " }, name),
-                style,
-            ),
-            Span::styled(" ".repeat(pad as usize), style),
-            Span::styled(
-                keys,
-                style.fg(if selected {
+                format!("{keys} "),
+                base_style.fg(if selected {
                     Color::Black
                 } else {
                     Color::DarkGray
