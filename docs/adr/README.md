@@ -15,3 +15,4 @@
 | [0011](0011-macos-out-of-scope.md) | macOS is out of scope for v0.1 | accepted | 2026-10-19 |
 | [0012](0012-code-based-kem-roadmap.md) | Defer a code-based KEM; prefer HQC or provisioned McEliece later | accepted | 2026-10-19 |
 | [0013](0013-server-provisioning.md) | Server provisioning is a CLI, not a control plane | accepted | 2026-10-20 |
+| [0014](0014-wireguard-gaps.md) | Close the WireGuard gaps Vallum can win | accepted | 2026-10-20 |
