@@ -320,6 +320,10 @@ else
         nft list table inet vallum 2>&1
         echo "== host: iptables -S (filter table)"
         iptables -S 2>&1 | head -40
+        echo "== host: nft ruleset (first 60 lines)"
+        nft list ruleset 2>&1 | head -60
+        echo "== host: iptables nat"
+        iptables -t nat -S 2>&1 | head -20
         echo "== host: ip route get 1.1.1.1"
         ip route get 1.1.1.1 2>&1
         echo "== host: ip rule"
