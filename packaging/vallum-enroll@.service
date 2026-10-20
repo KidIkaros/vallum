@@ -1,0 +1,22 @@
+[Unit]
+Description=Vallum enrolment responder for %i (token-gated peer enrolment)
+After=network.target vallum@%i.service
+
+[Service]
+Type=simple
+# Root, deliberately: enrolment writes /etc/vallum and applies it through the
+# control socket. Off unless `[enroll] enabled = true` — a stock install does
+# not run this at all.
+ExecStart=/usr/bin/vallum enroll-serve --config /etc/vallum/%i.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+# It must write /etc/vallum (peer records) and /run/vallum (invites); the rest
+# of the filesystem stays read-only.
+ProtectSystem=full
+ReadWritePaths=/etc/vallum /run/vallum
+
+[Install]
+WantedBy=multi-user.target

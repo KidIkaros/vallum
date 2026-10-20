@@ -57,8 +57,17 @@ pub struct SetupArgs {
 
     /// Enrol this machine against a server over SSH, which needs no bundle and
     /// never sends this machine's private key anywhere.
-    #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client"])]
+    #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client", "join", "token"])]
     pub remote: Option<String>,
+
+    /// Enrol with a single-use token, for machines that cannot SSH to the
+    /// server. The server's `vallum peer invite` prints the whole command.
+    #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["server", "client", "remote"], requires = "token")]
+    pub join: Option<String>,
+
+    /// The single-use token from `vallum peer invite`.
+    #[arg(long, value_name = "TOKEN", requires = "join")]
+    pub token: Option<String>,
 
     /// Print every step and change nothing.
     #[arg(long)]
@@ -81,6 +90,9 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
     }
     if let Some(remote) = &args.remote {
         return as_remote(remote, args);
+    }
+    if let Some(join) = &args.join {
+        return as_join(join, args);
     }
     if !std::io::stdin().is_terminal() {
         return guidance();
@@ -468,6 +480,18 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
         .and_then(|e| e.as_str())
         .unwrap_or("?");
 
+    place_config(&name, config_text, &secret, address, endpoint)
+}
+
+/// Write the enrolled config and its key, and either install the service
+/// (as root) or say how to run it.
+fn place_config(
+    name: &str,
+    config_text: &str,
+    secret: &crate::keys::SecretFile,
+    address: &str,
+    endpoint: &str,
+) -> Result<(), Error> {
     let root = nix::unistd::Uid::effective().is_root();
     let directory = if root {
         PathBuf::from("/etc/vallum")
@@ -481,7 +505,7 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     })?;
     let key_path = directory.join(format!("{name}.key"));
     let config_path = directory.join(format!("{name}.toml"));
-    crate::keys::save_secret(&key_path, &secret)?;
+    crate::keys::save_secret(&key_path, secret)?;
     std::fs::write(&config_path, config_text).map_err(|source| Error::IoPath {
         action: "write the config",
         path: config_path.clone(),
@@ -497,7 +521,7 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("   config     {}", config_path.display());
     say!("   key        {} (this machine only)", key_path.display());
     if root && config_path.starts_with("/etc/vallum") {
-        crate::commands::server::install_service(&name, false)?;
+        crate::commands::server::install_service(name, false)?;
         say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
     } else {
         say!(
@@ -506,6 +530,32 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+/// Enrol with a single-use token — transport B, for machines that cannot SSH.
+fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
+    let name = args
+        .name
+        .clone()
+        .or_else(hostname)
+        .unwrap_or_else(|| "client".to_owned());
+    let token = crate::enroll::Token::parse(args.token.as_deref().unwrap_or_default())?;
+    if args.dry_run {
+        say!("would generate a key here and ask {server} to enrol `{name}`");
+        say!("   the token proves the server invited this machine; no secrets travel");
+        return Ok(());
+    }
+
+    let seed = crate::entropy::seed();
+    let secret = crate::keys::new_secret(3, false, seed);
+    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
+    let identity = crate::keys::identity(&suite, &secret)?;
+    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
+    say!("generated a key here; the private half does not leave this machine");
+    say!("asking {server} to enrol `{name}`…");
+
+    let config_text = crate::enroll::join(server, &token, &name, &public_line)?;
+    place_config(&name, &config_text, &secret, &name, server)
 }
 
 /// Finish a machine that is already enrolled: install the service, or say how

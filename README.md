@@ -126,6 +126,24 @@ client generates its key locally and only its public line travels, so a server
 compromise is not a client compromise. The bundle remains for hosts with no SSH
 access, and is marked as what it is — the server generated that key.
 
+For machines that cannot SSH in either — a phone, a locked-down network — the
+server can mint a single-use invite instead:
+
+```sh
+# server: one command, one printed token, fifteen minutes to use it
+sudo vallum peer invite laptop
+#   → sudo vallum setup --join vpn.example.com:51821 --name laptop --token a1b2-…
+
+# client: exactly that one-liner; the key is generated locally again
+sudo vallum setup --join vpn.example.com:51821 --name laptop --token a1b2-…
+```
+
+The token transport needs `[enroll] enabled = true` in the server config and
+`sudo systemctl enable --now vallum-enroll@vallum0`. It rides one UDP port
+(`listen + 1`), is off by default, and the token proves the invite — so a bad
+token is dropped silently, while expiry, reuse and a second key get a sealed,
+honest refusal.
+
 `vallum setup` with no flags asks the question interactively; `--server` and
 `--client FILE` are the scriptable forms, and `--dry-run` prints the whole plan
 before anything is touched. Underneath, `vallum server init` is idempotent and

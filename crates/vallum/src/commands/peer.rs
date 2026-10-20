@@ -51,6 +51,8 @@ pub enum PeerCommand {
     Remove(RemoveArgs),
     /// Enrol a device that generated its own key, and hand back its config.
     Enroll(EnrollArgs),
+    /// Mint a single-use token so a device can enrol without SSH access.
+    Invite(InviteArgs),
     /// Install a new identity while the old one keeps working.
     Rotate(RotateArgs),
     /// Retire the previous identity a rotation kept.
@@ -285,6 +287,7 @@ pub fn peer(args: &PeerArgs) -> Result<(), Error> {
         PeerCommand::Show(args) => show(args),
         PeerCommand::Remove(args) => remove(args),
         PeerCommand::Enroll(args) => enroll(args),
+        PeerCommand::Invite(args) => invite(args),
         PeerCommand::Rotate(args) => rotate(args),
         PeerCommand::Finalize(args) => finalize(args),
     }
@@ -618,6 +621,110 @@ fn enroll(args: &EnrollArgs) -> Result<(), Error> {
     say!("the device's config:");
     for line in config_text.lines() {
         say!("   {line}");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+pub struct InviteArgs {
+    /// The name the device will enrol under.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// The configuration file this invite is for.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// How long the invite lives, in minutes.
+    #[arg(long, value_name = "MINUTES", default_value = "15")]
+    pub ttl: u64,
+
+    /// Emit JSON instead of a report.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Mint a single-use enrolment token for a machine that cannot SSH in.
+///
+/// The token is the only secret here, and it is small and short-lived on
+/// purpose: single use, fifteen minutes, stored hashed nowhere because the
+/// whole point is that it can be read aloud — typed into the client once.
+fn invite(args: &InviteArgs) -> Result<(), Error> {
+    require_config(&args.config)?;
+    let file = ConfigFile::load(&args.config)?;
+    let interface = vallum_config::Config::load(&args.config)
+        .ok()
+        .and_then(|config| config.interface.name)
+        .unwrap_or_else(|| "vallum0".to_owned());
+    if file.peers().into_iter().any(|peer| peer.name == args.name) {
+        return Err(Error::Usage(format!(
+            "`{}` is already a peer; `vallum peer remove {}` first, or choose another name",
+            args.name, args.name
+        )));
+    }
+    let (token, path) = crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60)?;
+    let endpoint = bundle_endpoint(None, &load_server(&args.config)?, &args.config)?.0;
+    let port = endpoint
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .map(|port| port + 1)
+        .unwrap_or(51821);
+    let host = endpoint
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or("?");
+
+    if args.json {
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": args.name,
+                "token": token.display(),
+                "expires_in_secs": args.ttl * 60,
+                "join": format!("{host}:{port}"),
+            }))
+            .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    let enroll_enabled = vallum_config::Config::load(&args.config)
+        .map(|config| config.enroll.enabled)
+        .unwrap_or(false);
+    say!(
+        "invite for `{}` — single use, expires in {} minutes",
+        args.name,
+        args.ttl
+    );
+    say!();
+    say!("   on the client:");
+    say!(
+        "      sudo vallum setup --join {host}:{port} --name {} --token {}",
+        args.name,
+        token.display()
+    );
+    say!();
+    say!(
+        "   the token lives in {} (0600) and is never logged;",
+        path.display()
+    );
+    say!("   it is the only secret in this exchange — the client's private key");
+    say!("   is generated on the client and never leaves it.");
+    say!();
+    if enroll_enabled {
+        say!("   [enroll] is enabled; if the responder is not running yet:");
+        say!(
+            "      sudo systemctl enable --now vallum-enroll@{}",
+            interface
+        );
+    } else {
+        say!(
+            "   this needs `[enroll] enabled = true` in {} and then",
+            args.config.display()
+        );
+        say!(
+            "   `sudo systemctl enable --now vallum-enroll@{}`.",
+            interface
+        );
     }
     Ok(())
 }
@@ -1257,6 +1364,14 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
     require_config(&args.config)?;
     let mut file = ConfigFile::load(&args.config)?;
     let removed = file.remove_peer(&args.name)?;
+    // A live invite for this name must not outlive the peer.
+    if let Ok(config) = vallum_config::Config::load(&args.config) {
+        let interface = config
+            .interface
+            .name
+            .unwrap_or_else(|| "vallum0".to_owned());
+        crate::enroll::revoke_invite(&interface, &args.name);
+    }
     file.validate()?;
     let backup = file.save()?;
     let applied = if args.no_apply {
@@ -1586,7 +1701,7 @@ fn fingerprint(public_line: &str) -> String {
     keys::hex_encode(&hash[..6])
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();

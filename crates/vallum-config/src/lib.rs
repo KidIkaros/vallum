@@ -29,6 +29,10 @@ pub struct Config {
     /// Options only `vallum-quick` uses. The daemon parses and ignores them.
     #[serde(default)]
     pub quick: Quick,
+
+    /// See [`Enroll`].
+    #[serde(default)]
+    pub enroll: Enroll,
 }
 
 /// The `[quick]` table: OS-level work done by `vallum-quick`, never the daemon.
@@ -61,6 +65,20 @@ pub struct Quick {
     /// See [`Quick::pre_up`].
     #[serde(default)]
     pub post_down: Vec<String>,
+}
+
+/// The `[enroll]` table: the optional token-gated enrolment responder.
+///
+/// Off by default — a stock install answers nothing on this port.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Enroll {
+    /// Whether `vallum enroll-serve` may answer requests for this interface.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The UDP port to answer on. Defaults to the interface's `listen + 1`.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 /// The `[interface]` table.

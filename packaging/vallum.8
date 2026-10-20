@@ -115,6 +115,19 @@ document is checked against its own key.
 .B identity show [--suite ID] --document FILE [--json]
 Print a document's label, key sizes, window and fingerprint without verifying it.
 .TP
+.B peer invite NAME [--config FILE] [--ttl MINUTES] [--json]
+Mint a single-use token so a device can enrol without SSH access. Prints the
+exact `vallum setup --join` line the client runs. Needs `[enroll] enabled =
+true` and `vallum-enroll@<iface>` running.
+.PP
+.B peer enroll NAME --public-key LINE|--public-key-file FILE [--address CIDR] [--json]
+Enrol a device that generated its own key; the primitive both transports call.
+Idempotent: the same line returns the same config; a different key is refused.
+.PP
+.B enroll-serve [--config FILE]
+Answer token-gated enrolment requests on `listen + 1`, running as the
+`vallum-enroll@.service` unit. Off unless `[enroll] enabled = true`.
+.PP
 .B import-bundle FILE [--output-dir DIR] [--force] [--install]
 Import a client `.vallum-bundle` as a config and a 0600 key file. `--install`
 writes to `/etc/vallum`, installs the units, and starts the tunnel.

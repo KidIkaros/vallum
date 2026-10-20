@@ -25,6 +25,7 @@ use crate::{control, entropy, hostnet, keys, Error};
 /// The two units a server needs: the daemon, and the host-networking one-shot.
 const DAEMON_UNIT: &str = include_str!("../../../../packaging/vallum@.service");
 const QUICK_UNIT: &str = include_str!("../../../../packaging/vallum-quick@.service");
+const ENROLL_UNIT: &str = include_str!("../../../../packaging/vallum-enroll@.service");
 
 #[derive(Debug, Args)]
 pub struct ServerArgs {
@@ -566,11 +567,21 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     }
     write_atomic(&daemon_unit, DAEMON_UNIT, 0o644)?;
     write_atomic(&quick_unit, QUICK_UNIT, 0o644)?;
+    let enroll_unit = unit_dir.join("vallum-enroll@.service");
+    write_atomic(&enroll_unit, ENROLL_UNIT, 0o644)?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", &format!("vallum@{instance}")])?;
     // The host-networking unit depends on the daemon; enabling it explicitly
     // makes `systemctl stop vallum@x` also undo the routes, via `PartOf=`.
     systemctl(&["enable", "--now", &format!("vallum-quick@{instance}")])?;
+    // The enrolment responder only runs where it was asked for.
+    let enroll_enabled =
+        vallum_config::Config::load(&PathBuf::from(format!("/etc/vallum/{instance}.toml")))
+            .map(|config| config.enroll.enabled)
+            .unwrap_or(false);
+    if enroll_enabled {
+        systemctl(&["enable", "--now", &format!("vallum-enroll@{instance}")])?;
+    }
     Ok("installed and started".to_owned())
 }
 

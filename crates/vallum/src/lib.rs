@@ -45,6 +45,7 @@ pub mod commands;
 pub mod config;
 pub mod config_edit;
 pub mod control;
+pub mod enroll;
 pub mod entropy;
 pub mod error;
 pub mod hostnet;

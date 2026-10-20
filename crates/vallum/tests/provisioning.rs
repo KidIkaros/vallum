@@ -376,3 +376,91 @@ fn enroll_hands_back_a_config_and_is_idempotent() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+#[allow(clippy::zombie_processes)] // the KillOnDrop guard reaps it
+fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
+    let dir = scratch("join");
+    let config = init(&dir);
+    // Enable the responder on a test-only port.
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    // A port of our own: a stale responder from a previous run would answer
+    // (or rather, refuse) on a shared one and look like a product failure.
+    let port = 55000 + (std::process::id() % 1000) as u16;
+    text.push_str(&format!("\n[enroll]\nenabled = true\nport = {port}\n"));
+    std::fs::write(&config, text).unwrap();
+    let rundir = dir.join("run");
+
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "invite", "phone", "--config"])
+        .arg(&config)
+        .arg("--json")
+        .env("VALLUM_RUN_DIR", &rundir));
+    assert!(ok, "{stderr}");
+    let invite: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let token = invite["token"].as_str().unwrap().to_owned();
+
+    let mut serve = bin()
+        .arg("enroll-serve")
+        .arg("--config")
+        .arg(&config)
+        .env("VALLUM_RUN_DIR", &rundir)
+        .env("VALLUM_BIN", env!("CARGO_BIN_EXE_vallum"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    let client = dir.join("client");
+    std::fs::create_dir_all(&client).unwrap();
+    let join = |token: &str| {
+        run(bin()
+            .args([
+                "setup",
+                "--join",
+                &format!("127.0.0.1:{port}"),
+                "--name",
+                "phone",
+                "--token",
+                token,
+            ])
+            .current_dir(&client))
+    };
+    let (ok, stdout, stderr) = join(&token);
+    assert!(ok, "stdout {stdout}\nstderr {stderr}");
+    let placed = client.join("phone.toml");
+    assert!(placed.exists(), "the client config was not written");
+    let parsed = vallum_config::Config::load(&placed).unwrap();
+    assert_eq!(
+        parsed.peers.len(),
+        1,
+        "the client config has its server peer"
+    );
+    // The key came from the client; the server's record must match it.
+    let server_config = vallum_config::Config::load(&config).unwrap();
+    assert_eq!(server_config.peers.len(), 1);
+    // The peer the server recorded is the key the client generated.
+    let (ok, client_line, stderr) = run(bin()
+        .args(["pubkey", "--private-key"])
+        .arg(client.join("phone.key")));
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        server_config.peers[0].public_key.as_deref(),
+        Some(client_line.trim()),
+        "the server recorded a different key than the client generated"
+    );
+
+    // The same token with a different key is refused, and says so.
+    let (ok, _, stderr) = join(&token);
+    assert!(!ok, "a second key enrolled under a spent token");
+    assert!(stderr.contains("different key"), "{stderr}");
+
+    // A wrong token gets silence, then a clear timeout.
+    let (ok, _, stderr) = join("aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111");
+    assert!(!ok);
+    assert!(stderr.contains("no answer"), "{stderr}");
+
+    let _ = serve.kill();
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -84,11 +84,20 @@ enum Command {
     Identity(IdentityArgs),
     /// Import a client `.vallum-bundle` file.
     ImportBundle(ImportArgs),
+    /// Answer token-gated enrolment requests (runs as its own service).
+    EnrollServe(EnrollServeArgs),
     /// Operate a tunnel in a terminal dashboard.
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct EnrollServeArgs {
+    /// The configuration file whose `[enroll]` section governs the responder.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    config: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +124,7 @@ fn main() -> ExitCode {
     };
     let outcome = match command {
         Command::Setup(args) => setup::setup(&args),
+        Command::EnrollServe(args) => vallum::enroll::serve(&args.config),
         Command::Run(args) => run::run(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keys::keygen(&args),
         Command::Pubkey(args) => keys::pubkey(&args, cli.allow_insecure_key_permissions),
