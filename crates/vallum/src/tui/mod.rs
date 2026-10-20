@@ -158,51 +158,53 @@ fn open_editor(
     Ok(())
 }
 
-fn color_to_ansi_fg(color: ratatui::style::Color) -> &'static str {
+fn color_to_ansi_fg(color: ratatui::style::Color) -> String {
     use ratatui::style::Color;
     match color {
-        Color::Reset => "\x1b[39m",
-        Color::Black => "\x1b[30m",
-        Color::Red => "\x1b[31m",
-        Color::Green => "\x1b[32m",
-        Color::Yellow => "\x1b[33m",
-        Color::Blue => "\x1b[34m",
-        Color::Magenta => "\x1b[35m",
-        Color::Cyan => "\x1b[36m",
-        Color::Gray => "\x1b[37m",
-        Color::DarkGray => "\x1b[90m",
-        Color::LightRed => "\x1b[91m",
-        Color::LightGreen => "\x1b[92m",
-        Color::LightYellow => "\x1b[93m",
-        Color::LightBlue => "\x1b[94m",
-        Color::LightMagenta => "\x1b[95m",
-        Color::LightCyan => "\x1b[96m",
-        Color::White => "\x1b[97m",
-        _ => "",
+        Color::Reset => "\x1b[39m".to_owned(),
+        Color::Black => "\x1b[30m".to_owned(),
+        Color::Red => "\x1b[31m".to_owned(),
+        Color::Green => "\x1b[32m".to_owned(),
+        Color::Yellow => "\x1b[33m".to_owned(),
+        Color::Blue => "\x1b[34m".to_owned(),
+        Color::Magenta => "\x1b[35m".to_owned(),
+        Color::Cyan => "\x1b[36m".to_owned(),
+        Color::Gray => "\x1b[37m".to_owned(),
+        Color::DarkGray => "\x1b[90m".to_owned(),
+        Color::LightRed => "\x1b[91m".to_owned(),
+        Color::LightGreen => "\x1b[92m".to_owned(),
+        Color::LightYellow => "\x1b[93m".to_owned(),
+        Color::LightBlue => "\x1b[94m".to_owned(),
+        Color::LightMagenta => "\x1b[95m".to_owned(),
+        Color::LightCyan => "\x1b[96m".to_owned(),
+        Color::White => "\x1b[97m".to_owned(),
+        Color::Rgb(r, g, b) => format!("\x1b[38;2;{r};{g};{b}m"),
+        _ => String::new(),
     }
 }
 
-fn color_to_ansi_bg(color: ratatui::style::Color) -> &'static str {
+fn color_to_ansi_bg(color: ratatui::style::Color) -> String {
     use ratatui::style::Color;
     match color {
-        Color::Reset => "\x1b[49m",
-        Color::Black => "\x1b[40m",
-        Color::Red => "\x1b[41m",
-        Color::Green => "\x1b[42m",
-        Color::Yellow => "\x1b[43m",
-        Color::Blue => "\x1b[44m",
-        Color::Magenta => "\x1b[45m",
-        Color::Cyan => "\x1b[46m",
-        Color::Gray => "\x1b[47m",
-        Color::DarkGray => "\x1b[100m",
-        Color::LightRed => "\x1b[101m",
-        Color::LightGreen => "\x1b[102m",
-        Color::LightYellow => "\x1b[103m",
-        Color::LightBlue => "\x1b[104m",
-        Color::LightMagenta => "\x1b[105m",
-        Color::LightCyan => "\x1b[106m",
-        Color::White => "\x1b[107m",
-        _ => "",
+        Color::Reset => "\x1b[49m".to_owned(),
+        Color::Black => "\x1b[40m".to_owned(),
+        Color::Red => "\x1b[41m".to_owned(),
+        Color::Green => "\x1b[42m".to_owned(),
+        Color::Yellow => "\x1b[43m".to_owned(),
+        Color::Blue => "\x1b[44m".to_owned(),
+        Color::Magenta => "\x1b[45m".to_owned(),
+        Color::Cyan => "\x1b[46m".to_owned(),
+        Color::Gray => "\x1b[47m".to_owned(),
+        Color::DarkGray => "\x1b[100m".to_owned(),
+        Color::LightRed => "\x1b[101m".to_owned(),
+        Color::LightGreen => "\x1b[102m".to_owned(),
+        Color::LightYellow => "\x1b[103m".to_owned(),
+        Color::LightBlue => "\x1b[104m".to_owned(),
+        Color::LightMagenta => "\x1b[105m".to_owned(),
+        Color::LightCyan => "\x1b[106m".to_owned(),
+        Color::White => "\x1b[107m".to_owned(),
+        Color::Rgb(r, g, b) => format!("\x1b[48;2;{r};{g};{b}m"),
+        _ => String::new(),
     }
 }
 
@@ -211,6 +213,24 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
     let (keymap, _warning) = keymap::KeyMap::load(args.keymap_file());
     app.keymap = keymap;
     actions::refresh(&mut app);
+
+    if let Some(iface) = app.interfaces.first_mut() {
+        if iface.device.is_some() && iface.service_state.is_none() {
+            iface.service_state = Some(app::ServiceState::Active);
+        }
+        if iface.rx_history.is_empty() && iface.device.is_some() {
+            iface.rx_rate = 1_420_800.0;
+            iface.tx_rate = 3_891_200.0;
+            iface.rx_history = vec![
+                420, 680, 910, 1250, 1100, 1480, 1920, 1640, 1380, 1750, 2100, 1890, 1520, 1680,
+                2240, 1980, 1760, 1420, 1650, 1890, 2310, 2050, 1780, 1940, 2180, 1840,
+            ];
+            iface.tx_history = vec![
+                980, 1420, 1850, 2400, 2150, 2890, 3420, 3100, 2780, 3250, 3910, 3540, 2980, 3320,
+                4120, 3780, 3450, 2910, 3380, 3720, 4280, 3950, 3610, 3840, 4090, 3891,
+            ];
+        }
+    }
 
     match args.snapshot_view.as_str() {
         "empty" => {
@@ -234,11 +254,19 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
         }
         "qr" => {
             app.qr = Some(qr::QrState {
-                frames: vec!["vallum-bundle:v1:0003:enc:client-key".to_owned()],
+                frames: vec![
+                    "VALLUM1:1/1:e8a12c4b:{\"v\":1,\"iface\":\"vallum0\",\"peer\":\"charlie-macbook\",\"ep\":\"198.51.100.10:51820\",\"vip\":\"10.7.0.3/32\",\"suite\":\"0x0003\"}".to_owned(),
+                ],
                 index: 0,
                 last: Instant::now(),
                 hash: "e8a12c4b".to_owned(),
-                path: "/etc/vallum/client.vallum-bundle".to_owned(),
+                path: "/etc/vallum/charlie-macbook.vallum-bundle".to_owned(),
+            });
+        }
+        "palette" => {
+            app.palette = Some(app::PaletteState {
+                input: String::new(),
+                selected: 3,
             });
         }
         "filter" => {

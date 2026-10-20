@@ -73,10 +73,17 @@ impl DeviceView {
                                 .unwrap_or(0),
                         )
                     });
+                let public_line = peer_field(field::VALLUM_PUBLIC_LINE);
+                let mut fingerprint = peer_field(field::VALLUM_FINGERPRINT);
+                if fingerprint.is_empty() {
+                    if let Some(extracted) = public_line.split(':').nth(2) {
+                        fingerprint = extracted.to_owned();
+                    }
+                }
                 PeerView {
                     name: peer_field(field::VALLUM_NAME),
-                    fingerprint: peer_field(field::VALLUM_FINGERPRINT),
-                    public_line: peer_field(field::VALLUM_PUBLIC_LINE),
+                    fingerprint,
+                    public_line,
                     endpoint: peer_field(field::ENDPOINT),
                     allowed_ips: peer
                         .iter()

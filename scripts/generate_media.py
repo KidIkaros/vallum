@@ -9,7 +9,6 @@ import os
 import re
 import socket
 import subprocess
-import sys
 import threading
 import time
 from PIL import Image, ImageDraw, ImageFont
@@ -20,7 +19,7 @@ FONT_REGULAR = "/usr/share/fonts/truetype/jetbrains-mono-zorin-os/JetBrainsMono-
 FONT_BOLD = "/usr/share/fonts/truetype/jetbrains-mono-zorin-os/JetBrainsMono-Bold.ttf"
 
 ANSI_COLOR_MAP = {
-    30: "#161b22",  # black
+    30: "#0d1117",  # black
     31: "#ff7b72",  # red
     32: "#3fb950",  # green
     33: "#d29922",  # yellow
@@ -35,23 +34,34 @@ ANSI_COLOR_MAP = {
     94: "#79c0ff",  # light blue
     95: "#d2a8ff",  # light magenta
     96: "#56d4dd",  # light cyan
-    97: "#f0f6fc",  # white
+    97: "#ffffff",  # pure white
 }
 
 ANSI_BG_MAP = {
-    40: "#161b22",
+    40: "#000000",  # pure black bg (used by QR code & badges)
     41: "#b62324",
-    42: "#238636",  # active green bg
-    43: "#9e6a03",  # yellow bg
+    42: "#2ea043",  # active green bg
+    43: "#d29922",  # yellow/amber bg
     44: "#1f6feb",
     45: "#8957e5",
-    46: "#1b7c83",
+    46: "#39c5cf",  # cyan pill bg
     47: "#6e7681",
     100: "#30363d",
+    107: "#ffffff",
 }
 
 DEFAULT_FG = "#c9d1d9"
 DEFAULT_BG = "#0d1117"
+
+SPARK_LEVELS = {
+    "▁": 1 / 8,
+    "▂": 2 / 8,
+    "▃": 3 / 8,
+    "▄": 4 / 8,
+    "▅": 5 / 8,
+    "▆": 6 / 8,
+    "▇": 7 / 8,
+}
 
 
 def run_mock_uapi_server(sock_path, stop_event):
@@ -76,10 +86,13 @@ public_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 vallum_public_line=vallum1:0003:4a8f9c2d1e0b5a37:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
 
 public_key=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+vallum_fingerprint=8b7e6d5c4b3a2918
 vallum_public_line=vallum1:0003:8b7e6d5c4b3a2918:/v7+/f79/Pn49/b19PPz8vHx7+7t7Ovp6Ofm5eTj4uE=
 vallum_name=gateway-us-east
 allowed_ip=10.7.0.2/32
 endpoint=198.51.100.10:51820
+persistent_keepalive_interval=25
+vallum_epoch=4
 rx_bytes=142857120
 tx_bytes=384910240
 last_handshake_time_sec={now - 14}
@@ -87,10 +100,13 @@ last_handshake_time_nsec=0
 preshared_key=true
 
 public_key=11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff
+vallum_fingerprint=3f4e5d6c7b8a9012
 vallum_public_line=vallum1:0003:3f4e5d6c7b8a9012:ESIzRFVmd4iZAKq7zN3u/xEiM0RVZneImQCqu8zd7v8=
 vallum_name=charlie-macbook
 allowed_ip=10.7.0.3/32
 endpoint=203.0.113.45:54321
+persistent_keepalive_interval=25
+vallum_epoch=2
 rx_bytes=52840100
 tx_bytes=18492000
 last_handshake_time_sec={now - 42}
@@ -98,10 +114,12 @@ last_handshake_time_nsec=0
 preshared_key=true
 
 public_key=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899
+vallum_fingerprint=1a2b3c4d5e6f7081
 vallum_public_line=vallum1:0003:1a2b3c4d5e6f7081:qrvM3e7/ESIzRFVmd4iZAKq7zN3u/xEiM0RVZneImQA=
 vallum_name=dev-bastion-01
 allowed_ip=10.7.0.10/32
 endpoint=192.0.2.77:51820
+vallum_epoch=1
 rx_bytes=8940020
 tx_bytes=14820100
 last_handshake_time_sec={now - 1420}
@@ -109,10 +127,13 @@ last_handshake_time_nsec=0
 preshared_key=false
 
 public_key=3344556677889900112233445566778899001122334455667788990011223344
+vallum_fingerprint=9e8d7c6b5a4f3021
 vallum_public_line=vallum1:0003:9e8d7c6b5a4f3021:M0RVZneImQCqu8zd7v8RIjNEVWZ3iJkAqrvM3e7/ESIz
 vallum_name=edge-node-frankfurt
 allowed_ip=10.7.0.25/32
 endpoint=[2a01:4f8::1]:51820
+persistent_keepalive_interval=25
+vallum_epoch=7
 rx_bytes=89410300
 tx_bytes=210150900
 last_handshake_time_sec={now - 3}
@@ -180,7 +201,9 @@ def parse_ansi_line(line):
             tokens.append((text, fg, bg, bold))
         codes_str = match.group(1)
         codes = [int(c) for c in codes_str.split(";") if c] if codes_str else [0]
-        for c in codes:
+        i = 0
+        while i < len(codes):
+            c = codes[i]
             if c == 0:
                 fg = DEFAULT_FG
                 bg = None
@@ -189,6 +212,14 @@ def parse_ansi_line(line):
                 bold = True
             elif c == 22:
                 bold = False
+            elif c == 38 and i + 4 < len(codes) and codes[i + 1] == 2:
+                r, g, b = codes[i + 2], codes[i + 3], codes[i + 4]
+                fg = f"#{r:02x}{g:02x}{b:02x}"
+                i += 4
+            elif c == 48 and i + 4 < len(codes) and codes[i + 1] == 2:
+                r, g, b = codes[i + 2], codes[i + 3], codes[i + 4]
+                bg = f"#{r:02x}{g:02x}{b:02x}"
+                i += 4
             elif c in ANSI_COLOR_MAP:
                 fg = ANSI_COLOR_MAP[c]
             elif c == 39:
@@ -197,8 +228,67 @@ def parse_ansi_line(line):
                 bg = ANSI_BG_MAP[c]
             elif c == 49:
                 bg = None
+            i += 1
         pos = match.end()
     return tokens
+
+
+def draw_cell_glyph_or_primitive(draw, ch, x_pos, y_pos, cw, lh, fg, bg, t_font):
+    x0 = int(round(x_pos))
+    x1 = int(round(x_pos + cw))
+    y0 = int(round(y_pos))
+    y1 = int(round(y_pos + lh))
+    ym = y0 + (y1 - y0) // 2
+    xm = x0 + (x1 - x0) // 2
+
+    if bg:
+        draw.rectangle([(x0, y0), (x1, y1)], fill=bg)
+
+    # Pixel-exact block characters (used by QR code, progress bars, cursor, sparklines)
+    if ch == "█":
+        draw.rectangle([(x0, y0), (x1, y1)], fill=fg)
+        return
+    if ch == "▀":
+        draw.rectangle([(x0, y0), (x1, ym)], fill=fg)
+        return
+    if ch == "▄":
+        draw.rectangle([(x0, ym), (x1, y1)], fill=fg)
+        return
+    if ch == "▌":
+        draw.rectangle([(x0, y0), (xm, y1)], fill=fg)
+        return
+    if ch in SPARK_LEVELS:
+        ratio = SPARK_LEVELS[ch]
+        bar_h = max(2, int(round((y1 - y0) * ratio)))
+        draw.rectangle([(x0, y1 - bar_h), (max(x0 + 1, x1 - 1), y1)], fill=fg)
+        return
+
+    # Seamless box-drawing primitives so borders connect without gaps
+    if ch == "─":
+        draw.line([(x0, ym), (x1, ym)], fill=fg, width=1)
+        return
+    if ch == "│":
+        draw.line([(xm, y0), (xm, y1)], fill=fg, width=1)
+        return
+    if ch == "╭":
+        draw.line([(xm, ym), (x1, ym)], fill=fg, width=1)
+        draw.line([(xm, ym), (xm, y1)], fill=fg, width=1)
+        return
+    if ch == "╮":
+        draw.line([(x0, ym), (xm, ym)], fill=fg, width=1)
+        draw.line([(xm, ym), (xm, y1)], fill=fg, width=1)
+        return
+    if ch == "╰":
+        draw.line([(xm, y0), (xm, ym)], fill=fg, width=1)
+        draw.line([(xm, ym), (x1, ym)], fill=fg, width=1)
+        return
+    if ch == "╯":
+        draw.line([(xm, y0), (xm, ym)], fill=fg, width=1)
+        draw.line([(x0, ym), (xm, ym)], fill=fg, width=1)
+        return
+
+    if ch != " ":
+        draw.text((x0, y0 + 1), ch, font=t_font, fill=fg)
 
 
 def render_to_image(ansi_text, title="vallum tui — vallum0 (post-quantum tri-hybrid)"):
@@ -206,7 +296,7 @@ def render_to_image(ansi_text, title="vallum tui — vallum0 (post-quantum tri-h
     num_lines = len(lines)
     max_cols = max((len(re.sub(r"\x1b\[[0-9;]*m", "", line)) for line in lines), default=120)
 
-    char_w = 9.0
+    char_w = 10
     line_h = 20
     pad_x = 24
     pad_top = 46
@@ -230,7 +320,6 @@ def render_to_image(ansi_text, title="vallum tui — vallum0 (post-quantum tri-h
 
     # Title
     font_bold = ImageFont.truetype(FONT_BOLD, 14)
-    font_reg = ImageFont.truetype(FONT_REGULAR, 14)
 
     title_bbox = font_bold.getbbox(title)
     title_w = title_bbox[2] - title_bbox[0]
@@ -246,16 +335,11 @@ def render_to_image(ansi_text, title="vallum tui — vallum0 (post-quantum tri-h
         x_pos = pad_x
         for text, fg, bg, bold in tokens:
             t_font = font_content_bold if bold else font_content_reg
-            # Render character by character to maintain strict grid alignment
             for ch in text:
-                cw = char_w
-                if bg:
-                    draw.rectangle(
-                        [(x_pos, y_pos), (x_pos + cw, y_pos + line_h)],
-                        fill=bg,
-                    )
-                draw.text((x_pos, y_pos + 1), ch, font=t_font, fill=fg)
-                x_pos += cw
+                draw_cell_glyph_or_primitive(
+                    draw, ch, x_pos, y_pos, char_w, line_h, fg, bg, t_font
+                )
+                x_pos += char_w
         y_pos += line_h
 
     # Window outer border
@@ -269,7 +353,7 @@ def render_to_svg(ansi_text, title="vallum tui — vallum0 (post-quantum tri-hyb
     num_lines = len(lines)
     max_cols = max((len(re.sub(r"\x1b\[[0-9;]*m", "", line)) for line in lines), default=120)
 
-    char_w = 9.0
+    char_w = 10
     line_h = 20
     pad_x = 24
     pad_top = 46
@@ -301,14 +385,64 @@ def render_to_svg(ansi_text, title="vallum tui — vallum0 (post-quantum tri-hyb
             weight = "bold" if bold else "normal"
             for ch in text:
                 cw = char_w
-                escaped_ch = (
-                    ch.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-                )
+                ym = y_pos + line_h // 2
+                xm = x_pos + cw // 2
                 if bg:
                     svg_parts.append(
                         f'<rect x="{x_pos}" y="{y_pos}" width="{cw}" height="{line_h}" fill="{bg}"/>'
                     )
-                if escaped_ch.strip():
+                if ch == "█":
+                    svg_parts.append(
+                        f'<rect x="{x_pos}" y="{y_pos}" width="{cw}" height="{line_h}" fill="{fg}"/>'
+                    )
+                elif ch == "▀":
+                    svg_parts.append(
+                        f'<rect x="{x_pos}" y="{y_pos}" width="{cw}" height="{line_h // 2}" fill="{fg}"/>'
+                    )
+                elif ch == "▄":
+                    svg_parts.append(
+                        f'<rect x="{x_pos}" y="{ym}" width="{cw}" height="{line_h // 2}" fill="{fg}"/>'
+                    )
+                elif ch == "▌":
+                    svg_parts.append(
+                        f'<rect x="{x_pos}" y="{y_pos}" width="{cw // 2}" height="{line_h}" fill="{fg}"/>'
+                    )
+                elif ch in SPARK_LEVELS:
+                    bar_h = max(2, int(round(line_h * SPARK_LEVELS[ch])))
+                    svg_parts.append(
+                        f'<rect x="{x_pos}" y="{y_pos + line_h - bar_h}" width="{cw - 1}" height="{bar_h}" fill="{fg}"/>'
+                    )
+                elif ch == "─":
+                    svg_parts.append(
+                        f'<line x1="{x_pos}" y1="{ym}" x2="{x_pos + cw}" y2="{ym}" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch == "│":
+                    svg_parts.append(
+                        f'<line x1="{xm}" y1="{y_pos}" x2="{xm}" y2="{y_pos + line_h}" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch == "╭":
+                    svg_parts.append(
+                        f'<path d="M{xm},{y_pos + line_h} L{xm},{ym} L{x_pos + cw},{ym}" fill="none" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch == "╮":
+                    svg_parts.append(
+                        f'<path d="M{x_pos},{ym} L{xm},{ym} L{xm},{y_pos + line_h}" fill="none" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch == "╰":
+                    svg_parts.append(
+                        f'<path d="M{xm},{y_pos} L{xm},{ym} L{x_pos + cw},{ym}" fill="none" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch == "╯":
+                    svg_parts.append(
+                        f'<path d="M{x_pos},{ym} L{xm},{ym} L{xm},{y_pos}" fill="none" stroke="{fg}" stroke-width="1"/>'
+                    )
+                elif ch.strip():
+                    escaped_ch = (
+                        ch.replace("&", "&amp;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .replace('"', "&quot;")
+                    )
                     svg_parts.append(
                         f'<text x="{x_pos}" y="{y_pos + 15}" fill="{fg}" font-weight="{weight}" class="base">{escaped_ch}</text>'
                     )
@@ -409,7 +543,7 @@ def main():
     subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     print("Media asset generation complete:")
-    for f in os.listdir(ASSETS_DIR):
+    for f in sorted(os.listdir(ASSETS_DIR)):
         fpath = os.path.join(ASSETS_DIR, f)
         size_kb = os.path.getsize(fpath) / 1024
         print(f"  {f:25s} ({size_kb:.1f} KB)")

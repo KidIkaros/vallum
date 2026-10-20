@@ -41,7 +41,7 @@ fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
         draw_peers(frame, body[0], app);
         draw_details(frame, body[1], app);
     } else {
-        let body = Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)])
+        let body = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(chunks[1]);
         draw_peers(frame, body[0], app);
         draw_details(frame, body[1], app);
@@ -162,31 +162,43 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     lines.push(control_health_line(interface));
     match &interface.device {
         Some(device) => {
+            let suite_display = suite_label(&device.suite);
             if compact {
-                lines.push(Line::from(format!(
-                    "listen {}  suite {}  fwmark {}",
-                    device.listen, device.suite, device.fwmark
-                )));
-                lines.push(Line::from(format!(
-                    "id {}  addresses {}",
-                    device.fingerprint,
-                    device.addresses.join(", ")
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled("listen ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(device.listen.clone(), Style::default().fg(Color::White)),
+                    Span::styled("  suite ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(suite_display, Style::default().fg(Color::Cyan)),
+                    Span::styled("  fwmark ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(device.fwmark.to_string(), Style::default().fg(Color::Gray)),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::styled("id ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(device.fingerprint.clone(), Style::default().fg(Color::Gray)),
+                    Span::styled("  addresses ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        device.addresses.join(", "),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
             } else {
                 lines.push(Line::from(vec![
                     Span::styled("listen ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(device.listen.clone()),
-                    Span::raw("  suite "),
-                    Span::raw(device.suite.clone()),
-                    Span::raw("  fwmark "),
-                    Span::raw(device.fwmark.to_string()),
-                    Span::raw("  "),
-                    Span::raw(device.fingerprint.clone()),
+                    Span::styled(device.listen.clone(), Style::default().fg(Color::White)),
+                    Span::styled("  suite ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(suite_display, Style::default().fg(Color::Cyan)),
+                    Span::styled("  fwmark ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(device.fwmark.to_string(), Style::default().fg(Color::Gray)),
+                    Span::styled("  id ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(device.fingerprint.clone(), Style::default().fg(Color::Gray)),
                 ]));
-                lines.push(Line::from(format!(
-                    "addresses {}",
-                    device.addresses.join(", ")
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled("addresses ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        device.addresses.join(", "),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
             }
         }
         None => lines.push(Line::from(Span::styled(
@@ -217,42 +229,90 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         ])
         .split(inner);
 
+        let (total_rx, total_tx) = interface.device.as_ref().map_or((0u64, 0u64), |dev| {
+            (
+                dev.peers.iter().map(|p| p.rx_bytes).sum(),
+                dev.peers.iter().map(|p| p.tx_bytes).sum(),
+            )
+        });
+        let baseline = "▁".repeat(inner.width as usize);
+
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    "RX ",
+                    "▼ RX ",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(rate_label(interface.rx_rate)),
+                Span::styled(
+                    format!("{:<10}", rate_label(interface.rx_rate)),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("Σ {}", bytes(total_rx)),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])),
             rows[0],
         );
-        frame.render_widget(
-            Sparkline::default()
-                .data(&interface.rx_history)
-                .style(Style::default().fg(Color::Cyan)),
-            rows[1],
-        );
+        if interface.rx_history.iter().any(|&v| v > 0) {
+            frame.render_widget(
+                Sparkline::default()
+                    .data(&interface.rx_history)
+                    .style(Style::default().fg(Color::Cyan)),
+                rows[1],
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    baseline.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                rows[1],
+            );
+        }
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    "TX ",
+                    "▲ TX ",
                     Style::default()
                         .fg(Color::Magenta)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(rate_label(interface.tx_rate)),
+                Span::styled(
+                    format!("{:<10}", rate_label(interface.tx_rate)),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("Σ {}", bytes(total_tx)),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ])),
             rows[2],
         );
-        frame.render_widget(
-            Sparkline::default()
-                .data(&interface.tx_history)
-                .style(Style::default().fg(Color::Magenta)),
-            rows[3],
-        );
+        if interface.tx_history.iter().any(|&v| v > 0) {
+            frame.render_widget(
+                Sparkline::default()
+                    .data(&interface.tx_history)
+                    .style(Style::default().fg(Color::Magenta)),
+                rows[3],
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(baseline, Style::default().fg(Color::DarkGray))),
+                rows[3],
+            );
+        }
+    }
+}
+
+fn suite_label(suite: &str) -> String {
+    match suite.trim() {
+        "0x0003" => "0x0003 (tri-hybrid)".to_owned(),
+        "0x0002" => "0x0002 (ml-kem-768)".to_owned(),
+        "0x0001" => "0x0001 (sntrup761)".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -519,7 +579,12 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .iter()
             .map(|(_, peer)| {
                 let freshness = App::handshake_freshness(peer);
-                let handshake = Cell::from(freshness.label()).style(
+                let hs_label = if expanded || freshness == HandshakeFreshness::Never {
+                    freshness.label().to_owned()
+                } else {
+                    format!("{} {}", freshness.label(), App::handshake_age(peer))
+                };
+                let handshake = Cell::from(hs_label).style(
                     Style::default()
                         .fg(freshness_color(freshness))
                         .add_modifier(Modifier::BOLD),
@@ -557,10 +622,10 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ]
     } else {
         vec![
-            Constraint::Length(16),
+            Constraint::Length(20),
             Constraint::Min(10),
-            Constraint::Length(10),
-            Constraint::Length(15),
+            Constraint::Length(12),
+            Constraint::Length(14),
         ]
     };
     let sort_suffix = if app.sort_mode != super::app::SortMode::Natural {
@@ -602,6 +667,16 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
+fn detail_kv(label: &'static str, value: impl Into<String>, value_style: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:<11} "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(value.into(), value_style),
+    ])
+}
+
 fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if area.height < 11 {
         draw_compact_details(frame, area, app);
@@ -609,25 +684,46 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     let mut lines = Vec::new();
     if let Some(peer) = app.current_peer() {
-        lines.push(Line::from(Span::styled(
-            peer.name.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!("fingerprint {}", peer.fingerprint)));
-        lines.push(Line::from(format!("endpoint   {}", peer.endpoint)));
-        lines.push(Line::from(format!(
-            "allowed    {}",
-            peer.allowed_ips.join(", ")
-        )));
-        lines.push(Line::from(format!(
-            "keepalive  {}",
-            peer.keepalive
-                .map_or_else(|| "off".to_owned(), |value| format!("{value}s"))
-        )));
         let freshness = App::handshake_freshness(peer);
         lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(freshness_color(freshness))),
             Span::styled(
-                format!("handshake  {}", freshness.label()),
+                peer.name.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        let fp = if peer.fingerprint.is_empty() {
+            "—".to_owned()
+        } else {
+            peer.fingerprint.clone()
+        };
+        lines.push(detail_kv(
+            "fingerprint",
+            fp,
+            Style::default().fg(Color::Gray),
+        ));
+        lines.push(detail_kv(
+            "endpoint",
+            peer.endpoint.clone(),
+            Style::default().fg(Color::White),
+        ));
+        lines.push(detail_kv(
+            "allowed",
+            peer.allowed_ips.join(", "),
+            Style::default().fg(Color::White),
+        ));
+        lines.push(detail_kv(
+            "keepalive",
+            peer.keepalive
+                .map_or_else(|| "off".to_owned(), |value| format!("{value}s")),
+            Style::default().fg(Color::Gray),
+        ));
+        lines.push(Line::from(vec![
+            Span::styled("handshake   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                freshness.label(),
                 Style::default()
                     .fg(freshness_color(freshness))
                     .add_modifier(Modifier::BOLD),
@@ -635,29 +731,44 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             if freshness == HandshakeFreshness::Never {
                 Span::raw("")
             } else {
-                Span::raw(format!(" · {}", App::handshake_age(peer)))
+                Span::styled(
+                    format!(" · {}", App::handshake_age(peer)),
+                    Style::default().fg(Color::Gray),
+                )
             },
         ]));
-        lines.push(Line::from(format!(
-            "transfer   rx {} / tx {}",
-            bytes(peer.rx_bytes),
-            bytes(peer.tx_bytes)
-        )));
-        lines.push(Line::from(format!("epoch      {}", peer.epoch)));
-        lines.push(Line::from(format!(
-            "PSK        {}",
+        lines.push(detail_kv(
+            "transfer",
+            format!("rx {} / tx {}", bytes(peer.rx_bytes), bytes(peer.tx_bytes)),
+            Style::default().fg(Color::White),
+        ));
+        lines.push(detail_kv(
+            "epoch",
+            peer.epoch.to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+        lines.push(detail_kv(
+            "PSK",
             if peer.preshared_key {
                 "configured (masked)"
             } else {
                 "none"
-            }
-        )));
+            },
+            if peer.preshared_key {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "public line",
+            "── public line ────────────────────────",
             Style::default().fg(Color::DarkGray),
         )));
-        lines.push(Line::from(peer.public_line.clone()));
+        lines.push(Line::from(Span::styled(
+            peer.public_line.clone(),
+            Style::default().fg(Color::Gray),
+        )));
     } else if !app.peer_filter.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("No peers match filter \"{}\"", app.peer_filter),
@@ -671,17 +782,33 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some(interface) = app.current() {
         if let Some(device) = &interface.device {
             lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "rates      rx {} / tx {}",
-                rate_label(interface.rx_rate),
-                rate_label(interface.tx_rate)
+            lines.push(Line::from(Span::styled(
+                "── interface dataplane ────────────────",
+                Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(format!(
-                "dataplane  offload {} · UDP batching {}",
-                on_off(device.offload),
-                on_off(device.batching)
-            )));
-            lines.push(Line::from(format!("device     {}", device.interface)));
+            lines.push(detail_kv(
+                "rates",
+                format!(
+                    "rx {} / tx {}",
+                    rate_label(interface.rx_rate),
+                    rate_label(interface.tx_rate)
+                ),
+                Style::default().fg(Color::Gray),
+            ));
+            lines.push(detail_kv(
+                "dataplane",
+                format!(
+                    "offload {} · UDP batching {}",
+                    on_off(device.offload),
+                    on_off(device.batching)
+                ),
+                Style::default().fg(Color::Gray),
+            ));
+            lines.push(detail_kv(
+                "device",
+                device.interface.clone(),
+                Style::default().fg(Color::White),
+            ));
         }
     }
     frame.render_widget(
@@ -770,14 +897,19 @@ fn key_capsule<'a>(key: &'a str, label: &'a str) -> Vec<Span<'a>> {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if app.qr.is_some() || app.form.is_some() || app.confirm.is_some() || app.palette.is_some() {
+        return;
+    }
     if app.filtering {
         let filter_line = Line::from(vec![
             Span::styled(
-                "FILTER: ",
+                " FILTER ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw(" "),
             Span::styled(
                 &app.peer_filter,
                 Style::default()
@@ -787,7 +919,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled("█", Style::default().fg(Color::Cyan)),
             Span::raw("  "),
             Span::styled(
-                "(Enter: apply, Esc: cancel, Ctrl-U: clear)",
+                "(Enter: apply · Esc: cancel · Ctrl-U: clear)",
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
@@ -795,23 +927,41 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let mut nav_spans = Vec::new();
+    let mut nav_spans = vec![
+        Span::styled(
+            " : commands ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+    ];
     nav_spans.extend(key_capsule("Tab", "iface"));
     nav_spans.extend(key_capsule("↑/↓", "peer"));
-    if area.width >= 100 {
-        nav_spans.extend(key_capsule("Home/End", ""));
-    }
     nav_spans.extend(key_capsule("/", "filter"));
     nav_spans.extend(key_capsule("o", "sort"));
-    nav_spans.extend(key_capsule(":", "cmds"));
+    nav_spans.push(Span::styled("│  ", Style::default().fg(Color::DarkGray)));
     nav_spans.extend(key_capsule("?", "help"));
     nav_spans.extend(key_capsule("q", "quit"));
 
     let second_line = if let Some(toast) = &app.toast {
-        Line::from(Span::styled(
-            &toast.message,
-            Style::default().fg(Color::Yellow),
-        ))
+        Line::from(vec![
+            Span::styled(
+                " ▸ ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                &toast.message,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
     } else {
         let mut act_spans = Vec::new();
         act_spans.extend(key_capsule("Space", "toggle"));
@@ -824,14 +974,14 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             act_spans.extend(key_capsule("y", "copy"));
         } else {
             act_spans.extend(key_capsule("d", "remove"));
-            act_spans.extend(key_capsule("i", "import"));
             act_spans.extend(key_capsule("b", "bundle"));
-            act_spans.extend(key_capsule("y", "copy"));
+            act_spans.extend(key_capsule("i", "import"));
             act_spans.extend(key_capsule("p", "ping"));
-            act_spans.extend(key_capsule("W", "save"));
-            act_spans.extend(key_capsule("c", "runtime"));
+            act_spans.extend(key_capsule("y", "copy"));
+            act_spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
             act_spans.extend(key_capsule("C", "config"));
             act_spans.extend(key_capsule("E", "edit"));
+            act_spans.extend(key_capsule("W", "save"));
             act_spans.extend(key_capsule("l", "logs"));
             act_spans.extend(key_capsule("r", "refresh"));
         }
@@ -947,6 +1097,34 @@ fn log_line_style(line: &str) -> Style {
     }
 }
 
+fn format_log_line(line: &str) -> Line<'_> {
+    if let Some(rest) = line.strip_prefix('[') {
+        if let Some((ts, after_ts)) = rest.split_once("] ") {
+            if let Some(level_rest) = after_ts.strip_prefix('[') {
+                if let Some((level, msg)) = level_rest.split_once("] ") {
+                    let level_style = match level {
+                        "WARN" | "WARNING" => Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                        "ERR" | "ERROR" => {
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        }
+                        _ => Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    };
+                    return Line::from(vec![
+                        Span::styled(format!("[{ts}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("[{level}] "), level_style),
+                        Span::styled(msg, log_line_style(line)),
+                    ]);
+                }
+            }
+        }
+    }
+    Line::from(Span::styled(line, log_line_style(line)))
+}
+
 fn draw_logs(frame: &mut Frame<'_>, app: &App) {
     let lines: Vec<Line<'_>> = if app.logs.is_empty() {
         vec![Line::from(
@@ -955,7 +1133,7 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
     } else {
         app.logs
             .iter()
-            .map(|line| Line::from(Span::styled(line.as_str(), log_line_style(line))))
+            .map(|line| format_log_line(line.as_str()))
             .collect()
     };
     let visible = usize::from(frame.area().height.saturating_sub(2));
@@ -981,48 +1159,193 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
-    let popup = centered(area, 96, 96);
+    let popup = centered(area, 92, 92);
     frame.render_widget(Clear, popup);
-    let mut lines = vec![Line::from(Span::styled(
-        format!(
-            "Bundle QR  frame {}/{}  hash {}  (secret: contains the private key)",
-            qr.index + 1,
-            qr.frames.len(),
-            qr.hash
-        ),
-        Style::default().fg(Color::Yellow),
-    ))];
-    if area.width < 75 || area.height < 30 {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Terminal window is too small to render QR code cleanly.",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!(
-            "Current size: {}x{} — resize to at least 80x32 for reliable camera scan.",
-            area.width, area.height
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(format!("Bundle file was saved to: {}", qr.path)));
-        lines.push(Line::from(
-            "You can import it directly on the client using:",
-        ));
-        lines.push(Line::from(Span::styled(
-            format!("  vallum import-bundle {}", qr.path),
-            Style::default().fg(Color::Cyan),
-        )));
-    } else {
-        match super::qr::render(qr.current()) {
-            Ok(rendered) => lines.extend(rendered.into_iter().map(Line::from)),
-            Err(error) => lines.push(Line::from(error)),
+    let block = modal_block("CLIENT BUNDLE QR  ·  optical provisioning");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rendered = match super::qr::render(qr.current()) {
+        Ok(lines) => lines,
+        Err(error) => {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    error,
+                    Style::default().fg(Color::Red),
+                ))),
+                inner,
+            );
+            return;
         }
+    };
+
+    let qr_rows = rendered.len() as u16;
+    let qr_cols = rendered
+        .first()
+        .map_or(0, |line| line.chars().count() as u16);
+
+    if inner.height < qr_rows || inner.width < qr_cols + 2 {
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "Terminal window is too small to render QR code cleanly.",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(
+                "Current size: {}x{} — resize to at least {}x{} for reliable camera scan.",
+                area.width,
+                area.height,
+                qr_cols + 8,
+                qr_rows + 4
+            )),
+            Line::from(""),
+            Line::from(format!("Bundle file was saved to: {}", qr.path)),
+            Line::from("You can import it directly on the client using:"),
+            Line::from(Span::styled(
+                format!("  vallum import-bundle {}", qr.path),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(""),
+            Line::from("n/p frame  Esc close"),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+        return;
     }
-    lines.push(Line::from(format!("saved: {}", qr.path)));
-    lines.push(Line::from("n/p frame  Esc close"));
-    frame.render_widget(
-        Paragraph::new(lines).block(modal_block("CLIENT BUNDLE QR")),
-        popup,
+
+    let qr_style = Style::default().fg(Color::White).bg(Color::Black);
+    let total_frames = qr.frames.len().max(1);
+    let current_frame = qr.index + 1;
+    let bar_width = 16usize;
+    let filled = (current_frame * bar_width) / total_frames;
+    let progress_bar = format!(
+        "[{}{}]",
+        "█".repeat(filled),
+        "░".repeat(bar_width.saturating_sub(filled))
     );
+
+    if inner.width >= qr_cols + 36 {
+        let cols =
+            Layout::horizontal([Constraint::Length(qr_cols + 4), Constraint::Min(32)]).split(inner);
+
+        let pad_top = cols[0].height.saturating_sub(qr_rows) / 2;
+        let pad_left = cols[0].width.saturating_sub(qr_cols) / 2;
+        let qr_rect = Rect::new(cols[0].x + pad_left, cols[0].y + pad_top, qr_cols, qr_rows);
+        let qr_lines: Vec<Line<'_>> = rendered
+            .into_iter()
+            .map(|row| Line::from(Span::styled(row, qr_style)))
+            .collect();
+        frame.render_widget(Paragraph::new(qr_lines), qr_rect);
+
+        let info_lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                " ● OPTICAL CLIENT PROVISIONING ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    " ⚠ SECRET MATERIAL ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " contains peer private key",
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "── Frame Telemetry ─────────────────────",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(vec![
+                Span::styled("frame       ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{current_frame}/{total_frames} "),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(progress_bar, Style::default().fg(Color::Cyan)),
+            ]),
+            detail_kv("hash", qr.hash.clone(), Style::default().fg(Color::Cyan)),
+            detail_kv(
+                "encoding",
+                "VALLUM1 · ISO/IEC 18004 (EC-L, 2px quiet zone)",
+                Style::default().fg(Color::Gray),
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "── Offline File Fallback ───────────────",
+                Style::default().fg(Color::DarkGray),
+            )),
+            detail_kv("saved", qr.path.clone(), Style::default().fg(Color::White)),
+            Line::from(vec![
+                Span::styled("import      ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("vallum import-bundle {}", qr.path),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "── Controls ────────────────────────────",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    "n / →",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" next frame   ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    "p / ←",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" prev frame", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Esc / q",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " close modal & clear secret from display",
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
+        ];
+        frame.render_widget(
+            Paragraph::new(info_lines).wrap(Wrap { trim: false }),
+            cols[1],
+        );
+    } else {
+        let mut lines = vec![Line::from(Span::styled(
+            format!(
+                "Bundle QR  frame {current_frame}/{total_frames}  hash {}  (secret: contains the private key)",
+                qr.hash
+            ),
+            Style::default().fg(Color::Yellow),
+        ))];
+        for row in rendered {
+            lines.push(Line::from(Span::styled(row, qr_style)));
+        }
+        lines.push(Line::from(format!("saved: {}", qr.path)));
+        lines.push(Line::from("n/p frame  Esc close"));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 fn field_help_hint(label: &str) -> &'static str {

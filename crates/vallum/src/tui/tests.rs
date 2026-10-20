@@ -1271,3 +1271,61 @@ fn poll_ping_reports_results_and_survives_worker_loss() {
         .as_ref()
         .is_some_and(|t| t.message.contains("ping worker exited")));
 }
+
+#[test]
+fn qr_render_packs_half_blocks_with_a_quiet_zone_and_fits_in_modal() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let lines =
+        qr::render("VALLUM1:1/1:e8a12c4b:{\"v\":1,\"iface\":\"vallum0\"}").expect("render qr");
+    let cols = lines[0].chars().count();
+    // 2 vertical modules per row -> rows == cols.div_ceil(2)
+    assert_eq!(lines.len(), cols.div_ceil(2));
+    // Top and bottom rows are inside the 2-module quiet zone -> solid '█' plate
+    assert!(lines.first().unwrap().chars().all(|c| c == '█'));
+    assert!(lines.last().unwrap().chars().all(|c| c == '█'));
+    for line in &lines {
+        assert!(line.starts_with("██"));
+        assert!(line.ends_with("██"));
+    }
+
+    let mut app = App::new(Vec::new());
+    app.qr = Some(qr::QrState {
+        frames: vec!["VALLUM1:1/1:e8a12c4b:{\"v\":1,\"iface\":\"vallum0\"}".to_owned()],
+        index: 0,
+        last: std::time::Instant::now(),
+        hash: "e8a12c4b".to_owned(),
+        path: "/etc/vallum/client.vallum-bundle".to_owned(),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw qr modal");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("OPTICAL CLIENT PROVISIONING"));
+    assert!(text.contains("SECRET MATERIAL"));
+    assert!(text.contains("e8a12c4b"));
+    assert!(text.contains("vallum import-bundle /etc/vallum/client.vallum-bundle"));
+}
+
+#[test]
+fn peer_fingerprint_falls_back_to_public_line_when_omitted_by_uapi() {
+    let response = Response {
+        device: vec![("vallum_interface".to_owned(), "vallum0".to_owned())],
+        peers: vec![vec![
+            ("vallum_name".to_owned(), "gateway-us-east".to_owned()),
+            (
+                "vallum_public_line".to_owned(),
+                "vallum1:0003:8b7e6d5c4b3a2918:AQIDBA==".to_owned(),
+            ),
+        ]],
+    };
+    let device = DeviceView::from_response(&response);
+    assert_eq!(device.peers[0].fingerprint, "8b7e6d5c4b3a2918");
+}
