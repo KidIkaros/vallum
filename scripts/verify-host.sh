@@ -184,11 +184,49 @@ ping -c1 -W3 "$CLI_IP" >/dev/null 2>&1 && ok "tunnel survives rotation" || warn 
 ok "rotated and finalized"
 
 # ── DNS through the tunnel, through real NAT ─────────────────────────────────
-say "DNS over the tunnel (needs the server's NAT + your outbound internet)"
+# Three layers, so a failure says where: egress, DNS across the tunnel with
+# resolved out of the picture, then the resolver integration itself.
+say "traffic out of the tunnel, through the server's NAT"
+if ping -c1 -W3 -I "$CIFACE" 1.1.1.1 > "$WORK/egress.log" 2>&1; then
+    ok "the tunnel reaches the internet (1.1.1.1 answers)"
+else
+    warn "no ICMP through the tunnel; the DNS checks below will likely fail too"
+fi
+
+say "raw DNS through the tunnel, bypassing resolved"
+if command -v dig >/dev/null 2>&1; then
+    if dig +time=3 +tries=1 -b "$CLI_IP" @1.1.1.1 example.com A > "$WORK/dig.log" 2>&1 && grep -q "ANSWER SECTION" "$WORK/dig.log"; then
+        ok "dig @1.1.1.1 from $CLI_IP answered: $(grep -E '^example.com' "$WORK/dig.log" | head -1)"
+    else
+        warn "raw DNS through the tunnel failed; evidence kept"
+    fi
+else
+    warn "dig not installed; skipping the resolver-independent probe"
+fi
+
+say "DNS over the tunnel (resolved, the ~. domain, and the tunnel)"
 if resolvectl query -i "$CIFACE" example.com > "$WORK/dns.log" 2>&1 && grep -qE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" "$WORK/dns.log"; then
     ok "a real name resolved through the tunnel: $(grep -oE '([0-9]+\.){3}[0-9]+' "$WORK/dns.log" | head -1)"
 else
-    warn "DNS over the tunnel did not answer; see $WORK/dns.log"
+    warn "DNS over the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
+    {
+        echo "== egress: ping -I $CIFACE 1.1.1.1"
+        cat "$WORK/egress.log" 2>/dev/null
+        echo "== raw: dig @1.1.1.1 from $CLI_IP"
+        cat "$WORK/dig.log" 2>/dev/null
+        echo "== resolvectl query -i $CIFACE example.com"
+        cat "$WORK/dns.log" 2>/dev/null
+        echo "== resolvectl status $CIFACE"
+        resolvectl status "$CIFACE" 2>&1
+        echo "== ip route get 1.1.1.1"
+        ip route get 1.1.1.1 2>&1
+        echo "== ip rule"
+        ip rule 2>&1
+        echo "== nft list table inet vallum"
+        nft list table inet vallum 2>&1
+        echo "== forwarding and rp_filter"
+        sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
+    } > /tmp/vallum-host-dns.log 2>&1
 fi
 
 # ── detach reverts DNS ───────────────────────────────────────────────────────
