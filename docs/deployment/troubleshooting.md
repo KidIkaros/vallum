@@ -165,6 +165,22 @@ sudo vallum server init --force --endpoint <host:port>
 regenerates the key, so existing clients keep working. To start completely
 fresh, move `server.key` aside first and re-enrol every client.
 
+## Ping works through the tunnel, DNS and TCP do not
+
+The classic half-broken server, and the most misleading one, because ICMP is the
+one protocol that gets through by accident.
+
+On Ubuntu, ufw ships `DEFAULT_FORWARD_POLICY="DROP"` but its
+`before-forward` chain accepts ICMP echo. So a server with NAT and no forwarded
+accept rules will answer `ping` from a client and silently drop every TCP and
+UDP packet. A ping is therefore **not** proof that forwarding works — `dig` or a
+TCP connection is.
+
+`vallum server init` adds the accept rules where the drop lives (`iptables
+-I FORWARD -i <iface> -j ACCEPT`, and the reverse), and `doctor` reports a
+forwarding path that is filtered even when the sysctl is on. If the rules were
+added before this existed, `vallum server init --force` re-applies them.
+
 ## A client in a namespace on the server's host
 
 Not a supported topology, and not a reliable test one. On a host with
