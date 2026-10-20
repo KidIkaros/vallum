@@ -34,10 +34,12 @@ pub fn run(args: &TuiArgs) -> Result<(), Error> {
         return snapshot(args);
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err(Error::Usage(
-            "`vallum tui` needs a terminal; use `vallum show` or `vallum tui --snapshot`"
-                .to_owned(),
-        ));
+        let msg = "this flow needs a terminal; `vallum tui` was given a non-tty.\n".to_string()
+            + "Try inside a real terminal: tmux new-session -d -x 80 -y 24 'vallum tui'\n"
+            + "Or via script:             script -qec 'vallum tui' /dev/null\n"
+            + "Fallback UI:               vallum tui --snapshot\n"
+            + "(no root/CAP_NET_ADMIN:    the daemon cannot open a TUN interface)";
+        return Err(Error::Usage(msg));
     }
     let mut app = App::new(client::discover(args));
     actions::refresh(&mut app);
@@ -84,7 +86,8 @@ fn event_loop(
 ) -> Result<(), Error> {
     let mut last_refresh = Instant::now();
     while !app.quit {
-        if last_refresh.elapsed() >= Duration::from_secs(1) {
+        if app.refresh_rate > 0 && last_refresh.elapsed() >= Duration::from_millis(app.refresh_rate)
+        {
             actions::refresh(app);
             last_refresh = Instant::now();
         }

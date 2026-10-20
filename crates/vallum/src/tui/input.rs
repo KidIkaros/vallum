@@ -245,10 +245,6 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => app.quit = true,
-        KeyCode::Char('?') => {
-            app.help_scroll = 0;
-            app.view = View::Help;
-        }
         KeyCode::Char('/') => {
             app.filtering = true;
         }
@@ -282,6 +278,18 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                 app.notify("refreshed");
             }
         }
+        KeyCode::Char('R') => {
+            app.refresh_rate = if app.refresh_rate == 0 { 1000 } else { 0 };
+            app.notify(if app.refresh_rate == 0 {
+                "auto-refresh off · r refreshes"
+            } else {
+                "auto-refresh on (1s)"
+            });
+        }
+        KeyCode::Char('?') | KeyCode::F(1) => {
+            app.help_scroll = 0;
+            app.view = View::Help;
+        }
         KeyCode::Char('a') => app.form = Some(Form::add_peer()),
         KeyCode::Char('e') => {
             if let Some(peer) = app.current_peer().cloned() {
@@ -312,6 +320,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                         index: orig_index,
                         label,
                     },
+                    config: String::new(),
                 });
             } else {
                 app.notify("no peer selected");

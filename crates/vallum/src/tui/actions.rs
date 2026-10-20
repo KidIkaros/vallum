@@ -213,45 +213,83 @@ pub fn confirm(app: &mut App) {
     let Some(confirm) = app.confirm.take() else {
         return;
     };
-    let ConfirmAction::RemovePeer { index, .. } = confirm.action else {
-        restart_service(app);
-        return;
-    };
-    let Some(peer) = app
-        .current_device()
-        .and_then(|device| device.peers.get(index))
-        .cloned()
-    else {
-        return;
-    };
-    let Ok((_, identity)) = keys::decode_public(&peer.public_line) else {
-        app.notify("peer public line is not decodable");
-        return;
-    };
-    let set = Set {
-        private_key: None,
-        listen_port: None,
-        fwmark: None,
-        replace_peers: false,
-        peers: vec![Peer {
-            public_key: Some(identity.kem().as_bytes().to_vec()),
-            name: None,
-            preshared_key: None,
-            endpoint: None,
-            keepalive: None,
-            allowed_ips: Vec::new(),
-            remove: true,
-            update_only: false,
-            replace_allowed_ips: false,
-        }],
-    };
-    match apply(app, &set) {
-        Ok(()) => {
-            app.notify("peer removed");
-            app.peer_selected = app.peer_selected.saturating_sub(1);
+
+    match confirm.action {
+        ConfirmAction::RemovePeer { index, .. } => {
+            let Some(peer) = app
+                .current_device()
+                .and_then(|device| device.peers.get(index))
+                .cloned()
+            else {
+                return;
+            };
+            let Ok((_, identity)) = keys::decode_public(&peer.public_line) else {
+                app.notify("peer public line is not decodable");
+                return;
+            };
+            let set = Set {
+                private_key: None,
+                listen_port: None,
+                fwmark: None,
+                replace_peers: false,
+                peers: vec![Peer {
+                    public_key: Some(identity.kem().as_bytes().to_vec()),
+                    name: None,
+                    preshared_key: None,
+                    endpoint: None,
+                    keepalive: None,
+                    allowed_ips: Vec::new(),
+                    remove: true,
+                    update_only: false,
+                    replace_allowed_ips: false,
+                }],
+            };
+            match apply(app, &set) {
+                Ok(()) => {
+                    app.notify("peer removed");
+                    app.peer_selected = app.peer_selected.saturating_sub(1);
+                    refresh(app);
+                }
+                Err(error) => app.notify(error),
+            }
+        }
+        ConfirmAction::ApplyConfig => {
+            let Some(path) = app
+                .current()
+                .and_then(|interface| interface.config_path.clone())
+            else {
+                app.notify("no config path available");
+                return;
+            };
+            // Same discipline as the `E` flow: write to a sibling file,
+            // validate, back up the original, then rename and restart.
+            let candidate = path.with_extension("toml.new");
+            if let Err(error) = std::fs::write(&candidate, &confirm.config) {
+                app.notify(format!("write config: {error}"));
+                return;
+            }
+            if let Err(error) = crate::config::Config::load(&candidate) {
+                let _ = std::fs::remove_file(&candidate);
+                app.notify(format!("invalid config: {error}"));
+                return;
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            let backup = path.with_extension(format!("toml.bak.{stamp}"));
+            if let Err(error) = std::fs::copy(&path, &backup) {
+                let _ = std::fs::remove_file(&candidate);
+                app.notify(format!("backup failed: {error}"));
+                return;
+            }
+            if let Err(error) = std::fs::rename(&candidate, &path) {
+                app.notify(format!("apply config: {error}"));
+                return;
+            }
+            app.notify(format!("config applied · backup {}", backup.display()));
+            restart_service(app);
             refresh(app);
         }
-        Err(error) => app.notify(error),
     }
 }
 
@@ -570,6 +608,12 @@ pub fn interface_form(app: &mut App) {
 }
 
 fn apply_interface_form(app: &mut App, form: &super::app::Form) -> FormResult {
+    let values: Vec<String> = form
+        .fields
+        .iter()
+        .map(|field| field.value.clone())
+        .collect();
+    super::app::Form::validate_interface(&values)?;
     let path = app
         .current()
         .and_then(|interface| interface.config_path.clone())
@@ -615,7 +659,11 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> FormResult {
             .map(str::trim)
             .filter(|entry| !entry.is_empty())
             .collect();
+        // Don't create a table that stays empty just to delete a missing key.
         if doc.get(table_name).is_none() {
+            if entries.is_empty() {
+                continue;
+            }
             doc[table_name] = toml_edit::Item::Table(toml_edit::Table::new());
         }
         let table = doc[table_name]
@@ -631,29 +679,22 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> FormResult {
             table[key] = toml_edit::Item::Value(toml_edit::Value::Array(array));
         }
     }
-    if doc.get("quick").is_none() {
-        doc["quick"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    if let Some(table) = doc["quick"].as_table_mut() {
-        set_string(table, "table", form.field("table"));
+    if !form.field("table").trim().is_empty() || doc.get("quick").is_some() {
+        if doc.get("quick").is_none() {
+            doc["quick"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(table) = doc["quick"].as_table_mut() {
+            set_string(table, "table", form.field("table"));
+        }
     }
 
-    let candidate = path.with_extension("toml.new");
-    std::fs::write(&candidate, doc.to_string())
-        .map_err(|error| form_error(None, format!("write: {error}")))?;
-    crate::config::Config::load(&candidate)
-        .map_err(|error| form_error(None, format!("invalid config: {error}")))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let backup = path.with_extension(format!("toml.bak.{stamp}"));
-    std::fs::copy(&path, &backup).map_err(|error| form_error(None, format!("backup: {error}")))?;
-    std::fs::rename(&candidate, &path)
-        .map_err(|error| form_error(None, format!("replace: {error}")))?;
+    // Ask for confirmation before applying config changes
+    // Store the config in the confirm struct so it can be applied later
     app.confirm = Some(super::app::Confirm {
         action: ConfirmAction::ApplyConfig,
+        config: doc.to_string(),
     });
-    Ok(format!("config written; backup {}", backup.display()))
+    Ok("Press Enter to apply config changes".to_string())
 }
 
 pub fn export_bundle(app: &mut App) {
@@ -1351,7 +1392,21 @@ mod tests {
             "9.9.9.9".to_owned(),
             "auto".to_owned(),
         ]);
-        apply_interface_form(&mut app, &form).expect("apply");
+        // apply_interface_form should NOT write the config; it should ask for confirmation
+        let msg = apply_interface_form(&mut app, &form).expect("apply");
+        assert_eq!(msg, "Press Enter to apply config changes");
+        assert!(app.confirm.is_some());
+        assert!(matches!(
+            app.confirm.as_ref().unwrap().action,
+            super::super::app::ConfirmAction::ApplyConfig
+        ));
+        // The original config should NOT be modified yet
+        let text_before = std::fs::read_to_string(&path).unwrap();
+        assert!(text_before.contains("listen = \"0.0.0.0:51820\""));
+        assert!(!text_before.contains("listen = \"0.0.0.0:51821\""));
+        // Confirm should apply the config
+        super::super::actions::confirm(&mut app);
+        assert!(app.confirm.is_none());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("listen = \"0.0.0.0:51821\""));
         assert!(text.contains("mtu = 1400"));

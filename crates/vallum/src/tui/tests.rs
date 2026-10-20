@@ -1037,3 +1037,82 @@ fn ping_peer_handles_no_peer_or_no_ip_gracefully() {
         .as_ref()
         .is_some_and(|t| t.message.contains("has no allowed IPs to ping")));
 }
+
+#[test]
+fn question_mark_and_f1_open_help_and_return_to_the_dashboard() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.view, super::app::View::Help);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.view, super::app::View::Dashboard);
+
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+    assert_eq!(app.view, super::app::View::Help);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view, super::app::View::Dashboard);
+}
+
+#[test]
+fn lowercase_r_refreshes_and_capital_r_toggles_auto_refresh() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    );
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|toast| toast.message.contains("refreshed")));
+
+    assert_eq!(app.refresh_rate, 1000);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.refresh_rate, 0);
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|toast| toast.message.contains("auto-refresh off")));
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.refresh_rate, 1000);
+}
+
+#[test]
+fn long_form_values_render_as_a_single_line_window() {
+    // A generated public line is ~800 chars; it must not push the remaining
+    // fields, the hint, or the footer off the form.
+    let long = format!("vallum1:0003:{}", "a".repeat(780));
+    let short = super::ui::field_value_display(&long, 0, 40, false);
+    assert_eq!(short.chars().count(), 40);
+    assert!(short.ends_with('…'));
+
+    // Focused, cursor at the start: the window begins at the value start.
+    let focused_start = super::ui::field_value_display(&long, 0, 40, true);
+    assert!(focused_start.starts_with("|vallum1:0003:"));
+    assert!(focused_start.ends_with('…'));
+
+    // Focused, cursor near the end: the window follows the cursor.
+    let cursor = long.chars().count();
+    let focused_end = super::ui::field_value_display(&long, cursor, 40, true);
+    assert!(focused_end.starts_with('…'));
+    assert!(focused_end.ends_with('|'));
+
+    // UTF-8 values index by char, not byte.
+    let utf8 = "héllo wörld";
+    let display = super::ui::field_value_display(utf8, 2, 40, true);
+    assert_eq!(display, "hé|llo wörld");
+}

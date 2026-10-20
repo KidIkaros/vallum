@@ -61,12 +61,12 @@ fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     let Some(interface) = app.current() else {
-        let text = vec![Line::from(Span::styled(
-            "No interface connected",
-            Style::default().fg(Color::Yellow),
-        ))];
         frame.render_widget(
-            Paragraph::new(text).block(brand_block("TUNNEL CONTROL")),
+            Paragraph::new(vec![Line::from(Span::styled(
+                "No interface connected",
+                Style::default().fg(Color::Yellow),
+            ))])
+            .block(brand_block("TUNNEL CONTROL")),
             area,
         );
         return;
@@ -79,41 +79,47 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         (area, None)
     };
 
-    let status_badge = match (
-        interface.service_state,
-        interface.device.is_some(),
-        interface.error.is_none(),
-    ) {
-        (Some(ServiceState::Active), _, _) | (None, true, true) => Span::styled(
+    // The badge reports the systemd unit state only. When no unit is known
+    // (for example a --control socket with no config), it says so instead of
+    // guessing from control reachability — the CONTROL line carries that.
+    let status_badge = match interface.service_state {
+        Some(ServiceState::Active) => Span::styled(
             " ● ACTIVE ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        (Some(ServiceState::Activating), _, _) => Span::styled(
+        Some(ServiceState::Inactive) => Span::styled(
+            " ○ INACTIVE ",
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(ServiceState::Activating) => Span::styled(
             " ◐ STARTING ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        (Some(ServiceState::Deactivating), _, _) => Span::styled(
+        Some(ServiceState::Deactivating) => Span::styled(
             " ◑ STOPPING ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        (Some(ServiceState::Failed), _, _) => Span::styled(
+        Some(ServiceState::Failed) => Span::styled(
             " ✖ FAILED ",
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
-        _ => Span::styled(
-            " ○ INACTIVE ",
+        None => Span::styled(
+            " ◌ NO UNIT ",
             Style::default()
                 .fg(Color::White)
                 .bg(Color::DarkGray)
@@ -344,57 +350,23 @@ fn duration_label(duration: std::time::Duration) -> String {
 
 fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
     let mut text = Vec::new();
-    if area.height >= 16 {
+    if area.height >= 10 {
         text.push(Line::from(""));
-        text.push(Line::from(Span::styled(
-            "   ██╗   ██╗ █████╗ ██╗     ██╗     ██╗   ██╗███╗   ███╗",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
         text.push(Line::from(vec![
             Span::styled(
-                "   ██║   ██║██╔══██╗██║     ██║     ██║   ██║████╗ ████║",
+                "◆ VALLUM",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   POST-QUANTUM WIRE ENCLAVE",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-        text.push(Line::from(vec![
-            Span::styled(
-                "   ╚██╗ ██╔╝███████║██║     ██║     ██║   ██║██╔████╔██║",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "   Kyber-768 / Tri-Hybrid · Layer-3 VPN",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        text.push(Line::from(vec![
-            Span::styled(
-                "    ╚████╔╝ ██║  ██║███████╗███████╗╚██████╔╝██║ ╚═╝ ██║",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "   Ikaros Digital × Atomguard",
+                "  ──●──◆──●──  a boundary with a protected crossing",
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
         text.push(Line::from(Span::styled(
-            "     ╚═══╝  ╚═╝  ╚═╝╚══════╝╚══════╝ ╚═════╝ ╚═╝     ╚═╝",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "  post-quantum layer-3 tunnel · ML-KEM-768 / tri-hybrid",
+            Style::default().fg(Color::Gray),
         )));
         text.push(Line::from(""));
     }
@@ -891,7 +863,8 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         Line::from("E                 edit TOML in $EDITOR (with diff review)"),
         Line::from("l                 show journald logs (scroll with j/k/PgUp/PgDn)"),
         Line::from("r                 refresh device snapshot"),
-        Line::from("?                 close help"),
+        Line::from("R                 toggle auto-refresh (1s poll on/off)"),
+        Line::from("? / F1            open or close this help"),
         Line::from("q / Q / Ctrl-C    quit / close view"),
         Line::from(""),
         Line::from("CONTROL reports UAPI reachability; systemd unit state is separate."),
@@ -900,7 +873,8 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         Line::from("Secrets are masked; private keys and PSK are never rendered."),
         Line::from("Developed in partnership by Ikaros Digital × Atomguard."),
     ];
-    let scroll_y = (app.help_scroll as u16).min(text.len().saturating_sub(1) as u16);
+    let visible = usize::from(frame.area().height.saturating_sub(2));
+    let scroll_y = (app.help_scroll as u16).min(text.len().saturating_sub(visible) as u16);
     frame.render_widget(
         Paragraph::new(text)
             .scroll((scroll_y, 0))
@@ -934,7 +908,8 @@ fn draw_diff(frame: &mut Frame<'_>, app: &App) {
             Span::styled(right.to_owned(), style),
         ]));
     }
-    let scroll_y = (app.diff_scroll as u16).min(lines.len().saturating_sub(1) as u16);
+    let visible = usize::from(frame.area().height.saturating_sub(2));
+    let scroll_y = (app.diff_scroll as u16).min(lines.len().saturating_sub(visible) as u16);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((scroll_y, 0))
@@ -976,7 +951,8 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
             .map(|line| Line::from(Span::styled(line.as_str(), log_line_style(line))))
             .collect()
     };
-    let scroll_y = (app.logs_scroll as u16).min(app.logs.len().saturating_sub(1) as u16);
+    let visible = usize::from(frame.area().height.saturating_sub(2));
+    let scroll_y = (app.logs_scroll as u16).min(app.logs.len().saturating_sub(visible) as u16);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((scroll_y, 0))
@@ -1065,9 +1041,52 @@ fn field_help_hint(label: &str) -> &'static str {
     }
 }
 
+/// Render a field value on one line. Long values (a public line is hundreds of
+/// characters) get an elided window so the rest of the form stays visible; the
+/// focused field shows a window that keeps the cursor in view.
+pub(crate) fn field_value_display(
+    value: &str,
+    cursor: usize,
+    width: usize,
+    focused: bool,
+) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= width {
+        if focused {
+            let mut display = chars.clone();
+            display.insert(cursor.min(chars.len()), '|');
+            return display.iter().collect();
+        }
+        return value.to_owned();
+    }
+    if !focused {
+        let head: String = chars.iter().take(width.saturating_sub(1)).collect();
+        return format!("{head}…");
+    }
+    let cursor = cursor.min(chars.len());
+    let mut start = cursor.saturating_sub(width.saturating_sub(2));
+    if start + width > chars.len() {
+        start = chars.len().saturating_sub(width);
+    }
+    let mut window: Vec<char> = chars[start..(start + width).min(chars.len())].to_vec();
+    window.insert(cursor.saturating_sub(start).min(window.len()), '|');
+    let mut display = String::new();
+    if start > 0 {
+        display.push('…');
+    }
+    display.extend(window);
+    if start + width < chars.len() {
+        display.push('…');
+    }
+    display
+}
+
 fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
     let popup = centered(area, 80, 60);
     frame.render_widget(Clear, popup);
+    // Borders + marker + label column; a field value never wraps to a second
+    // line so every field stays on screen regardless of its length.
+    let value_width = (popup.width as usize).saturating_sub(26).max(8);
     let mut lines = Vec::new();
     for (index, field) in form.fields.iter().enumerate() {
         let focused = index == form.focus;
@@ -1104,18 +1123,13 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
                     field.placeholder,
                     Style::default().fg(Color::DarkGray),
                 ));
+            } else if field.masked {
+                spans.push(Span::styled(format!("{value}|"), style));
             } else {
-                let mut display_val = value;
-                if field.masked {
-                    display_val.push('|');
-                } else {
-                    let byte_index = display_val
-                        .char_indices()
-                        .nth(form.cursor)
-                        .map_or(display_val.len(), |(index, _)| index);
-                    display_val.insert(byte_index, '|');
-                }
-                spans.push(Span::styled(display_val, style));
+                spans.push(Span::styled(
+                    field_value_display(&field.value, form.cursor, value_width, true),
+                    style,
+                ));
             }
         } else if is_empty && !field.placeholder.is_empty() {
             spans.push(Span::styled(
@@ -1123,7 +1137,10 @@ fn draw_form(frame: &mut Frame<'_>, area: Rect, form: &Form) {
                 Style::default().fg(Color::DarkGray),
             ));
         } else {
-            spans.push(Span::styled(value, style));
+            spans.push(Span::styled(
+                field_value_display(&value, 0, value_width, false),
+                style,
+            ));
         }
 
         lines.push(Line::from(spans));

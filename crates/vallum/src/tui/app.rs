@@ -432,6 +432,7 @@ impl Form {
             "e.g. auto, off, or table number",
         ];
         let cursor = values[0].chars().count();
+        let error = Self::validate_interface(&values).err();
         Self {
             title: "Interface config".to_owned(),
             fields: labels
@@ -447,9 +448,141 @@ impl Form {
                 .collect(),
             focus: 0,
             cursor,
-            error: None,
+            error,
             kind: FormKind::Interface,
         }
+    }
+
+    pub(crate) fn validate_interface(values: &[String]) -> Result<(), FormError> {
+        const LABELS: &[&str] = &[
+            "listen",
+            "mtu",
+            "fwmark",
+            "addresses (comma)",
+            "dns (comma)",
+            "table",
+        ];
+
+        for (index, value) in values.iter().enumerate() {
+            // An empty field means "leave the current value unchanged".
+            if value.trim().is_empty() {
+                continue;
+            }
+            match LABELS.get(index).copied() {
+                Some("listen") => {
+                    if !value.contains(':') {
+                        return Err(FormError {
+                            field: Some("listen"),
+                            message: "must be an address:port (e.g. 0.0.0.0:51820)".to_string(),
+                        });
+                    }
+                }
+                Some("mtu") => {
+                    if let Ok(n) = value.parse::<u16>() {
+                        if n == 0 {
+                            continue; // auto
+                        }
+                        if n < 1280 {
+                            return Err(FormError {
+                                field: Some("mtu"),
+                                message: "must be 1280-65535 or 0 (auto)".to_string(),
+                            });
+                        }
+                    } else {
+                        return Err(FormError {
+                            field: Some("mtu"),
+                            message: "must be a number".to_string(),
+                        });
+                    }
+                }
+                Some("fwmark") => {
+                    if value.parse::<u32>().is_err() {
+                        return Err(FormError {
+                            field: Some("fwmark"),
+                            message: "must be a number or 0".to_string(),
+                        });
+                    }
+                }
+                Some("addresses (comma)") => {
+                    for cidr in value.split(',') {
+                        let cidr = cidr.trim();
+                        if cidr.is_empty() {
+                            continue;
+                        }
+                        match cidr.find('/') {
+                            Some(slash) => {
+                                let ip = &cidr[..slash];
+                                if ip.contains('.') {
+                                    if ip.split('.').count() != 4 {
+                                        return Err(FormError {
+                                            field: Some("addresses (comma)"),
+                                            message: "invalid IPv4 address".to_string(),
+                                        });
+                                    }
+                                } else {
+                                    if ip.contains(':') {
+                                        let colon_count = ip.chars().filter(|&c| c == ':').count();
+                                        if colon_count > 7 {
+                                            return Err(FormError {
+                                                field: Some("addresses (comma)"),
+                                                message: "invalid IPv6 address".to_string(),
+                                            });
+                                        }
+                                    } else {
+                                        return Err(FormError {
+                                            field: Some("addresses (comma)"),
+                                            message: "invalid address".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            None => {
+                                return Err(FormError {
+                                    field: Some("addresses (comma)"),
+                                    message: "must be CIDR notation (e.g. 10.7.0.1/24)".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Some("dns (comma)") => {
+                    for ip in value.split(',') {
+                        let ip = ip.trim();
+                        if ip.is_empty() {
+                            continue;
+                        }
+                        if ip.contains(':') {
+                            let colon_count = ip.chars().filter(|&c| c == ':').count();
+                            if colon_count > 7 {
+                                return Err(FormError {
+                                    field: Some("dns (comma)"),
+                                    message: "invalid IPv6 address".to_string(),
+                                });
+                            }
+                        } else {
+                            if ip.split('.').count() != 4 {
+                                return Err(FormError {
+                                    field: Some("dns (comma)"),
+                                    message: "invalid IPv4 address".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Some("table") => {
+                    if matches!(value.as_str(), "auto" | "off") || value.parse::<i32>().is_ok() {
+                        // valid
+                    } else {
+                        return Err(FormError {
+                            field: Some("table"),
+                            message: "must be 'auto', 'off', or a number".to_string(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -585,6 +718,7 @@ pub enum ConfirmAction {
 #[derive(Debug, Clone)]
 pub struct Confirm {
     pub action: ConfirmAction,
+    pub config: String,
 }
 
 #[derive(Debug, Clone)]
@@ -606,6 +740,7 @@ pub struct App {
     pub quit: bool,
     pub logs: Vec<String>,
     pub last_refresh: Instant,
+    pub refresh_rate: u64,
     pub pending_key: Option<PathBuf>,
     pub qr: Option<QrState>,
     pub editor: Option<PathBuf>,
@@ -619,6 +754,19 @@ pub struct App {
     pub peer_filter: String,
     pub filtering: bool,
     pub sort_mode: SortMode,
+    pub status_bar: StatusBar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusBar {
+    /// No status bar
+    Hidden,
+    /// Status bar showing selection and filter
+    Filter,
+    /// Status bar showing selection and sort mode
+    Selection,
+    /// Status bar showing all info
+    Full,
 }
 
 impl App {
@@ -649,6 +797,8 @@ impl App {
             peer_filter: String::new(),
             filtering: false,
             sort_mode: SortMode::Natural,
+            refresh_rate: 1000,
+            status_bar: StatusBar::Filter,
         }
     }
 

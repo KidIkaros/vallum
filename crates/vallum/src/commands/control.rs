@@ -17,6 +17,7 @@ use crate::control;
 use crate::keys;
 use crate::uapi::{errno, field as uapi_field};
 use crate::Error;
+use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
@@ -97,37 +98,188 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
         })
 }
 
+// A config-derived device view, used when no daemon is reachable.
+// This is the Gulf of execution fix for finding A: ` Vallum show` does the
+// prerequisite (reading the config) itself, rather than dying with
+// "no daemon". See docs/proof/pre-release-dogfood-assess.md.
+#[derive(Debug, Clone, Serialize)]
+struct ConfigDevice {
+    config: PathBuf,
+    interface: String,
+    listen: String,
+    addresses: Vec<String>,
+    fwmark: u32,
+    peers: Vec<PeerRow>,
+    next: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PeerRow {
+    name: String,
+    endpoint: String,
+    allowed_ips: Vec<String>,
+    preshared_key: bool,
+}
+
+impl ConfigDevice {
+    fn from_resolved(resolved: &config::Resolved, config_path: &Path) -> Self {
+        let peers = resolved
+            .peers
+            .iter()
+            .map(|peer| PeerRow {
+                name: peer.name().to_owned(),
+                endpoint: peer.endpoint().map(|s| s.to_string()).unwrap_or_default(),
+                allowed_ips: peer
+                    .allowed_ips()
+                    .nets()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect(),
+                preshared_key: peer.preshared_key().is_some(),
+            })
+            .collect();
+        ConfigDevice {
+            config: config_path.to_path_buf(),
+            interface: resolved
+                .interface_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            listen: resolved.listen.to_string(),
+            addresses: resolved.addresses.iter().map(|p| p.to_string()).collect(),
+            fwmark: resolved.fwmark,
+            peers,
+            next: format!("vallum run --config {}", config_path.display()),
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "config: {}", self.config.display())?;
+        writeln!(f, "interface: {}", self.interface)?;
+        writeln!(f, "listen: {}", self.listen)?;
+        writeln!(f, "addresses: {}", self.addresses.join(", "))?;
+        writeln!(f, "fwmark: {}", self.fwmark)?;
+        writeln!(f, "peers: {}", self.peers.len())?;
+        for peer in &self.peers {
+            let endpoint = if peer.endpoint.is_empty() {
+                "roaming".to_owned()
+            } else {
+                peer.endpoint.clone()
+            };
+            writeln!(
+                f,
+                "  {} — {} via {}",
+                peer.name,
+                peer.allowed_ips.join(", "),
+                endpoint
+            )?;
+        }
+        writeln!(f, "next: {}", self.next)
+    }
+}
+
 pub fn show(args: &ShowArgs) -> Result<(), Error> {
     if args.json && args.watch {
         return Err(Error::Usage(
             "`--json` and `--watch` are different modes; choose one".to_owned(),
         ));
     }
-    let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    // An explicit --control wins; otherwise the socket comes from the config's
+    // `control` field. The config itself is also loaded so an unreachable
+    // daemon can still yield the configured-device view (finding A in
+    // docs/proof/pre-release-dogfood-assess.md).
+    let config_path = args.config.as_deref();
+    let cfg = match config_path {
+        Some(path) => Some(Config::load(path)?),
+        None => None,
+    };
+    let socket_path = match (args.control.as_deref(), config_path) {
+        (Some(socket), _) => Some(socket.to_path_buf()),
+        (None, Some(path)) => cfg
+            .as_ref()
+            .and_then(|config| config.interface.control.as_ref())
+            .map(|declared| config::resolve_key_path(path, declared)),
+        (None, None) => None,
+    };
+
     if args.watch {
-        return watch(&path, args);
+        let socket = match (socket_path, config_path) {
+            (Some(socket), _) => socket,
+            (None, Some(path)) => {
+                return Err(Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: "interface.control is not set, so there is no socket to query".to_owned(),
+                })
+            }
+            (None, None) => {
+                return Err(Error::Usage(
+                    "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+                ))
+            }
+        };
+        return watch(&socket, args);
     }
-    let reply = control::request(&path, "get=1\n")?;
-    if args.dump {
-        print!("{reply}");
-        return Ok(());
-    }
-    if args.json {
-        let response = crate::uapi::parse_response(&reply);
-        let value = crate::uapi::response_json(&response);
-        println!(
+
+    let reply = socket_path
+        .as_deref()
+        .map(|socket| control::request(socket, "get=1\n"));
+
+    if let Some(Ok(reply)) = reply {
+        if args.dump {
+            print!("{reply}");
+            return Ok(());
+        }
+        if args.json {
+            let response = crate::uapi::parse_response(&reply);
+            let value = crate::uapi::response_json(&response);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|e| Error::Usage(e.to_string()))?
+            );
+            return Ok(());
+        }
+        if let Some(field) = args.field.as_deref() {
+            print_field(&reply, field);
+            return Ok(());
+        }
+        print!(
             "{}",
-            serde_json::to_string_pretty(&value).map_err(|e| Error::Usage(e.to_string()))?
+            crate::uapi::render_human(&crate::uapi::parse_response(&reply))
         );
         return Ok(());
     }
-    if let Some(field) = args.field.as_deref() {
-        print_field(&reply, field);
-        return Ok(());
+
+    // The daemon is unreachable — or no socket was configured. With a config,
+    // show the configured device; without one, report the original failure.
+    let (Some(cfg), Some(config_path)) = (cfg.as_ref(), config_path) else {
+        return match reply {
+            Some(Err(error)) => Err(error),
+            _ => Err(Error::Usage(
+                "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+            )),
+        };
+    };
+    let suite =
+        SdkSuite::from_id(cfg.suite_id(config_path).map_err(|e| {
+            Error::Suite(format!("key file names a suite this build cannot use: {e}"))
+        })?)
+        .map_err(|e| Error::Suite(format!("key file names a suite this build cannot use: {e}")))?;
+    let resolved = cfg
+        .resolve(config_path, &suite)
+        .map_err(|e| Error::Usage(e.to_string()))?;
+    let device = ConfigDevice::from_resolved(&resolved, config_path);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&device).map_err(|e| Error::Usage(e.to_string()))?
+        );
+    } else {
+        println!("{device}");
     }
-    print!(
-        "{}",
-        crate::uapi::render_human(&crate::uapi::parse_response(&reply))
+    eprintln!(
+        "note: no daemon connected; showing the configured device from {}",
+        device.config.display()
     );
     Ok(())
 }
@@ -332,4 +484,47 @@ fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
         path: path.to_path_buf(),
         what,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn show_args(config: Option<PathBuf>, control: Option<PathBuf>) -> ShowArgs {
+        ShowArgs {
+            config,
+            control,
+            dump: false,
+            json: false,
+            watch: false,
+            interval: 1000,
+            field: None,
+        }
+    }
+
+    #[test]
+    fn a_dead_control_socket_is_an_error_not_a_panic() {
+        // Regression: the config-fallback path used to panic when --control
+        // was given without --config and the daemon was unreachable.
+        let result = show(&show_args(
+            None,
+            Some(PathBuf::from("/nonexistent/vallum-dead.sock")),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_and_control_together_are_accepted() {
+        // --control overrides the socket but must not be rejected.
+        let result = show(&show_args(
+            Some(PathBuf::from("/nonexistent/missing-config.toml")),
+            Some(PathBuf::from("/nonexistent/dead.sock")),
+        ));
+        // It fails on the missing config file, not on argument validation.
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(!message.contains("give --control"));
+    }
 }

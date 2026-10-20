@@ -41,8 +41,9 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
 | `E` | edit the TOML in `$EDITOR`; review the two-column diff, Enter applies, Esc keeps the file |
 | `l` | load journald logs (scroll with `j`/`k`, `PageUp`/`PageDown`, `Home`/`End`) |
 | `f` | toggle log follow (in the Logs view) |
-| `r` | refresh |
-| `?` | help (scrollable) |
+| `r` | refresh the device snapshot now |
+| `R` | toggle the 1-second auto-refresh on/off |
+| `?` / `F1` | help (scrollable) |
 | `q` / `Q` / Ctrl-C | quit (or close modal/help/logs/diff) |
 
 ## What it does
@@ -51,7 +52,9 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
   peer name, fingerprint, endpoint, allowed IPs, handshake freshness, rx/tx
   totals, epoch, and PSK presence. `CONTROL LIVE/STALE/UNAVAILABLE` describes
   UAPI reachability; a systemd unit state is polled separately every 5 seconds
-  for config-backed interfaces when detectable.
+  for config-backed interfaces when detectable. The status badge reports that
+  unit state (`ACTIVE`, `INACTIVE`, `STARTING`, `STOPPING`, `FAILED`) or
+  `NO UNIT` when no unit is known — it never guesses from control health.
   Handshake labels are a heuristic: `RECENT` is under 5 minutes, `AGING` is
   under 1 hour, `OLD` is at least 1 hour, and `NEVER` means no handshake is
   recorded. They do not prove that the peer is online. Dataplane offload and
@@ -61,9 +64,9 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
   retries instead of presenting it as live.
 - **Branding**: a modern cockpit aesthetic with rounded borders, a distinct
   `◆ Vallum ❯ <section>` wordmark breadcrumb across panels, joint partnership attribution
-  (`Ikaros Digital × Atomguard`), an ASCII enclave crest in the onboarding empty state,
-  and high-contrast modal borders. Live tunnel state and security telemetry remain
-  the clear visual focus.
+  (`Ikaros Digital × Atomguard`), and a compact wordmark with a small
+  boundary/crossing mark in the onboarding empty state — no large ASCII banner.
+  Live tunnel state and security telemetry remain the clear visual focus.
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not
@@ -86,8 +89,10 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
   says so and is cleared on close.
 - **Bundle import** is `vallum import-bundle <file> --output-dir DIR`; it writes
   the config and a 0600 key, refusing to overwrite without `--force`.
-- **Config edits** are backed up before `$EDITOR`; after editing, a two-column
-  diff is shown. Enter restarts/applies, Esc keeps the file unapplied.
+- **Config edits**: `E` backs up before `$EDITOR` and shows a two-column diff;
+  `C` edits structured fields, asks for confirmation, then writes through a
+  validated sibling file with a timestamped backup. In both flows Enter
+  applies and restarts the service; Esc keeps the file unapplied.
 - **Service control**: `systemctl start/stop vallum@<stem>.service` when the
   unit exists; otherwise `vallum-quick up/down` if already root, or the exact
   `sudo` command when not. No sudo prompt is opened by the TUI.
@@ -113,4 +118,5 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
 - Terminal-only; no GUI, camera QR scanning, or Windows named-pipe control.
 - Interface/routes/DNS changes are raw TOML through `E`, not structured forms
   yet; peer and runtime-device changes are forms.
+- `p` pings the peer's first allowed IP synchronously (~1 s worst case).
 - The QR is an export format; import is from the `.vallum-bundle` file.
