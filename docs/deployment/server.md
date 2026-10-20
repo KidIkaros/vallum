@@ -54,7 +54,7 @@ That single command:
 | key | generates a tri-hybrid key, or reuses the existing one | `/etc/vallum/server.key` (0600) |
 | config | writes the interface, control socket and `[quick]` table | `/etc/vallum/vallum0.toml` (0600) |
 | forwarding | enables IPv4/IPv6 forwarding and persists it | `/etc/sysctl.d/90-vallum.conf` |
-| firewall | opens the UDP port in ufw, firewalld, or nftables — whichever is active | the host's own rules |
+| firewall | opens the UDP port in ufw, firewalld, or nftables — whichever is active; a manager that is installed but switched off still gets its rule, stored for the day it is enabled | the host's own rules |
 | NAT | masquerades the tunnel subnet, v4 and v6 | `inet vallum` table |
 | service | installs `vallum@.service` and `vallum-quick@.service`, enables and starts both | systemd |
 

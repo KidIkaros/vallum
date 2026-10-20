@@ -314,11 +314,7 @@ fn check_firewall(port: u16) -> Check {
     let state = crate::hostnet::inspect();
     let (status, detail) = match state.firewall {
         crate::hostnet::Firewall::Ufw => {
-            let allowed = output("ufw", &["status"]).is_some_and(|status| {
-                status.lines().any(|line| {
-                    line.contains(&format!("{port}/udp")) && line.to_lowercase().contains("allow")
-                })
-            });
+            let allowed = ufw_allows(port);
             (
                 if allowed { Status::Pass } else { Status::Warn },
                 if allowed {
@@ -345,24 +341,69 @@ fn check_firewall(port: u16) -> Check {
         crate::hostnet::Firewall::Nftables => {
             let allowed = output("nft", &["list", "ruleset"])
                 .is_some_and(|rules| rules.contains(&format!("dport {port}")));
-            (
-                if allowed { Status::Pass } else { Status::Warn },
-                if allowed {
-                    format!("nftables accepts UDP {port}")
-                } else {
+            if allowed {
+                (Status::Pass, format!("nftables accepts UDP {port}"))
+            } else if !state.input_drop {
+                // Nothing is dropping the port, so there is no rule to add.
+                // Saying otherwise sends the operator to edit a chain that is
+                // not blocking anything.
+                (
+                    Status::Pass,
+                    if state.ufw_installed {
+                        if ufw_allows(port) {
+                            format!(
+                                "nothing blocks UDP {port}; ufw is installed but not enabled, \
+                                 and the allow rule is stored for when you enable it"
+                            )
+                        } else {
+                            format!(
+                                "nothing blocks UDP {port}; ufw is installed but not enabled — \
+                                 if you enable it, run `ufw allow {port}/udp` first"
+                            )
+                        }
+                    } else {
+                        format!("nothing blocks UDP {port}; the nftables input chain has no drop policy")
+                    },
+                )
+            } else {
+                (
+                    Status::Warn,
                     format!(
-                        "no nftables rule accepts UDP {port}; add one to the chain that \
-                         drops it, or run `vallum server init --force`"
-                    )
-                },
-            )
+                        "the nftables input chain drops UDP {port}; run `vallum server init \
+                         --force`, or add an accept rule to `inet filter input`"
+                    ),
+                )
+            }
         }
         crate::hostnet::Firewall::None => (
             Status::Pass,
-            "no host firewall detected, so nothing is blocking the port".to_owned(),
+            if state.ufw_installed && !ufw_allows(port) {
+                format!(
+                    "no host firewall is active, so nothing blocks UDP {port}; ufw is \
+                     installed but not enabled — run `ufw allow {port}/udp` before enabling it"
+                )
+            } else {
+                "no host firewall detected, so nothing is blocking the port".to_owned()
+            },
         ),
     };
     Check::new("firewall", status, detail)
+}
+
+/// Whether ufw stores an allow rule for this port.
+///
+/// `ufw status` only lists rules while ufw is enabled; `ufw show added` reads
+/// the stored ones, which is what matters for a manager that is installed but
+/// switched off.
+fn ufw_allows(port: u16) -> bool {
+    let rule = format!("{port}/udp");
+    ["status", "show added"].iter().any(|args| {
+        let args: Vec<&str> = args.split(' ').collect();
+        output("ufw", &args).is_some_and(|text| {
+            text.lines()
+                .any(|line| line.contains(&rule) && line.to_lowercase().contains("allow"))
+        })
+    })
 }
 
 /// Whether the unit that should own this config is running.

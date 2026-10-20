@@ -65,7 +65,11 @@ cleanup() {
 }
 [ "$(id -u)" = 0 ] || { echo "verify-host.sh needs root; run it with sudo"; exit 1; }
 [ "$KEEP" = "--keep" ] || trap cleanup EXIT
-[ -x "$VALLUM" ] && [ -x "$QUICK" ] || bad "build first: cargo build --release -p vallum -p vallum-quick"
+# Build, rather than trusting whatever is in target/release: a stale binary is
+# how this script would test yesterday's code.
+say "building"
+cargo build --release -p vallum -p vallum-quick > "$WORK-build.log" 2>&1 || { tail -20 "$WORK-build.log"; bad "build"; }
+[ -x "$VALLUM" ] && [ -x "$QUICK" ] || bad "the build produced no binaries at $VALLUM / $QUICK"
 [ -e /etc/vallum ] && bad "/etc/vallum already exists; this script removes it on cleanup"
 [ -e "$SYSCTL_FILE" ] && bad "$SYSCTL_FILE already exists; a real deployment may be using it"
 nft list table inet vallum >/dev/null 2>&1 && bad "nftables table 'inet vallum' already exists"

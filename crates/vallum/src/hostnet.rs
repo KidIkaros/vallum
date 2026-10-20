@@ -63,6 +63,14 @@ pub struct HostState {
     pub forward_v4: bool,
     /// Whether `net.ipv6.conf.all.forwarding` is already on.
     pub forward_v6: bool,
+    /// Whether `ufw` is installed, whether or not it is enabled.
+    ///
+    /// An inactive manager still stores rules, and an operator who enables it
+    /// later expects the tunnel to survive. Ignoring it here is how a working
+    /// server stops working months later with no change to Vallum.
+    pub ufw_installed: bool,
+    /// Whether `firewall-cmd` is installed, whether or not it is running.
+    pub firewalld_installed: bool,
 }
 
 /// One host change, described before it is run.
@@ -235,6 +243,8 @@ pub fn inspect() -> HostState {
         forward_drop: forward.contains("policy drop"),
         forward_v4: read_sysctl("/proc/sys/net/ipv4/ip_forward"),
         forward_v6: read_sysctl("/proc/sys/net/ipv6/conf/all/forwarding"),
+        ufw_installed: output_of("ufw", &["--version"]).is_some(),
+        firewalld_installed: output_of("firewall-cmd", &["--version"]).is_some(),
     }
 }
 
@@ -281,6 +291,39 @@ pub fn plan_forwarding(state: &HostState, v4: bool, v6: bool) -> Vec<HostStep> {
 /// the host actually uses.
 #[must_use]
 pub fn plan_firewall(state: &HostState, port: u16, interface: &str) -> Vec<HostStep> {
+    let mut steps = plan_active_firewall(state, port, interface);
+    // No active manager, but one installed: its rule is stored for the day it
+    // is enabled, which is the difference between a tunnel that survives that
+    // day and one that silently stops.
+    if matches!(state.firewall, Firewall::Nftables | Firewall::None) {
+        if state.ufw_installed {
+            steps.push(HostStep::Run {
+                summary: format!(
+                    "allow UDP {port} through ufw (installed, not enabled — the rule applies \
+                     when you enable it)"
+                ),
+                program: "ufw".to_owned(),
+                args: vec!["allow".to_owned(), format!("{port}/udp")],
+                stdin: None,
+                ignore_failure: false,
+            });
+        } else if state.firewalld_installed {
+            steps.push(HostStep::Run {
+                summary: format!(
+                    "allow UDP {port} through firewalld (installed, not running — the rule \
+                     applies when it starts)"
+                ),
+                program: "firewall-cmd".to_owned(),
+                args: vec!["--permanent".to_owned(), format!("--add-port={port}/udp")],
+                stdin: None,
+                ignore_failure: true,
+            });
+        }
+    }
+    steps
+}
+
+fn plan_active_firewall(state: &HostState, port: u16, interface: &str) -> Vec<HostStep> {
     match state.firewall {
         Firewall::Ufw => vec![HostStep::Run {
             summary: format!("allow UDP {port} through ufw"),
@@ -451,6 +494,8 @@ mod tests {
             forward_drop: true,
             forward_v4: false,
             forward_v6: false,
+            ufw_installed: false,
+            firewalld_installed: false,
         }
     }
 
@@ -498,6 +543,40 @@ mod tests {
         assert!(steps
             .iter()
             .any(|step| step.summary().contains("forwarded traffic")));
+    }
+
+    #[test]
+    fn an_installed_but_disabled_ufw_still_gets_its_rule() {
+        let mut host = state(Firewall::Nftables);
+        host.input_drop = false;
+        host.forward_drop = false;
+        host.ufw_installed = true;
+        let steps = plan_firewall(&host, 51820, "vallum0");
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].summary().contains("ufw"), "{}", steps[0].summary());
+        assert!(steps[0].summary().contains("not enabled"));
+    }
+
+    #[test]
+    fn a_dormant_manager_does_not_replace_the_active_rule() {
+        let mut host = state(Firewall::Nftables);
+        host.ufw_installed = true;
+        let steps = plan_firewall(&host, 51820, "vallum0");
+        assert!(steps
+            .iter()
+            .any(|step| step.summary().contains("input chain")));
+        assert!(steps.iter().any(|step| step.summary().contains("ufw")));
+    }
+
+    #[test]
+    fn a_dormant_firewalld_gets_a_permanent_rule() {
+        let mut host = state(Firewall::Nftables);
+        host.input_drop = false;
+        host.forward_drop = false;
+        host.firewalld_installed = true;
+        let steps = plan_firewall(&host, 51820, "vallum0");
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].summary().contains("firewalld"));
     }
 
     #[test]
