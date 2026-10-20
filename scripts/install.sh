@@ -295,9 +295,14 @@ if [ -n "$REMOVE_CLIENT" ]; then
     exit 0
 fi
 
-if [ "$INSTALL_ONLY" -eq 1 ]; then
+# Installing is not the same as becoming a server. Only prepare the host when
+# the operator actually said something about the server (`--endpoint`,
+# `--address`, `--listen`, …); otherwise a plain install on a laptop would
+# silently start a daemon, open a port and add NAT rules.
+if [ "$INSTALL_ONLY" -eq 1 ] || [ "${#PASSTHRU[@]}" -eq 0 ]; then
     say "installed"
-    echo "prepare this host:  sudo vallum setup --server"
+    echo "this machine is ready. To make it a server:  sudo vallum setup --server"
+    echo "to join an existing server:                  sudo vallum setup --remote user@host"
     exit 0
 fi
 

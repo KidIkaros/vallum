@@ -540,6 +540,12 @@ fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
             path: key,
             source,
         })?;
+        // The units drop capabilities, which means root loses CAP_DAC_OVERRIDE
+        // and cannot read a 0600 file owned by anyone else. A file moved in
+        // from a user's directory keeps its owner, so hand it to root.
+        for path in [&target, &key_target] {
+            let _ = std::os::unix::fs::chown(path, Some(0), Some(0));
+        }
         say!("moved it to {}", target.display());
         crate::commands::server::install_service(name, false)?;
         return Ok(());

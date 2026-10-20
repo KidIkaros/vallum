@@ -570,6 +570,23 @@ fn check_config_mode(config: Option<&Path>) -> Check {
             format!("cannot read {}", path.display()),
         );
     };
+    // The units run with a bounded capability set, so root does not get
+    // CAP_DAC_OVERRIDE and cannot read a 0600 file owned by someone else. A
+    // config moved in from a user's directory keeps its owner and then fails
+    // to load with "permission denied" — as root.
+    let owned_by_root = std::os::unix::fs::MetadataExt::uid(&metadata) == 0;
+    if path.starts_with("/etc/vallum") && !owned_by_root {
+        return Check::new(
+            "config owner",
+            Status::Warn,
+            format!(
+                "{} is owned by uid {}; the units run without CAP_DAC_OVERRIDE, so they                  cannot read it. `sudo chown root:root {}`",
+                path.display(),
+                std::os::unix::fs::MetadataExt::uid(&metadata),
+                path.display()
+            ),
+        );
+    }
     let mode = metadata.permissions().mode() & 0o777;
     if mode & 0o077 == 0 {
         Check::new(
