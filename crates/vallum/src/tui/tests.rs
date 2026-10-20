@@ -199,7 +199,7 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("Vallum / TUNNEL CONTROL"));
+    assert!(text.contains("Vallum ❯ TUNNEL CONTROL"));
     assert!(text.contains("offload on"));
     assert!(text.contains("UDP batching off"));
     assert!(text.contains("CONTROL LIVE"));
@@ -420,4 +420,620 @@ fn a_bundle_splits_into_qr_frames() {
     assert!(!lines.is_empty());
     let app = App::new(Vec::new());
     assert_eq!(app.selected, 0);
+}
+
+#[test]
+fn lowercase_q_quits_dashboard() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    assert!(!app.quit);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+    );
+    assert!(app.quit);
+}
+
+#[test]
+fn peer_removal_confirm_includes_peer_identity() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let peer = super::app::PeerView {
+        name: "test-laptop".to_owned(),
+        allowed_ips: vec!["10.7.0.5/32".to_owned()],
+        fingerprint: "0123456789abcdef".to_owned(),
+        ..super::app::PeerView::default()
+    };
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![interface]);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+    );
+    assert!(app.confirm.is_some());
+    if let Some(confirm) = &app.confirm {
+        match &confirm.action {
+            super::app::ConfirmAction::RemovePeer { index, label } => {
+                assert_eq!(*index, 0);
+                assert!(label.contains("test-laptop"));
+                assert!(label.contains("10.7.0.5/32"));
+            }
+            _ => panic!("expected RemovePeer action"),
+        }
+    }
+}
+
+#[test]
+fn peer_filtering_and_navigation() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let peer1 = super::app::PeerView {
+        name: "alice-laptop".to_owned(),
+        allowed_ips: vec!["10.7.0.2/32".to_owned()],
+        ..super::app::PeerView::default()
+    };
+    let peer2 = super::app::PeerView {
+        name: "bob-phone".to_owned(),
+        allowed_ips: vec!["10.7.0.3/32".to_owned()],
+        ..super::app::PeerView::default()
+    };
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer1, peer2],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![interface]);
+    assert_eq!(app.filtered_peers().len(), 2);
+
+    // Enter filter mode
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    );
+    assert!(app.filtering);
+
+    // Type "bob"
+    for c in ['b', 'o', 'b'] {
+        super::input::handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(app.peer_filter, "bob");
+    assert_eq!(app.filtered_peers().len(), 1);
+    assert_eq!(
+        app.current_peer().map(|p| p.name.as_str()),
+        Some("bob-phone")
+    );
+    assert_eq!(app.current_peer_original_index(), Some(1));
+
+    // Commit filter
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(!app.filtering);
+    assert_eq!(app.filtered_peers().len(), 1);
+
+    // Clear filter with Esc
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.peer_filter, "");
+    assert_eq!(app.filtered_peers().len(), 2);
+
+    // Type again and clear with Ctrl-U in filter mode
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+    );
+    for c in ['a', 'l', 'i', 'c', 'e'] {
+        super::input::handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(app.peer_filter, "alice");
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+    );
+    assert_eq!(app.peer_filter, "");
+    assert_eq!(app.filtered_peers().len(), 2);
+}
+
+#[test]
+fn forgiving_ip_prefix_format() {
+    let prefixes =
+        super::actions::parse_prefixes("10.7.0.2, 192.168.1.0/24 2001:db8::1").expect("parse");
+    assert_eq!(prefixes.len(), 3);
+    assert_eq!(prefixes[0].to_string(), "10.7.0.2/32");
+    assert_eq!(prefixes[1].to_string(), "192.168.1.0/24");
+    assert_eq!(prefixes[2].to_string(), "2001:db8::1/128");
+}
+
+#[test]
+fn scrolling_in_logs_and_diff() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    app.view = super::app::View::Logs;
+    app.logs = (0..50).map(|i| format!("log line {i}")).collect();
+
+    assert_eq!(app.logs_scroll, 0);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.logs_scroll, 1);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+    );
+    assert_eq!(app.logs_scroll, 11);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.logs_scroll, 10);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(app.logs_scroll, 0);
+}
+
+#[test]
+fn peer_sorting_cycles_and_orders() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let p_charlie = super::app::PeerView {
+        name: "charlie".to_owned(),
+        rx_bytes: 100,
+        tx_bytes: 100,
+        last_handshake: Some((1000, 0)),
+        ..super::app::PeerView::default()
+    };
+    let p_alice = super::app::PeerView {
+        name: "alice".to_owned(),
+        rx_bytes: 500,
+        tx_bytes: 500,
+        last_handshake: Some((3000, 0)),
+        ..super::app::PeerView::default()
+    };
+    let p_bob = super::app::PeerView {
+        name: "bob".to_owned(),
+        rx_bytes: 300,
+        tx_bytes: 300,
+        last_handshake: Some((2000, 0)),
+        ..super::app::PeerView::default()
+    };
+
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![p_charlie, p_alice, p_bob],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![interface]);
+
+    // Natural sort order (original order: charlie, alice, bob)
+    assert_eq!(app.sort_mode, super::app::SortMode::Natural);
+    let names: Vec<&str> = app
+        .filtered_peers()
+        .iter()
+        .map(|p| p.1.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["charlie", "alice", "bob"]);
+
+    // Press 'o' -> RecentHandshake (most recent first: alice 3000, bob 2000, charlie 1000)
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.sort_mode, super::app::SortMode::RecentHandshake);
+    let names: Vec<&str> = app
+        .filtered_peers()
+        .iter()
+        .map(|p| p.1.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob", "charlie"]);
+
+    // Press 'o' -> Transfer (highest total first: alice 1000, bob 600, charlie 200)
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.sort_mode, super::app::SortMode::Transfer);
+    let names: Vec<&str> = app
+        .filtered_peers()
+        .iter()
+        .map(|p| p.1.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob", "charlie"]);
+
+    // Press 'o' -> Name (alphabetical: alice, bob, charlie)
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.sort_mode, super::app::SortMode::Name);
+    let names: Vec<&str> = app
+        .filtered_peers()
+        .iter()
+        .map(|p| p.1.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["alice", "bob", "charlie"]);
+
+    // Press 'o' -> Natural again
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.sort_mode, super::app::SortMode::Natural);
+    let names: Vec<&str> = app
+        .filtered_peers()
+        .iter()
+        .map(|p| p.1.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["charlie", "alice", "bob"]);
+}
+
+#[test]
+fn endpoint_missing_port_validation() {
+    // Empty is ok (optional)
+    assert_eq!(super::actions::parse_endpoint("").unwrap(), None);
+    assert_eq!(super::actions::parse_endpoint("  ").unwrap(), None);
+
+    // Missing port errors
+    let err = super::actions::parse_endpoint("192.168.1.1").unwrap_err();
+    assert!(err.contains("must include a port"));
+
+    let err = super::actions::parse_endpoint("[2001:db8::1]").unwrap_err();
+    assert!(err.contains("must include a port"));
+
+    let err = super::actions::parse_endpoint("vpn.example.com").unwrap_err();
+    assert!(err.contains("must include a port"));
+
+    // Valid socket addresses succeed
+    let endpoint = super::actions::parse_endpoint("192.168.1.1:51820").unwrap();
+    assert_eq!(endpoint.unwrap().to_string(), "192.168.1.1:51820");
+
+    let endpoint = super::actions::parse_endpoint("[2001:db8::1]:51820").unwrap();
+    assert_eq!(endpoint.unwrap().to_string(), "[2001:db8::1]:51820");
+}
+
+#[test]
+fn base64_rfc4648_test_vectors() {
+    assert_eq!(super::actions::base64_encode(b""), "");
+    assert_eq!(super::actions::base64_encode(b"f"), "Zg==");
+    assert_eq!(super::actions::base64_encode(b"fo"), "Zm8=");
+    assert_eq!(super::actions::base64_encode(b"foo"), "Zm9v");
+    assert_eq!(super::actions::base64_encode(b"foob"), "Zm9vYg==");
+    assert_eq!(super::actions::base64_encode(b"fooba"), "Zm9vYmE=");
+    assert_eq!(super::actions::base64_encode(b"foobar"), "Zm9vYmFy");
+}
+
+#[test]
+fn interface_rate_history_collects_samples() {
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    assert!(iface.rx_history.is_empty());
+
+    let dev1 = super::app::DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![super::app::PeerView {
+            rx_bytes: 1000,
+            tx_bytes: 500,
+            ..super::app::PeerView::default()
+        }],
+        ..super::app::DeviceView::default()
+    };
+    iface.set_device(dev1);
+
+    let dev2 = super::app::DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![super::app::PeerView {
+            rx_bytes: 2000,
+            tx_bytes: 1000,
+            ..super::app::PeerView::default()
+        }],
+        ..super::app::DeviceView::default()
+    };
+    iface.set_device(dev2);
+
+    assert_eq!(iface.rx_history.len(), 1);
+    assert_eq!(iface.tx_history.len(), 1);
+}
+
+#[test]
+fn mouse_events_handle_scroll_and_click() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let p1 = super::app::PeerView {
+        name: "peer1".to_owned(),
+        ..super::app::PeerView::default()
+    };
+    let p2 = super::app::PeerView {
+        name: "peer2".to_owned(),
+        ..super::app::PeerView::default()
+    };
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    iface.set_device(super::app::DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![p1, p2],
+        ..super::app::DeviceView::default()
+    });
+    let mut app = App::new(vec![iface]);
+
+    assert_eq!(app.peer_selected, 0);
+
+    // Mouse scroll down selects next peer
+    let scroll_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    super::input::handle_mouse(&mut app, scroll_down);
+    assert_eq!(app.peer_selected, 1);
+
+    // Mouse scroll up selects previous peer
+    let scroll_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    super::input::handle_mouse(&mut app, scroll_up);
+    assert_eq!(app.peer_selected, 0);
+
+    // Mouse click on row 9 selects peer 1
+    let click_row = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 9,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    super::input::handle_mouse(&mut app, click_row);
+    assert_eq!(app.peer_selected, 1);
+}
+
+#[test]
+fn space_bar_invokes_toggle_service() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        Some(std::path::PathBuf::from("/tmp/nonexistent.toml")),
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    let mut app = App::new(vec![iface]);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+    );
+    assert!(app.toast.is_some());
+}
+
+#[test]
+fn bracketed_paste_inserts_text_into_active_form_field() {
+    let mut app = App::new(Vec::new());
+    app.form = Some(super::app::Form::add_peer());
+
+    // Paste into first field (name)
+    super::input::handle_paste(&mut app, "laptop-corp\r\n".to_owned());
+    let form = app.form.as_ref().expect("form still open");
+    assert_eq!(form.fields[0].value, "laptop-corp");
+    assert_eq!(form.cursor, 11);
+
+    // Paste additional text
+    super::input::handle_paste(&mut app, "-01".to_owned());
+    let form = app.form.as_ref().expect("form still open");
+    assert_eq!(form.fields[0].value, "laptop-corp-01");
+    assert_eq!(form.cursor, 14);
+}
+
+#[test]
+fn bracketed_paste_appends_to_search_filter() {
+    let mut app = App::new(Vec::new());
+    app.filtering = true;
+
+    super::input::handle_paste(&mut app, "staging-node\n".to_owned());
+    assert_eq!(app.peer_filter, "staging-node");
+}
+
+#[test]
+fn yank_peer_address_copies_allowed_ips() {
+    let peer = super::app::PeerView {
+        name: "worker".to_owned(),
+        allowed_ips: vec!["10.7.0.99/32".to_owned()],
+        ..super::app::PeerView::default()
+    };
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    iface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![iface]);
+    super::actions::yank_peer_address(&mut app);
+    let toast = app.toast.expect("toast after yanking address");
+    assert!(toast.message.contains("10.7.0.99/32"));
+}
+
+#[test]
+fn import_bundle_form_defaults() {
+    let form = super::app::Form::import_bundle("/etc/vallum");
+    assert_eq!(form.fields.len(), 2);
+    assert_eq!(form.fields[0].label, "bundle file");
+    assert_eq!(form.fields[1].value, "/etc/vallum");
+}
+
+#[test]
+fn vim_scroll_navigation_in_logs_help_and_diff() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+
+    // 1. Logs view
+    app.view = super::app::View::Logs;
+    app.logs = (0..50).map(|i| format!("log line {i}")).collect();
+    app.logs_scroll = 15;
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.logs_scroll, 0);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.logs_scroll, 40);
+
+    // 2. Help view
+    app.view = super::app::View::Help;
+    app.help_scroll = 5;
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.help_scroll, 0);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.help_scroll, 100);
+
+    // 3. Diff view
+    app.view = super::app::View::Diff;
+    app.diff = Some(super::app::DiffView {
+        backup: std::path::PathBuf::from("/tmp/backup.toml"),
+        rows: (0..30)
+            .map(|i| super::app::DiffRow {
+                left: Some(format!("left {i}")),
+                right: Some(format!("right {i}")),
+                kind: super::app::DiffKind::Equal,
+            })
+            .collect(),
+    });
+    app.diff_scroll = 8;
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.diff_scroll, 0);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.diff_scroll, 20);
+}
+
+#[test]
+fn smart_search_filter_freshness_and_psk() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let peer_recent = super::app::PeerView {
+        name: "charlie".to_owned(),
+        last_handshake: Some((now.saturating_sub(60), 0)),
+        preshared_key: true,
+        ..super::app::PeerView::default()
+    };
+    let peer_never = super::app::PeerView {
+        name: "david".to_owned(),
+        last_handshake: None,
+        preshared_key: false,
+        ..super::app::PeerView::default()
+    };
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    iface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer_recent, peer_never],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![iface]);
+
+    // Match by freshness keyword "recent"
+    app.peer_filter = "recent".to_owned();
+    assert_eq!(app.filtered_peers().len(), 1);
+    assert_eq!(app.filtered_peers()[0].1.name, "charlie");
+
+    // Match by freshness keyword "never"
+    app.peer_filter = "never".to_owned();
+    assert_eq!(app.filtered_peers().len(), 1);
+    assert_eq!(app.filtered_peers()[0].1.name, "david");
+
+    // Match by "psk"
+    app.peer_filter = "psk".to_owned();
+    assert_eq!(app.filtered_peers().len(), 1);
+    assert_eq!(app.filtered_peers()[0].1.name, "charlie");
+}
+
+#[test]
+fn rate_label_scales_units_accurately() {
+    assert_eq!(super::ui::rate_label(0.0), "0.0 B/s");
+    assert_eq!(super::ui::rate_label(512.4), "512.4 B/s");
+    assert_eq!(super::ui::rate_label(1024.0), "1.0 KB/s");
+    assert_eq!(super::ui::rate_label(2560.0), "2.5 KB/s");
+    assert_eq!(super::ui::rate_label(5.5 * 1024.0 * 1024.0), "5.5 MB/s");
+    assert_eq!(
+        super::ui::rate_label(1.5 * 1024.0 * 1024.0 * 1024.0),
+        "1.5 GB/s"
+    );
+}
+
+#[test]
+fn ping_peer_handles_no_peer_or_no_ip_gracefully() {
+    let mut app = App::new(Vec::new());
+    super::actions::ping_peer(&mut app);
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.message.contains("no peer selected")));
+
+    let peer = super::app::PeerView {
+        name: "test-peer".to_owned(),
+        allowed_ips: Vec::new(),
+        ..super::app::PeerView::default()
+    };
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    iface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![peer],
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![iface]);
+    super::actions::ping_peer(&mut app);
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.message.contains("has no allowed IPs to ping")));
 }

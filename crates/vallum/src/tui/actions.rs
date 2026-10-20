@@ -2,6 +2,7 @@
 
 //! Side effects: UAPI writes, key generation, service control, logs.
 
+use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
@@ -60,6 +61,7 @@ pub fn submit_form(app: &mut App) {
         FormKind::EditPeer(index) => edit_peer(app, &form, index),
         FormKind::Device => apply_device(app, &form),
         FormKind::ExportBundle => finish_export(app, &form),
+        FormKind::ImportBundle => finish_import_bundle(app, &form),
         FormKind::Interface => apply_interface_form(app, &form),
     };
     match result {
@@ -211,7 +213,7 @@ pub fn confirm(app: &mut App) {
     let Some(confirm) = app.confirm.take() else {
         return;
     };
-    let ConfirmAction::RemovePeer(index) = confirm.action else {
+    let ConfirmAction::RemovePeer { index, .. } = confirm.action else {
         restart_service(app);
         return;
     };
@@ -699,6 +701,149 @@ fn finish_export(app: &mut App, form: &super::app::Form) -> FormResult {
     Ok(format!("bundle written to {}", path.display()))
 }
 
+pub fn import_bundle(app: &mut App) {
+    let default_dir = app
+        .current()
+        .and_then(|i| i.config_path.as_ref())
+        .and_then(|p| p.parent())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/etc/vallum".to_owned());
+    app.form = Some(super::app::Form::import_bundle(&default_dir));
+}
+
+fn finish_import_bundle(app: &mut App, form: &super::app::Form) -> FormResult {
+    let bundle_path_str = form.field("bundle file").trim();
+    if bundle_path_str.is_empty() {
+        return Err(field_error("bundle file", "bundle file path is empty"));
+    }
+    let bundle_path = std::path::Path::new(bundle_path_str);
+    if !bundle_path.exists() {
+        return Err(field_error("bundle file", "file does not exist"));
+    }
+    let bundle = crate::bundle::read(bundle_path)
+        .map_err(|err| field_error("bundle file", format!("cannot load bundle: {err}")))?;
+
+    let out_dir_str = form.field("output dir").trim();
+    let out_dir = if out_dir_str.is_empty() {
+        std::path::Path::new("/etc/vallum")
+    } else {
+        std::path::Path::new(out_dir_str)
+    };
+
+    let imported = crate::bundle::import(&bundle, out_dir, false)
+        .map_err(|err| form_error(None, format!("import failed: {err}")))?;
+
+    let stem = imported
+        .config
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("vallum0");
+    let control_path = out_dir.join(format!("{stem}.control.sock"));
+    let new_iface =
+        super::app::Interface::new(stem.to_owned(), Some(imported.config.clone()), control_path);
+    app.interfaces.push(new_iface);
+    app.selected = app.interfaces.len().saturating_sub(1);
+
+    Ok(format!(
+        "bundle imported: config {} (key {})",
+        imported.config.display(),
+        imported.key.display()
+    ))
+}
+
+pub fn save_runtime_config(app: &mut App) {
+    let Some(interface) = app.current() else {
+        app.notify("no interface selected");
+        return;
+    };
+    let Some(config_path) = interface.config_path.clone() else {
+        app.notify("no config file associated with this interface; cannot save");
+        return;
+    };
+    let Some(device) = interface.device.clone() else {
+        app.notify("no runtime device snapshot to save");
+        return;
+    };
+
+    let text = match std::fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) => {
+            app.notify(format!("cannot read {}: {e}", config_path.display()));
+            return;
+        }
+    };
+    let mut doc: toml_edit::DocumentMut = match text.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            app.notify(format!("cannot parse config: {e}"));
+            return;
+        }
+    };
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let backup = config_path.with_extension(format!("toml.bak.{stamp}"));
+    if let Err(e) = std::fs::copy(&config_path, &backup) {
+        app.notify(format!("backup failed: {e}"));
+        return;
+    }
+
+    let mut peers_array = toml_edit::ArrayOfTables::new();
+    for peer in &device.peers {
+        let mut table = toml_edit::Table::new();
+        if !peer.name.is_empty() {
+            table.insert(
+                "name",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.name.as_str())),
+            );
+        }
+        if !peer.public_line.is_empty() {
+            table.insert(
+                "public_key",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.public_line.as_str())),
+            );
+        }
+        if !peer.endpoint.is_empty() && peer.endpoint != "(none)" {
+            table.insert(
+                "endpoint",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.endpoint.as_str())),
+            );
+        }
+        if !peer.allowed_ips.is_empty() {
+            let mut allowed_array = toml_edit::Array::new();
+            for ip in &peer.allowed_ips {
+                allowed_array.push(ip.as_str());
+            }
+            table.insert(
+                "allowed_ips",
+                toml_edit::Item::Value(toml_edit::Value::Array(allowed_array)),
+            );
+        }
+        if let Some(keepalive) = peer.keepalive {
+            if keepalive > 0 {
+                table.insert(
+                    "persistent_keepalive",
+                    toml_edit::Item::Value(toml_edit::Value::from(i64::from(keepalive))),
+                );
+            }
+        }
+        peers_array.push(table);
+    }
+    doc["peer"] = toml_edit::Item::ArrayOfTables(peers_array);
+
+    if let Err(e) = std::fs::write(&config_path, doc.to_string()) {
+        app.notify(format!("cannot write config: {e}"));
+        return;
+    }
+
+    app.notify(format!(
+        "saved runtime configuration to {} ({} peers)",
+        config_path.display(),
+        device.peers.len()
+    ));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServicePlan {
     Systemd {
@@ -790,6 +935,13 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
                 .run("systemctl", &[action.to_owned(), unit.clone()])
                 .is_ok()
             {
+                if let Some(interface) = app.current_mut() {
+                    interface.service_state = Some(match action {
+                        "start" => super::app::ServiceState::Activating,
+                        "stop" => super::app::ServiceState::Deactivating,
+                        _ => super::app::ServiceState::Activating,
+                    });
+                }
                 app.notify(format!("systemctl {action} {unit}"));
                 refresh_service_state(app);
                 refresh(app);
@@ -808,6 +960,13 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
                 .run("vallum-quick", &[action.to_owned(), config_arg.clone()])
                 .is_ok()
             {
+                if let Some(interface) = app.current_mut() {
+                    interface.service_state = Some(match action {
+                        "up" => super::app::ServiceState::Activating,
+                        "down" => super::app::ServiceState::Deactivating,
+                        _ => super::app::ServiceState::Activating,
+                    });
+                }
                 app.notify(format!("vallum-quick {action}"));
                 refresh_service_state(app);
                 refresh(app);
@@ -880,7 +1039,7 @@ fn optional_name(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
+pub(crate) fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
@@ -888,18 +1047,221 @@ fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
     if let Ok(address) = text.parse() {
         return Ok(Some(address));
     }
+    if !text.contains(':') || (text.starts_with('[') && !text.contains("]:")) {
+        return Err(
+            "endpoint must include a port (e.g. 198.51.100.1:51820 or vpn.example.com:51820)"
+                .to_owned(),
+        );
+    }
     text.to_socket_addrs()
-        .map_err(|error| format!("endpoint: {error}"))?
+        .map_err(|error| format!("endpoint: {error} (check hostname and port)"))?
         .next()
         .map(Some)
         .ok_or_else(|| "endpoint resolved to nothing".to_owned())
 }
 
-fn parse_prefixes(text: &str) -> Result<Vec<Prefix>, String> {
+pub fn copy_to_clipboard(text: &str) {
+    // 1. ANSI OSC 52 sequence (works over SSH, tmux, and modern terminal emulators)
+    let encoded = base64_encode(text.as_bytes());
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
+
+    // 2. Best-effort fallback: local display server clipboard (wl-copy or xclip)
+    // for Linux desktop terminals with OSC 52 disabled by default
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if let Ok(mut child) = std::process::Command::new("wl-copy")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    } else if std::env::var_os("DISPLAY").is_some() {
+        if let Ok(mut child) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+pub fn yank_public_line(app: &mut App) {
+    let (target_label, line) = if let Some(peer) = app.current_peer() {
+        let label = if !peer.name.is_empty() {
+            format!("peer '{}'", peer.name)
+        } else {
+            format!("peer {}", peer.fingerprint)
+        };
+        (label, peer.public_line.clone())
+    } else if let Some(device) = app.current_device() {
+        (
+            format!("device {}", device.interface),
+            device.public_line.clone(),
+        )
+    } else if let Some(interface) = app.current() {
+        if let Some(config) = &interface.config_path {
+            let cmd = format!("sudo vallum-quick up {}", config.display());
+            copy_to_clipboard(&cmd);
+            app.notify(format!("copied start command to clipboard: {cmd}"));
+            return;
+        }
+        app.notify("no public identity to copy");
+        return;
+    } else {
+        app.notify("no public identity to copy");
+        return;
+    };
+
+    if line.is_empty() {
+        app.notify("public line is empty");
+        return;
+    }
+
+    copy_to_clipboard(&line);
+    app.notify(format!("copied {target_label} public line to clipboard"));
+}
+
+pub fn yank_peer_address(app: &mut App) {
+    if let Some(peer) = app.current_peer() {
+        let label = if !peer.name.is_empty() {
+            format!("peer '{}'", peer.name)
+        } else {
+            format!("peer {}", peer.fingerprint)
+        };
+        let target = if !peer.allowed_ips.is_empty() {
+            peer.allowed_ips.join(", ")
+        } else if !peer.endpoint.is_empty() {
+            peer.endpoint.clone()
+        } else {
+            app.notify(format!("{label} has no IP or endpoint"));
+            return;
+        };
+        copy_to_clipboard(&target);
+        app.notify(format!("copied {label} address ({target}) to clipboard"));
+    } else if let Some(device) = app.current_device() {
+        let target = if !device.addresses.is_empty() {
+            device.addresses.join(", ")
+        } else {
+            device.listen.clone()
+        };
+        copy_to_clipboard(&target);
+        app.notify(format!("copied device address ({target}) to clipboard"));
+    } else if let Some(interface) = app.current() {
+        if let Some(config) = &interface.config_path {
+            let cmd = format!("sudo vallum-quick up {}", config.display());
+            copy_to_clipboard(&cmd);
+            app.notify(format!("copied start command to clipboard: {cmd}"));
+        } else {
+            app.notify("no address to copy");
+        }
+    } else {
+        app.notify("no address to copy");
+    }
+}
+
+pub fn ping_peer(app: &mut App) {
+    let Some(peer) = app.current_peer() else {
+        app.notify("no peer selected to ping");
+        return;
+    };
+    let Some(first_allowed) = peer.allowed_ips.first() else {
+        let label = if !peer.name.is_empty() {
+            &peer.name
+        } else {
+            &peer.fingerprint
+        };
+        app.notify(format!("peer '{label}' has no allowed IPs to ping"));
+        return;
+    };
+    let target_ip = first_allowed
+        .split('/')
+        .next()
+        .unwrap_or(first_allowed)
+        .trim();
+    if target_ip.is_empty() {
+        app.notify("invalid allowed IP to ping");
+        return;
+    }
+
+    match Command::new("ping")
+        .args(["-c", "1", "-W", "1", target_ip])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let time_str = stdout
+                .lines()
+                .find(|l| l.contains("time="))
+                .and_then(|l| l.split("time=").nth(1))
+                .and_then(|part| part.split_whitespace().next())
+                .unwrap_or("");
+            if !time_str.is_empty() {
+                app.notify(format!("ping {target_ip}: reply in {time_str} ms"));
+            } else {
+                app.notify(format!("ping {target_ip}: reply (online)"));
+            }
+        }
+        Ok(_) => {
+            app.notify(format!("ping {target_ip}: no reply (timed out)"));
+        }
+        Err(err) => {
+            app.notify(format!("ping {target_ip}: {err}"));
+        }
+    }
+}
+
+pub(crate) fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub(crate) fn parse_prefixes(text: &str) -> Result<Vec<Prefix>, String> {
     text.split([',', ' '])
         .filter(|part| !part.is_empty())
         .map(|part| {
-            part.parse::<Prefix>()
+            let normalized = if !part.contains('/') {
+                if part.parse::<std::net::Ipv4Addr>().is_ok() {
+                    format!("{part}/32")
+                } else if part.parse::<std::net::Ipv6Addr>().is_ok() {
+                    format!("{part}/128")
+                } else {
+                    part.to_owned()
+                }
+            } else {
+                part.to_owned()
+            };
+            normalized
+                .parse::<Prefix>()
                 .map_err(|error| format!("{part}: {error}"))
         })
         .collect()

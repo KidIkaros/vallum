@@ -163,6 +163,8 @@ pub struct Interface {
     last_service_check: Option<Instant>,
     pub tx_rate: f64,
     pub rx_rate: f64,
+    pub rx_history: Vec<u64>,
+    pub tx_history: Vec<u64>,
 }
 
 impl Interface {
@@ -182,6 +184,8 @@ impl Interface {
             last_service_check: None,
             tx_rate: 0.0,
             rx_rate: 0.0,
+            rx_history: Vec::new(),
+            tx_history: Vec::new(),
         }
     }
 
@@ -193,6 +197,14 @@ impl Interface {
         if self.device.is_some() {
             self.tx_rate = tx.saturating_sub(self.prev_tx) as f64 / elapsed;
             self.rx_rate = rx.saturating_sub(self.prev_rx) as f64 / elapsed;
+            self.rx_history.push(self.rx_rate as u64);
+            if self.rx_history.len() > 30 {
+                self.rx_history.remove(0);
+            }
+            self.tx_history.push(self.tx_rate as u64);
+            if self.tx_history.len() > 30 {
+                self.tx_history.remove(0);
+            }
         }
         self.prev_tx = tx;
         self.prev_rx = rx;
@@ -286,12 +298,44 @@ impl HandshakeFreshness {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+    #[default]
+    Natural,
+    RecentHandshake,
+    Transfer,
+    Name,
+}
+
+impl SortMode {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Natural => "default",
+            Self::RecentHandshake => "recent handshake",
+            Self::Transfer => "transfer (rx+tx)",
+            Self::Name => "name (a-z)",
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Natural => Self::RecentHandshake,
+            Self::RecentHandshake => Self::Transfer,
+            Self::Transfer => Self::Name,
+            Self::Name => Self::Natural,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormKind {
     AddPeer,
     EditPeer(usize),
     Device,
     ExportBundle,
+    ImportBundle,
     Interface,
 }
 
@@ -300,6 +344,7 @@ pub struct Field {
     pub label: &'static str,
     pub value: String,
     pub masked: bool,
+    pub placeholder: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -328,31 +373,37 @@ impl Form {
                     label: "name",
                     value: String::new(),
                     masked: false,
+                    placeholder: "e.g. laptop, phone, office-router",
                 },
                 Field {
                     label: "public line",
                     value: String::new(),
                     masked: false,
+                    placeholder: "suite + identity from keygen or peer",
                 },
                 Field {
                     label: "endpoint",
                     value: String::new(),
                     masked: false,
+                    placeholder: "e.g. 198.51.100.1:51820 (optional)",
                 },
                 Field {
                     label: "allowed IPs",
                     value: String::new(),
                     masked: false,
+                    placeholder: "e.g. 10.7.0.2/32, 192.168.1.0/24 (auto /32 if omitted)",
                 },
                 Field {
                     label: "keepalive",
                     value: "0".to_owned(),
                     masked: false,
+                    placeholder: "seconds (0 = off, 25 for NAT)",
                 },
                 Field {
                     label: "PSK (hex, optional)",
                     value: String::new(),
                     masked: true,
+                    placeholder: "32-byte hex pre-shared key",
                 },
             ],
             focus: 0,
@@ -372,16 +423,26 @@ impl Form {
             "dns (comma)",
             "table",
         ];
+        let placeholders = [
+            "e.g. 0.0.0.0:51820",
+            "e.g. 1420",
+            "e.g. 51820 or 0",
+            "e.g. 10.7.0.1/24, fd00::1/64",
+            "e.g. 1.1.1.1, 8.8.8.8",
+            "e.g. auto, off, or table number",
+        ];
         let cursor = values[0].chars().count();
         Self {
             title: "Interface config".to_owned(),
             fields: labels
                 .into_iter()
                 .zip(values)
-                .map(|(label, value)| Field {
+                .zip(placeholders)
+                .map(|((label, value), placeholder)| Field {
                     label,
                     value,
                     masked: false,
+                    placeholder,
                 })
                 .collect(),
             focus: 0,
@@ -399,11 +460,38 @@ impl Form {
                 label: "server endpoint",
                 value: device.listen.clone(),
                 masked: false,
+                placeholder: "public IP/hostname:port (e.g. vpn.example.com:51820)",
             }],
             focus: 0,
             cursor: device.listen.chars().count(),
             error: None,
             kind: FormKind::ExportBundle,
+        }
+    }
+
+    #[must_use]
+    pub fn import_bundle(default_dir: &str) -> Self {
+        let cursor = default_dir.chars().count();
+        Self {
+            title: "Import client bundle".to_owned(),
+            fields: vec![
+                Field {
+                    label: "bundle file",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "path to .vallum-bundle file (e.g. peer.vallum-bundle)",
+                },
+                Field {
+                    label: "output dir",
+                    value: default_dir.to_owned(),
+                    masked: false,
+                    placeholder: "destination config directory (e.g. /etc/vallum)",
+                },
+            ],
+            focus: 0,
+            cursor,
+            error: None,
+            kind: FormKind::ImportBundle,
         }
     }
 
@@ -421,11 +509,13 @@ impl Form {
                     label: "listen port",
                     value: port,
                     masked: false,
+                    placeholder: "e.g. 51820",
                 },
                 Field {
                     label: "fwmark",
                     value: device.fwmark.to_string(),
                     masked: false,
+                    placeholder: "e.g. 0 or 51820",
                 },
             ],
             focus: 0,
@@ -444,26 +534,31 @@ impl Form {
                     label: "name",
                     value: peer.name.clone(),
                     masked: false,
+                    placeholder: "e.g. laptop, phone",
                 },
                 Field {
                     label: "endpoint",
                     value: peer.endpoint.clone(),
                     masked: false,
+                    placeholder: "e.g. 198.51.100.1:51820 (optional)",
                 },
                 Field {
                     label: "allowed IPs",
                     value: peer.allowed_ips.join(", "),
                     masked: false,
+                    placeholder: "e.g. 10.7.0.2/32, 192.168.1.0/24",
                 },
                 Field {
                     label: "keepalive",
                     value: peer.keepalive.unwrap_or(0).to_string(),
                     masked: false,
+                    placeholder: "seconds (0 = off, 25 for NAT)",
                 },
                 Field {
                     label: "PSK (hex, blank = keep)",
                     value: String::new(),
                     masked: true,
+                    placeholder: "32-byte hex or leave blank",
                 },
             ],
             focus: 0,
@@ -481,13 +576,13 @@ impl Form {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    RemovePeer(usize),
+    RemovePeer { index: usize, label: String },
     ApplyConfig,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Confirm {
     pub action: ConfirmAction,
 }
@@ -518,6 +613,12 @@ pub struct App {
     pub logs_follow: bool,
     pub last_logs: Instant,
     pub diff: Option<DiffView>,
+    pub logs_scroll: usize,
+    pub diff_scroll: usize,
+    pub help_scroll: usize,
+    pub peer_filter: String,
+    pub filtering: bool,
+    pub sort_mode: SortMode,
 }
 
 impl App {
@@ -542,6 +643,12 @@ impl App {
             logs_follow: false,
             last_logs: Instant::now(),
             diff: None,
+            logs_scroll: 0,
+            diff_scroll: 0,
+            help_scroll: 0,
+            peer_filter: String::new(),
+            filtering: false,
+            sort_mode: SortMode::Natural,
         }
     }
 
@@ -560,16 +667,84 @@ impl App {
             .and_then(|interface| interface.device.as_ref())
     }
 
+    pub fn cycle_sort(&mut self) {
+        self.sort_mode = self.sort_mode.next();
+        self.peer_selected = 0;
+        self.notify(format!("sort: {}", self.sort_mode.label()));
+    }
+
+    #[must_use]
+    pub fn filtered_peers(&self) -> Vec<(usize, &PeerView)> {
+        let Some(device) = self.current_device() else {
+            return Vec::new();
+        };
+        let mut list: Vec<(usize, &PeerView)> = if self.peer_filter.is_empty() {
+            device.peers.iter().enumerate().collect()
+        } else {
+            let filter = self.peer_filter.to_lowercase();
+            device
+                .peers
+                .iter()
+                .enumerate()
+                .filter(|(_, peer)| {
+                    peer.name.to_lowercase().contains(&filter)
+                        || peer.fingerprint.to_lowercase().contains(&filter)
+                        || peer.endpoint.to_lowercase().contains(&filter)
+                        || peer
+                            .allowed_ips
+                            .iter()
+                            .any(|ip| ip.to_lowercase().contains(&filter))
+                        || Self::handshake_freshness(peer)
+                            .label()
+                            .to_lowercase()
+                            .contains(&filter)
+                        || (peer.preshared_key && "psk".contains(&filter))
+                })
+                .collect()
+        };
+
+        match self.sort_mode {
+            SortMode::Natural => {}
+            SortMode::RecentHandshake => {
+                list.sort_by(|(_, a), (_, b)| {
+                    let a_time = a.last_handshake.unwrap_or((0, 0));
+                    let b_time = b.last_handshake.unwrap_or((0, 0));
+                    b_time.cmp(&a_time)
+                });
+            }
+            SortMode::Transfer => {
+                list.sort_by(|(_, a), (_, b)| {
+                    let a_total = a.rx_bytes.saturating_add(a.tx_bytes);
+                    let b_total = b.rx_bytes.saturating_add(b.tx_bytes);
+                    b_total.cmp(&a_total)
+                });
+            }
+            SortMode::Name => {
+                list.sort_by_key(|(_, a)| a.name.to_lowercase());
+            }
+        }
+
+        list
+    }
+
     #[must_use]
     pub fn current_peer(&self) -> Option<&PeerView> {
-        self.current_device()
-            .and_then(|device| device.peers.get(self.peer_selected))
+        let peers = self.filtered_peers();
+        peers.get(self.peer_selected).map(|(_, peer)| *peer)
+    }
+
+    #[must_use]
+    pub fn current_peer_original_index(&self) -> Option<usize> {
+        let peers = self.filtered_peers();
+        peers.get(self.peer_selected).map(|(orig, _)| *orig)
     }
 
     pub fn next_interface(&mut self) {
         if !self.interfaces.is_empty() {
             self.selected = (self.selected + 1) % self.interfaces.len();
             self.peer_selected = 0;
+            self.peer_filter.clear();
+            self.filtering = false;
         }
     }
 
@@ -577,23 +752,42 @@ impl App {
         if !self.interfaces.is_empty() {
             self.selected = (self.selected + self.interfaces.len() - 1) % self.interfaces.len();
             self.peer_selected = 0;
+            self.peer_filter.clear();
+            self.filtering = false;
         }
     }
 
     pub fn next_peer(&mut self) {
-        if let Some(device) = self.current_device() {
-            if !device.peers.is_empty() {
-                self.peer_selected = (self.peer_selected + 1) % device.peers.len();
-            }
+        let count = self.filtered_peers().len();
+        if count > 0 {
+            self.peer_selected = (self.peer_selected + 1) % count;
         }
     }
 
     pub fn previous_peer(&mut self) {
-        if let Some(device) = self.current_device() {
-            if !device.peers.is_empty() {
-                self.peer_selected =
-                    (self.peer_selected + device.peers.len() - 1) % device.peers.len();
-            }
+        let count = self.filtered_peers().len();
+        if count > 0 {
+            self.peer_selected = (self.peer_selected + count - 1) % count;
+        }
+    }
+
+    pub fn select_first_peer(&mut self) {
+        self.peer_selected = 0;
+    }
+
+    pub fn select_last_peer(&mut self) {
+        let count = self.filtered_peers().len();
+        if count > 0 {
+            self.peer_selected = count - 1;
+        }
+    }
+
+    pub fn scroll_peers(&mut self, delta: isize) {
+        let count = self.filtered_peers().len();
+        if count > 0 {
+            let current = self.peer_selected as isize;
+            let next = (current + delta).clamp(0, (count - 1) as isize);
+            self.peer_selected = next as usize;
         }
     }
 

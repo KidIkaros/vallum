@@ -8,29 +8,42 @@ root for status or peer changes.
 vallum tui --config /etc/vallum/vallum0.toml
 vallum tui --control /run/vallum/vallum0.sock
 vallum tui --config-dir /etc/vallum
-vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
+vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI styles
 ```
+
+<p align="center">
+  <img src="../assets/vallum-cockpit.png" alt="Vallum TUI Console" width="100%">
+</p>
 
 ## Keys
 
 | Key | Action |
 |---|---|
-| `Tab` / `Shift-Tab` | next/previous interface |
-| `j` / `k`, arrows | select peer |
+| `Space` / `s` | toggle tunnel service (systemd first, then `vallum-quick`) |
+| `Tab` / `Shift-Tab` | next/previous interface (or click tab with mouse) |
+| `j` / `k`, arrows | select peer (or click row / scroll wheel with mouse) |
+| `/` | filter peers by name, IP, endpoint, or fingerprint |
+| `o` | cycle peer sorting order (`natural`, `handshake`, `transfer`, `name`) |
+| `Home` / `End`, `g` / `G` | jump to first / last peer; top / bottom in logs, diff, and help |
+| `PageUp` / `PageDown` | scroll peer table (5 rows) / scroll logs, diff, and help |
+| `p` | ping selected peer's tunnel IP |
 | `a` | add peer (name, public line, endpoint, allowed IPs, keepalive, PSK) |
 | `e` | edit name, endpoint, allowed IPs, keepalive, PSK |
-| `d` | remove peer (confirmation) |
+| `d` | remove peer (confirmation with peer details preview) |
+| `i` | import client bundle (`.vallum-bundle`) into the daemon directly |
 | `g` | generate a key and prefill the add form |
-| `q` | export the client bundle and show its animated QR |
-| `c` | edit the runtime listen port and fwmark |
-| `C` | edit listen/MTU/fwmark/addresses/DNS/table |
+| `b` (or `x`) | export the client bundle and show its animated QR |
+| `y` | copy peer (or interface) public line to clipboard (OSC 52 + desktop clipboard) |
+| `Y` | copy peer address / endpoint (or interface address) to clipboard |
+| `W` | write/save runtime peers and configuration to disk file |
+| `c` | edit the runtime listen port and fwmark (temporary) |
+| `C` | edit listen/MTU/fwmark/addresses/DNS/table (on disk) |
 | `E` | edit the TOML in `$EDITOR`; review the two-column diff, Enter applies, Esc keeps the file |
-| `s` | start/stop: systemd first, then `vallum-quick` |
-| `l` | load journald logs |
+| `l` | load journald logs (scroll with `j`/`k`, `PageUp`/`PageDown`, `Home`/`End`) |
 | `f` | toggle log follow (in the Logs view) |
 | `r` | refresh |
-| `?` | help |
-| `Q` / Ctrl-C | quit |
+| `?` | help (scrollable) |
+| `q` / `Q` / Ctrl-C | quit (or close modal/help/logs/diff) |
 
 ## What it does
 
@@ -46,9 +59,11 @@ vallum tui --snapshot --width 120 --height 36   # headless, for CI/README
   terminals, and the dashboard stacks peers and details below 100 columns.
   If the control socket drops, the UI marks retained data as stale and `r`
   retries instead of presenting it as live.
-- **Branding**: a compact `Vallum / section` wordmark appears in panel titles;
-  semantic status colors supplement explicit text labels. There is no large
-  startup banner, so the operator's live state remains the visual focus.
+- **Branding**: a modern cockpit aesthetic with rounded borders, a distinct
+  `◆ Vallum ❯ <section>` wordmark breadcrumb across panels, joint partnership attribution
+  (`Ikaros Digital × Atomguard`), an ASCII enclave crest in the onboarding empty state,
+  and high-contrast modal borders. Live tunnel state and security telemetry remain
+  the clear visual focus.
 - **Forms**: the focused field and insertion point are visible; arrows and
   Home/End move within text, Backspace/Delete edit in place, and Ctrl-U clears
   the current field. Secret fields use a fixed mask so their length is not

@@ -33,6 +33,14 @@ pub struct TuiArgs {
     /// Snapshot height.
     #[arg(long, default_value = "36")]
     pub height: u16,
+
+    /// Render snapshot with ANSI colors and styles.
+    #[arg(long)]
+    pub ansi: bool,
+
+    /// Snapshot view mode (dashboard, logs, help, qr, empty, filter, ping).
+    #[arg(long, default_value = "dashboard")]
+    pub snapshot_view: String,
 }
 
 pub fn run(args: &TuiArgs) -> Result<(), Error> {

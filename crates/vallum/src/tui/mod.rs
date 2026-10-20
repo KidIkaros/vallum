@@ -13,7 +13,10 @@ pub mod ui;
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -42,18 +45,35 @@ pub fn run(args: &TuiArgs) -> Result<(), Error> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         default_hook(info);
     }));
 
     enable_raw_mode().map_err(Error::Io)?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(Error::Io)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .map_err(Error::Io)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(Error::Io)?;
     let result = event_loop(&mut terminal, &mut app);
     disable_raw_mode().map_err(Error::Io)?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(Error::Io)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )
+    .map_err(Error::Io)?;
     terminal.show_cursor().map_err(Error::Io)?;
     result
 }
@@ -87,10 +107,17 @@ fn event_loop(
             .draw(|frame| ui::draw(frame, app))
             .map_err(Error::Io)?;
         if event::poll(Duration::from_millis(100)).map_err(Error::Io)? {
-            if let Event::Key(key) = event::read().map_err(Error::Io)? {
-                if key.kind == KeyEventKind::Press {
+            match event::read().map_err(Error::Io)? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     input::handle(app, key);
                 }
+                Event::Mouse(mouse) => {
+                    input::handle_mouse(app, mouse);
+                }
+                Event::Paste(text) => {
+                    input::handle_paste(app, text);
+                }
+                _ => {}
             }
         }
     }
@@ -102,18 +129,123 @@ fn open_editor(
     path: &std::path::Path,
 ) -> Result<(), Error> {
     disable_raw_mode().map_err(Error::Io)?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(Error::Io)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )
+    .map_err(Error::Io)?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
     let _ = std::process::Command::new(editor).arg(path).status();
-    execute!(terminal.backend_mut(), EnterAlternateScreen).map_err(Error::Io)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )
+    .map_err(Error::Io)?;
     enable_raw_mode().map_err(Error::Io)?;
     terminal.clear().map_err(Error::Io)?;
     Ok(())
 }
 
+fn color_to_ansi_fg(color: ratatui::style::Color) -> &'static str {
+    use ratatui::style::Color;
+    match color {
+        Color::Reset => "\x1b[39m",
+        Color::Black => "\x1b[30m",
+        Color::Red => "\x1b[31m",
+        Color::Green => "\x1b[32m",
+        Color::Yellow => "\x1b[33m",
+        Color::Blue => "\x1b[34m",
+        Color::Magenta => "\x1b[35m",
+        Color::Cyan => "\x1b[36m",
+        Color::Gray => "\x1b[37m",
+        Color::DarkGray => "\x1b[90m",
+        Color::LightRed => "\x1b[91m",
+        Color::LightGreen => "\x1b[92m",
+        Color::LightYellow => "\x1b[93m",
+        Color::LightBlue => "\x1b[94m",
+        Color::LightMagenta => "\x1b[95m",
+        Color::LightCyan => "\x1b[96m",
+        Color::White => "\x1b[97m",
+        _ => "",
+    }
+}
+
+fn color_to_ansi_bg(color: ratatui::style::Color) -> &'static str {
+    use ratatui::style::Color;
+    match color {
+        Color::Reset => "\x1b[49m",
+        Color::Black => "\x1b[40m",
+        Color::Red => "\x1b[41m",
+        Color::Green => "\x1b[42m",
+        Color::Yellow => "\x1b[43m",
+        Color::Blue => "\x1b[44m",
+        Color::Magenta => "\x1b[45m",
+        Color::Cyan => "\x1b[46m",
+        Color::Gray => "\x1b[47m",
+        Color::DarkGray => "\x1b[100m",
+        Color::LightRed => "\x1b[101m",
+        Color::LightGreen => "\x1b[102m",
+        Color::LightYellow => "\x1b[103m",
+        Color::LightBlue => "\x1b[104m",
+        Color::LightMagenta => "\x1b[105m",
+        Color::LightCyan => "\x1b[106m",
+        Color::White => "\x1b[107m",
+        _ => "",
+    }
+}
+
 fn snapshot(args: &TuiArgs) -> Result<(), Error> {
     let mut app = App::new(client::discover(args));
     actions::refresh(&mut app);
+
+    match args.snapshot_view.as_str() {
+        "empty" => {
+            app.interfaces.clear();
+        }
+        "logs" => {
+            app.view = app::View::Logs;
+            app.logs = vec![
+                "[2026-10-19 20:30:11] [INFO] daemon started listening on 0.0.0.0:51820".to_owned(),
+                "[2026-10-19 20:30:12] [INFO] interface vallum0 configured with address 10.7.0.1/24".to_owned(),
+                "[2026-10-19 20:30:14] [INFO] handshake established with gateway-us-east (suite 0x0003 tri-hybrid)".to_owned(),
+                "[2026-10-19 20:30:15] [INFO] cryptokey routing prefix 10.7.0.2/32 bound to peer 8b7e6d5c4b3a2918".to_owned(),
+                "[2026-10-19 20:30:42] [INFO] handshake established with charlie-macbook (suite 0x0003)".to_owned(),
+                "[2026-10-19 20:31:18] [WARN] dev-bastion-01: keepalive packet delayed (1420ms)".to_owned(),
+                "[2026-10-19 20:32:05] [INFO] rekey triggered for epoch 1; ratchet PCS confirmed".to_owned(),
+                "[2026-10-19 20:33:40] [INFO] datagram batching active (16 pkts/call via sendmmsg)".to_owned(),
+            ];
+        }
+        "help" => {
+            app.view = app::View::Help;
+        }
+        "qr" => {
+            app.qr = Some(qr::QrState {
+                frames: vec!["vallum-bundle:v1:0003:enc:client-key".to_owned()],
+                index: 0,
+                last: Instant::now(),
+                hash: "e8a12c4b".to_owned(),
+                path: "/etc/vallum/client.vallum-bundle".to_owned(),
+            });
+        }
+        "filter" => {
+            app.filtering = true;
+            app.peer_filter = "psk".to_owned();
+        }
+        "ping" => {
+            app.peer_selected = 1;
+            app.notify("ping 10.7.0.3: reply in 18.2 ms");
+        }
+        "peer1" => {
+            app.peer_selected = 1;
+        }
+        "peer2" => {
+            app.peer_selected = 2;
+        }
+        _ => {}
+    }
+
     let backend = TestBackend::new(args.width.max(40), args.height.max(12));
     let mut terminal =
         Terminal::new(backend).map_err(|error| Error::Usage(format!("tui snapshot: {error}")))?;
@@ -123,9 +255,38 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
     let buffer = terminal.backend().buffer();
     let mut out = io::stdout();
     for y in 0..args.height.max(12) {
+        let mut last_fg = ratatui::style::Color::Reset;
+        let mut last_bg = ratatui::style::Color::Reset;
+        let mut last_bold = false;
+
         for x in 0..args.width.max(40) {
-            let symbol = buffer.cell((x, y)).map_or(" ", |cell| cell.symbol());
-            write!(out, "{symbol}").map_err(Error::Io)?;
+            if let Some(cell) = buffer.cell((x, y)) {
+                if args.ansi {
+                    let bold = cell.modifier.contains(ratatui::style::Modifier::BOLD);
+                    if bold != last_bold {
+                        if bold {
+                            write!(out, "\x1b[1m").map_err(Error::Io)?;
+                        } else {
+                            write!(out, "\x1b[22m").map_err(Error::Io)?;
+                        }
+                        last_bold = bold;
+                    }
+                    if cell.fg != last_fg {
+                        write!(out, "{}", color_to_ansi_fg(cell.fg)).map_err(Error::Io)?;
+                        last_fg = cell.fg;
+                    }
+                    if cell.bg != last_bg {
+                        write!(out, "{}", color_to_ansi_bg(cell.bg)).map_err(Error::Io)?;
+                        last_bg = cell.bg;
+                    }
+                }
+                write!(out, "{}", cell.symbol()).map_err(Error::Io)?;
+            } else {
+                write!(out, " ").map_err(Error::Io)?;
+            }
+        }
+        if args.ansi {
+            write!(out, "\x1b[0m").map_err(Error::Io)?;
         }
         writeln!(out).map_err(Error::Io)?;
     }

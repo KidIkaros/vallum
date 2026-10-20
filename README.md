@@ -4,7 +4,16 @@
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](Cargo.toml)
 
 A hybrid **post-quantum layer-3 tunnel** — a real userspace VPN, not a reference
-crate.
+crate. Developed in joint engineering partnership between **Ikaros Digital** and **Atomguard**.
+
+<p align="center">
+  <img src="assets/vallum-demo.gif" alt="Vallum TUI Operations Cockpit" width="100%">
+</p>
+<p align="center">
+  <em>Live operations cockpit: tri-hybrid PQ tunnel state, active peers, connectivity ping probes, smart filters, and journald telemetry.</em>
+  <br>
+  <a href="assets/vallum-demo.mp4"><b>▶ Download HD Video Capture (.mp4)</b></a> · <a href="assets/vallum-cockpit.svg"><b>View Vector SVG</b></a>
+</p>
 
 Vallum is built *on top of* `origin-crypto-sdk` but never *inside* it: every
 cryptographic operation Vallum performs goes through a Vallum-owned boundary
@@ -138,31 +147,60 @@ suite `0x0002` (X25519+ML-KEM-768): generate a key with `vallum keygen --suite 2
 It completes a handshake in ~1.81 ms versus ~54 ms for the default tri-hybrid;
 the default stays tri-hybrid for KEM diversity.
 
-## TUI
+## TUI (Terminal Operations Cockpit)
 
-`vallum tui` is a terminal operations console: live device and peer state, peer
-add/edit/remove, key generation, client-bundle QR export, runtime device
-changes, start/stop, and journald logs. It talks to the 0600 control socket and
-needs no root for status or peer changes.
+`vallum tui` is a terminal operations cockpit for real-time monitoring and tunnel administration: live device state, peer add/edit/remove, peer connectivity ping probes, smart filtering, QR client-bundle export, runtime parameter changes, service toggle, and journald log streaming. It communicates over the local `0600` control socket without requiring root privileges for day-to-day operations.
 
-```text
-┌Vallum────────────────────────────────────────────────────────────────────────────────────────┐
-│ vallum0                                                                                      │
-│listen 127.0.0.1:41403  suite 0x0003  fwmark 0  079c12170a8fb63b                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Peers────────────────────────────────────────────────────────────────────┐┌Details──────────────┐
-│name         fingerprint      endpoint   allowed        handshake rx/tx    ││laptop               │
-│laptop       1a0888aca6183e92 (none)     10.7.0.2/32    —         0B/0B     ││allowed  10.7.0.2/32 │
-└──────────────────────────────────────────────────────────────────────────┘└─────────────────────┘
-Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device
-C interface  E edit config  s start/stop  l logs  f follow  ? help  Q quit
-```
+<p align="center">
+  <img src="assets/vallum-cockpit.png" alt="Vallum Cockpit Dashboard" width="100%">
+</p>
+
+### Dogfooding & Operations Showcase
+
+| Live Cockpit & Peer Telemetry | Semantic Journald Logs (`l`) |
+|:---:|:---:|
+| <img src="assets/vallum-peer-macbook.png" alt="Peer Selection & Details" width="100%"> | <img src="assets/vallum-logs.png" alt="Semantic Logs" width="100%"> |
+| **Peer Ping Connectivity Probe (`p`)** | **Multi-Frame Client Bundle QR (`b`)** |
+| <img src="assets/vallum-ping.png" alt="Ping Probe" width="100%"> | <img src="assets/vallum-qr.png" alt="Client QR Export" width="100%"> |
 
 Generate that frame yourself with
-`vallum tui --config <file> --snapshot --width 160 --height 30`. The QR export
-asks for the server endpoint (an unspecified `0.0.0.0`/`[::]` is rejected);
+`vallum tui --control /run/vallum/<name>.sock --snapshot --ansi --width 120 --height 32`.
+The QR export asks for the server endpoint (an unspecified `0.0.0.0`/`[::]` is rejected);
 `vallum import-bundle <file> --output-dir DIR` unpacks a bundle into a config
 and a 0600 key. See [`docs/tui.md`](docs/tui.md) for the key map and limits.
+
+## Operator Ergonomics & UX Principles
+
+Vallum's terminal interface is built in accordance with cognitive psychology and human-computer interaction (HCI) principles (*The Design of Everyday Things*, *Designing with the Mind in Mind*, and *Designing the User Interface*):
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                      OPERATOR COGNITIVE SURFACE                        │
+├───────────────────────────────────┬────────────────────────────────────┤
+│ Recognition Over Recall           │ Forgiving Interaction              │
+│ • Bottom action capsules          │ • Side-by-side config diff audit   │
+│ • Progressive disclosure panes    │ • Peer deletion identity preview   │
+│ • Scaled throughput (B/s → GB/s)  │ • Fixed-length secret masking      │
+├───────────────────────────────────┼────────────────────────────────────┤
+│ Dual Delivery & Ergonomics        │ Perceptual Feedback                │
+│ • Vim navigation (j/k, g/G, /)    │ • Modeless status toasts (ping RTT)│
+│ • OSC 52 + desktop clipboard      │ • Semantic log highlighting        │
+│ • Bracketed paste protection      │ • Handshake freshness heuristics   │
+└───────────────────────────────────┴────────────────────────────────────┘
+```
+
+- **Progressive Disclosure & Cognitive Chunking**:
+  The dashboard table presents a scannable summary of interface health and peer states. Selecting a peer expands full cryptokey routing, cryptographic identity, and transport telemetry in the side details panel without visual clutter.
+- **Auto-Scaled Data Rates**:
+  Throughput rates dynamically scale (`B/s`, `KB/s`, `MB/s`, `GB/s`) so operators perceive bandwidth changes instantly without mentally counting digits.
+- **Recognition Over Recall**:
+  Persistent key capsules at the bottom adapt to terminal geometry, ensuring operators never need to memorize hotkeys.
+- **Safe, Forgiving Operations**:
+  TOML config changes edited in `$EDITOR` (`E`) display a side-by-side colorized diff view before applying. Peer removal (`d`) requires confirmation showing peer identity and allowed prefixes to prevent accidental disconnection.
+- **Dual-Tier Clipboard Delivery**:
+  Yanking public lines (`y`) or peer IPs (`Y`) simultaneously emits ANSI OSC 52 escape sequences (working seamlessly over remote SSH and tmux sessions) and integrates with desktop clipboards (`wl-copy`, `xclip`).
+- **Immediate Modeless Feedback**:
+  Asynchronous actions (such as the `p` peer connectivity probe or log refreshes) display non-intrusive toasts with round-trip times without interrupting operator workflows.
 
 ## Test
 
@@ -209,3 +247,7 @@ decapsulation here, versus ~0.25 ms for the ML-KEM leg — which is why the
 alternative-suite work matters.
 
 A dual-stack tunnel is one config: `addresses = ["10.7.0.1/24", "fd00:7::1/64"]`.
+ 
+## Partnership
+ 
+Vallum is co-developed through a joint engineering partnership between **Ikaros Digital** and **Atomguard**, uniting post-quantum cryptographic research, zero-compromise security engineering, and operator-focused systems design.
