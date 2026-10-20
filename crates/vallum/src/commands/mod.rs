@@ -12,5 +12,6 @@ pub mod metrics;
 pub mod peer;
 pub mod run;
 pub mod server;
+pub mod setup;
 #[cfg(feature = "tui")]
 pub mod tui;

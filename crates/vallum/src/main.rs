@@ -15,10 +15,11 @@ use vallum::commands::metrics::MetricsArgs;
 use vallum::commands::peer::PeerArgs;
 use vallum::commands::run::RunArgs;
 use vallum::commands::server::ServerArgs;
+use vallum::commands::setup::SetupArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::{
-    bench, control, doctor, identity, import, keys, metrics, peer, run, server,
+    bench, control, doctor, identity, import, keys, metrics, peer, run, server, setup,
 };
 use vallum::Error;
 
@@ -33,8 +34,9 @@ use vallum::Error;
                   The daemon is Linux-only this release; see docs/deployment/server.md."
 )]
 struct Cli {
+    /// Absent means "tell me what this machine can be", not an error.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 
     /// Use a private key file that its group or the world can read.
     ///
@@ -48,6 +50,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Set this machine up as a server, or as a client.
+    Setup(SetupArgs),
     /// Run the tunnel described by a configuration file.
     Run(RunArgs),
     /// Generate a private key, and print the public line for a peer.
@@ -96,7 +100,21 @@ struct CompletionsArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let outcome = match cli.command {
+    let Some(command) = cli.command else {
+        // A wall of twenty subcommands is not an answer to "what now?".
+        println!(
+            "Vallum — a post-quantum tunnel between two machines.\n\n\
+             On the server, where clients connect:\n\
+             \x20  sudo vallum setup --server\n\n\
+             On a machine that a server gave a .vallum-bundle:\n\
+             \x20  sudo vallum setup --client <file>.vallum-bundle\n\n\
+             `vallum setup` with no flags asks which one this machine is.\n\
+             Every command is under `vallum --help`; the dashboard is `vallum tui`."
+        );
+        return ExitCode::SUCCESS;
+    };
+    let outcome = match command {
+        Command::Setup(args) => setup::setup(&args),
         Command::Run(args) => run::run(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keys::keygen(&args),
         Command::Pubkey(args) => keys::pubkey(&args, cli.allow_insecure_key_permissions),

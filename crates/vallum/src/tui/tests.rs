@@ -163,8 +163,9 @@ fn empty_dashboard_explains_how_to_connect_or_start_an_interface() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("No Vallum interface found"));
-    assert!(text.contains("vallum-quick up"));
+    assert!(text.contains("No tunnel on this machine yet"));
+    assert!(text.contains("What is this machine?"));
+    assert!(text.contains("vallum setup --server"));
     assert!(!text.contains("No device data"));
 }
 
@@ -1340,10 +1341,18 @@ fn palette_window_stays_anchored_on_first_page_and_matches_categories() {
     assert_eq!(window_start(28, 14, 14), 1);
     assert_eq!(window_start(28, 27, 14), 14);
 
-    let bundle_cmds = matching_commands("BUNDLE");
+    // A "BUNDLE" search also finds the client-setup command by keyword, which
+    // is the point of keywords; the category itself has exactly two members.
+    let bundle_cmds: Vec<_> = matching_commands("BUNDLE")
+        .into_iter()
+        .filter(|command| command.category == "BUNDLE")
+        .collect();
     assert_eq!(bundle_cmds.len(), 2);
     assert_eq!(bundle_cmds[0].action, Action::ExportBundle);
     assert_eq!(bundle_cmds[1].action, Action::ImportBundle);
+    assert!(matching_commands("BUNDLE")
+        .iter()
+        .any(|command| command.action == Action::SetupClient));
 }
 
 #[test]
@@ -1468,4 +1477,67 @@ fn an_expiring_identity_and_an_open_rotation_are_visible_in_the_detail_pane() {
         text.contains("rotation    open"),
         "an open rotation is not shown; buffer:\n{text}"
     );
+}
+
+#[test]
+fn the_first_screen_asks_what_the_machine_is_and_shows_both_commands() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let app = App::new(Vec::new());
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw empty state");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+
+    assert!(text.contains("What is this machine?"), "{text}");
+    assert!(text.contains("The server"), "no server role");
+    assert!(text.contains("The client"), "no client role");
+    assert!(text.contains("vallum setup --server"), "no server command");
+    assert!(text.contains("vallum setup --client"), "no client command");
+}
+
+#[test]
+fn the_numbered_roles_hand_over_the_command_for_this_machine() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+    );
+    let toast = app.toast.as_ref().expect("a toast says what happened");
+    assert!(
+        toast.message.contains("setup --server"),
+        "{}",
+        toast.message
+    );
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+    );
+    let toast = app.toast.as_ref().expect("a toast says what happened");
+    assert!(
+        toast.message.contains("setup --client"),
+        "{}",
+        toast.message
+    );
+}
+
+#[test]
+fn the_palette_offers_both_setup_roles() {
+    let names: Vec<&str> = super::keymap::COMMANDS.iter().map(|c| c.name).collect();
+    assert!(names.iter().any(|name| name.contains("as a server")));
+    assert!(names.iter().any(|name| name.contains("as a client")));
+    // Category badges must not collide with an existing one.
+    let categories: Vec<&str> = super::keymap::COMMANDS.iter().map(|c| c.category).collect();
+    assert!(categories.contains(&"SETUP"));
 }

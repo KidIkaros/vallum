@@ -1101,6 +1101,39 @@ pub(crate) fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
         .ok_or_else(|| "endpoint resolved to nothing".to_owned())
 }
 
+/// Answer the first-run question: this machine is a server, or a client.
+///
+/// The dashboard cannot change the host — that needs root and a terminal — so
+/// it hands over the exact command for *this* machine and copies it, rather
+/// than pretending to run it.
+pub fn setup_hint(app: &mut App, server: bool) {
+    let command = if server {
+        "sudo vallum setup --server".to_owned()
+    } else {
+        let bundles = std::fs::read_dir(".")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .is_some_and(|extension| extension == "vallum-bundle")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if bundles > 0 {
+            "sudo vallum setup --client <file>.vallum-bundle   (press i to import one here)"
+                .to_owned()
+        } else {
+            "sudo vallum setup --client <file>.vallum-bundle".to_owned()
+        }
+    };
+    let channels = copy_to_clipboard(&command);
+    app.notify(format!("{command} — {}", clipboard_report(&channels)));
+}
+
 /// Best-effort clipboard copy. Returns the channels that accepted the text so
 /// the caller can report honestly — an OSC 52 write can only be reported as
 /// *sent*; whether the terminal stores it is unverifiable.

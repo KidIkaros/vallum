@@ -59,10 +59,18 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
     if !args.install {
         say!();
         say!("next:");
-        say!(
-            "   sudo systemctl enable --now vallum@{}",
-            instance_of(&imported.config)
-        );
+        // A unit can only run a config in /etc/vallum; anything else has to be
+        // run directly, and saying otherwise sends the operator to a command
+        // that cannot work.
+        let config = imported.config.display().to_string();
+        if config.starts_with("/etc/vallum/") {
+            say!(
+                "   sudo systemctl enable --now vallum@{}",
+                instance_of(&imported.config)
+            );
+        } else {
+            say!("   sudo vallum run --config {config}");
+        }
         return Ok(());
     }
 

@@ -106,21 +106,31 @@ one (recorded as an open limitation).
 
 ## Deploy
 
-A Vallum server is one command, and a client is another. Both are the same
-daemon; only the config differs.
+A server and a client are the same daemon with different configs. `vallum setup`
+asks which one this machine is and runs only that role's steps:
 
 ```sh
-# server: install a release, then key + config + forwarding + firewall + NAT + service
-sudo ./scripts/install.sh --from-release --endpoint vpn.example.com --address 10.7.0.1/24
+# on the server — key, config, forwarding, firewall, NAT, service
+sudo vallum setup --server
 
-# enrol a device; it receives one bundle file and imports it
+# it then offers to enrol your first client and prints the handoff;
+# on the client, that one bundle is all it needs
+sudo vallum setup --client laptop.vallum-bundle
+```
+
+`vallum setup` with no flags asks the question interactively; `--server` and
+`--client FILE` are the scriptable forms, and `--dry-run` prints the whole plan
+before anything is touched. Underneath, `vallum server init` is idempotent and
+`vallum peer add --public-key` is the other custody model: the device generates
+its own key and only its public line travels.
+
+If you would rather drive each step yourself:
+
+```sh
+sudo ./scripts/install.sh --from-release --endpoint vpn.example.com --address 10.7.0.1/24
 sudo vallum peer add laptop --bundle-out laptop.vallum-bundle --forget-key
 sudo vallum import-bundle laptop.vallum-bundle --install   # on the device
 ```
-
-`vallum server init` is idempotent and `--dry-run` prints the whole plan before
-anything is touched. `vallum peer add --public-key` is the other custody model:
-the device generates its own key and only its public line travels.
 
 Guides: [server](docs/deployment/server.md) ·
 [client](docs/deployment/client.md) ·

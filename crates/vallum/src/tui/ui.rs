@@ -450,93 +450,93 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
         text.push(Line::from(""));
     }
 
+    // The one question that decides everything after it. Two roles, the
+    // command each needs for *this* machine, and nothing else — the full
+    // command list is behind `vallum --help` and the palette.
     text.push(Line::from(vec![
         Span::styled("◌ ", Style::default().fg(Color::Yellow)),
         Span::styled(
-            "No Vallum interface found",
+            "No tunnel on this machine yet.",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " — choose an onboarding path below:",
-            Style::default().fg(Color::Gray),
-        ),
+        Span::styled("  What is this machine?", Style::default().fg(Color::White)),
     ]));
     text.push(Line::from(""));
+    for (key, role, detail, command) in [
+        (
+            " 1 ",
+            "The server",
+            "clients connect to it",
+            "sudo vallum setup --server",
+        ),
+        (
+            " 2 ",
+            "The client",
+            "it connects to a server",
+            "sudo vallum setup --client <file>.vallum-bundle",
+        ),
+    ] {
+        text.push(Line::from(vec![
+            Span::styled(
+                key,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {role:<12}"),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(detail, Style::default().fg(Color::Gray)),
+        ]));
+        // A visible marker, not leading spaces: the paragraph wraps with
+        // `trim: true`, which eats indentation and left the command stranded
+        // in column zero.
+        text.push(Line::from(vec![
+            Span::styled("  → ", Style::default().fg(Color::DarkGray)),
+            Span::styled(command, Style::default().fg(Color::Cyan)),
+        ]));
+        text.push(Line::from(""));
+    }
     text.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
         Span::styled(
-            " 01 ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "1 or 2 copies the command for this machine",
+            Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(" Start a tunnel     ", Style::default().fg(Color::White)),
+        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+        Span::styled("i", Style::default().fg(Color::Cyan)),
         Span::styled(
-            "sudo vallum-quick up /etc/vallum/<name>.toml",
-            Style::default().fg(Color::Cyan),
+            " imports a bundle here ",
+            Style::default().fg(Color::DarkGray),
         ),
+        Span::styled("· ", Style::default().fg(Color::DarkGray)),
+        Span::styled(":", Style::default().fg(Color::Cyan)),
+        Span::styled(" every action ", Style::default().fg(Color::DarkGray)),
+        Span::styled("· ", Style::default().fg(Color::DarkGray)),
+        Span::styled("?", Style::default().fg(Color::Cyan)),
+        Span::styled(" help", Style::default().fg(Color::DarkGray)),
     ]));
-    text.push(Line::from(vec![
-        Span::styled(
-            " 02 ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Inspect a daemon   ", Style::default().fg(Color::White)),
-        Span::styled(
-            "vallum tui --control /run/vallum/<name>.sock",
-            Style::default().fg(Color::Cyan),
-        ),
-    ]));
-    text.push(Line::from(vec![
-        Span::styled(
-            " 03 ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Load a config      ", Style::default().fg(Color::White)),
-        Span::styled(
-            "vallum tui --config /path/to/config.toml  (or --config-dir DIR)",
-            Style::default().fg(Color::Gray),
-        ),
-    ]));
-    text.push(Line::from(""));
-    text.push(Line::from(vec![Span::styled(
-        "── Interactive Actions ──────────────────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    )]));
-    text.push(Line::from(vec![
-        Span::styled(
-            " i ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Import a client bundle (.vallum-bundle) directly   ",
-            Style::default().fg(Color::Gray),
-        ),
-        Span::styled(
-            " : ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Open command palette   ", Style::default().fg(Color::Gray)),
-        Span::styled(
-            " g ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Generate keypair", Style::default().fg(Color::Gray)),
-    ]));
+    if area.height >= 18 {
+        text.push(Line::from(""));
+        text.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                "Already have a config? ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "vallum tui --config /path/to/config.toml",
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
     text.push(Line::from(""));
     text.push(Line::from(Span::styled(
         "  Ikaros Digital × Atomguard · zero-compromise post-quantum systems engineering",

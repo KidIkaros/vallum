@@ -12,6 +12,13 @@ mutually authenticated key confirmation. It is configured by a TOML file; the
 daemon owns the tunnel, the TUN interface and the UDP socket, and nothing else.
 .SH COMMANDS
 .TP
+.B "setup [--server | --client FILE]"
+The one entry point: asks what this machine is and runs only that role's
+steps. \fB--server\fR is \fBserver init\fR plus the offer to enrol a first
+client; \fB--client FILE\fR is \fBimport-bundle --install\fR. With no flags
+it prompts, and without a terminal it prints the two paths and changes
+nothing.
+.TP
 .B run --config FILE
 Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
 .TP

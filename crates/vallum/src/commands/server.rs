@@ -129,11 +129,11 @@ struct Report {
 /// step that failed — named with what it was trying to do.
 pub fn server(args: &ServerArgs) -> Result<(), Error> {
     match &args.command {
-        ServerCommand::Init(init) => run_init(init),
+        ServerCommand::Init(init) => self::init(init),
     }
 }
 
-fn run_init(args: &InitArgs) -> Result<(), Error> {
+pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
     let root = nix::unistd::geteuid().is_root();
     let needs_service = !args.no_service && Path::new("/run/systemd/system").exists();
     if !args.dry_run && (!args.no_host || needs_service) && !root {
@@ -653,7 +653,7 @@ mod tests {
             force: false,
             json: false,
         };
-        run_init(&args).unwrap();
+        self::init(&args).unwrap();
         assert!(!config.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -682,7 +682,7 @@ mod tests {
             force: false,
             json: false,
         };
-        run_init(&args).unwrap();
+        self::init(&args).unwrap();
         let loaded = Config::load(&config).unwrap();
         assert_eq!(loaded.interface.name.as_deref(), Some("vallum9"));
         assert_eq!(loaded.interface.listen.as_deref(), Some("0.0.0.0:51820"));
@@ -701,7 +701,7 @@ mod tests {
 
         // Re-running keeps the key: a second init must not invalidate clients.
         let before = std::fs::read(dir.join("server.key")).unwrap();
-        run_init(&args).unwrap();
+        self::init(&args).unwrap();
         let after = std::fs::read(dir.join("server.key")).unwrap();
         assert_eq!(before, after);
         let _ = std::fs::remove_dir_all(&dir);

@@ -431,6 +431,30 @@ fn build_identity(
     }
 }
 
+/// `peer add` as `vallum setup` needs it: a name, a bundle, defaults elsewhere.
+pub(crate) fn add_for_setup(config: &Path, name: &str, bundle_out: &Path) -> Result<(), Error> {
+    add(&AddArgs {
+        name: name.to_owned(),
+        config: config.to_path_buf(),
+        public_key: None,
+        public_key_file: None,
+        bundle_out: Some(bundle_out.to_path_buf()),
+        client_config_out: None,
+        identity: None,
+        address: None,
+        allowed_ips: None,
+        endpoint: None,
+        keepalive: None,
+        pin_endpoint: false,
+        psk: false,
+        dns: Vec::new(),
+        forget_key: false,
+        no_apply: false,
+        json: false,
+        full: false,
+    })
+}
+
 fn add(args: &AddArgs) -> Result<(), Error> {
     require_config(&args.config)?;
     let mut file = ConfigFile::load(&args.config)?;

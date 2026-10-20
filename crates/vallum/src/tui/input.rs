@@ -559,6 +559,8 @@ fn dispatch(app: &mut App, action: Action) {
         Action::ToggleService => actions::toggle_service(app),
         Action::Ping => actions::ping_peer(app),
         Action::ImportBundle => actions::import_bundle(app),
+        Action::SetupServer => actions::setup_hint(app, true),
+        Action::SetupClient => actions::setup_hint(app, false),
         Action::YankPublicLine => actions::yank_public_line(app),
         Action::YankAddress => actions::yank_peer_address(app),
         Action::SaveRuntime => actions::save_runtime_config(app),

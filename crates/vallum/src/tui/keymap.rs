@@ -54,6 +54,8 @@ pub enum Action {
     EditConfig,
     ToggleService,
     Logs,
+    SetupServer,
+    SetupClient,
 }
 
 /// One command-palette entry: category badge, name shown, keywords searched.
@@ -68,6 +70,18 @@ pub struct Command {
 /// The palette list, in the order shown when the input is empty.
 /// Commands that open a form or confirmation carry a trailing `…` (GUI Blooper 31).
 pub const COMMANDS: &[Command] = &[
+    Command {
+        action: Action::SetupServer,
+        category: "SETUP",
+        name: "set this machine up as a server…",
+        keywords: "setup init server onboarding host install begin",
+    },
+    Command {
+        action: Action::SetupClient,
+        category: "SETUP",
+        name: "set this machine up as a client…",
+        keywords: "setup client bundle join onboarding connect import",
+    },
     Command {
         action: Action::ToggleService,
         category: "SERVICE",
@@ -398,6 +412,9 @@ impl KeyMap {
             ("interface_form", Action::InterfaceForm, &["C"]),
             ("edit_config", Action::EditConfig, &["E"]),
             ("toggle_service", Action::ToggleService, &["s", "Space"]),
+            // The first-run question is answered with the number it shows.
+            ("setup_server", Action::SetupServer, &["1"]),
+            ("setup_client", Action::SetupClient, &["2"]),
             ("logs", Action::Logs, &["l"]),
         ];
         defaults
