@@ -260,6 +260,19 @@ ip netns exec vallumtest-ns "$QUICK" attach "$WORK/client/ns.toml" > "$WORK/ns-a
 ok "client running inside the namespace, routes attached"
 
 sleep 1
+# Wait for the handshake rather than assuming one second is enough: a retry
+# with backoff would otherwise look exactly like broken forwarding.
+established=0
+for _ in $(seq 1 20); do
+    if ip netns exec vallumtest-ns "$VALLUM" show --control /run/vallum/ns.sock 2>/dev/null \
+        | grep -q "last_handshake_time_sec=[1-9]"; then
+        established=1; break
+    fi
+    sleep 0.5
+done
+[ "$established" = 1 ] && ok "the client completed a handshake" \
+    || warn "the client never handshaked; the tunnel is not established"
+
 # The tunnel before the internet: if this fails the handshake or the TUN is at
 # fault, not forwarding. It is the difference between two very different bugs.
 if ip netns exec vallumtest-ns ping -c2 -W3 "$SRV_IP" > "$WORK/ns-inner.log" 2>&1; then
