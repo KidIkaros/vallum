@@ -1059,11 +1059,15 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ),
         Span::raw("  "),
     ];
-    nav_spans.extend(key_capsule("Tab", "iface"));
-    nav_spans.extend(key_capsule("↑/↓", "peer"));
-    nav_spans.extend(key_capsule("/", "filter"));
-    nav_spans.extend(key_capsule("o", "sort"));
-    nav_spans.push(Span::styled("│  ", Style::default().fg(Color::DarkGray)));
+    // Keys that need an interface are not shown when there is none: a footer
+    // of actions that cannot run is a promise the screen does not keep.
+    if app.current().is_some() {
+        nav_spans.extend(key_capsule("Tab", "iface"));
+        nav_spans.extend(key_capsule("↑/↓", "peer"));
+        nav_spans.extend(key_capsule("/", "filter"));
+        nav_spans.extend(key_capsule("o", "sort"));
+        nav_spans.push(Span::styled("│  ", Style::default().fg(Color::DarkGray)));
+    }
     nav_spans.extend(key_capsule("?", "help"));
     nav_spans.extend(key_capsule("q", "quit"));
 
@@ -1083,6 +1087,16 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
+        ])
+    } else if app.current().is_none() {
+        // Nothing is running: the only honest actions are the ones that work.
+        Line::from(vec![
+            Span::styled(" ▸ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("choose 1 or 2 above · ", Style::default().fg(Color::Gray)),
+            Span::styled(":", Style::default().fg(Color::Cyan)),
+            Span::styled(" every action · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("?", Style::default().fg(Color::Cyan)),
+            Span::styled(" help", Style::default().fg(Color::DarkGray)),
         ])
     } else {
         let mut act_spans = Vec::new();

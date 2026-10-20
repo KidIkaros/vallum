@@ -911,8 +911,12 @@ pub fn service_plan(
     let unit = format!("vallum@{stem}.service");
     let action = if running { "stop" } else { "start" };
     let quick = if running { "down" } else { "up" };
-    if systemd {
+    if systemd && root {
         ServicePlan::Systemd { unit, action }
+    } else if systemd {
+        // A normal user cannot start a system unit, and trying raises a polkit
+        // dialog in the middle of the dashboard. Hand over the command instead.
+        ServicePlan::Command(format!("sudo systemctl {action} {unit}"))
     } else if root {
         ServicePlan::Quick {
             action: quick,
@@ -961,9 +965,15 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
         .and_then(|stem| stem.to_str())
         .unwrap_or("vallum0");
     let unit = format!("vallum@{stem}.service");
-    let systemd = runner
-        .run("systemctl", &["cat".to_owned(), unit.clone()])
-        .is_ok();
+    // The *template* unit exists on any host that installed Vallum, so
+    // `systemctl cat` succeeds for instance names that were never created. A
+    // unit only ever reads /etc/vallum/<instance>.toml, so the config's own
+    // location is what decides whether systemd owns this interface.
+    let under_etc = config.starts_with("/etc/vallum");
+    let systemd = under_etc
+        && runner
+            .run("systemctl", &["cat".to_owned(), unit.clone()])
+            .is_ok();
     let plan = service_plan(
         config,
         interface.device.is_some(),
@@ -1015,7 +1025,12 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
                 app.notify(format!("sudo vallum-quick {action} {config_arg}"));
             }
         }
-        ServicePlan::Command(command) => app.notify(command),
+        ServicePlan::Command(command) => {
+            // Copy it: the operator has to run this in a terminal, and retyping
+            // a unit name is how the wrong unit gets restarted.
+            let channels = copy_to_clipboard(&command);
+            app.notify(format!("{command} — {}", clipboard_report(&channels)));
+        }
     }
 }
 
@@ -1508,10 +1523,12 @@ mod tests {
     }
 
     #[test]
-    fn the_tui_uses_systemd_when_available() {
+    fn the_tui_uses_systemd_when_the_unit_owns_the_config() {
+        // Only a config in /etc/vallum is read by the unit; anywhere else the
+        // template exists but the instance would start with nothing.
         let app_interface = super::super::app::Interface::new(
-            "vallum0".to_owned(),
-            Some(std::path::PathBuf::from("/tmp/fake.toml")),
+            "fake".to_owned(),
+            Some(std::path::PathBuf::from("/etc/vallum/fake.toml")),
             std::path::PathBuf::from("/tmp/control.sock"),
         );
         let mut app = App::new(vec![app_interface]);
@@ -1527,22 +1544,43 @@ mod tests {
     }
 
     #[test]
-    fn the_tui_falls_back_to_quick_as_root() {
+    fn an_unprivileged_operator_is_handed_the_command_not_a_polkit_prompt() {
         let app_interface = super::super::app::Interface::new(
-            "vallum0".to_owned(),
+            "fake".to_owned(),
+            Some(std::path::PathBuf::from("/etc/vallum/fake.toml")),
+            std::path::PathBuf::from("/tmp/control.sock"),
+        );
+        let mut app = App::new(vec![app_interface]);
+        let runner = FakeRunner::new(false, vec![Ok(())]);
+        toggle_service_with(&mut app, &runner);
+        // It asked systemd whether it owns the unit, then stopped: no start,
+        // which is what used to raise the polkit dialog.
+        assert_eq!(runner.calls(), ["systemctl cat vallum@fake.service"]);
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("the operator is told what to run");
+        assert!(
+            toast
+                .message
+                .contains("sudo systemctl start vallum@fake.service"),
+            "{}",
+            toast.message
+        );
+    }
+
+    #[test]
+    fn the_tui_falls_back_to_quick_for_a_config_outside_etc() {
+        // A config in /tmp is not read by any unit, so systemd is never asked.
+        let app_interface = super::super::app::Interface::new(
+            "fake".to_owned(),
             Some(std::path::PathBuf::from("/tmp/fake.toml")),
             std::path::PathBuf::from("/tmp/control.sock"),
         );
         let mut app = App::new(vec![app_interface]);
-        let runner = FakeRunner::new(true, vec![Err("no unit".to_owned()), Ok(())]);
+        let runner = FakeRunner::new(true, vec![Ok(())]);
         toggle_service_with(&mut app, &runner);
-        assert_eq!(
-            runner.calls(),
-            [
-                "systemctl cat vallum@fake.service",
-                "vallum-quick up /tmp/fake.toml",
-            ]
-        );
+        assert_eq!(runner.calls(), ["vallum-quick up /tmp/fake.toml"]);
     }
 
     #[test]
@@ -1553,9 +1591,9 @@ mod tests {
             std::path::PathBuf::from("/tmp/control.sock"),
         );
         let mut app = App::new(vec![app_interface]);
-        let runner = FakeRunner::new(false, vec![Err("no unit".to_owned())]);
+        let runner = FakeRunner::new(false, vec![Ok(())]);
         toggle_service_with(&mut app, &runner);
-        assert_eq!(runner.calls(), ["systemctl cat vallum@fake.service"]);
+        assert_eq!(runner.calls(), Vec::<String>::new());
         assert!(app
             .toast
             .as_ref()

@@ -114,13 +114,29 @@ latest_version() {
 download_asset() {
     local tag=$1 name=$2 out=$3
     local url="https://github.com/$REPO/releases/download/$tag/$name"
-    local header
+    local header token asset_id
     header=$(auth_header)
-    if command -v gh >/dev/null 2>&1 && [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+    token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+    if command -v gh >/dev/null 2>&1 && [ -z "$token" ]; then
         gh release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
         return
     fi
     if [ -n "$header" ]; then
+        # A private repository's `releases/download/...` URL is the web front
+        # end: it wants a browser session and answers 404 to a token. The REST
+        # asset endpoint is the one that accepts one, so resolve the id first.
+        asset_id=$(curl -fsSL -H "$header" \
+            "https://api.github.com/repos/$REPO/releases/tags/$tag" \
+            | awk -v want="$name" '
+                /"id":/ { line = $0; sub(/.*"id": */, "", line); sub(/,.*/, "", line); last = line }
+                $0 ~ "\"name\": \"" want "\"" { print last; exit }
+            ')
+        if [ -n "$asset_id" ]; then
+            curl -fsSL -H "$header" -H "Accept: application/octet-stream" \
+                -o "$out" "https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+            return
+        fi
+        # No id resolved: fall back to the web URL rather than failing here.
         curl -fsSL -H "$header" -o "$out" "$url"
     else
         curl -fsSL -o "$out" "$url"

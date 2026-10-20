@@ -74,6 +74,10 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
         return Ok(());
     }
 
+    // The units exec /usr/bin/vallum{,-quick}; installing them without those
+    // binaries produces a service that fails with 203/EXEC after the operator
+    // was told it worked.
+    crate::commands::server::require_installed_binaries()?;
     let instance = instance_of(&imported.config);
     let service = crate::commands::server::install_service(&instance, false)?;
     say!("service vallum@{instance}: {service}");

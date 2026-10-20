@@ -15,6 +15,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use clap::Args;
+use ipnet::IpNet;
 
 use crate::commands::import::ImportArgs;
 use crate::commands::server::InitArgs;
@@ -67,7 +68,7 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
         return as_server(args);
     }
     if let Some(bundle) = &args.client {
-        return as_client(bundle, args.dry_run);
+        return as_client(bundle, args.dry_run, false);
     }
     if !std::io::stdin().is_terminal() {
         return guidance();
@@ -76,7 +77,7 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
         Role::Server => as_server(args),
         Role::Client => {
             let bundle = ask_bundle()?;
-            as_client(&bundle, args.dry_run)
+            as_client(&bundle, args.dry_run, true)
         }
     }
 }
@@ -116,16 +117,41 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
             {
                 say!("  this machine's address is {detected} — private if clients are off-LAN");
             }
-            let answer = prompt("The address clients dial (a public name or IP)", None)?;
-            (!answer.is_empty()).then_some(answer)
+            loop {
+                let answer = prompt("The address clients dial (a public name or IP)", None)?;
+                if answer.is_empty() {
+                    break None;
+                }
+                if plausible_endpoint(&answer) {
+                    break Some(answer);
+                }
+                // `1`, or a line that was meant for another prompt, is not a
+                // host — and an endpoint is copied into every bundle, so a
+                // wrong one is discovered by a client that cannot connect.
+                say!("`{answer}` is not an address. Give a name or an IP, like vpn.example.com.");
+            }
         }
         (None, false) => None,
     };
     let address = match (&args.address, interactive) {
         (Some(address), _) => address.clone(),
-        (None, true) => prompt("The tunnel address", Some(DEFAULT_ADDRESS))?,
+        (None, true) => {
+            // A wizard that hands an unvalidated value to `init` and lets the
+            // error surface four steps later has not prevented anything.
+            loop {
+                let answer = prompt("The tunnel address", Some(DEFAULT_ADDRESS))?;
+                match answer.parse::<IpNet>() {
+                    Ok(_) => break answer,
+                    Err(_) => say!("`{answer}` needs a prefix, like {DEFAULT_ADDRESS}. Try again."),
+                }
+            }
+        }
         (None, false) => DEFAULT_ADDRESS.to_owned(),
     };
+    let network = address
+        .parse::<IpNet>()
+        .map(|prefix| prefix.trunc().to_string())
+        .unwrap_or_else(|_| address.clone());
 
     let init = InitArgs {
         config: PathBuf::from(format!("/etc/vallum/{}.toml", args.name)),
@@ -156,7 +182,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
             "  · open UDP {} in the host firewall",
             listen_port(&args.listen)?
         );
-        say!("  · add the NAT masquerade for {address}");
+        say!("  · add the NAT masquerade for {network}");
         say!("  · install and start the vallum@{} service", args.name);
         say!();
         if !confirm("Do that?", true)? {
@@ -200,6 +226,12 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
 
 /// The bundle to import: what the operator names, or the only one in sight.
 fn ask_bundle() -> Result<PathBuf, Error> {
+    // A prompt that asks for a file without saying what it is, where it came
+    // from, or what happens next is a riddle, not a question.
+    say!("A .vallum-bundle is the one file your server produced when it enrolled");
+    say!("this machine. It holds the client's config, its private key, and the");
+    say!("server's address — nothing else is needed from the server.");
+    say!();
     let found: Vec<PathBuf> = std::fs::read_dir(".")
         .map(|entries| {
             entries
@@ -216,24 +248,104 @@ fn ask_bundle() -> Result<PathBuf, Error> {
         [only] => Some(only.display().to_string()),
         _ => None,
     };
-    let answer = prompt(
-        "The .vallum-bundle file the server gave you",
-        default.as_deref(),
-    )?;
-    if answer.is_empty() {
-        return Err(Error::Usage(
-            "give the path to a .vallum-bundle file, or ask the server for one: \
-             `vallum peer add <name> --bundle-out <name>.vallum-bundle`"
-                .to_owned(),
-        ));
+    loop {
+        let answer = prompt(
+            "The .vallum-bundle file the server gave you",
+            default.as_deref(),
+        )?;
+        if answer.is_empty() {
+            return Err(Error::Usage(
+                "give the path to a .vallum-bundle file, or ask the server for one: \
+                 `vallum peer add <name> --bundle-out <name>.vallum-bundle`"
+                    .to_owned(),
+            ));
+        }
+        let path = PathBuf::from(&answer);
+        if path.is_file() {
+            return Ok(path);
+        }
+        say!(
+            "`{answer}` does not exist here. On the server it was written by \
+             `vallum peer add`, and copied over with `scp`."
+        );
+        if default.is_some() && answer != default.clone().unwrap_or_default() {
+            continue;
+        }
+        continue;
     }
-    Ok(PathBuf::from(answer))
 }
 
-fn as_client(bundle: &std::path::Path, dry_run: bool) -> Result<(), Error> {
+/// What a bundle will actually do, read from the bundle itself.
+struct Summary {
+    name: String,
+    endpoint: String,
+    full_tunnel: bool,
+    dns: bool,
+}
+
+fn summarise(bundle: &std::path::Path) -> Result<Summary, Error> {
+    let text = std::fs::read_to_string(bundle).map_err(|source| Error::IoPath {
+        action: "read the bundle",
+        path: bundle.to_path_buf(),
+        source,
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::Usage(format!("{} is not a bundle: {error}", bundle.display())))?;
+    let config = parsed
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage(format!("{} has no config", bundle.display())))?;
+    let line = |key: &str| {
+        config
+            .lines()
+            .find(|line| line.trim_start().starts_with(key))
+            .map(|line| line.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let allowed = line("allowed_ips");
+    Ok(Summary {
+        name: parsed
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or("client")
+            .to_owned(),
+        endpoint: line("endpoint")
+            .trim_start_matches("endpoint = ")
+            .trim_matches('"')
+            .to_owned(),
+        full_tunnel: allowed.contains("0.0.0.0/0") || allowed.contains("::/0"),
+        dns: config.contains("\ndns = ") || config.starts_with("dns = "),
+    })
+}
+
+fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Result<(), Error> {
+    let summary = summarise(bundle)?;
+    say!();
+    say!("{} — {}", bundle.display(), summary.name);
+    say!("   server     {}", summary.endpoint);
+    say!(
+        "   routing    {}",
+        if summary.full_tunnel {
+            "every destination through the tunnel (a full tunnel)"
+        } else {
+            "only the prefixes the server routes"
+        }
+    );
+    if summary.dns {
+        say!("   DNS        the server's resolver, while the tunnel is up");
+    }
+    say!();
+    say!("Importing it will write the config and its key (0600), and install and");
+    say!("start the vallum@{} service.", summary.name);
+    if interactive && !confirm("Do that?", true)? {
+        say!("Nothing was changed.");
+        return Ok(());
+    }
     if dry_run {
-        say!("would import {}", bundle.display());
-        say!("   and start the tunnel for it");
+        say!(
+            "would import {} and start the tunnel for it",
+            bundle.display()
+        );
         return Ok(());
     }
     let root = nix::unistd::Uid::effective().is_root();
@@ -269,6 +381,21 @@ fn guidance() -> Result<(), Error> {
     say!("`vallum setup` with no flags asks which of the two this machine is.");
     say!("Every individual command is under `vallum --help`.");
     Ok(())
+}
+
+/// Whether a dialled address looks like a host, not a stray answer.
+///
+/// Deliberately permissive: single-label LAN names (`nas`) are legitimate, so
+/// the test is that the host is not *purely numeric* — which is never a host
+/// and is almost always a line meant for a different prompt.
+fn plausible_endpoint(answer: &str) -> bool {
+    let host = answer.trim();
+    if host.is_empty() || host.contains(char::is_whitespace) {
+        return false;
+    }
+    let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !host.is_empty() && !host.chars().all(|character| character.is_ascii_digit())
 }
 
 fn listen_port(listen: &str) -> Result<u16, Error> {
@@ -322,6 +449,19 @@ mod tests {
         assert_eq!(listen_port("0.0.0.0:51820").unwrap(), 51820);
         assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
         assert!(listen_port("0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn a_stray_number_is_not_a_host() {
+        assert!(plausible_endpoint("vpn.example.com"));
+        assert!(plausible_endpoint("203.0.113.5"));
+        assert!(plausible_endpoint("203.0.113.5:51820"));
+        assert!(plausible_endpoint("nas"));
+        assert!(plausible_endpoint("[2001:db8::1]:51820"));
+        // The line the wizard caught on a real host.
+        assert!(!plausible_endpoint("1"));
+        assert!(!plausible_endpoint(""));
+        assert!(!plausible_endpoint("two words"));
     }
 
     #[test]

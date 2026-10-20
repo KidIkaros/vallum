@@ -527,12 +527,34 @@ pub(crate) fn normalise_endpoint(endpoint: &str, port: u16) -> String {
     format!("{endpoint}:{port}")
 }
 
+/// Refuse to install a unit that could never start.
+///
+/// The units exec `/usr/bin/vallum{,-quick}`. Running from a checkout — which
+/// is exactly what a first-time user does — leaves those paths empty, and the
+/// unit then fails with `203/EXEC` after the operator has been told setup
+/// succeeded.
+pub(crate) fn require_installed_binaries() -> Result<(), Error> {
+    let missing: Vec<&str> = ["/usr/bin/vallum", "/usr/bin/vallum-quick"]
+        .into_iter()
+        .filter(|path| !Path::new(path).exists())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Precondition(format!(
+        "the systemd units run {}, which {} not installed. Install first          (`sudo ./scripts/install.sh --local`, or a release with --from-release),          or pass --no-service to write the config and run it with `vallum run`",
+        missing.join(" and "),
+        if missing.len() == 1 { "is" } else { "are" }
+    )))
+}
+
 pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, Error> {
     if !Path::new("/run/systemd/system").exists() {
         return Ok(format!(
             "no systemd on this host; start it with `vallum run --config /etc/vallum/{instance}.toml`"
         ));
     }
+    require_installed_binaries()?;
     let unit_dir = Path::new("/etc/systemd/system");
     let daemon_unit = unit_dir.join("vallum@.service");
     let quick_unit = unit_dir.join("vallum-quick@.service");
