@@ -183,6 +183,8 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
                 .persistent_keepalive()
                 .map(|interval| u16::try_from(interval.as_secs()).unwrap_or(u16::MAX)),
             allowed_ips: config.allowed_ips().nets().to_vec(),
+            valid_until: config.validity().map(|window| window.not_after),
+            rotating: !config.previous_identities().is_empty(),
             epoch: device.epoch(id).unwrap_or(0),
         });
     }

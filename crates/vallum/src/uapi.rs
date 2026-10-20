@@ -94,6 +94,10 @@ pub mod field {
     /// Peer fields.
     pub const ALLOWED_IP: &str = "allowed_ip";
     /// Peer fields.
+    /// The unix second a peer's identity document expires, when it has one.
+    pub const VALLUM_VALID_UNTIL: &str = "vallum_valid_until";
+    /// 1 when a rotation is open (a previous identity is still accepted).
+    pub const VALLUM_ROTATING: &str = "vallum_rotating";
     pub const VALLUM_EPOCH: &str = "vallum_epoch";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
@@ -378,6 +382,10 @@ pub struct PeerState {
     pub keepalive: Option<u16>,
     /// Allowed prefixes.
     pub allowed_ips: Vec<Prefix>,
+    /// The unix second this peer's identity expires, when it is a document.
+    pub valid_until: Option<u64>,
+    /// Whether a previous identity is still accepted (a rotation is open).
+    pub rotating: bool,
     /// The current epoch.
     pub epoch: u64,
 }
@@ -479,6 +487,14 @@ pub fn render_get(state: &DeviceState) -> String {
             out.push_str(&format!("{}={prefix}\n", field::ALLOWED_IP));
         }
         out.push_str(&format!("{}={}\n", field::VALLUM_EPOCH, peer.epoch));
+        if let Some(valid_until) = peer.valid_until {
+            out.push_str(&format!("{}={valid_until}\n", field::VALLUM_VALID_UNTIL));
+        }
+        out.push_str(&format!(
+            "{}={}\n",
+            field::VALLUM_ROTATING,
+            u8::from(peer.rotating)
+        ));
     }
     out.push_str(&format!("{}=0\n", field::ERRNO));
     out
@@ -836,10 +852,10 @@ mod tests {
             prop::option::of(prop::array::uniform32(any::<u8>())),
             prop::option::of(an_address()),
             prop::option::of((any::<u64>(), any::<u32>())),
-            any::<u64>(),
-            any::<u64>(),
+            (any::<u64>(), any::<u64>()),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
+            prop::option::of((any::<u64>(), any::<bool>())),
             any::<u64>(),
         )
             .prop_map(
@@ -851,10 +867,10 @@ mod tests {
                     preshared_key,
                     endpoint,
                     last_handshake,
-                    tx_bytes,
-                    rx_bytes,
+                    (tx_bytes, rx_bytes),
                     keepalive,
                     allowed_ips,
+                    identity,
                     epoch,
                 )| PeerState {
                     name,
@@ -868,6 +884,8 @@ mod tests {
                     rx_bytes,
                     keepalive,
                     allowed_ips,
+                    valid_until: identity.map(|(valid_until, _)| valid_until),
+                    rotating: identity.is_some_and(|(_, rotating)| rotating),
                     epoch,
                 },
             )
@@ -1101,12 +1119,18 @@ mod tests {
                 rx_bytes: 20,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
+                valid_until: Some(1_800_000_000),
+                rotating: true,
                 epoch: 2,
             }],
         };
         let text = render_get(&state);
         assert!(text.contains("private_key=0101"));
         assert!(text.contains("vallum_interface=vallum0"));
+        // An expiring credential and an open rotation are visible to a client
+        // of the control socket, not just to the config file.
+        assert!(text.contains("vallum_valid_until=1800000000"));
+        assert!(text.contains("vallum_rotating=1"));
         assert!(text.contains("vallum_can_set_listen_port=false"));
         assert!(text.contains("endpoint=203.0.113.9:51820"));
         assert!(text.contains("allowed_ip=10.7.0.2/32"));
@@ -1145,6 +1169,8 @@ mod tests {
                 rx_bytes: 0,
                 keepalive: None,
                 allowed_ips: Vec::new(),
+                valid_until: None,
+                rotating: false,
                 epoch: 0,
             }],
         };
@@ -1152,6 +1178,10 @@ mod tests {
         assert_eq!(response.field(field::VALLUM_INTERFACE), Some("vallum0"));
         assert_eq!(response.peers.len(), 1);
         assert_eq!(response.peer_field(0, "vallum_name"), Some("laptop"));
+        // A peer with no document says nothing about a window, and reports a
+        // closed rotation explicitly.
+        assert_eq!(response.peer_field(0, "vallum_valid_until"), None);
+        assert_eq!(response.peer_field(0, "vallum_rotating"), Some("0"));
     }
 
     #[test]

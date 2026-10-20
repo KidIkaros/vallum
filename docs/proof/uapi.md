@@ -67,6 +67,8 @@ rx_bytes=<u64>
 persistent_keepalive_interval=<seconds, 0 = off>
 allowed_ip=<prefix>            (repeated)
 vallum_epoch=<u64>
+vallum_valid_until=<unix seconds>   # only when the peer's identity is a document
+vallum_rotating=<0|1>               # 1 while a previous identity is still accepted
 errno=0
 ```
 

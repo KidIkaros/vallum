@@ -1412,3 +1412,60 @@ fn fitts_law_footer_and_header_clicks_trigger_actions_and_palette_accepts_paste(
     );
     assert_eq!(app.selected, 1);
 }
+
+#[test]
+fn an_expiring_identity_and_an_open_rotation_are_visible_in_the_detail_pane() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let expires = now + 14 * 86_400;
+    let response = crate::uapi::parse_response(&format!(
+        "vallum_interface=vallum0\n\
+         vallum_suite=0x0003\n\
+         vallum_listen=0.0.0.0:51820\n\
+         errno=0\n\
+         \n\
+         public_key=aa\n\
+         vallum_name=laptop\n\
+         vallum_fingerprint=f1e20541fb69\n\
+         vallum_valid_until={expires}\n\
+         vallum_rotating=1\n\
+         rx_bytes=10\n\
+         tx_bytes=20\n\
+         vallum_epoch=1\n\
+         errno=0\n"
+    ));
+
+    let mut iface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    iface.set_device(DeviceView::from_response(&response));
+    assert_eq!(
+        iface.device.as_ref().unwrap().peers[0].valid_until,
+        Some(expires)
+    );
+    assert!(iface.device.as_ref().unwrap().peers[0].rotating);
+    let app = App::new(vec![iface]);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("14d left"), "the window is not shown: {text}");
+    // The pane wraps, so match the label and the start of the value.
+    assert!(
+        text.contains("rotation    open"),
+        "an open rotation is not shown; buffer:\n{text}"
+    );
+}

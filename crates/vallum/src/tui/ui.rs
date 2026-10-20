@@ -834,6 +834,41 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             peer.epoch.to_string(),
             Style::default().fg(Color::Gray),
         ));
+        // An expiring credential is the one thing a peer detail can show that
+        // the operator must act on, so it is never silent.
+        if let Some(valid_until) = peer.valid_until {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let days = (i64::try_from(valid_until).unwrap_or(i64::MAX)
+                - i64::try_from(now).unwrap_or(i64::MAX))
+            .div_euclid(86_400);
+            let (label, style) = if days < 0 {
+                (
+                    format!("EXPIRED {}d ago", -days),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )
+            } else if days <= 14 {
+                (
+                    format!("{days}d left"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (format!("{days}d left"), Style::default().fg(Color::Green))
+            };
+            lines.push(detail_kv("identity", label, style));
+        }
+        if peer.rotating {
+            lines.push(detail_kv(
+                "rotation",
+                "open — the previous key is still accepted (`peer finalize`)",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         lines.push(detail_kv(
             "PSK",
             if peer.preshared_key {

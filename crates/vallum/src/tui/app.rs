@@ -23,6 +23,10 @@ pub struct PeerView {
     pub rx_bytes: u64,
     pub epoch: u64,
     pub preshared_key: bool,
+    /// Unix second the peer's identity expires, when it is a document.
+    pub valid_until: Option<u64>,
+    /// Whether a rotation is open (a previous identity is still accepted).
+    pub rotating: bool,
 }
 
 /// One device snapshot.
@@ -99,6 +103,8 @@ impl DeviceView {
                     rx_bytes: peer_field(field::RX_BYTES).parse().unwrap_or(0),
                     epoch: peer_field(field::VALLUM_EPOCH).parse().unwrap_or(0),
                     preshared_key: !peer_field(field::PRESHARED_KEY).is_empty(),
+                    valid_until: peer_field(field::VALLUM_VALID_UNTIL).parse().ok(),
+                    rotating: peer_field(field::VALLUM_ROTATING) == "1",
                 }
             })
             .collect();
