@@ -163,14 +163,7 @@ fn up_after_pre(
         wait_for_interface(interface)?;
     }
 
-    if table != "off" {
-        for peer in &config.peers {
-            for prefix in &peer.allowed_ips {
-                let prefix: Prefix = prefix.parse()?;
-                add_route(interface, &prefix, table, dry_run)?;
-            }
-        }
-    }
+    apply_routes(config, interface, table, dry_run)?;
 
     if !config.quick.dns.is_empty() {
         set_dns(
@@ -197,15 +190,7 @@ fn up_after_pre(
 
 /// Undo whatever a failed `up` may have applied.
 fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, dry_run: bool) {
-    if table != "off" {
-        for peer in &config.peers {
-            for prefix in &peer.allowed_ips {
-                if let Ok(prefix) = prefix.parse::<Prefix>() {
-                    let _ = del_route(interface, &prefix, table, dry_run);
-                }
-            }
-        }
-    }
+    remove_routes(config, interface, table, dry_run);
     if !config.quick.dns.is_empty() {
         let _ = unset_dns(interface, dry_run);
     }
@@ -236,14 +221,7 @@ fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Err
         run_hook(hook, dry_run)?;
     }
 
-    if table != "off" {
-        for peer in &config.peers {
-            for prefix in &peer.allowed_ips {
-                let prefix: Prefix = prefix.parse()?;
-                del_route(&interface, &prefix, table, dry_run)?;
-            }
-        }
-    }
+    remove_routes(&config, &interface, table, dry_run);
     if !config.quick.dns.is_empty() {
         unset_dns(&interface, dry_run)?;
     }
@@ -287,9 +265,7 @@ fn attach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::E
         wait_for_interface(&interface)?;
     }
 
-    for prefix in managed_routes(&config, &interface, table, dry_run)? {
-        add_route(&interface, &prefix, table, dry_run)?;
-    }
+    apply_routes(&config, &interface, table, dry_run)?;
 
     if !config.quick.dns.is_empty() {
         set_dns(
@@ -320,9 +296,7 @@ fn detach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::E
         run_hook(hook, dry_run)?;
     }
 
-    for prefix in managed_routes(&config, &interface, table, dry_run)? {
-        del_route(&interface, &prefix, table, dry_run)?;
-    }
+    remove_routes(&config, &interface, table, dry_run);
 
     if !config.quick.dns.is_empty() {
         unset_dns(&interface, dry_run)?;
@@ -360,6 +334,174 @@ fn managed_routes(
         }
     }
     Ok(routes)
+}
+
+/// The routing table a full tunnel keeps its default route in.
+const POLICY_TABLE: &str = "51820";
+
+/// A full-tunnel route plan, or `None` when no managed route is a default.
+///
+/// A default route cannot go in the main table: it would beat every other
+/// default regardless of metric, and a dead tunnel becomes a dead internet.
+/// WireGuard's model avoids that — the default lives in its own table, `not
+/// fwmark <mark>` sends all unmarked traffic there, and `suppress_prefixlength
+/// 0` leaves every non-default route to the main table. The daemon marks its
+/// own UDP packets (`[interface] fwmark` → `SO_MARK`), so its handshake and
+/// data escape to the real gateway while everything else enters the tunnel.
+#[derive(Debug)]
+struct Policy {
+    table: String,
+    mark: u32,
+    v4: bool,
+    v6: bool,
+}
+
+/// Whether a default route is among the managed routes, and if so the policy
+/// needed to install it safely.
+fn policy_for(
+    config: &Config,
+    routes: &[Prefix],
+    table: &str,
+) -> Result<Option<Policy>, Box<dyn std::error::Error>> {
+    if !routes
+        .iter()
+        .any(|prefix| prefix.as_ipnet().prefix_len() == 0)
+    {
+        return Ok(None);
+    }
+    if table == "off" {
+        return Err("a full tunnel (allowed_ips 0.0.0.0/0) cannot use [quick] table = off".into());
+    }
+    let mark = config.interface.fwmark.filter(|mark| *mark != 0).ok_or(
+        "a full tunnel (allowed_ips 0.0.0.0/0) needs `[interface] fwmark` so the          tunnel's own packets can reach the real gateway; set e.g. `fwmark = 51820`          in the config, or a dead tunnel leaves this host with no route at all",
+    )?;
+    Ok(Some(Policy {
+        table: if table == "auto" {
+            POLICY_TABLE.to_owned()
+        } else {
+            table.to_owned()
+        },
+        mark,
+        v4: routes
+            .iter()
+            .any(|p| matches!(p.as_ipnet(), ipnet::IpNet::V4(net) if net.prefix_len() == 0)),
+        v6: routes
+            .iter()
+            .any(|p| matches!(p.as_ipnet(), ipnet::IpNet::V6(net) if net.prefix_len() == 0)),
+    }))
+}
+
+/// `ip rule add/del` for one family, ignoring failures on `del`.
+fn rule(v6: bool, args: &[&str], del: bool, dry_run: bool) {
+    let mut full: Vec<String> = if v6 {
+        vec!["-6".to_owned()]
+    } else {
+        Vec::new()
+    };
+    full.extend(args.iter().map(|a| (*a).to_owned()));
+    if del {
+        let _ = ip(&full, dry_run);
+    } else {
+        // A rule that fails to install must abort, not half-apply.
+        if let Err(error) = ip(&full, dry_run) {
+            eprintln!("vallum-quick: {error}");
+        }
+    }
+}
+
+/// Install the routes, and policy rules if a default route is among them.
+fn apply_routes(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let routes = managed_routes(config, interface, table, dry_run)?;
+    let policy = policy_for(config, &routes, table)?;
+    if let Some(policy) = &policy {
+        // Rules before routes, so no lookup can find an empty table.
+        let mark = policy.mark.to_string();
+        for v6 in [false, true] {
+            if (v6 && !policy.v6) || (!v6 && !policy.v4) {
+                continue;
+            }
+            rule(
+                v6,
+                &[
+                    "rule",
+                    "add",
+                    "not",
+                    "fwmark",
+                    &mark,
+                    "table",
+                    &policy.table,
+                ],
+                false,
+                dry_run,
+            );
+            rule(
+                v6,
+                &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
+                false,
+                dry_run,
+            );
+        }
+    }
+    for prefix in &routes {
+        let route_table = match &policy {
+            Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
+            _ => table,
+        };
+        add_route(interface, prefix, route_table, dry_run)?;
+    }
+    Ok(())
+}
+
+/// Undo [`apply_routes`]. Deletion ignores failures: whatever was never added
+/// is simply absent.
+fn remove_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
+    if table == "off" {
+        return;
+    }
+    let routes = managed_routes(config, interface, table, dry_run).unwrap_or_default();
+    if let Some(policy) = policy_for(config, &routes, table).ok().flatten() {
+        for prefix in &routes {
+            if prefix.as_ipnet().prefix_len() == 0 {
+                del_route(interface, prefix, &policy.table, dry_run).ok();
+            }
+        }
+        let mark = policy.mark.to_string();
+        for v6 in [false, true] {
+            if (v6 && !policy.v6) || (!v6 && !policy.v4) {
+                continue;
+            }
+            rule(
+                v6,
+                &[
+                    "rule",
+                    "del",
+                    "not",
+                    "fwmark",
+                    &mark,
+                    "table",
+                    &policy.table,
+                ],
+                true,
+                dry_run,
+            );
+            rule(
+                v6,
+                &["rule", "del", "table", "main", "suppress_prefixlength", "0"],
+                true,
+                dry_run,
+            );
+        }
+    }
+    for prefix in &routes {
+        if prefix.as_ipnet().prefix_len() != 0 {
+            let _ = del_route(interface, prefix, table, dry_run);
+        }
+    }
 }
 
 /// The networks already assigned to the interface.
@@ -762,7 +904,7 @@ mod tests {
         let path = dir.join("v.toml");
         fs::write(
             &path,
-            "[interface]\nname = \"v0\"\n\n[quick]\ndns = [\"1.1.1.1\"]\n\n[[peer]]\nname = \"p\"\n",
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[quick]\ndns = [\"1.1.1.1\"]\n\n[[peer]]\nname = \"p\"\n",
         )
         .unwrap();
         let text = fs::read_to_string(&path).unwrap();
@@ -778,7 +920,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let config = dir.join("v.toml");
         let out = dir.join("out.toml");
-        fs::write(&config, "[interface]\nname = \"v0\"\n").unwrap();
+        fs::write(&config, "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n").unwrap();
         std::env::set_var("VALLUM_BIN", "/bin/echo");
         save(&config, Some(&out), false, false).unwrap();
         assert!(fs::read_to_string(&out).unwrap().contains("showconf"));
@@ -788,6 +930,68 @@ mod tests {
         assert!(fs::read_to_string(&config).unwrap().contains("showconf"));
         assert!(config.with_extension("toml.bak").exists());
         std::env::remove_var("VALLUM_BIN");
+    }
+
+    #[test]
+    fn a_default_route_requires_a_fwmark() {
+        // Without a mark the daemon's own packets would be policy-routed into
+        // the tunnel — the failure that blackholed the host's internet.
+        let dir = std::env::temp_dir().join(format!("vallum-quick-fm-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let routes: Vec<Prefix> = vec!["0.0.0.0/0".parse().unwrap()];
+        let error = policy_for(&config, &routes, "auto").unwrap_err();
+        assert!(error.to_string().contains("fwmark"), "{error}");
+    }
+
+    #[test]
+    fn a_default_route_plans_a_policy_table_not_the_main_table() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-pl-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n[[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let routes: Vec<Prefix> = vec!["0.0.0.0/0".parse().unwrap(), "::/0".parse().unwrap()];
+        let policy = policy_for(&config, &routes, "auto").unwrap().unwrap();
+        assert_eq!(policy.table, POLICY_TABLE);
+        assert_eq!(policy.mark, 51820);
+        assert!(policy.v4 && policy.v6);
+    }
+
+    #[test]
+    fn a_split_tunnel_needs_no_policy() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-sp-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(&path, "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        let routes: Vec<Prefix> = vec!["10.7.0.0/24".parse().unwrap()];
+        assert!(policy_for(&config, &routes, "auto").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_default_route_with_table_off_is_refused() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-off-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 1\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let routes: Vec<Prefix> = vec!["0.0.0.0/0".parse().unwrap()];
+        assert!(policy_for(&config, &routes, "off").is_err());
     }
 
     #[test]
