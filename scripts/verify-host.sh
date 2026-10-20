@@ -60,6 +60,9 @@ cleanup() {
     rm -f "$UNIT_D/vallum@.service" "$UNIT_D/vallum-quick@.service"
     systemctl daemon-reload >/dev/null 2>&1
     nft delete table inet vallum >/dev/null 2>&1
+    iptables -D FORWARD -i "$IFACE" -j ACCEPT >/dev/null 2>&1
+    iptables -D FORWARD -o "$IFACE" -j ACCEPT >/dev/null 2>&1
+    iptables -D INPUT -p udp --dport "$PORT" -j ACCEPT >/dev/null 2>&1
     command -v ufw >/dev/null 2>&1 && ufw delete allow "$PORT/udp" >/dev/null 2>&1
     rm -f "$SYSCTL_FILE"
     sysctl -p >/dev/null 2>&1
@@ -131,6 +134,22 @@ ok "forwarding persisted in $SYSCTL_FILE and live"
 
 nft list table inet vallum 2>/dev/null | grep -q masquerade || bad "nftables NAT table 'inet vallum' missing the masquerade rule"
 ok "nftables NAT masquerade installed"
+
+# iptables filters live in `ip filter`, which is where Docker, Tailscale, and
+# ufw with the iptables backend put their chains. If one of them drops
+# forwarded traffic, `server init` must have inserted an accept for our
+# interface — otherwise the tunnel pings and nothing forwards.
+if iptables -S FORWARD 2>/dev/null | grep -q "^-A FORWARD"; then
+    if iptables -S 2>/dev/null | grep -q -- "-j DROP"; then
+        iptables -S FORWARD | grep -q -- "-i $IFACE -j ACCEPT" \
+            || bad "iptables filters forwarded traffic and has no accept rule for $IFACE"
+        ok "iptables filters forwarding; accept rule added for $IFACE"
+    else
+        ok "iptables has FORWARD rules but no DROP; nothing to open"
+    fi
+else
+    ok "iptables does not filter forwarding on this host"
+fi
 
 firewall_ok=0
 if command -v ufw >/dev/null 2>&1 && { ufw status 2>/dev/null | grep -q "$PORT/udp" || ufw show added 2>/dev/null | grep -q "$PORT/udp"; }; then
@@ -267,6 +286,8 @@ else
         cat "$WORK/ns-dig.log" 2>/dev/null
         echo "== host: nft list table inet vallum"
         nft list table inet vallum 2>&1
+        echo "== host: iptables -S (filter table)"
+        iptables -S 2>&1 | head -40
         echo "== host: ip route get 1.1.1.1"
         ip route get 1.1.1.1 2>&1
         echo "== host: ip rule"

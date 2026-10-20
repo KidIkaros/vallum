@@ -71,6 +71,15 @@ pub struct HostState {
     pub ufw_installed: bool,
     /// Whether `firewall-cmd` is installed, whether or not it is running.
     pub firewalld_installed: bool,
+    /// Whether iptables filters forwarded traffic.
+    ///
+    /// Docker, Tailscale, and a ufw with the iptables backend all install
+    /// chains here, and the nft-native `inet filter` chains this module reads
+    /// for nftables do not see them. A `DROP` in one of those chains is the
+    /// classic "the tunnel pings but nothing forwards" host.
+    pub iptables_forward_drop: bool,
+    /// Whether iptables filters input traffic.
+    pub iptables_input_drop: bool,
 }
 
 /// One host change, described before it is run.
@@ -245,7 +254,24 @@ pub fn inspect() -> HostState {
         forward_v6: read_sysctl("/proc/sys/net/ipv6/conf/all/forwarding"),
         ufw_installed: output_of("ufw", &["--version"]).is_some(),
         firewalld_installed: output_of("firewall-cmd", &["--version"]).is_some(),
+        iptables_forward_drop: iptables_filters("FORWARD"),
+        iptables_input_drop: iptables_filters("INPUT"),
     }
+}
+
+/// Whether iptables has rules on `chain` and a `DROP` somewhere in the table.
+///
+/// The `DROP` may live in a chain `FORWARD` jumps to (`DOCKER-USER`,
+/// `ts-forward`), so the whole table is searched; a host with no rules on the
+/// chain is not filtering, and gets nothing.
+fn iptables_filters(chain: &str) -> bool {
+    let Some(rules) = output_of("iptables", &["-S", chain]) else {
+        return false;
+    };
+    let filters = rules
+        .lines()
+        .any(|line| line.starts_with(&format!("-A {chain}")));
+    filters && output_of("iptables", &["-S"]).is_some_and(|all| all.contains("-j DROP"))
 }
 
 /// Persist and apply IP forwarding.
@@ -295,6 +321,61 @@ pub fn plan_firewall(state: &HostState, port: u16, interface: &str) -> Vec<HostS
     // No active manager, but one installed: its rule is stored for the day it
     // is enabled, which is the difference between a tunnel that survives that
     // day and one that silently stops.
+    // iptables filters in `ip filter`, which the nft-native chains above never
+    // show. An accept at the top of the chain is what an operator writes by
+    // hand, and it is the only thing that gets past `DOCKER-USER` or
+    // `ts-forward`.
+    if state.iptables_forward_drop {
+        steps.push(HostStep::Run {
+            summary: format!("allow traffic from {interface} in iptables FORWARD"),
+            program: "iptables".to_owned(),
+            args: vec![
+                "-I".to_owned(),
+                "FORWARD".to_owned(),
+                "1".to_owned(),
+                "-i".to_owned(),
+                interface.to_owned(),
+                "-j".to_owned(),
+                "ACCEPT".to_owned(),
+            ],
+            stdin: None,
+            ignore_failure: false,
+        });
+        steps.push(HostStep::Run {
+            summary: format!("allow traffic to {interface} in iptables FORWARD"),
+            program: "iptables".to_owned(),
+            args: vec![
+                "-I".to_owned(),
+                "FORWARD".to_owned(),
+                "2".to_owned(),
+                "-o".to_owned(),
+                interface.to_owned(),
+                "-j".to_owned(),
+                "ACCEPT".to_owned(),
+            ],
+            stdin: None,
+            ignore_failure: false,
+        });
+    }
+    if state.iptables_input_drop {
+        steps.push(HostStep::Run {
+            summary: format!("allow UDP {port} in iptables INPUT"),
+            program: "iptables".to_owned(),
+            args: vec![
+                "-I".to_owned(),
+                "INPUT".to_owned(),
+                "1".to_owned(),
+                "-p".to_owned(),
+                "udp".to_owned(),
+                "--dport".to_owned(),
+                port.to_string(),
+                "-j".to_owned(),
+                "ACCEPT".to_owned(),
+            ],
+            stdin: None,
+            ignore_failure: false,
+        });
+    }
     if matches!(state.firewall, Firewall::Nftables | Firewall::None) {
         if state.ufw_installed {
             steps.push(HostStep::Run {
@@ -496,6 +577,8 @@ mod tests {
             forward_v6: false,
             ufw_installed: false,
             firewalld_installed: false,
+            iptables_forward_drop: false,
+            iptables_input_drop: false,
         }
     }
 
@@ -543,6 +626,39 @@ mod tests {
         assert!(steps
             .iter()
             .any(|step| step.summary().contains("forwarded traffic")));
+    }
+
+    #[test]
+    fn iptables_filtering_forwarding_gets_accept_rules() {
+        let mut host = state(Firewall::Nftables);
+        host.input_drop = false;
+        host.forward_drop = false;
+        host.iptables_forward_drop = true;
+        let steps = plan_firewall(&host, 51820, "vallum0");
+        assert_eq!(steps.len(), 2);
+        assert!(steps
+            .iter()
+            .all(|step| step.summary().contains("iptables FORWARD")));
+        assert!(steps[0].summary().contains("from vallum0"));
+        assert!(steps[1].summary().contains("to vallum0"));
+    }
+
+    #[test]
+    fn iptables_filtering_input_opens_the_port() {
+        let mut host = state(Firewall::Nftables);
+        host.input_drop = false;
+        host.forward_drop = false;
+        host.iptables_input_drop = true;
+        let steps = plan_firewall(&host, 51820, "vallum0");
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].summary().contains("iptables INPUT"));
+        match &steps[0] {
+            HostStep::Run { args, .. } => {
+                assert!(args.contains(&"51820".to_owned()));
+                assert!(args.contains(&"udp".to_owned()));
+            }
+            HostStep::Write { .. } => panic!("expected a run step"),
+        }
     }
 
     #[test]

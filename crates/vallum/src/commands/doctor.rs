@@ -290,6 +290,34 @@ fn check_forwarding(resolved: &crate::config::Resolved) -> Check {
     if has_v6 && !sysctl("/proc/sys/net/ipv6/conf/all/forwarding") {
         missing.push("net.ipv6.conf.all.forwarding");
     }
+    // A firewall can filter forwarding even with the sysctl on: Docker,
+    // Tailscale, and iptables-based ufw all install chains in `ip filter`,
+    // which is invisible to the nft-native chains the firewall check reads.
+    if missing.is_empty() && crate::hostnet::inspect().iptables_forward_drop {
+        let interface = resolved.interface_name.as_deref().unwrap_or("vallum0");
+        let accepted = output("iptables", &["-S", "FORWARD"]).is_some_and(|rules| {
+            rules
+                .lines()
+                .any(|line| line.contains(&format!("-i {interface}")) && line.contains("-j ACCEPT"))
+        });
+        return if accepted {
+            Check::new(
+                "forwarding",
+                Status::Pass,
+                format!("IP forwarding is on, and iptables accepts traffic on {interface}"),
+            )
+        } else {
+            Check::new(
+                "forwarding",
+                Status::Warn,
+                format!(
+                    "IP forwarding is on, but iptables filters forwarded traffic (Docker, \
+                     Tailscale, or another manager); run `vallum server init --force`, or \
+                     `iptables -I FORWARD -i {interface} -j ACCEPT`"
+                ),
+            )
+        };
+    }
     if missing.is_empty() {
         Check::new(
             "forwarding",
