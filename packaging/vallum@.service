@@ -17,6 +17,11 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+
+# The control socket's directory. Created and owned by the service, so a
+# `vallum tui` run by the same user can reach it without a manual `install -d`.
+RuntimeDirectory=vallum
+RuntimeDirectoryMode=0750
 ReadWritePaths=/run/vallum
 
 [Install]

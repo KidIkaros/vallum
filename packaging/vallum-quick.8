@@ -15,6 +15,16 @@ vallum-quick \- bring a Vallum config up with its routes, DNS and hooks
 .B vallum-quick
 .B strip
 .I FILE
+.br
+.B vallum-quick
+.B attach
+.I FILE
+.RB [ --dry-run ]
+.br
+.B vallum-quick
+.B detach
+.I FILE
+.RB [ --dry-run ]
 .SH DESCRIPTION
 .B vallum-quick
 is the admin-side helper. It starts
@@ -23,6 +33,18 @@ adds routes for each peer's allowed IPs, installs DNS through
 .BR resolvconf (8)
 when available, and runs the operator's hooks. The daemon never runs any of
 this.
+.PP
+.B attach
+and
+.B detach
+do the same host-level work for an interface a supervisor already owns. The
+systemd deployment uses them: \fBvallum@.service\fR runs the daemon and
+\fBvallum-quick@.service\fR runs \fBattach\fR once the interface exists, so the
+daemon's sandbox never has to allow writes to
+.I /etc/resolv.conf
+or a shell. A prefix the interface's own address already covers is skipped, so
+\fBattach\fR is a no-op on a server and adds the client's default route on a
+client.
 .SH OPTIONS
 .TP
 .B --dry-run

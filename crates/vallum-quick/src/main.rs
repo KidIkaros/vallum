@@ -43,6 +43,26 @@ enum Action {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Apply routes, DNS and hooks to an interface a supervisor already owns.
+    ///
+    /// This is the systemd form: `vallum@.service` starts the daemon and
+    /// `vallum-quick@.service` runs `attach`, so routes and DNS are applied
+    /// without spawning a second daemon or weakening the daemon's sandbox.
+    Attach {
+        /// The configuration file.
+        config: PathBuf,
+        /// Print the commands instead of running them.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove what `attach` applied, leaving the daemon running.
+    Detach {
+        /// The configuration file.
+        config: PathBuf,
+        /// Print the commands instead of running them.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print the config without its `[quick]` table.
     Strip {
         /// The configuration file.
@@ -69,6 +89,8 @@ fn main() -> std::process::ExitCode {
     let outcome = match &cli.command {
         Action::Up { config, dry_run } => up(config, *dry_run),
         Action::Down { config, dry_run } => down(config, *dry_run),
+        Action::Attach { config, dry_run } => attach(config, *dry_run),
+        Action::Detach { config, dry_run } => detach(config, *dry_run),
         Action::Strip { config } => strip(config),
         Action::Save {
             config,
@@ -236,6 +258,138 @@ fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Err
         run_hook(hook, dry_run)?;
     }
     Ok(())
+}
+
+/// Apply the config's host-level work to an interface someone else started.
+///
+/// `vallum@.service` owns the daemon and `vallum-quick@.service` runs this, so
+/// routes and DNS are applied without spawning a second daemon and without
+/// widening the daemon's sandbox to let it write `/etc/resolv.conf`.
+fn attach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load(config_path)?;
+    let interface = config
+        .interface
+        .name
+        .clone()
+        .unwrap_or_else(|| "vallum0".to_owned());
+    let table = config.quick.table.as_deref().unwrap_or("auto");
+
+    for hook in &config.quick.pre_up {
+        run_hook(hook, dry_run)?;
+    }
+
+    if !dry_run {
+        wait_for_interface(&interface)?;
+    }
+
+    for prefix in managed_routes(&config, &interface, table, dry_run)? {
+        add_route(&interface, &prefix, table, dry_run)?;
+    }
+
+    if !config.quick.dns.is_empty() {
+        set_dns(&interface, &config.quick.dns, dry_run)?;
+    }
+
+    for hook in &config.quick.post_up {
+        run_hook(hook, dry_run)?;
+    }
+    Ok(())
+}
+
+/// Remove what [`attach`] applied, leaving the daemon running.
+fn detach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load(config_path)?;
+    let interface = config
+        .interface
+        .name
+        .clone()
+        .unwrap_or_else(|| "vallum0".to_owned());
+    let table = config.quick.table.as_deref().unwrap_or("auto");
+
+    for hook in &config.quick.pre_down {
+        run_hook(hook, dry_run)?;
+    }
+
+    for prefix in managed_routes(&config, &interface, table, dry_run)? {
+        del_route(&interface, &prefix, table, dry_run)?;
+    }
+
+    if !config.quick.dns.is_empty() {
+        unset_dns(&interface, dry_run)?;
+    }
+
+    for hook in &config.quick.post_down {
+        run_hook(hook, dry_run)?;
+    }
+    Ok(())
+}
+
+/// The peer prefixes this host must route.
+///
+/// A prefix the interface's own address already covers is skipped: on a server
+/// `allowed_ips = ["10.7.0.2/32"]` is inside the interface's `10.7.0.1/24`, so
+/// `attach` is a no-op there and only the client's default route is added.
+fn managed_routes(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> Result<Vec<Prefix>, Box<dyn std::error::Error>> {
+    if table == "off" {
+        return Ok(Vec::new());
+    }
+    let own = interface_networks(interface, dry_run)?;
+    let mut routes = Vec::new();
+    for peer in &config.peers {
+        for prefix in &peer.allowed_ips {
+            let prefix: Prefix = prefix.parse()?;
+            if own.iter().any(|network| covers(network, &prefix)) {
+                continue;
+            }
+            routes.push(prefix);
+        }
+    }
+    Ok(routes)
+}
+
+/// The networks already assigned to the interface.
+///
+/// Under `--dry-run` the interface may not exist, so nothing is read and every
+/// route is printed — the plan the operator is being shown.
+fn interface_networks(
+    interface: &str,
+    dry_run: bool,
+) -> Result<Vec<ipnet::IpNet>, Box<dyn std::error::Error>> {
+    if dry_run {
+        return Ok(Vec::new());
+    }
+    let output = Command::new("ip")
+        .args(["-o", "addr", "show", "dev", interface])
+        .output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut networks = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        for (index, field) in fields.iter().enumerate() {
+            if (*field == "inet" || *field == "inet6") && fields.get(index + 1).is_some() {
+                if let Ok(network) = fields[index + 1].parse::<ipnet::IpNet>() {
+                    networks.push(network);
+                }
+            }
+        }
+    }
+    Ok(networks)
+}
+
+/// Whether `outer` contains every address in `inner`.
+fn covers(outer: &ipnet::IpNet, inner: &Prefix) -> bool {
+    let inner = inner.as_ipnet();
+    outer.addr().is_ipv4() == inner.addr().is_ipv4()
+        && outer.prefix_len() <= inner.prefix_len()
+        && outer.contains(&inner.addr())
 }
 
 fn save(
@@ -446,6 +600,54 @@ fn which(program: &str) -> Option<PathBuf> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn prefix(text: &str) -> Prefix {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_prefix_is_covered_by_the_interface_address_that_contains_it() {
+        let subnet: ipnet::IpNet = "10.7.0.1/24".parse().unwrap();
+        assert!(covers(&subnet, &prefix("10.7.0.2/32")));
+        assert!(covers(&subnet, &prefix("10.7.0.0/24")));
+        assert!(!covers(&subnet, &prefix("10.8.0.0/24")));
+        assert!(!covers(&subnet, &prefix("0.0.0.0/0")));
+    }
+
+    #[test]
+    fn a_default_route_is_never_covered_by_an_interface_address() {
+        // The client case: `allowed_ips = ["0.0.0.0/0", "::/0"]` must always be
+        // routed, or the tunnel carries nothing.
+        let v4: ipnet::IpNet = "10.7.0.2/32".parse().unwrap();
+        let v6: ipnet::IpNet = "fd00:7::2/128".parse().unwrap();
+        assert!(!covers(&v4, &prefix("0.0.0.0/0")));
+        assert!(!covers(&v6, &prefix("::/0")));
+    }
+
+    #[test]
+    fn families_do_not_cover_each_other() {
+        let v4: ipnet::IpNet = "10.7.0.1/24".parse().unwrap();
+        let v6: ipnet::IpNet = "fd00:7::1/64".parse().unwrap();
+        assert!(!covers(&v4, &prefix("fd00:7::2/128")));
+        assert!(!covers(&v6, &prefix("10.7.0.2/32")));
+        assert!(covers(&v6, &prefix("fd00:7::2/128")));
+    }
+
+    #[test]
+    fn managed_routes_is_empty_when_the_table_is_off() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-routes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[quick]\ntable = \"off\"\n\n\
+             [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"10.7.0.2/32\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let routes = managed_routes(&config, "v0", "off", true).unwrap();
+        assert!(routes.is_empty());
+    }
 
     #[test]
     fn strip_removes_the_quick_table_only() {

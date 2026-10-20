@@ -1,0 +1,25 @@
+[Unit]
+Description=Vallum host networking for %i (routes, DNS, hooks)
+Documentation=man:vallum-quick(8) man:vallum.toml(5)
+Requires=vallum@%i.service
+After=vallum@%i.service
+PartOf=vallum@%i.service
+
+[Service]
+# One shot: apply the config's routes, DNS and hooks once the daemon owns the
+# interface, then stay "active" so `systemctl stop` runs the reverse. Keeping
+# this out of the daemon's unit preserves the daemon's sandbox, which cannot
+# write /etc/resolv.conf or run operator hooks.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/vallum-quick attach /etc/vallum/%i.toml
+ExecStop=/usr/bin/vallum-quick detach /etc/vallum/%i.toml
+TimeoutStartSec=60s
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
