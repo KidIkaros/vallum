@@ -164,3 +164,14 @@ sudo vallum server init --force --endpoint <host:port>
 `--force` rewrites the config and keeps a timestamped backup; it never
 regenerates the key, so existing clients keep working. To start completely
 fresh, move `server.key` aside first and re-enrol every client.
+
+## A client in a namespace on the server's host
+
+Not a supported topology, and not a reliable test one. On a host with
+third-party netfilter (Docker, Tailscale) the server's replies are read from its
+TUN and never transmitted, so the tunnel pings from the server side and never
+from the client side. The same topology forwards correctly on a plain host, so
+`scripts/verify-host.sh` reports it as a note rather than a failure.
+
+Test client egress where it really lives: a second machine, or the namespace E2E
+(`scripts/e2e-netns.sh`), which is the gate of record for it.
