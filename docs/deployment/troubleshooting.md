@@ -7,6 +7,19 @@ they fail:
 sudo vallum doctor --config /etc/vallum/vallum0.toml
 ```
 
+To validate a whole host install — sysctl persistence, the firewall and NAT
+rules, the systemd units, a real client through `resolvectl`, and live
+rotation — run the privileged half of the test gate:
+
+```sh
+sudo ./scripts/verify-host.sh
+```
+
+It uses dedicated names (`vallumtest0`/`1`, UDP 51921, `10.99.77.0/24`), asserts
+every change it makes, and restores the host on exit. It refuses to run if
+`/etc/vallum` or `inet vallum` already exist, so it cannot disturb a real
+deployment.
+
 | Check | A failure means | Fix |
 |---|---|---|
 | `platform` | not Linux | Linux is the supported tier this release |
