@@ -494,7 +494,13 @@ fn read_document(path: &Path) -> Result<IdentityDocument, Error> {
 fn days_remaining(validity: Validity, now: u64) -> i64 {
     let remaining = i64::try_from(validity.not_after).unwrap_or(i64::MAX)
         - i64::try_from(now).unwrap_or(i64::MAX);
-    remaining / 86_400
+    // Round a partial day up, so a document issued for 30 days reads "30 days"
+    // a second later rather than "29". An expired window stays negative.
+    if remaining > 0 {
+        (remaining + 86_399) / 86_400
+    } else {
+        remaining / 86_400
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
@@ -530,6 +536,7 @@ mod tests {
     fn days_remaining_goes_negative_after_expiry() {
         let validity = Validity::new(1_000, 1_000 + 86_400);
         assert_eq!(days_remaining(validity, 1_000), 1);
+        assert_eq!(days_remaining(validity, 1_001), 1);
         assert_eq!(days_remaining(validity, 1_000 + 86_400), 0);
         assert_eq!(days_remaining(validity, 1_000 + 3 * 86_400), -2);
     }

@@ -1356,7 +1356,7 @@ fn validity_label(validity: Option<Validity>, now: u64) -> String {
         None => "-".to_owned(),
         Some(window) if now >= window.not_after => "EXPIRED".to_owned(),
         Some(window) if now < window.not_before => "NOT YET".to_owned(),
-        Some(window) => format!("{}d", (window.not_after - now) / 86_400),
+        Some(window) => format!("{}d", (window.not_after - now).div_ceil(86_400)),
     }
 }
 
