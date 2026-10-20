@@ -260,6 +260,14 @@ ip netns exec vallumtest-ns "$QUICK" attach "$WORK/client/ns.toml" > "$WORK/ns-a
 ok "client running inside the namespace, routes attached"
 
 sleep 1
+# The tunnel before the internet: if this fails the handshake or the TUN is at
+# fault, not forwarding. It is the difference between two very different bugs.
+if ip netns exec vallumtest-ns ping -c2 -W3 "$SRV_IP" > "$WORK/ns-inner.log" 2>&1; then
+    ok "the client's tunnel is up: it reaches the server's $SRV_IP"
+else
+    warn "the client cannot even reach $SRV_IP; the tunnel is not established"
+fi
+
 if ip netns exec vallumtest-ns ping -c2 -W3 1.1.1.1 > "$WORK/ns-ping.log" 2>&1; then
     ok "the tunnel carries traffic to the internet: $(tail -2 "$WORK/ns-ping.log" | head -1)"
 else
@@ -272,10 +280,20 @@ if ip netns exec vallumtest-ns dig +time=3 +tries=1 @1.1.1.1 example.com A > "$W
 else
     warn "DNS through the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
     {
-        echo "== ns ping 1.1.1.1"
+        echo "== ns: ping the server's tunnel address ($SRV_IP)"
+        cat "$WORK/ns-inner.log" 2>/dev/null
+        echo "== ns: ping 1.1.1.1"
         cat "$WORK/ns-ping.log" 2>/dev/null
-        echo "== ns dig @1.1.1.1 example.com"
+        echo "== ns: dig @1.1.1.1 example.com"
         cat "$WORK/ns-dig.log" 2>/dev/null
+        echo "== ns: client log"
+        cat "$WORK/ns-client.log" 2>/dev/null
+        echo "== ns: the client's own view"
+        ip netns exec vallumtest-ns "$VALLUM" show --control /run/vallum/ns.sock 2>&1 | head -20
+        echo "== server: metrics"
+        "$VALLUM" metrics --control /run/vallum/$IFACE.sock 2>&1 | head -20
+        echo "== server: journal"
+        journalctl -u "vallum@$IFACE" --no-pager -n 20 2>&1
         echo "== host: nft list table inet vallum"
         nft list table inet vallum 2>&1
         echo "== host: iptables -S (filter table)"
