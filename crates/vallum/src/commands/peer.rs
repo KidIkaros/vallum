@@ -49,6 +49,8 @@ pub enum PeerCommand {
     Show(ShowArgs),
     /// Remove a peer.
     Remove(RemoveArgs),
+    /// Enrol a device that generated its own key, and hand back its config.
+    Enroll(EnrollArgs),
     /// Install a new identity while the old one keeps working.
     Rotate(RotateArgs),
     /// Retire the previous identity a rotation kept.
@@ -133,6 +135,10 @@ pub struct AddArgs {
     /// Include the full public line in JSON output.
     #[arg(long)]
     pub full: bool,
+
+    /// Suppress the report. Used by `peer enroll`, which prints its own.
+    #[arg(long, hide = true)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, Args)]
@@ -278,6 +284,7 @@ pub fn peer(args: &PeerArgs) -> Result<(), Error> {
         PeerCommand::List(args) => list(args),
         PeerCommand::Show(args) => show(args),
         PeerCommand::Remove(args) => remove(args),
+        PeerCommand::Enroll(args) => enroll(args),
         PeerCommand::Rotate(args) => rotate(args),
         PeerCommand::Finalize(args) => finalize(args),
     }
@@ -452,7 +459,167 @@ pub(crate) fn add_for_setup(config: &Path, name: &str, bundle_out: &Path) -> Res
         no_apply: false,
         json: false,
         full: false,
+        quiet: false,
     })
+}
+
+#[derive(Debug, Args)]
+pub struct EnrollArgs {
+    /// The name this device will have on the server.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// The configuration file to edit.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// The device's public line, generated on the device itself.
+    #[arg(long, value_name = "LINE", conflicts_with = "public_key_file")]
+    pub public_key: Option<String>,
+
+    /// A file holding the device's public line.
+    #[arg(long, value_name = "FILE")]
+    pub public_key_file: Option<PathBuf>,
+
+    /// The address to route to the device. Allocated if absent.
+    #[arg(long, value_name = "CIDR")]
+    pub address: Option<String>,
+
+    /// Send a keepalive every this many seconds.
+    #[arg(long, value_name = "SECS")]
+    pub keepalive: Option<u16>,
+
+    /// Write the config but do not tell a running daemon.
+    #[arg(long)]
+    pub no_apply: bool,
+
+    /// Emit JSON instead of a report.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Enrol a device that generated its own key.
+///
+/// This is the primitive both enrolment transports call: SSH hands it a public
+/// line, and the token transport will do the same. The private key is never
+/// here — only the public line arrives, and only non-secret material leaves.
+///
+/// Idempotent on retry: the same line returns the same config, so a client that
+/// lost its answer can simply ask again.
+fn enroll(args: &EnrollArgs) -> Result<(), Error> {
+    require_config(&args.config)?;
+    let server = load_server(&args.config)?;
+    let line = match (&args.public_key, &args.public_key_file) {
+        (Some(line), None) => line.trim().to_owned(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|source| Error::IoPath {
+                action: "read the device's public line",
+                path: path.clone(),
+                source,
+            })?
+            .trim()
+            .to_owned(),
+        _ => {
+            return Err(Error::Usage(
+                "give the device's public line: --public-key LINE, or --public-key-file FILE"
+                    .to_owned(),
+            ))
+        }
+    };
+    let identity = validate_public_line(&server, &line)?;
+    let canonical = keys::encode_public(server.suite_id, &identity);
+
+    let mut file = ConfigFile::load(&args.config)?;
+    let existing = file.peers().into_iter().find(|peer| peer.name == args.name);
+    let address = match &existing {
+        Some(peer) => {
+            let same = peer.public_key == canonical
+                || peer.identity.as_deref() == Some(canonical.as_str());
+            if !same {
+                return Err(Error::Usage(format!(
+                    "`{}` is already enrolled with a different key; `vallum peer rotate {}` \
+                     replaces it deliberately",
+                    args.name, args.name
+                )));
+            }
+            peer.allowed_ips.first().cloned().ok_or_else(|| {
+                Error::Usage(format!("`{}` has no address to hand back", args.name))
+            })?
+        }
+        None => {
+            add(&AddArgs {
+                name: args.name.clone(),
+                config: args.config.clone(),
+                public_key: Some(canonical.clone()),
+                public_key_file: None,
+                bundle_out: None,
+                client_config_out: None,
+                identity: None,
+                address: args.address.clone(),
+                allowed_ips: None,
+                endpoint: None,
+                keepalive: args.keepalive,
+                pin_endpoint: false,
+                psk: false,
+                dns: Vec::new(),
+                forget_key: false,
+                no_apply: args.no_apply,
+                json: false,
+                full: false,
+                quiet: true,
+            })?;
+            // `add` allocated the address; read it back rather than guessing.
+            file = ConfigFile::load(&args.config)?;
+            file.peers()
+                .into_iter()
+                .find(|peer| peer.name == args.name)
+                .and_then(|peer| peer.allowed_ips.first().cloned())
+                .ok_or_else(|| {
+                    Error::Usage(format!("`{}` was added but has no address", args.name))
+                })?
+        }
+    };
+
+    let (endpoint, source) = bundle_endpoint(None, &server, &args.config)?;
+    let config_text = client_config(
+        &args.name,
+        &address,
+        &server.public_line,
+        &endpoint,
+        &[],
+        None,
+    );
+
+    if args.json {
+        let report = Enrolled {
+            name: args.name.clone(),
+            address: address.clone(),
+            endpoint: endpoint.clone(),
+            fingerprint: fingerprint(&canonical),
+            config: config_text,
+        };
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+
+    say!("enrolled `{}`", args.name);
+    say!("   address    {address}");
+    say!("   endpoint   {endpoint}");
+    if source == EndpointSource::Detected {
+        // Only worth saying when it was a guess rather than a choice.
+        say_bundle_endpoint(&endpoint, source);
+    }
+    say!("   fingerprint {}", fingerprint(&canonical));
+    say!();
+    say!("the device's config:");
+    for line in config_text.lines() {
+        say!("   {line}");
+    }
+    Ok(())
 }
 
 fn add(args: &AddArgs) -> Result<(), Error> {
@@ -658,6 +825,9 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         return Ok(());
     }
 
+    if args.quiet {
+        return Ok(());
+    }
     say!("added peer `{}`", args.name);
     say!("   address    {}", address);
     say!("   allowed    {}", allowed.join(", "));
@@ -1125,6 +1295,15 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
     );
     say!("   client key files are left in place; delete them by hand if the device is gone");
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct Enrolled {
+    name: String,
+    address: String,
+    endpoint: String,
+    fingerprint: String,
+    config: String,
 }
 
 #[derive(Debug, Serialize)]

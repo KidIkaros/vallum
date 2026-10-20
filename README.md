@@ -113,10 +113,18 @@ asks which one this machine is and runs only that role's steps:
 # on the server — key, config, forwarding, firewall, NAT, service
 sudo vallum setup --server
 
-# it then offers to enrol your first client and prints the handoff;
-# on the client, that one bundle is all it needs
+# on the client, with SSH access to the server: no bundle, no file copy,
+# and the private key is generated here and never leaves
+sudo vallum setup --remote you@vpn.example.com
+
+# or, if you would rather move a file: the server offers a bundle
 sudo vallum setup --client laptop.vallum-bundle
 ```
+
+`--remote` is the recommended path when you can reach the server over SSH: the
+client generates its key locally and only its public line travels, so a server
+compromise is not a client compromise. The bundle remains for hosts with no SSH
+access, and is marked as what it is — the server generated that key.
 
 `vallum setup` with no flags asks the question interactively; `--server` and
 `--client FILE` are the scriptable forms, and `--dry-run` prints the whole plan

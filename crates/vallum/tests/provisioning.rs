@@ -321,3 +321,58 @@ fn pinning_requires_an_endpoint_and_is_written_to_the_peer() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn enroll_hands_back_a_config_and_is_idempotent() {
+    let dir = scratch("enroll");
+    let config = init(&dir);
+    let public_line = keygen(&dir, "laptop");
+    let line_file = dir.join("laptop.pub");
+    std::fs::write(&line_file, &public_line).unwrap();
+
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "enroll", "laptop", "--config"])
+        .arg(&config)
+        .arg("--public-key-file")
+        .arg(&line_file)
+        .args(["--json", "--no-apply"]));
+    assert!(ok, "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let address = report["address"].as_str().unwrap().to_owned();
+    let client_config = report["config"].as_str().unwrap();
+    // The device gets its address, the server's line, and nothing secret.
+    assert!(client_config.contains(&address), "{client_config}");
+    assert!(client_config.contains("public_key = \"vallum1:0003:"));
+    assert!(
+        !client_config.contains("seed"),
+        "a secret leaked into the config"
+    );
+
+    // The same line again: same answer, no second peer, no new address.
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "enroll", "laptop", "--config"])
+        .arg(&config)
+        .arg("--public-key-file")
+        .arg(&line_file)
+        .args(["--json", "--no-apply"]));
+    assert!(ok, "{stderr}");
+    let again: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(again["address"].as_str().unwrap(), address);
+    let parsed = vallum_config::Config::load(&config).unwrap();
+    assert_eq!(parsed.peers.len(), 1, "a retry added a second peer");
+
+    // A different key for the same name is refused, and says how to rotate.
+    let other = keygen(&dir, "other");
+    let other_file = dir.join("other.pub");
+    std::fs::write(&other_file, &other).unwrap();
+    let (ok, _, stderr) = run(bin()
+        .args(["peer", "enroll", "laptop", "--config"])
+        .arg(&config)
+        .arg("--public-key-file")
+        .arg(&other_file)
+        .args(["--no-apply"]));
+    assert!(!ok, "a different key replaced an existing enrolment");
+    assert!(stderr.contains("peer rotate"), "{stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

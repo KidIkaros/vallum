@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use ipnet::IpNet;
+use vallum_crypto_sdk::SdkSuite;
 
 use crate::commands::import::ImportArgs;
 use crate::commands::server::InitArgs;
@@ -48,8 +49,16 @@ pub struct SetupArgs {
     pub listen: String,
 
     /// The instance name: the config file stem and the unit instance.
-    #[arg(long, value_name = "NAME", default_value = "vallum0")]
-    pub name: String,
+    ///
+    /// Defaults to `vallum0` on a server, and to this machine's hostname on a
+    /// client enrolled over SSH.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Enrol this machine against a server over SSH, which needs no bundle and
+    /// never sends this machine's private key anywhere.
+    #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client"])]
+    pub remote: Option<String>,
 
     /// Print every step and change nothing.
     #[arg(long)]
@@ -69,6 +78,9 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
     }
     if let Some(bundle) = &args.client {
         return as_client(bundle, args.dry_run, false);
+    }
+    if let Some(remote) = &args.remote {
+        return as_remote(remote, args);
     }
     if !std::io::stdin().is_terminal() {
         return guidance();
@@ -153,9 +165,10 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
         .map(|prefix| prefix.trunc().to_string())
         .unwrap_or_else(|_| address.clone());
 
+    let instance = args.name.clone().unwrap_or_else(|| "vallum0".to_owned());
     let init = InitArgs {
-        config: PathBuf::from(format!("/etc/vallum/{}.toml", args.name)),
-        name: Some(args.name.clone()),
+        config: PathBuf::from(format!("/etc/vallum/{instance}.toml")),
+        name: Some(instance.clone()),
         addresses: vec![address.clone()],
         listen: args.listen.clone(),
         endpoint,
@@ -183,7 +196,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
             listen_port(&args.listen)?
         );
         say!("  · add the NAT masquerade for {network}");
-        say!("  · install and start the vallum@{} service", args.name);
+        say!("  · install and start the vallum@{instance} service");
         say!();
         if !confirm("Do that?", true)? {
             say!("Nothing was changed.");
@@ -365,6 +378,187 @@ fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Resu
         say!("To run it as a service instead, re-run this with sudo.");
     }
     Ok(())
+}
+
+/// Enrol this machine against a server over SSH.
+///
+/// The key is generated here and stays here; only the public line travels, over
+/// the SSH channel the operator already trusts. The server hands back its own
+/// public line and the address it allocated — nothing secret either way.
+fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
+    let name = args
+        .name
+        .clone()
+        .or_else(hostname)
+        .unwrap_or_else(|| "client".to_owned());
+    if args.dry_run {
+        say!("would generate a key here and enrol `{name}` on {remote} over SSH");
+        say!("   nothing secret would leave this machine");
+        return Ok(());
+    }
+
+    // Already enrolled here? Then this run is about installing or starting it,
+    // not about enrolling again: a second enrolment would present a new key and
+    // the server would rightly refuse it.
+    let candidates = [
+        PathBuf::from(format!("/etc/vallum/{name}.toml")),
+        PathBuf::from(format!("{name}.toml")),
+    ];
+    if let Some(existing) = candidates
+        .iter()
+        .find(|path| path.is_file() && path.with_extension("key").is_file())
+    {
+        say!("already enrolled: {}", existing.display());
+        return start_existing(existing, &name);
+    }
+
+    let seed = crate::entropy::seed();
+    let secret = crate::keys::new_secret(3, false, seed);
+    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
+    let identity = crate::keys::identity(&suite, &secret)?;
+    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
+    say!("generated a key here; the private half does not leave this machine");
+
+    let remote_command =
+        format!("sudo vallum peer enroll {name} --public-key-file /dev/stdin --json");
+    let mut child = std::process::Command::new("ssh")
+        .arg(remote)
+        .arg(&remote_command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|source| Error::IoPath {
+            action: "run ssh",
+            path: PathBuf::from("ssh"),
+            source,
+        })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write as _;
+        stdin
+            .write_all(public_line.as_bytes())
+            .map_err(|error| Error::Usage(format!("could not send the public line: {error}")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| Error::Usage(format!("ssh: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Precondition(format!(
+            "the server refused the enrolment: {}\n\
+             That command runs `sudo vallum peer enroll` there, so it needs vallum \
+             installed on the server and passwordless sudo for this user. \
+             If that is not available, ask the server for a bundle instead: \
+             `vallum peer add {name} --bundle-out {name}.vallum-bundle`",
+            stderr.trim()
+        )));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
+    let config_text = report
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage("the server's answer had no config".to_owned()))?;
+    let address = report
+        .get("address")
+        .and_then(|a| a.as_str())
+        .unwrap_or("?");
+    let endpoint = report
+        .get("endpoint")
+        .and_then(|e| e.as_str())
+        .unwrap_or("?");
+
+    let root = nix::unistd::Uid::effective().is_root();
+    let directory = if root {
+        PathBuf::from("/etc/vallum")
+    } else {
+        PathBuf::from(".")
+    };
+    std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
+        action: "create",
+        path: directory.clone(),
+        source,
+    })?;
+    let key_path = directory.join(format!("{name}.key"));
+    let config_path = directory.join(format!("{name}.toml"));
+    crate::keys::save_secret(&key_path, &secret)?;
+    std::fs::write(&config_path, config_text).map_err(|source| Error::IoPath {
+        action: "write the config",
+        path: config_path.clone(),
+        source,
+    })?;
+    let _ = std::fs::set_permissions(
+        &config_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    );
+
+    say!();
+    say!("enrolled `{name}` — {address}, through {endpoint}");
+    say!("   config     {}", config_path.display());
+    say!("   key        {} (this machine only)", key_path.display());
+    if root && config_path.starts_with("/etc/vallum") {
+        crate::commands::server::install_service(&name, false)?;
+        say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
+    } else {
+        say!(
+            "Run it with `sudo vallum run --config {}`.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Finish a machine that is already enrolled: install the service, or say how
+/// to run it.
+fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
+    let root = nix::unistd::Uid::effective().is_root();
+    let in_etc = config.starts_with("/etc/vallum");
+    if root && in_etc {
+        crate::commands::server::install_service(name, false)?;
+        say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
+        return Ok(());
+    }
+    if root && !in_etc {
+        // The unit reads /etc/vallum/<name>.toml, so move it there.
+        let target = PathBuf::from(format!("/etc/vallum/{name}.toml"));
+        let key = config.with_extension("key");
+        let key_target = PathBuf::from(format!("/etc/vallum/{name}.key"));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::IoPath {
+                action: "create",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::rename(config, &target).map_err(|source| Error::IoPath {
+            action: "move the config",
+            path: config.to_path_buf(),
+            source,
+        })?;
+        std::fs::rename(&key, &key_target).map_err(|source| Error::IoPath {
+            action: "move the key",
+            path: key,
+            source,
+        })?;
+        say!("moved it to {}", target.display());
+        crate::commands::server::install_service(name, false)?;
+        return Ok(());
+    }
+    say!(
+        "Run it with `sudo vallum run --config {}`,",
+        config.display()
+    );
+    say!("or re-run this with sudo to install it as a service.");
+    Ok(())
+}
+
+/// This machine's short hostname, for naming the device on the server.
+fn hostname() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.split('.').next().unwrap_or(&name).to_owned())
 }
 
 /// The non-interactive default: say what the two paths are, without running
