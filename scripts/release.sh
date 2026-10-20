@@ -70,7 +70,7 @@ if [ "$DRY" -eq 0 ]; then
     rm -rf "dist/$name"
     cp target/debian/*.deb dist/ 2>/dev/null || true
     cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
-    ( cd dist && sha256sum ./*.deb ./*.rpm ./*.tar.gz > SHA256SUMS )
+    ( cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS )
     ls -l dist
 else
     echo "   would assemble dist/$name.tar.gz, the .deb, the .rpm, and SHA256SUMS"
