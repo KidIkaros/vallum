@@ -57,6 +57,9 @@ fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     if app.confirm.is_some() {
         draw_confirm(frame, area, app);
     }
+    if app.palette.is_some() {
+        draw_palette(frame, area, app);
+    }
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
@@ -800,6 +803,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     nav_spans.extend(key_capsule("/", "filter"));
     nav_spans.extend(key_capsule("o", "sort"));
+    nav_spans.extend(key_capsule(":", "cmds"));
     nav_spans.extend(key_capsule("?", "help"));
     nav_spans.extend(key_capsule("q", "quit"));
 
@@ -854,9 +858,10 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         Line::from("i                 import client bundle (.vallum-bundle) into daemon"),
         Line::from("g                 generate a key and prefill the add form"),
         Line::from("b                 export client bundle and show animated QR"),
-        Line::from("y                 copy peer public line to clipboard"),
-        Line::from("Y                 copy peer address / endpoint to clipboard"),
-        Line::from("p                 ping selected peer's tunnel IP"),
+        Line::from("y                 copy peer public line (OSC 52 + wl-copy/xclip)"),
+        Line::from("Y                 copy peer address / endpoint (same reporting)"),
+        Line::from("p                 ping selected peer's tunnel IP (runs off-loop)"),
+        Line::from(":                 command palette — every action by name, click or Enter"),
         Line::from("W                 write/save runtime configuration to disk"),
         Line::from("c                 edit runtime listen port and fwmark (temporary)"),
         Line::from("C                 edit listen/MTU/fwmark/addresses/DNS/table (on disk)"),
@@ -870,6 +875,8 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         Line::from("CONTROL reports UAPI reachability; systemd unit state is separate."),
         Line::from("Handshake tags: RECENT <5m, AGING <1h, OLD >1h, or NEVER."),
         Line::from("Forms: Tab moves fields, arrows edit text, Ctrl-U clears."),
+        Line::from("Keys are remappable: vallum tui --keys FILE or"),
+        Line::from("~/.config/vallum/tui-keys.toml (e.g. add_peer = \"n\")."),
         Line::from("Secrets are masked; private keys and PSK are never rendered."),
         Line::from("Developed in partnership by Ikaros Digital × Atomguard."),
     ];
@@ -1251,6 +1258,82 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+/// The command palette popup rect; also used by the mouse hit test.
+pub(crate) fn palette_rect(area: Rect) -> Rect {
+    centered(area, 60, 55)
+}
+
+fn draw_palette(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(palette) = &app.palette else {
+        return;
+    };
+    let popup = palette_rect(area);
+    frame.render_widget(Clear, popup);
+    let block = modal_block("COMMANDS  ·  type to filter · enter runs · esc closes");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let input = Line::from(vec![
+        Span::styled(":", Style::default().fg(Color::Cyan)),
+        Span::raw(&palette.input),
+        Span::styled("▌", Style::default().fg(Color::Cyan)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(input),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let commands = super::keymap::matching_commands(&palette.input);
+    let max_rows = popup.height.saturating_sub(4) as usize;
+    let offset = super::keymap::window_start(commands.len(), palette.selected, max_rows);
+    if commands.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  no matching commands",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    }
+    for (visible, command) in commands.iter().skip(offset).take(max_rows).enumerate() {
+        let index = offset + visible;
+        let selected = index == palette.selected;
+        let keys = app.keymap.keys_for(command.action).join(" ");
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let name_width = inner.width.saturating_sub(keys.chars().count() as u16 + 3);
+        let name: String = command.name.chars().take(name_width as usize).collect();
+        let pad = inner
+            .width
+            .saturating_sub(name.chars().count() as u16 + keys.chars().count() as u16 + 2);
+        let row = Line::from(vec![
+            Span::styled(
+                format!("{} {}", if selected { "▸" } else { " " }, name),
+                style,
+            ),
+            Span::styled(" ".repeat(pad as usize), style),
+            Span::styled(
+                keys,
+                style.fg(if selected {
+                    Color::Black
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(row),
+            Rect::new(inner.x, inner.y + 1 + visible as u16, inner.width, 1),
+        );
+    }
 }
 
 fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {

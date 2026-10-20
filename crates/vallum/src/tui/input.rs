@@ -3,11 +3,40 @@
 //! Key handling: modes first, then the dashboard.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use super::actions;
-use super::app::{App, Confirm, ConfirmAction, Form, View};
+use super::app::{App, Confirm, ConfirmAction, Form, PaletteState, View};
+use super::keymap::{self, Action};
 
 pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    // Command palette: rows are clickable; a click outside closes it.
+    if let Some(palette) = app.palette.take() {
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            let (width, height) = crossterm::terminal::size().unwrap_or((0, 0));
+            let popup = super::ui::palette_rect(Rect::new(0, 0, width, height));
+            let first_row = popup.y + 2; // border + input line
+            let max_rows = popup.height.saturating_sub(4) as usize;
+            let commands = keymap::matching_commands(&palette.input);
+            if mouse.row >= first_row
+                && (mouse.row - first_row) < commands.len().min(max_rows) as u16
+                && mouse.column > popup.x
+                && mouse.column < popup.x + popup.width - 1
+            {
+                let index = keymap::window_start(commands.len(), palette.selected, max_rows)
+                    + (mouse.row - first_row) as usize;
+                if let Some(command) = commands.get(index) {
+                    dispatch(app, command.action);
+                    return;
+                }
+            }
+        } else {
+            // Scroll/drag inside the palette: keep it open.
+            app.palette = Some(palette);
+        }
+        // Left-click outside a row dismisses (palette already taken).
+        return;
+    }
     match mouse.kind {
         MouseEventKind::ScrollDown => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_add(3),
@@ -143,6 +172,73 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    // The `:` command palette: type to filter, Enter runs the highlighted
+    // command — every dashboard action without memorizing a binding.
+    if app.palette.is_some() {
+        match key.code {
+            KeyCode::Esc => app.palette = None,
+            KeyCode::Enter => {
+                if let Some(palette) = app.palette.take() {
+                    let commands = keymap::matching_commands(&palette.input);
+                    if let Some(command) = commands.get(palette.selected) {
+                        dispatch(app, command.action);
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.input.pop();
+                    palette.selected = 0;
+                }
+            }
+            KeyCode::Down => {
+                if let Some(palette) = app.palette.as_mut() {
+                    let last = keymap::matching_commands(&palette.input)
+                        .len()
+                        .saturating_sub(1);
+                    palette.selected = (palette.selected + 1).min(last);
+                }
+            }
+            KeyCode::Up => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.selected = palette.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(palette) = app.palette.as_mut() {
+                    let last = keymap::matching_commands(&palette.input)
+                        .len()
+                        .saturating_sub(1);
+                    palette.selected = (palette.selected + 8).min(last);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.selected = palette.selected.saturating_sub(8);
+                }
+            }
+            KeyCode::Home => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.selected = 0;
+                }
+            }
+            KeyCode::End => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.selected = keymap::matching_commands(&palette.input)
+                        .len()
+                        .saturating_sub(1);
+                }
+            }
+            KeyCode::Char(character) => {
+                if let Some(palette) = app.palette.as_mut() {
+                    palette.input.push(character);
+                    palette.selected = 0;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
     match app.view {
         View::Help => {
             match key.code {
@@ -243,30 +339,25 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         }
         View::Dashboard => {}
     }
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Char('Q') => app.quit = true,
-        KeyCode::Char('/') => {
-            app.filtering = true;
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit = true;
+        return;
+    }
+    if let Some(action) = app.keymap.action_for(&key) {
+        dispatch(app, action);
+    }
+}
+
+/// Run a dashboard action, whether it came from a key binding, the command
+/// palette, or a mouse click on a palette row.
+fn dispatch(app: &mut App, action: Action) {
+    match action {
+        Action::Quit => app.quit = true,
+        Action::Help => {
+            app.help_scroll = 0;
+            app.view = View::Help;
         }
-        KeyCode::Esc => {
-            if !app.peer_filter.is_empty() {
-                app.peer_filter.clear();
-                app.peer_selected = 0;
-                app.notify("filter cleared");
-            }
-        }
-        KeyCode::Tab => app.next_interface(),
-        KeyCode::BackTab => app.previous_interface(),
-        KeyCode::Char('j') | KeyCode::Down => app.next_peer(),
-        KeyCode::Char('k') | KeyCode::Up => app.previous_peer(),
-        KeyCode::PageDown => app.scroll_peers(5),
-        KeyCode::PageUp => app.scroll_peers(-5),
-        KeyCode::Home => app.select_first_peer(),
-        KeyCode::End => app.select_last_peer(),
-        KeyCode::Char('o') => app.cycle_sort(),
-        KeyCode::Char('y') => actions::yank_public_line(app),
-        KeyCode::Char('Y') => actions::yank_peer_address(app),
-        KeyCode::Char('r') => {
+        Action::Refresh => {
             actions::refresh(app);
             if let Some(interface) = app.current() {
                 if interface.error.is_some() {
@@ -278,7 +369,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                 app.notify("refreshed");
             }
         }
-        KeyCode::Char('R') => {
+        Action::AutoRefresh => {
             app.refresh_rate = if app.refresh_rate == 0 { 1000 } else { 0 };
             app.notify(if app.refresh_rate == 0 {
                 "auto-refresh off · r refreshes"
@@ -286,12 +377,26 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                 "auto-refresh on (1s)"
             });
         }
-        KeyCode::Char('?') | KeyCode::F(1) => {
-            app.help_scroll = 0;
-            app.view = View::Help;
+        Action::CommandPalette => app.palette = Some(PaletteState::default()),
+        Action::Filter => app.filtering = true,
+        Action::ClearFilter => {
+            if !app.peer_filter.is_empty() {
+                app.peer_filter.clear();
+                app.peer_selected = 0;
+                app.notify("filter cleared");
+            }
         }
-        KeyCode::Char('a') => app.form = Some(Form::add_peer()),
-        KeyCode::Char('e') => {
+        Action::Sort => app.cycle_sort(),
+        Action::NextInterface => app.next_interface(),
+        Action::PrevInterface => app.previous_interface(),
+        Action::NextPeer => app.next_peer(),
+        Action::PrevPeer => app.previous_peer(),
+        Action::ScrollPeersDown => app.scroll_peers(5),
+        Action::ScrollPeersUp => app.scroll_peers(-5),
+        Action::FirstPeer => app.select_first_peer(),
+        Action::LastPeer => app.select_last_peer(),
+        Action::AddPeer => app.form = Some(Form::add_peer()),
+        Action::EditPeer => {
             if let Some(peer) = app.current_peer().cloned() {
                 let orig_index = app
                     .current_peer_original_index()
@@ -301,7 +406,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                 app.notify("no peer selected");
             }
         }
-        KeyCode::Char('d') => {
+        Action::RemovePeer => {
             if let Some(peer) = app.current_peer().cloned() {
                 let orig_index = app
                     .current_peer_original_index()
@@ -326,23 +431,24 @@ pub fn handle(app: &mut App, key: KeyEvent) {
                 app.notify("no peer selected");
             }
         }
-        KeyCode::Char('g') => actions::keygen(app),
-        KeyCode::Char('b') | KeyCode::Char('x') => actions::export_bundle(app),
-        KeyCode::Char('E') => actions::edit_config(app),
-        KeyCode::Char('C') => actions::interface_form(app),
-        KeyCode::Char('c') => {
+        Action::Keygen => actions::keygen(app),
+        Action::ExportBundle => actions::export_bundle(app),
+        Action::EditConfig => actions::edit_config(app),
+        Action::InterfaceForm => actions::interface_form(app),
+        Action::RuntimeForm => {
             if let Some(device) = app.current_device().cloned() {
                 app.form = Some(Form::device(&device));
             } else {
                 app.notify("no device to configure");
             }
         }
-        KeyCode::Char('s') | KeyCode::Char(' ') => actions::toggle_service(app),
-        KeyCode::Char('p') => actions::ping_peer(app),
-        KeyCode::Char('i') => actions::import_bundle(app),
-        KeyCode::Char('W') => actions::save_runtime_config(app),
-        KeyCode::Char('l') => actions::load_logs(app),
-        _ => {}
+        Action::ToggleService => actions::toggle_service(app),
+        Action::Ping => actions::ping_peer(app),
+        Action::ImportBundle => actions::import_bundle(app),
+        Action::YankPublicLine => actions::yank_public_line(app),
+        Action::YankAddress => actions::yank_peer_address(app),
+        Action::SaveRuntime => actions::save_runtime_config(app),
+        Action::Logs => actions::load_logs(app),
     }
 }
 

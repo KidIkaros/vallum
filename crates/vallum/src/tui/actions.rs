@@ -1101,40 +1101,57 @@ pub(crate) fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
         .ok_or_else(|| "endpoint resolved to nothing".to_owned())
 }
 
-pub fn copy_to_clipboard(text: &str) {
+/// Best-effort clipboard copy. Returns the channels that accepted the text so
+/// the caller can report honestly — an OSC 52 write can only be reported as
+/// *sent*; whether the terminal stores it is unverifiable.
+pub fn copy_to_clipboard(text: &str) -> Vec<&'static str> {
+    let mut channels = Vec::new();
     // 1. ANSI OSC 52 sequence (works over SSH, tmux, and modern terminal emulators)
     let encoded = base64_encode(text.as_bytes());
     let mut out = std::io::stdout();
-    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
-    let _ = out.flush();
+    if write!(out, "\x1b]52;c;{encoded}\x07")
+        .and_then(|()| out.flush())
+        .is_ok()
+    {
+        channels.push("OSC 52");
+    }
 
-    // 2. Best-effort fallback: local display server clipboard (wl-copy or xclip)
-    // for Linux desktop terminals with OSC 52 disabled by default
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if let Ok(mut child) = std::process::Command::new("wl-copy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-        }
+    // 2. Local display server clipboard for terminals with OSC 52 disabled.
+    let helper = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        Some(("wl-copy", Vec::<&str>::new()))
     } else if std::env::var_os("DISPLAY").is_some() {
-        if let Ok(mut child) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
+        Some(("xclip", vec!["-selection", "clipboard"]))
+    } else {
+        None
+    };
+    if let Some((program, args)) = helper {
+        if let Ok(mut child) = std::process::Command::new(program)
+            .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+            let written = child
+                .stdin
+                .take()
+                .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+            if written && child.wait().is_ok_and(|status| status.success()) {
+                channels.push(program);
             }
-            let _ = child.wait();
         }
+    }
+    channels
+}
+
+pub(crate) fn clipboard_report(channels: &[&'static str]) -> String {
+    match channels {
+        [] => "no clipboard channel worked".to_owned(),
+        [single] if *single == "OSC 52" => {
+            "sent to the terminal clipboard (OSC 52; paste may fail if the terminal strips it)"
+                .to_owned()
+        }
+        list => format!("copied via {}", list.join(" + ")),
     }
 }
 
@@ -1154,8 +1171,8 @@ pub fn yank_public_line(app: &mut App) {
     } else if let Some(interface) = app.current() {
         if let Some(config) = &interface.config_path {
             let cmd = format!("sudo vallum-quick up {}", config.display());
-            copy_to_clipboard(&cmd);
-            app.notify(format!("copied start command to clipboard: {cmd}"));
+            let report = clipboard_report(&copy_to_clipboard(&cmd));
+            app.notify(format!("start command {report}"));
             return;
         }
         app.notify("no public identity to copy");
@@ -1170,8 +1187,8 @@ pub fn yank_public_line(app: &mut App) {
         return;
     }
 
-    copy_to_clipboard(&line);
-    app.notify(format!("copied {target_label} public line to clipboard"));
+    let report = clipboard_report(&copy_to_clipboard(&line));
+    app.notify(format!("{target_label} public line {report}"));
 }
 
 pub fn yank_peer_address(app: &mut App) {
@@ -1189,21 +1206,21 @@ pub fn yank_peer_address(app: &mut App) {
             app.notify(format!("{label} has no IP or endpoint"));
             return;
         };
-        copy_to_clipboard(&target);
-        app.notify(format!("copied {label} address ({target}) to clipboard"));
+        let report = clipboard_report(&copy_to_clipboard(&target));
+        app.notify(format!("{label} address ({target}) {report}"));
     } else if let Some(device) = app.current_device() {
         let target = if !device.addresses.is_empty() {
             device.addresses.join(", ")
         } else {
             device.listen.clone()
         };
-        copy_to_clipboard(&target);
-        app.notify(format!("copied device address ({target}) to clipboard"));
+        let report = clipboard_report(&copy_to_clipboard(&target));
+        app.notify(format!("device address {report}"));
     } else if let Some(interface) = app.current() {
         if let Some(config) = &interface.config_path {
             let cmd = format!("sudo vallum-quick up {}", config.display());
-            copy_to_clipboard(&cmd);
-            app.notify(format!("copied start command to clipboard: {cmd}"));
+            let report = clipboard_report(&copy_to_clipboard(&cmd));
+            app.notify(format!("start command {report}"));
         } else {
             app.notify("no address to copy");
         }
@@ -1230,37 +1247,45 @@ pub fn ping_peer(app: &mut App) {
         .split('/')
         .next()
         .unwrap_or(first_allowed)
-        .trim();
+        .trim()
+        .to_owned();
     if target_ip.is_empty() {
         app.notify("invalid allowed IP to ping");
         return;
     }
-
-    match Command::new("ping")
-        .args(["-c", "1", "-W", "1", target_ip])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let time_str = stdout
-                .lines()
-                .find(|l| l.contains("time="))
-                .and_then(|l| l.split("time=").nth(1))
-                .and_then(|part| part.split_whitespace().next())
-                .unwrap_or("");
-            if !time_str.is_empty() {
-                app.notify(format!("ping {target_ip}: reply in {time_str} ms"));
-            } else {
-                app.notify(format!("ping {target_ip}: reply (online)"));
-            }
-        }
-        Ok(_) => {
-            app.notify(format!("ping {target_ip}: no reply (timed out)"));
-        }
-        Err(err) => {
-            app.notify(format!("ping {target_ip}: {err}"));
-        }
+    if app.pending_ping.is_some() {
+        app.notify("a ping is already running");
+        return;
     }
+
+    let target = target_ip.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = match Command::new("ping")
+            .args(["-c", "1", "-W", "1", &target])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let time_str = stdout
+                    .lines()
+                    .find(|l| l.contains("time="))
+                    .and_then(|l| l.split("time=").nth(1))
+                    .and_then(|part| part.split_whitespace().next())
+                    .unwrap_or("");
+                if time_str.is_empty() {
+                    format!("ping {target}: reply (online)")
+                } else {
+                    format!("ping {target}: reply in {time_str} ms")
+                }
+            }
+            Ok(_) => format!("ping {target}: no reply (timed out)"),
+            Err(err) => format!("ping {target}: {err}"),
+        };
+        let _ = sender.send(result);
+    });
+    app.pending_ping = Some(receiver);
+    app.notify(format!("pinging {target_ip}…"));
 }
 
 pub(crate) fn base64_encode(input: &[u8]) -> String {

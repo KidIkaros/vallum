@@ -41,6 +41,17 @@ pub struct TuiArgs {
     /// Snapshot view mode (dashboard, logs, help, qr, empty, filter, ping).
     #[arg(long, default_value = "dashboard")]
     pub snapshot_view: String,
+
+    /// A `tui-keys.toml` keymap file (default `$XDG_CONFIG_HOME/vallum/tui-keys.toml`).
+    #[arg(long, value_name = "FILE")]
+    pub keys: Option<PathBuf>,
+}
+
+impl TuiArgs {
+    #[must_use]
+    pub fn keymap_file(&self) -> Option<&std::path::Path> {
+        self.keys.as_deref()
+    }
 }
 
 pub fn run(args: &TuiArgs) -> Result<(), Error> {

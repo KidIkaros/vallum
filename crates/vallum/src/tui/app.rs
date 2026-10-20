@@ -727,6 +727,13 @@ pub struct Toast {
     pub until: Instant,
 }
 
+/// The `:` command palette state.
+#[derive(Debug, Default)]
+pub struct PaletteState {
+    pub input: String,
+    pub selected: usize,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub interfaces: Vec<Interface>,
@@ -738,6 +745,12 @@ pub struct App {
     pub confirm: Option<Confirm>,
     pub toast: Option<Toast>,
     pub quit: bool,
+    /// A ping running off the event loop; polled each tick.
+    pub pending_ping: Option<std::sync::mpsc::Receiver<String>>,
+    /// Dashboard key bindings (defaults plus `tui-keys.toml` overrides).
+    pub keymap: super::keymap::KeyMap,
+    /// The `:` command palette, when open.
+    pub palette: Option<PaletteState>,
     pub logs: Vec<String>,
     pub last_refresh: Instant,
     pub refresh_rate: u64,
@@ -782,6 +795,9 @@ impl App {
             confirm: None,
             toast: None,
             quit: false,
+            pending_ping: None,
+            keymap: super::keymap::KeyMap::default(),
+            palette: None,
             logs: Vec::new(),
             last_refresh: Instant::now() - Duration::from_secs(2),
             pending_key: None,
@@ -938,6 +954,22 @@ impl App {
             let current = self.peer_selected as isize;
             let next = (current + delta).clamp(0, (count - 1) as isize);
             self.peer_selected = next as usize;
+        }
+    }
+
+    /// Deliver a finished background ping's toast, or re-arm the receiver.
+    pub fn poll_ping(&mut self) {
+        let Some(receiver) = self.pending_ping.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(message) => self.notify(message),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.pending_ping = Some(receiver);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.notify("ping worker exited without a result");
+            }
         }
     }
 

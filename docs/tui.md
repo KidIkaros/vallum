@@ -15,10 +15,27 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
   <img src="../assets/vallum-cockpit.png" alt="Vallum TUI Console" width="100%">
 </p>
 
+## Interacting
+
+Three ways to drive the dashboard — pick whichever fits; nothing is only
+reachable through a memorized shortcut:
+
+- **Command palette** (`:`): type what you want in plain words —
+  `add peer`, `export`, `logs`, `quit`. The list filters as you type, shows
+  the current key for each action on the right, and runs the highlighted row
+  on `Enter` or a mouse click. `Esc` (or a click outside) closes it.
+- **Mouse**: click interface tabs, peer rows, and palette rows; the wheel
+  scrolls peer lists.
+- **Keys**: the bindings below are the defaults. Every dashboard action is
+  remappable (see *Key bindings*), while modal contexts — forms,
+  confirmations, the filter input, QR, and scrolling views — keep fixed keys
+  so there is always a way out. `Ctrl-C` always quits.
+
 ## Keys
 
 | Key | Action |
 |---|---|
+| `:` | command palette — every action by name, click or Enter runs it |
 | `Space` / `s` | toggle tunnel service (systemd first, then `vallum-quick`) |
 | `Tab` / `Shift-Tab` | next/previous interface (or click tab with mouse) |
 | `j` / `k`, arrows | select peer (or click row / scroll wheel with mouse) |
@@ -26,14 +43,14 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
 | `o` | cycle peer sorting order (`natural`, `handshake`, `transfer`, `name`) |
 | `Home` / `End`, `g` / `G` | jump to first / last peer; top / bottom in logs, diff, and help |
 | `PageUp` / `PageDown` | scroll peer table (5 rows) / scroll logs, diff, and help |
-| `p` | ping selected peer's tunnel IP |
+| `p` | ping selected peer's tunnel IP (runs off the event loop) |
 | `a` | add peer (name, public line, endpoint, allowed IPs, keepalive, PSK) |
 | `e` | edit name, endpoint, allowed IPs, keepalive, PSK |
 | `d` | remove peer (confirmation with peer details preview) |
 | `i` | import client bundle (`.vallum-bundle`) into the daemon directly |
 | `g` | generate a key and prefill the add form |
 | `b` (or `x`) | export the client bundle and show its animated QR |
-| `y` | copy peer (or interface) public line to clipboard (OSC 52 + desktop clipboard) |
+| `y` | copy peer (or interface) public line to clipboard |
 | `Y` | copy peer address / endpoint (or interface address) to clipboard |
 | `W` | write/save runtime peers and configuration to disk file |
 | `c` | edit the runtime listen port and fwmark (temporary) |
@@ -45,6 +62,40 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
 | `R` | toggle the 1-second auto-refresh on/off |
 | `?` / `F1` | help (scrollable) |
 | `q` / `Q` / Ctrl-C | quit (or close modal/help/logs/diff) |
+
+## Key bindings
+
+Dashboard keys are configurable. `vallum tui` reads
+`$XDG_CONFIG_HOME/vallum/tui-keys.toml` (or `~/.config/vallum/tui-keys.toml`)
+when it exists, or a file passed with `--keys FILE` (which takes precedence).
+Unlisted actions keep their defaults; a file replaces each named action's
+bindings entirely.
+
+```toml
+add_peer = "n"            # rebind; 'a' no longer adds a peer
+help = ["F1", "h"]        # several keys for one action
+quit = "none"             # unbind (Ctrl-C still quits)
+```
+
+Action names: `quit` `help` `refresh` `auto_refresh` `command_palette`
+`filter` `clear_filter` `sort` `next_interface` `prev_interface` `next_peer`
+`prev_peer` `scroll_peers_down` `scroll_peers_up` `first_peer` `last_peer`
+`add_peer` `edit_peer` `remove_peer` `keygen` `export_bundle` `import_bundle`
+`ping` `yank_public_line` `yank_address` `save_runtime` `runtime_form`
+`interface_form` `edit_config` `toggle_service` `logs`. Unknown actions or
+unparsable keys are reported in a startup toast and otherwise ignored. The
+palette always shows the effective bindings next to each command.
+
+## Clipboard
+
+`y`/`Y` report which channel actually took the text instead of claiming a
+copy succeeded. OSC 52 is always attempted — that is what makes copying work
+over SSH and inside tmux — but the TUI can only report that it *sent* the
+sequence, since the terminal decides whether to honor it. On a Wayland or
+X11 desktop it additionally pipes to `wl-copy` / `xclip`, and the toast says
+`copied via wl-copy` only when that helper ran successfully; when no local
+helper is found it says the OSC 52 sequence was sent, and when nothing
+worked it says so.
 
 ## What it does
 
@@ -118,5 +169,6 @@ vallum tui --snapshot --ansi --width 120 --height 36   # headless, with ANSI sty
 - Terminal-only; no GUI, camera QR scanning, or Windows named-pipe control.
 - Interface/routes/DNS changes are raw TOML through `E`, not structured forms
   yet; peer and runtime-device changes are forms.
-- `p` pings the peer's first allowed IP synchronously (~1 s worst case).
+- `p` pings the peer's first allowed IP on a worker thread (the UI stays
+  responsive); only one ping runs at a time and its result arrives as a toast.
 - The QR is an export format; import is from the `.vallum-bundle` file.

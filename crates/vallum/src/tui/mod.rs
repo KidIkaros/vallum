@@ -7,6 +7,7 @@ pub mod app;
 pub mod bundle;
 pub mod client;
 pub mod input;
+pub mod keymap;
 pub mod qr;
 pub mod ui;
 
@@ -42,6 +43,11 @@ pub fn run(args: &TuiArgs) -> Result<(), Error> {
         return Err(Error::Usage(msg));
     }
     let mut app = App::new(client::discover(args));
+    let (keymap, warning) = keymap::KeyMap::load(args.keymap_file());
+    app.keymap = keymap;
+    if let Some(warning) = warning {
+        app.notify(warning);
+    }
     actions::refresh(&mut app);
 
     let default_hook = std::panic::take_hook();
@@ -92,6 +98,7 @@ fn event_loop(
             last_refresh = Instant::now();
         }
         app.expire_toast();
+        app.poll_ping();
         if let Some(qr) = app.qr.as_mut() {
             qr.tick();
         }
@@ -201,6 +208,8 @@ fn color_to_ansi_bg(color: ratatui::style::Color) -> &'static str {
 
 fn snapshot(args: &TuiArgs) -> Result<(), Error> {
     let mut app = App::new(client::discover(args));
+    let (keymap, _warning) = keymap::KeyMap::load(args.keymap_file());
+    app.keymap = keymap;
     actions::refresh(&mut app);
 
     match args.snapshot_view.as_str() {

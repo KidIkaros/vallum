@@ -1116,3 +1116,158 @@ fn long_form_values_render_as_a_single_line_window() {
     let display = super::ui::field_value_display(utf8, 2, 40, true);
     assert_eq!(display, "hé|llo wörld");
 }
+
+#[test]
+fn colon_opens_the_command_palette_and_enter_runs_the_selected_action() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+    );
+    assert!(app.palette.is_some());
+
+    // "qui" narrows to "quit"; Enter runs it without typing a binding.
+    for c in ['q', 'u', 'i'] {
+        super::input::handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        );
+    }
+    let commands = super::keymap::matching_commands("qui");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].action, super::keymap::Action::Quit);
+
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.quit);
+    assert!(app.palette.is_none());
+}
+
+#[test]
+fn palette_esc_closes_and_arrows_move_the_highlight() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    app.palette = Some(super::app::PaletteState::default());
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.palette.as_ref().expect("palette open").selected, 1);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.palette.as_ref().expect("palette open").selected, 0);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.palette.is_none());
+}
+
+#[test]
+fn palette_commands_match_names_and_keywords() {
+    use super::keymap::{matching_commands, Action};
+
+    assert_eq!(matching_commands("").len(), super::keymap::COMMANDS.len());
+    assert_eq!(matching_commands("add peer")[0].action, Action::AddPeer);
+    // Keyword hit: "reachability" is a keyword of "ping peer".
+    let ping = matching_commands("reachab");
+    assert_eq!(ping.len(), 1);
+    assert_eq!(ping[0].action, Action::Ping);
+    assert!(matching_commands("zzz-nothing").is_empty());
+}
+
+#[test]
+fn keymap_overrides_rebind_unbind_and_warn_on_unknown_actions() {
+    use super::keymap::{Action, KeyMap};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let dir = std::env::temp_dir().join(format!(
+        "vallum-keymap-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("tui-keys.toml");
+    std::fs::write(
+        &path,
+        "add_peer = \"n\"\nhelp = [\"F1\", \"h\"]\nquit = \"none\"\nbogus_action = \"z\"\n",
+    )
+    .expect("write keymap");
+
+    let (map, warning) = KeyMap::load(Some(&path));
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    // Rebound: 'n' adds a peer; the default 'a' no longer does.
+    assert_eq!(map.action_for(&key('n')), Some(Action::AddPeer));
+    assert_eq!(map.action_for(&key('a')), None);
+    // Multi-binding override.
+    assert_eq!(map.action_for(&key('h')), Some(Action::Help));
+    assert_eq!(
+        map.action_for(&KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+        Some(Action::Help)
+    );
+    // '?' was replaced by the help override.
+    assert_eq!(map.action_for(&key('?')), None);
+    // Unbound: 'q' and 'Q' no longer quit.
+    assert_eq!(map.action_for(&key('q')), None);
+    // Untouched defaults survive.
+    assert_eq!(map.action_for(&key('o')), Some(Action::Sort));
+    let warning = warning.expect("warning for bogus_action");
+    assert!(warning.contains("bogus_action"));
+
+    // Bad TOML falls back to defaults with a warning.
+    std::fs::write(&path, "not = [valid").expect("write bad keymap");
+    let (map, warning) = KeyMap::load(Some(&path));
+    assert!(warning.is_some());
+    assert_eq!(map.action_for(&key('a')), Some(Action::AddPeer));
+
+    // Missing file: defaults, no warning.
+    let (map, warning) = KeyMap::load(Some(&dir.join("missing.toml")));
+    assert_eq!(map.action_for(&key('a')), Some(Action::AddPeer));
+    let _ = warning; // a missing --keys file warns but must not break defaults
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn clipboard_report_distinguishes_what_actually_happened() {
+    use super::actions::clipboard_report;
+
+    assert_eq!(clipboard_report(&[]), "no clipboard channel worked");
+    let osc_only = clipboard_report(&["OSC 52"]);
+    assert!(osc_only.contains("OSC 52"));
+    assert!(!osc_only.starts_with("copied via"));
+    assert_eq!(clipboard_report(&["wl-copy"]), "copied via wl-copy");
+    assert_eq!(
+        clipboard_report(&["OSC 52", "xclip"]),
+        "copied via OSC 52 + xclip"
+    );
+}
+
+#[test]
+fn poll_ping_reports_results_and_survives_worker_loss() {
+    let mut app = App::new(Vec::new());
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    app.pending_ping = Some(receiver);
+
+    // No result yet: stays pending, no toast.
+    app.poll_ping();
+    assert!(app.pending_ping.is_some());
+    assert!(app.toast.is_none());
+
+    sender
+        .send("ping 10.7.0.2: reply in 0.42 ms".to_owned())
+        .expect("send");
+    app.poll_ping();
+    assert!(app.pending_ping.is_none());
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.message.contains("reply in 0.42 ms")));
+
+    // A dead worker is reported rather than hanging forever.
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    app.pending_ping = Some(receiver);
+    drop(sender);
+    app.poll_ping();
+    assert!(app.pending_ping.is_none());
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.message.contains("ping worker exited")));
+}

@@ -8,6 +8,8 @@
 *.sock
 *.log
 *.vallum-bundle
+# Private key files: the seed inside is the whole identity.
+*.key
 
 # Editor and OS droppings
 .DS_Store
