@@ -203,8 +203,8 @@ validity window, so a credential can expire:
 # once: a CA key with a signing half
 sudo vallum keygen --output /etc/vallum/ca.key --suite 3 --signing > ca.pub
 
-# trust that CA in the interface
-#   identity_issuer = "<the signing field of ca.pub>"
+# trust that CA in the interface — its public line is what keygen printed
+#   identity_issuer = "vallum1:0003:..."
 
 # per device: issue a 90-day document over its public line
 sudo vallum identity issue --ca-key /etc/vallum/ca.key \

@@ -17,7 +17,7 @@ use clap::Args;
 
 use crate::config::{self, Config};
 use crate::uapi::{self, Response};
-use crate::{control, Error};
+use crate::{control, say, Error};
 
 #[derive(Debug, Args)]
 pub struct MetricsArgs {
@@ -48,7 +48,20 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
         )));
     }
     let socket = socket_path(args.config.as_deref(), args.control.as_deref())?;
-    let reply = control::request(&socket, "get=1\n")?;
+    let reply = match control::request(&socket, "get=1\n") {
+        Ok(reply) => reply,
+        Err(error) => {
+            // A scrape should see `up 0`, not silence: staleness hides a dead
+            // daemon. The command still exits nonzero, so scripts can gate on it.
+            say!(
+                "# HELP {0}_up Whether the control socket answered.\n\
+                 # TYPE {0}_up gauge\n\
+                 {0}_up 0",
+                args.prefix
+            );
+            return Err(error);
+        }
+    };
     if !reply.lines().any(|line| line == "errno=0") {
         return Err(Error::Usage(format!(
             "control request failed: {}",
@@ -59,7 +72,7 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    print!("{}", render(&response, &args.prefix, now));
+    say!("{}", render(&response, &args.prefix, now).trim_end());
     Ok(())
 }
 

@@ -461,6 +461,44 @@ pub fn decode_public(text: &str) -> Result<DecodedPublic, Error> {
     Ok((suite, identity))
 }
 
+/// Resolve the signing key an issuer reference names.
+///
+/// The natural artifact is the CA's `vallum1:` public line, which is what
+/// `vallum keygen` prints; the bare hex of its signing key is also accepted.
+/// The result is a `String` error — the "what" — so each caller can wrap it in
+/// the error shape it reports with.
+///
+/// # Errors
+///
+/// If the line is KEM-only, names another suite, or the hex is the wrong size.
+pub fn issuer_signing_key(
+    suite_id: u16,
+    sign_pk_max: usize,
+    text: &str,
+) -> Result<SignPublicKey, String> {
+    let text = text.trim();
+    if text.starts_with(PUBLIC_TAG) {
+        let (line_suite, identity) = decode_public(text).map_err(|error| error.to_string())?;
+        if line_suite != suite_id {
+            return Err(format!(
+                "the issuer's public line is for suite 0x{line_suite:04x}, but this interface \
+                 uses 0x{suite_id:04x}"
+            ));
+        }
+        return identity.signing().cloned().ok_or_else(|| {
+            "the issuer's public line is KEM-only; a CA needs `vallum keygen --signing`".to_owned()
+        });
+    }
+    let bytes = hex_decode(text).map_err(|why| format!("not hex: {why}"))?;
+    if bytes.len() != sign_pk_max {
+        return Err(format!(
+            "{} bytes, but suite 0x{suite_id:04x} uses {sign_pk_max}",
+            bytes.len()
+        ));
+    }
+    Ok(SignPublicKey::new(bytes))
+}
+
 /// Where the daemon expects a key file when the config names none.
 #[must_use]
 pub fn default_secret_path(interface: &str) -> PathBuf {

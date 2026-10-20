@@ -261,6 +261,9 @@ struct Server {
     public_line: String,
     /// The CA key every document must verify against, if one is configured.
     issuer: Option<vallum_crypto::SignPublicKey>,
+    /// `interface.public_endpoint`: the address `server init` remembered, which
+    /// client bundles should dial before falling back to source-route detection.
+    public_endpoint: Option<String>,
 }
 
 /// `vallum peer`.
@@ -543,16 +546,17 @@ fn add(args: &AddArgs) -> Result<(), Error> {
 
     // 5. The bundle, when the server generated the key.
     let mut bundle_path = None;
+    let mut bundle_endpoint_result = None;
     if let Some(path) = &args.bundle_out {
         let secret = generated.as_ref().ok_or_else(|| {
             Error::Usage("--bundle-out needs a key this command generated".to_owned())
         })?;
-        let bundle_endpoint = bundle_endpoint(args.endpoint.as_deref(), &args.config)?;
+        let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
         let config_text = client_config(
             &args.name,
             &address.to_string(),
             &server.public_line,
-            &bundle_endpoint,
+            &endpoint,
             &args.dns,
             psk_hex.as_deref(),
         );
@@ -576,11 +580,12 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             let _ = std::fs::remove_file(key_path);
         }
         bundle_path = Some(path.clone());
+        bundle_endpoint_result = Some((endpoint, source));
     }
 
     let mut client_config_path = None;
     if let Some(path) = &args.client_config_out {
-        let endpoint = bundle_endpoint(args.endpoint.as_deref(), &args.config)?;
+        let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
         let text = client_config(
             &args.name,
             &address.to_string(),
@@ -591,6 +596,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         );
         write_private(path, text.as_bytes())?;
         client_config_path = Some(path.clone());
+        bundle_endpoint_result = Some((endpoint, source));
     }
 
     let applied = if args.no_apply {
@@ -612,6 +618,9 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             pin_endpoint: args.pin_endpoint,
             validity: validity_label(validity, now_unix()),
             bundle: bundle_path.clone(),
+            bundle_endpoint: bundle_endpoint_result
+                .as_ref()
+                .map(|(endpoint, _)| endpoint.clone()),
             client_config: client_config_path.clone(),
             config: args.config.clone(),
             backup,
@@ -653,6 +662,9 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     );
     if let Some(path) = &client_config_path {
         say!("   client     {}", path.display());
+        if let Some((endpoint, source)) = &bundle_endpoint_result {
+            say_bundle_endpoint(endpoint, *source);
+        }
         say!(
             "              copy it to the device, with its key file named `{}.key`",
             args.name
@@ -660,6 +672,9 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     }
     if let Some(path) = &bundle_path {
         say!("   bundle     {}", path.display());
+        if let Some((endpoint, source)) = &bundle_endpoint_result {
+            say_bundle_endpoint(endpoint, *source);
+        }
         if args.forget_key {
             say!("   key        deleted from the server (--forget-key)");
         } else {
@@ -714,6 +729,7 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
 
     // The bundle, when the server generated the new key.
     let mut bundle_path = None;
+    let mut bundle_endpoint_result = None;
     if let Some(path) = &args.bundle_out {
         let secret = built.generated.as_ref().ok_or_else(|| {
             Error::Usage("--bundle-out needs a key this command generated".to_owned())
@@ -727,7 +743,8 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
             .allowed_ips
             .first()
             .ok_or_else(|| Error::Usage("the peer has no address to put in a bundle".to_owned()))?;
-        let endpoint = bundle_endpoint(args.endpoint.as_deref(), &args.config)?;
+        let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
+        bundle_endpoint_result = Some((endpoint.clone(), source));
         let psk = read_psk(&peer, &file.directory())?;
         let config_text = client_config(
             &args.name,
@@ -768,6 +785,9 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
             name: args.name.clone(),
             fingerprint: fingerprint(built.text.as_deref().unwrap_or(&built.public_line)),
             bundle: bundle_path.clone(),
+            bundle_endpoint: bundle_endpoint_result
+                .as_ref()
+                .map(|(endpoint, _)| endpoint.clone()),
             config: args.config.clone(),
             backup,
             applied,
@@ -791,6 +811,9 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
     );
     if let Some(path) = &bundle_path {
         say!("   bundle     {}", path.display());
+        if let Some((endpoint, source)) = &bundle_endpoint_result {
+            say_bundle_endpoint(endpoint, *source);
+        }
         say!();
         say!("on the client:");
         say!("   vallum import-bundle {} --install", path.display());
@@ -1095,6 +1118,8 @@ struct Added {
     validity: String,
     bundle: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     client_config: Option<PathBuf>,
     config: PathBuf,
     backup: PathBuf,
@@ -1121,6 +1146,8 @@ struct Rotated {
     name: String,
     fingerprint: String,
     bundle: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_endpoint: Option<String>,
     config: PathBuf,
     backup: PathBuf,
     applied: bool,
@@ -1170,20 +1197,10 @@ fn load_server(config_path: &Path) -> Result<Server, Error> {
     let identity = keys::identity(&suite, &file)?;
     let public_line = keys::encode_public(file.suite, &identity.to_peer());
     let issuer = match config.interface.identity_issuer.as_deref() {
-        Some(text) => {
-            let bytes = keys::hex_decode(text).map_err(|why| {
-                Error::Usage(format!("interface.identity_issuer is not hex: {why}"))
-            })?;
-            let expected = suite.sizes().sign_pk_max;
-            if bytes.len() != expected {
-                return Err(Error::Usage(format!(
-                    "interface.identity_issuer is {} bytes, but suite 0x{:04x} uses {expected}",
-                    bytes.len(),
-                    file.suite
-                )));
-            }
-            Some(vallum_crypto::SignPublicKey::new(bytes))
-        }
+        Some(text) => Some(
+            keys::issuer_signing_key(suite.suite_id(), suite.sizes().sign_pk_max, text)
+                .map_err(|why| Error::Usage(format!("interface.identity_issuer: {why}")))?,
+        ),
         None => None,
     };
     Ok(Server {
@@ -1191,6 +1208,7 @@ fn load_server(config_path: &Path) -> Result<Server, Error> {
         suite_id: file.suite,
         public_line,
         issuer,
+        public_endpoint: config.interface.public_endpoint.clone(),
     })
 }
 
@@ -1276,18 +1294,49 @@ fn endpoint_with_port(text: &str, config_path: &Path) -> Result<String, Error> {
     Ok(normalise_endpoint(text, listen_port_of(config_path)?))
 }
 
-fn bundle_endpoint(explicit: Option<&str>, config_path: &Path) -> Result<String, Error> {
+/// Where the bundle's endpoint came from, so the report can say so honestly: an
+/// explicit flag and a remembered `public_endpoint` are choices; a detected
+/// source route is a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointSource {
+    Explicit,
+    Configured,
+    Detected,
+}
+
+fn bundle_endpoint(
+    explicit: Option<&str>,
+    server: &Server,
+    config_path: &Path,
+) -> Result<(String, EndpointSource), Error> {
     let port = listen_port_of(config_path)?;
     if let Some(text) = explicit {
-        return Ok(normalise_endpoint(text, port));
+        return Ok((normalise_endpoint(text, port), EndpointSource::Explicit));
     }
-    detected_endpoint(port).ok_or_else(|| {
-        Error::Usage(
-            "the client bundle needs a reachable endpoint; pass --endpoint <host:port> \
-             (the address the client should dial)"
-                .to_owned(),
-        )
-    })
+    if let Some(text) = server.public_endpoint.as_deref() {
+        return Ok((normalise_endpoint(text, port), EndpointSource::Configured));
+    }
+    detected_endpoint(port)
+        .map(|endpoint| (endpoint, EndpointSource::Detected))
+        .ok_or_else(|| {
+            Error::Usage(
+                "the client bundle needs a reachable endpoint; pass --endpoint <host:port> \
+                 (the address the client should dial)"
+                    .to_owned(),
+            )
+        })
+}
+
+fn say_bundle_endpoint(endpoint: &str, source: EndpointSource) {
+    match source {
+        EndpointSource::Explicit | EndpointSource::Configured => {
+            say!("              → {endpoint}")
+        }
+        EndpointSource::Detected => say!(
+            "              → {endpoint} (guessed from the source route; pass --endpoint if clients \
+             should dial something else)"
+        ),
+    }
 }
 
 fn client_config(

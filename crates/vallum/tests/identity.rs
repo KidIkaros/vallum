@@ -225,7 +225,9 @@ fn a_self_signed_document_is_accepted_only_without_an_issuer() {
 #[test]
 fn verify_reports_validity_and_exits_nonzero_when_invalid() {
     let dir = scratch("verify");
-    let (ca_key, _ca_public) = signing_key(&dir, "ca");
+    let (ca_key, ca_public) = signing_key(&dir, "ca");
+    let ca_public_file = dir.join("ca.pub");
+    std::fs::write(&ca_public_file, &ca_public).unwrap();
     let (_peer_key, peer_public) = signing_key(&dir, "laptop");
     let peer_public_file = dir.join("laptop.pub");
     std::fs::write(&peer_public_file, &peer_public).unwrap();
@@ -233,7 +235,7 @@ fn verify_reports_validity_and_exits_nonzero_when_invalid() {
 
     let (ok, stdout, _) = run(bin()
         .args(["identity", "verify", "--issuer"])
-        .arg(&ca_key)
+        .arg(&ca_public_file)
         .arg("--document")
         .arg(&document));
     assert!(ok);
@@ -254,6 +256,16 @@ fn verify_reports_validity_and_exits_nonzero_when_invalid() {
         .arg(&document));
     assert!(ok);
     assert!(stdout.contains("issued by another key"), "{stdout}");
+
+    // A private key file is the natural mistake for `--issuer`, and the error
+    // says so rather than failing on a TOML parse.
+    let (ok, _, stderr) = run(bin()
+        .args(["identity", "verify", "--issuer"])
+        .arg(&ca_key)
+        .arg("--document")
+        .arg(&document));
+    assert!(!ok);
+    assert!(stderr.contains("private key file"), "{stderr}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

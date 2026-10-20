@@ -137,13 +137,22 @@ pub struct Interface {
     /// warned about, because it is rarely what an operator means.
     #[serde(default)]
     pub group: Option<String>,
-    /// The CA's signing public key, hex-encoded.
+    /// The CA's `vallum1:` public line, or the bare hex of its signing key.
     ///
     /// When set, every peer's identity document must verify against it. When
     /// absent, a document must be self-signed: a key binding with a window, not
     /// an authorisation.
     #[serde(default)]
     pub identity_issuer: Option<String>,
+    /// The address clients should dial, as `host:port`.
+    ///
+    /// The daemon does not read this: a responder's own reachable address is a
+    /// property of its peers' configs, not its interface. It exists so
+    /// `vallum server init` can remember the `--endpoint` it was given and
+    /// `vallum peer add` can put the same address in every client bundle,
+    /// instead of guessing a source route that is often a private address.
+    #[serde(default)]
+    pub public_endpoint: Option<String>,
 }
 
 /// One `[[peer]]` table.

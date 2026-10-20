@@ -175,6 +175,15 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
     let networks = parse_networks(&addresses)?;
     let port = listen_port(&args.listen)?;
 
+    // The endpoint is computed before the config is written so `write_config`
+    // can persist it as `public_endpoint`: every `peer add --bundle-out` then
+    // reuses the address the operator chose instead of re-detecting it.
+    let endpoint = args
+        .endpoint
+        .clone()
+        .or_else(|| detected_endpoint(port))
+        .map(|endpoint| normalise_endpoint(&endpoint, port));
+
     let (public_key, key_created) = ensure_key(&key_path, args.dry_run)?;
     let config_created = write_config(
         args,
@@ -183,13 +192,8 @@ fn run_init(args: &InitArgs) -> Result<(), Error> {
         &control_path,
         &key_path,
         key_created,
+        endpoint.as_deref(),
     )?;
-
-    let endpoint = args
-        .endpoint
-        .clone()
-        .or_else(|| detected_endpoint(port))
-        .map(|endpoint| normalise_endpoint(&endpoint, port));
 
     let host = hostnet::inspect();
     let mut steps: Vec<hostnet::HostStep> = Vec::new();
@@ -342,6 +346,7 @@ fn write_config(
     control: &Path,
     key_path: &Path,
     key_created: bool,
+    public_endpoint: Option<&str>,
 ) -> Result<bool, Error> {
     if args.config.exists() && !args.force {
         // Re-running setup must not rewrite an operator's file. The key it names
@@ -381,6 +386,9 @@ fn write_config(
         body.push_str(&format!("addresses = [{list}]\n"));
     }
     body.push_str(&format!("listen = \"{}\"\n", args.listen));
+    if let Some(endpoint) = public_endpoint {
+        body.push_str(&format!("public_endpoint = \"{endpoint}\"\n"));
+    }
     body.push_str(&format!("control = \"{}\"\n", control.display()));
     body.push_str("fwmark = 4660\n");
     if let Some(user) = &args.user {

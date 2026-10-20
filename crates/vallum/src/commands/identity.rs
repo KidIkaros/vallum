@@ -102,11 +102,12 @@ pub struct SelfSignArgs {
 
 #[derive(Debug, Args)]
 pub struct VerifyArgs {
-    /// The issuer's key file. Its suite is used for the signature check.
+    /// A file holding the issuer's `vallum1:` public line — what `vallum
+    /// keygen` prints. Verification never needs the CA's private key.
     #[arg(long, value_name = "FILE", conflicts_with = "issuer_public")]
     pub issuer: Option<PathBuf>,
 
-    /// The issuer's public line, instead of a key file.
+    /// The issuer's public line, instead of a file.
     #[arg(long, value_name = "LINE")]
     pub issuer_public: Option<String>,
 
@@ -336,29 +337,44 @@ fn emit(
     Ok(())
 }
 
+/// The suite and signing key an issuer's `vallum1:` public line names.
+fn issuer_from_line(line: &str) -> Result<(SdkSuite, vallum_crypto::SignPublicKey), Error> {
+    let (suite_id, identity) = keys::decode_public(line)?;
+    let suite = suite_of(suite_id)?;
+    let Some(signing) = identity.signing() else {
+        return Err(Error::Usage(
+            "the issuer's public line is KEM-only; a CA needs `vallum keygen --signing`".to_owned(),
+        ));
+    };
+    Ok((suite, signing.clone()))
+}
+
 fn verify(args: &VerifyArgs) -> Result<(), Error> {
     let (suite, issuer) = match (&args.issuer, &args.issuer_public) {
         (Some(path), None) => {
-            let secret = keys::load_secret(path)?;
-            let suite = suite_of(secret.suite)?;
-            let identity = keys::identity(&suite, &secret)?;
-            let Some(signing) = identity.signing_public() else {
-                return Err(Error::Usage(format!(
-                    "{} is a KEM-only key; a CA needs `vallum keygen --signing`",
-                    path.display()
-                )));
-            };
-            (suite, Some(signing.clone()))
+            let text = std::fs::read_to_string(path).map_err(|source| Error::IoPath {
+                action: "read the issuer's public line",
+                path: path.clone(),
+                source,
+            })?;
+            let (suite, signing) = issuer_from_line(text.trim()).map_err(|error| {
+                // A private key file is the natural mistake here: it is the
+                // CA's other artifact, and its name suggests it is the answer.
+                if text.trim_start().starts_with("version") || text.contains("seed") {
+                    Error::Usage(format!(
+                        "{} looks like a private key file; --issuer takes the CA's public line \
+                         (`vallum keygen … > ca.pub`), which is all verification needs",
+                        path.display()
+                    ))
+                } else {
+                    error
+                }
+            })?;
+            (suite, Some(signing))
         }
         (None, Some(line)) => {
-            let (suite_id, identity) = keys::decode_public(line)?;
-            let suite = suite_of(suite_id)?;
-            let Some(signing) = identity.signing() else {
-                return Err(Error::Usage(
-                    "the issuer's public line has no signing key".to_owned(),
-                ));
-            };
-            (suite, Some(signing.clone()))
+            let (suite, signing) = issuer_from_line(line)?;
+            (suite, Some(signing))
         }
         _ => {
             let suite = suite_of(parse_suite(&args.suite)?)?;

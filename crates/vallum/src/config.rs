@@ -373,25 +373,13 @@ impl ResolveConfig for Config {
         )?;
         let identity = keys::identity(suite, &secret)?;
         let issuer = match self.interface.identity_issuer.as_deref() {
-            Some(text) => {
-                let bytes = keys::hex_decode(text).map_err(|why| Error::Invalid {
-                    path: path.to_path_buf(),
-                    what: format!("interface.identity_issuer is not hex: {why}"),
-                })?;
-                let expected = suite.sizes().sign_pk_max;
-                if bytes.len() != expected {
-                    return Err(Error::Invalid {
+            Some(text) => Some(
+                keys::issuer_signing_key(suite.suite_id(), suite.sizes().sign_pk_max, text)
+                    .map_err(|why| Error::Invalid {
                         path: path.to_path_buf(),
-                        what: format!(
-                            "interface.identity_issuer is {} bytes, but suite 0x{:04x} \
-                             uses {expected}",
-                            bytes.len(),
-                            suite.suite_id()
-                        ),
-                    });
-                }
-                Some(vallum_crypto::SignPublicKey::new(bytes))
-            }
+                        what: format!("interface.identity_issuer: {why}"),
+                    })?,
+            ),
             None => None,
         };
         let now = now_unix();

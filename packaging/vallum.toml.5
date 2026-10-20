@@ -8,6 +8,7 @@ name = "vallum0"
 private_key = "private.key"
 addresses = ["10.7.0.1/24", "fd00:7::1/64"]
 listen = "0.0.0.0:51820"
+public_endpoint = "vpn.example.com:51820"
 control = "/run/vallum/vallum0.sock"
 fwmark = 4660
 
@@ -47,9 +48,15 @@ The outer path MTU, default 1500; values above 1500 are refused.
 Drop to these ids after the interface and socket exist.
 .TP
 .B identity_issuer
-The CA's signing public key, hex. When set, every peer's identity document must
-verify against it. When absent, a document must be self-signed: a key binding
-with a window, not an authorisation.
+The CA's \fBvallum1:\fR public line (or the bare hex of its signing key).
+When set, every peer's identity document must verify against it. When absent, a
+document must be self-signed: a key binding with a window, not an authorisation.
+.TP
+.B public_endpoint
+The address clients should dial, as `host:port`. The daemon does not read it —
+a responder's reachable address is a property of its peers' configs. `server
+init` writes the `--endpoint` it was given so every `peer add` bundle dials the
+same address instead of re-detecting a source route.
 .SH PEER
 .TP
 .B public_key " / " identity " / " identity_file
