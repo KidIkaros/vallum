@@ -303,6 +303,15 @@ else
         cat "$WORK/ns-client.log" 2>/dev/null
         echo "== ns: the client's own view"
         ip netns exec vallumtest-ns "$VALLUM" show --control /run/vallum/ns.sock 2>&1 | head -20
+        echo "== server: interface addressing and routes"
+        ip -o addr show dev "$IFACE" 2>&1
+        ip route show dev "$IFACE" 2>&1
+        echo "== server: route to the client's tunnel address"
+        ip route get "$CLI_IP" 2>&1
+        echo "== server: TUN counters"
+        ip -s link show "$IFACE" 2>&1 | tail -4
+        echo "== ns: client TUN counters"
+        ip netns exec vallumtest-ns ip -s link show "$CIFACE" 2>&1 | tail -4
         echo "== server: metrics"
         "$VALLUM" metrics --control /run/vallum/$IFACE.sock 2>&1 | head -20
         echo "== server: journal"
