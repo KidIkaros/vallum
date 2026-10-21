@@ -517,6 +517,26 @@ pub fn fingerprint(public_line: &str) -> String {
     hex_encode(&hash[..6])
 }
 
+/// Write `bytes` to `path` with mode `0600` (owner-only).
+///
+/// Centralised here so neither the enrolment responder nor the identity
+/// tooling has to reach into the CLI command modules for secret-file I/O.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = options.open(path).map_err(|source| Error::IoPath {
+        action: "write",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.write_all(bytes).map_err(|source| Error::IoPath {
+        action: "write",
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]

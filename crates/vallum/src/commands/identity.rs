@@ -519,22 +519,7 @@ fn days_remaining(validity: Validity, now: u64) -> i64 {
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = options.open(path).map_err(|source| Error::IoPath {
-        action: "write",
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.write_all(bytes).map_err(|source| Error::IoPath {
-        action: "write",
-        path: path.to_path_buf(),
-        source,
-    })
-}
+use crate::keys::write_private;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -30,7 +30,6 @@ fuzz_target!(|data: &[u8]| {
         hello.id.chars().all(|c| c.is_ascii_hexdigit()),
         "an id is hex"
     );
-    assert!(!hello.ephemeral_pk.is_empty() || hello.ephemeral_pk.is_empty());
 
     // Re-encode from the parsed fields and require the same datagram back.
     // The token only keys the admission tag, so a fixed one is enough here: the

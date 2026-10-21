@@ -42,8 +42,8 @@ use vallum_core::cookie::{CookieSecret, COOKIE_ROTATION_SECONDS, COOKIE_SIZE};
 use vallum_crypto::{frame, CryptoSuite, KemPublicKey, KemRole};
 use vallum_crypto_sdk::SdkSuite;
 
-use crate::commands::peer::write_private;
 use crate::error::Error;
+use crate::keys::write_private;
 use crate::say;
 
 const MAGIC: &[u8; 4] = b"VEN2";
@@ -632,7 +632,7 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             // A v1 client cannot be answered in a form it would understand, so
             // the honest thing is to say so where an operator will see it
             // rather than let them debug a silent timeout.
-            if buf[..size].starts_with(b"VEN1") && legacy_notice(&mut legacy, source.ip()) {
+            if buf[..size].starts_with(b"VEN1") && legacy_notice(&mut legacy) {
                 eprintln!(
                     "vallum: a v1 enrolment client ({}) tried to enrol; this server \
                      speaks v2 — upgrade that client (`vallum setup --join`)",
@@ -642,16 +642,20 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             continue;
         };
         // The cookie gate: before any invite lookup, any filesystem access, or
-        // any KEM work. A spoofed source cannot receive it.
-        let expected_cookie = cookies
-            .cookie(&suite(), &source_key(source.ip()))
-            .unwrap_or([0u8; COOKIE_SIZE]);
-        match hello.cookie {
-            Some(cookie) if constant_time_eq(&cookie, &expected_cookie) => {}
-            _ => {
-                let _ = socket.send_to(&encode_cookie(&expected_cookie), source);
-                continue;
+        // any KEM work. A spoofed source cannot receive it. `verify_cookie`
+        // accepts both the current and the previous secret so a rotation does
+        // not reject a cookie issued moments earlier.
+        let client_addr = source_key(source.ip());
+        let cookie_ok = hello
+            .cookie
+            .as_ref()
+            .and_then(|cookie| cookies.verify_cookie(&suite(), &client_addr, cookie).ok())
+            .unwrap_or(false);
+        if !cookie_ok {
+            if let Ok(fresh) = cookies.cookie(&suite(), &client_addr) {
+                let _ = socket.send_to(&encode_cookie(&fresh), source);
             }
+            continue;
         }
         let Some(invite) = load_invite(&interface, &hello.id) else {
             continue; // no such invite: silently
@@ -663,59 +667,38 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             continue; // wrong token or tampered: silently
         }
 
-        // Post-auth: a refusal here can be sealed, so say why.
-        let refusal = |status: &str, body: &str| -> Option<Vec<u8>> {
-            let ciphertext = ephemeral_answer(&hello, &[]).ok()?;
+        // Post-auth: one encapsulation serves either the refusal, the
+        // retransmit, or the fresh enrolment.
+        let Ok((ciphertext, shared)) = ephemeral_answer(&hello) else {
+            continue;
+        };
+        let seal = |status: &str, body: &str| -> Option<Vec<u8>> {
             encode_reply(
                 &token,
                 &hello,
-                &ciphertext.0,
-                &ciphertext.1,
+                &ciphertext,
+                &shared,
                 &server_nonce(),
                 status,
                 body,
             )
             .ok()
         };
-
-        if invite.expires < unix_now() {
-            if let Some(datagram) = refusal(
-                "err",
-                "this invite has expired; ask the server for a new one",
-            ) {
-                let _ = socket.send_to(&datagram, source);
-            }
-            continue;
-        }
-        if let Some(expected) = &invite.expect_public_line {
-            if !constant_time_eq(expected.as_bytes(), hello.public_line.as_bytes()) {
-                if let Some(datagram) = refusal("err", "this invite is bound to a different key") {
+        match decide_invite(&invite, &hello, unix_now()) {
+            InviteDecision::Refuse(reason) => {
+                if let Some(datagram) = seal("err", reason) {
                     let _ = socket.send_to(&datagram, source);
                 }
                 continue;
             }
-        }
-        if let (Some(old), Some(config)) = (&invite.public_line, &invite.config) {
-            if !constant_time_eq(old.as_bytes(), hello.public_line.as_bytes()) {
-                if let Some(datagram) =
-                    refusal("err", "this invite was already used with a different key")
-                {
+            InviteDecision::Retransmit(config) => {
+                if let Some(datagram) = seal("ok", config) {
                     let _ = socket.send_to(&datagram, source);
                 }
                 continue;
             }
-            // A retransmit: re-seal the stored config under a fresh key.
-            if let Some(datagram) = refusal("ok", config) {
-                let _ = socket.send_to(&datagram, source);
-            }
-            continue;
+            InviteDecision::Proceed => {}
         }
-
-        // A real enrolment: one encapsulation, now that the sender has proven
-        // it can receive at this address and holds the token.
-        let Ok((ciphertext, shared)) = ephemeral_answer(&hello, &[]) else {
-            continue;
-        };
         match crate::commands::peer::enroll_report(&crate::commands::peer::EnrollArgs {
             name: invite.name.clone(),
             config: config_path.to_path_buf(),
@@ -768,9 +751,36 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
     }
 }
 
+/// Pure post-auth decision for a verified `HELLO` against a loaded `Invite`.
+#[derive(Debug, PartialEq, Eq)]
+enum InviteDecision<'a> {
+    Proceed,
+    Retransmit(&'a str),
+    Refuse(&'static str),
+}
+
+fn decide_invite<'a>(invite: &'a Invite, hello: &Hello, now: u64) -> InviteDecision<'a> {
+    if invite.expires < now {
+        return InviteDecision::Refuse("this invite has expired; ask the server for a new one");
+    }
+    if let Some(expected) = &invite.expect_public_line {
+        if !constant_time_eq(expected.as_bytes(), hello.public_line.as_bytes()) {
+            return InviteDecision::Refuse("this invite is bound to a different key");
+        }
+    }
+    if let (Some(old), Some(config)) = (&invite.public_line, &invite.config) {
+        return if constant_time_eq(old.as_bytes(), hello.public_line.as_bytes()) {
+            InviteDecision::Retransmit(config)
+        } else {
+            InviteDecision::Refuse("this invite was already used with a different key")
+        };
+    }
+    InviteDecision::Proceed
+}
+
 /// Whether to log a legacy-client notice now: at most once a minute, so a
 /// v1 client retrying does not fill the journal.
-fn legacy_notice(last: &mut Option<Instant>, _source: IpAddr) -> bool {
+fn legacy_notice(last: &mut Option<Instant>) -> bool {
     match last {
         Some(when) if when.elapsed() < Duration::from_secs(60) => false,
         _ => {
@@ -797,7 +807,7 @@ fn server_nonce() -> [u8; NONCE_LEN] {
 }
 
 /// Encapsulate to the client's ephemeral key, returning `(ciphertext, shared)`.
-fn ephemeral_answer(hello: &Hello, _unused: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+fn ephemeral_answer(hello: &Hello) -> Result<(Vec<u8>, Vec<u8>), Error> {
     let suite = suite();
     let pk = KemPublicKey::new(hello.ephemeral_pk.clone());
     let encapsulation = suite
@@ -976,7 +986,7 @@ mod tests {
         let hello =
             encode_hello(&invite.id, &nonce(3), pk.as_bytes(), "line", None, &token).unwrap();
         let parsed = parse_hello(&hello).unwrap();
-        let (ct, shared) = ephemeral_answer(&parsed, &[]).unwrap();
+        let (ct, shared) = ephemeral_answer(&parsed).unwrap();
         let reply = encode_reply(&token, &parsed, &ct, &shared, &nonce(4), "ok", "{}").unwrap();
 
         // The same reply under a different invite id must not open: the id is
@@ -997,7 +1007,7 @@ mod tests {
         let hello =
             encode_hello(&invite.id, &nonce(5), pk.as_bytes(), "line", None, &token).unwrap();
         let parsed = parse_hello(&hello).unwrap();
-        let (ct, shared) = ephemeral_answer(&parsed, &[]).unwrap();
+        let (ct, shared) = ephemeral_answer(&parsed).unwrap();
         let reply = encode_reply(&token, &parsed, &ct, &shared, &nonce(6), "ok", "secret").unwrap();
         assert!(open_reply(&token, &invite.id, &nonce(5), &sk, &reply).is_some());
 
@@ -1006,6 +1016,81 @@ mod tests {
             .kem_keygen(&crate::entropy::seed(), KemRole::Ephemeral)
             .unwrap();
         assert!(open_reply(&token, &invite.id, &nonce(5), &sk2, &reply).is_none());
+    }
+
+    #[test]
+    fn decide_invite_handles_expiry_pinning_and_retransmits_purely() {
+        let (mut inv, token) = invite();
+        let (pk, _sk) = suite()
+            .kem_keygen(&crate::entropy::seed(), KemRole::Ephemeral)
+            .unwrap();
+        let datagram = encode_hello(
+            &inv.id,
+            &nonce(7),
+            pk.as_bytes(),
+            "vallum1:0003:aa",
+            None,
+            &token,
+        )
+        .unwrap();
+        let hello = parse_hello(&datagram).unwrap();
+
+        // Fresh invite within TTL -> Proceed.
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires),
+            InviteDecision::Proceed
+        );
+        // Past expiry -> Refuse.
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires + 1),
+            InviteDecision::Refuse("this invite has expired; ask the server for a new one")
+        );
+
+        // Pinned to another line -> Refuse; pinned to this line -> Proceed.
+        inv.expect_public_line = Some("vallum1:0003:bb".to_owned());
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires),
+            InviteDecision::Refuse("this invite is bound to a different key")
+        );
+        inv.expect_public_line = Some("vallum1:0003:aa".to_owned());
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires),
+            InviteDecision::Proceed
+        );
+
+        // Spent on the same line -> Retransmit; spent on another -> Refuse.
+        inv.public_line = Some("vallum1:0003:aa".to_owned());
+        inv.config = Some("[interface]".to_owned());
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires),
+            InviteDecision::Retransmit("[interface]")
+        );
+        inv.public_line = Some("vallum1:0003:cc".to_owned());
+        assert_eq!(
+            decide_invite(&inv, &hello, inv.expires),
+            InviteDecision::Refuse("this invite was already used with a different key")
+        );
+    }
+
+    #[test]
+    fn a_cookie_survives_a_single_secret_rotation() {
+        let mut secret = CookieSecret::new(&[1u8; 32]);
+        let client = source_key("192.0.2.1".parse().unwrap());
+        let before_rotate = secret.cookie(&suite(), &client).unwrap();
+        assert!(secret
+            .verify_cookie(&suite(), &client, &before_rotate)
+            .unwrap());
+
+        // One rotation keeps `previous`, so a cookie issued moments earlier is
+        // still accepted; a second rotation retires it.
+        secret.rotate(&[2u8; 32]);
+        assert!(secret
+            .verify_cookie(&suite(), &client, &before_rotate)
+            .unwrap());
+        secret.rotate(&[3u8; 32]);
+        assert!(!secret
+            .verify_cookie(&suite(), &client, &before_rotate)
+            .unwrap());
     }
 
     #[test]
