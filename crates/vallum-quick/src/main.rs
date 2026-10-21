@@ -8,7 +8,9 @@
 //! table the daemon ignores.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -214,6 +216,7 @@ fn up_after_pre(
 
     if !dry_run {
         wait_for_interface(interface)?;
+        wait_for_session(config, config_path, interface)?;
     }
 
     apply_routes(config, interface, table, dry_run)?;
@@ -326,6 +329,7 @@ fn attach(
 
     if !dry_run {
         wait_for_interface(&interface)?;
+        wait_for_session(&config, config_path, &interface)?;
     }
 
     apply_routes(&config, &interface, table, dry_run)?;
@@ -971,6 +975,75 @@ fn run_hook(hook: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>>
         return Err(format!("hook failed: {hook}").into());
     }
     Ok(())
+}
+
+/// Long enough for several handshake retries before a dead server is
+/// declared; short enough that a failed unit reports promptly.
+const SESSION_WAIT: Duration = Duration::from_secs(20);
+
+/// Readiness is a handshake, not an interface. A full tunnel attaches by
+/// policy-routing every packet through the peer — if that peer never
+/// completes a handshake the host's entire egress blackholes while the
+/// unit reports success. Gate route installation on a real session: poll
+/// the control socket until a peer reports a handshake, then route. Split
+/// tunnels skip this — a dead /24 hurts only that subnet.
+fn wait_for_session(
+    config: &Config,
+    config_path: &Path,
+    interface: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let full_tunnel = config.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
+    });
+    if !full_tunnel {
+        return Ok(());
+    }
+    let socket = config
+        .interface
+        .control
+        .clone()
+        .map(|path| {
+            if path.is_relative() {
+                config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(path)
+            } else {
+                path
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")));
+    let deadline = std::time::Instant::now() + SESSION_WAIT;
+    while std::time::Instant::now() < deadline {
+        if let Ok(reply) = uapi_get(&socket) {
+            let established = reply
+                .lines()
+                .any(|line| line.starts_with("last_handshake_time_sec=") && !line.ends_with("=0"));
+            if established {
+                return Ok(());
+            }
+        }
+        sleep(Duration::from_millis(200));
+    }
+    Err(format!(
+        "no peer completed a handshake within {}s — the tunnel is up but the \
+         server is not answering, and routing the host's traffic into it \
+         would blackhole this machine; fix the server and retry",
+        SESSION_WAIT.as_secs()
+    )
+    .into())
+}
+
+fn uapi_get(socket: &Path) -> std::io::Result<String> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(b"get=1\n\n")?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply)?;
+    Ok(reply)
 }
 
 fn wait_for_interface(interface: &str) -> Result<(), Box<dyn std::error::Error>> {
