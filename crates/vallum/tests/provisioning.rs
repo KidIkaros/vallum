@@ -382,11 +382,10 @@ fn enroll_hands_back_a_config_and_is_idempotent() {
 fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     let dir = scratch("join");
     let config = init(&dir);
-    // Enable the responder on a test-only port.
-    let mut text = std::fs::read_to_string(&config).unwrap();
     // A port of our own: a stale responder from a previous run would answer
     // (or rather, refuse) on a shared one and look like a product failure.
     let port = 55000 + (std::process::id() % 1000) as u16;
+    let mut text = std::fs::read_to_string(&config).unwrap();
     text.push_str(&format!("\n[enroll]\nenabled = true\nport = {port}\n"));
     std::fs::write(&config, text).unwrap();
     let rundir = dir.join("run");
@@ -399,8 +398,10 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     assert!(ok, "{stderr}");
     let invite: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let token = invite["token"].as_str().unwrap().to_owned();
+    let id = invite["id"].as_str().unwrap().to_owned();
+    let fingerprint = invite["fingerprint"].as_str().unwrap().to_owned();
 
-    let mut serve = bin()
+    let serve = bin()
         .arg("enroll-serve")
         .arg("--config")
         .arg(&config)
@@ -410,25 +411,49 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    // The responder must die with the test, pass or fail.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut serve = KillOnDrop(serve);
     std::thread::sleep(std::time::Duration::from_millis(400));
+    if let Ok(Some(status)) = serve.0.try_wait() {
+        panic!("the responder exited immediately: {status}");
+    }
 
     let client = dir.join("client");
     std::fs::create_dir_all(&client).unwrap();
-    let join = |token: &str| {
-        run(bin()
+    let join = |id: &str, token: &str, expect: Option<&str>| {
+        let mut command = bin();
+        command
             .args([
                 "setup",
                 "--join",
                 &format!("127.0.0.1:{port}"),
                 "--name",
                 "phone",
+                "--invite-id",
+                id,
                 "--token",
                 token,
             ])
-            .current_dir(&client))
+            .current_dir(&client);
+        if let Some(expect) = expect {
+            command.args(["--expect", expect]);
+        }
+        run(&mut command)
     };
-    let (ok, stdout, stderr) = join(&token);
+
+    let (ok, stdout, stderr) = join(&id, &token, Some(&fingerprint));
     assert!(ok, "stdout {stdout}\nstderr {stderr}");
+    assert!(
+        stdout.contains(&format!("server fingerprint {fingerprint}")),
+        "{stdout}"
+    );
     let placed = client.join("phone.toml");
     assert!(placed.exists(), "the client config was not written");
     let parsed = vallum_config::Config::load(&placed).unwrap();
@@ -437,10 +462,9 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
         1,
         "the client config has its server peer"
     );
-    // The key came from the client; the server's record must match it.
+    // The peer the server recorded is the key the client generated.
     let server_config = vallum_config::Config::load(&config).unwrap();
     assert_eq!(server_config.peers.len(), 1);
-    // The peer the server recorded is the key the client generated.
     let (ok, client_line, stderr) = run(bin()
         .args(["pubkey", "--private-key"])
         .arg(client.join("phone.key")));
@@ -452,15 +476,84 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     );
 
     // The same token with a different key is refused, and says so.
-    let (ok, _, stderr) = join(&token);
+    let (ok, _, stderr) = join(&id, &token, None);
     assert!(!ok, "a second key enrolled under a spent token");
     assert!(stderr.contains("different key"), "{stderr}");
 
     // A wrong token gets silence, then a clear timeout.
-    let (ok, _, stderr) = join("aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111");
+    let (ok, _, stderr) = join(&id, "aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111", None);
     assert!(!ok);
     assert!(stderr.contains("no answer"), "{stderr}");
 
-    let _ = serve.kill();
+    drop(serve);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pinned_invite_only_enrols_the_key_it_named() {
+    let dir = scratch("pinned");
+    let config = init(&dir);
+    let port = 56000 + (std::process::id() % 1000) as u16;
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("\n[enroll]\nenabled = true\nport = {port}\n"));
+    std::fs::write(&config, text).unwrap();
+    let rundir = dir.join("run");
+
+    // The device generates its key here, and the operator pins it.
+    let pinned_line = keygen(&dir, "phone");
+    let pinned_file = dir.join("phone.pub");
+    std::fs::write(&pinned_file, &pinned_line).unwrap();
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "invite", "phone", "--config"])
+        .arg(&config)
+        .arg("--public-key-file")
+        .arg(&pinned_file)
+        .arg("--json")
+        .env("VALLUM_RUN_DIR", &rundir));
+    assert!(ok, "{stderr}");
+    let invite: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let id = invite["id"].as_str().unwrap().to_owned();
+    let token = invite["token"].as_str().unwrap().to_owned();
+
+    let serve = bin()
+        .arg("enroll-serve")
+        .arg("--config")
+        .arg(&config)
+        .env("VALLUM_RUN_DIR", &rundir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let serve = KillOnDrop(serve);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // A different key — what an attacker holding only the token would have.
+    let client = dir.join("client");
+    std::fs::create_dir_all(&client).unwrap();
+    let (ok, _, stderr) = run(bin()
+        .args([
+            "setup",
+            "--join",
+            &format!("127.0.0.1:{port}"),
+            "--name",
+            "phone",
+            "--invite-id",
+            &id,
+            "--token",
+            &token,
+        ])
+        .current_dir(&client));
+    assert!(!ok, "a pinned invite enrolled a different key");
+    assert!(stderr.contains("bound to a different key"), "{stderr}");
+    assert!(!client.join("phone.toml").exists());
+
+    drop(serve);
     let _ = std::fs::remove_dir_all(&dir);
 }

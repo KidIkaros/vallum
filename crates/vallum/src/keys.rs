@@ -505,6 +505,18 @@ pub fn default_secret_path(interface: &str) -> PathBuf {
     PathBuf::from(format!("/etc/vallum/{interface}.key"))
 }
 
+/// A short, comparable fingerprint of a public line.
+///
+/// Six bytes: enough that a human can compare two of them across a room, short
+/// enough to read aloud. Not a security boundary on its own — it is what makes
+/// `setup --join --expect` possible, by giving the invite line a value the
+/// client can check the answer against.
+pub fn fingerprint(public_line: &str) -> String {
+    let suite = vallum_crypto_sdk::SdkSuite::tri_hybrid();
+    let hash = suite.hash(b"vallum/peer/fingerprint/v1", public_line.as_bytes());
+    hex_encode(&hash[..6])
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]

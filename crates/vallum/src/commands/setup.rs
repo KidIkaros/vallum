@@ -72,6 +72,16 @@ pub struct SetupArgs {
     #[arg(long, value_name = "TOKEN", requires = "join")]
     pub token: Option<String>,
 
+    /// The invite id from `vallum peer invite` (32 hex characters).
+    #[arg(long, value_name = "HEX", requires = "join")]
+    pub invite_id: Option<String>,
+
+    /// Refuse the answer unless the server's fingerprint matches this. Printed
+    /// by `vallum peer invite`; it is how a client knows it reached the right
+    /// server rather than one that answered first.
+    #[arg(long, value_name = "FINGERPRINT", requires = "join")]
+    pub expect: Option<String>,
+
     /// On a server, allow devices to enrol with a one-time token (opens UDP
     /// `listen + 1`).
     #[arg(long)]
@@ -511,6 +521,29 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     let server_address = report
         .get("server_address")
         .and_then(|address| address.as_str());
+    // Before anything is written: is this the server the invite named?
+    if let Some(expect) = &args.expect {
+        let server_line = config_text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("public_key = \""))
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| {
+                Error::Usage("the answer had no server public line to check".to_owned())
+            })?;
+        let got = crate::keys::fingerprint(server_line);
+        if !got.eq_ignore_ascii_case(expect.trim()) {
+            return Err(Error::Precondition(format!(
+                "this is not the server the invite named.\n\
+                 \x20 expected {}\n\
+                 \x20 answered {}\n\
+                 Nothing was written. If the server was rebuilt, mint a new invite; \
+                 if not, treat this as an attack.",
+                expect.trim(),
+                got
+            )));
+        }
+        say!("   ok    server fingerprint {got}");
+    }
     place_config(
         &name,
         config_text,
@@ -661,7 +694,12 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("generated a key here; the private half does not leave this machine");
     say!("asking {server} to enrol `{name}`…");
 
-    let answer = crate::enroll::join(server, &token, &name, &public_line)?;
+    let invite_id = args.invite_id.clone().ok_or_else(|| {
+        Error::Usage(
+            "--invite-id is needed: `vallum peer invite` prints the whole command".to_owned(),
+        )
+    })?;
+    let answer = crate::enroll::join(server, &token, &invite_id, &name, &public_line)?;
     let report: serde_json::Value = serde_json::from_str(&answer)
         .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
     let config_text = report
@@ -679,6 +717,29 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     let server_address = report
         .get("server_address")
         .and_then(|address| address.as_str());
+    // Before anything is written: is this the server the invite named?
+    if let Some(expect) = &args.expect {
+        let server_line = config_text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("public_key = \""))
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| {
+                Error::Usage("the answer had no server public line to check".to_owned())
+            })?;
+        let got = crate::keys::fingerprint(server_line);
+        if !got.eq_ignore_ascii_case(expect.trim()) {
+            return Err(Error::Precondition(format!(
+                "this is not the server the invite named.\n\
+                 \x20 expected {}\n\
+                 \x20 answered {}\n\
+                 Nothing was written. If the server was rebuilt, mint a new invite; \
+                 if not, treat this as an attack.",
+                expect.trim(),
+                got
+            )));
+        }
+        say!("   ok    server fingerprint {got}");
+    }
     place_config(
         &name,
         config_text,

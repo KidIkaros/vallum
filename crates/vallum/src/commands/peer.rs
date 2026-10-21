@@ -510,6 +510,32 @@ pub struct EnrollArgs {
 /// Idempotent on retry: the same line returns the same config, so a client that
 /// lost its answer can simply ask again.
 fn enroll(args: &EnrollArgs) -> Result<(), Error> {
+    let report = enroll_report(args)?;
+    if args.json {
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    say!("enrolled `{}`", report.name);
+    say!("   address    {}", report.address);
+    say!("   endpoint   {}", report.endpoint);
+    say!("   fingerprint {}", report.fingerprint);
+    say!();
+    say!("the device's config:");
+    for line in report.config.lines() {
+        say!("   {line}");
+    }
+    Ok(())
+}
+
+/// Do the enrolment and return the report, without printing it.
+///
+/// The responder calls this in-process: a root service that shells out to
+/// itself is another surface, and this way the validation is the same code.
+pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     require_config(&args.config)?;
     let server = load_server(&args.config)?;
     let line = match (&args.public_key, &args.public_key_file) {
@@ -593,40 +619,18 @@ fn enroll(args: &EnrollArgs) -> Result<(), Error> {
         None,
     );
 
-    if args.json {
-        let report = Enrolled {
-            name: args.name.clone(),
-            address: address.clone(),
-            endpoint: endpoint.clone(),
-            server_address: file
-                .interface_addresses()
-                .first()
-                .map(|network| network.addr().to_string()),
-            fingerprint: fingerprint(&canonical),
-            config: config_text,
-        };
-        say!(
-            "{}",
-            serde_json::to_string_pretty(&report)
-                .map_err(|error| Error::Usage(format!("json: {error}")))?
-        );
-        return Ok(());
-    }
-
-    say!("enrolled `{}`", args.name);
-    say!("   address    {address}");
-    say!("   endpoint   {endpoint}");
-    if source == EndpointSource::Detected {
-        // Only worth saying when it was a guess rather than a choice.
-        say_bundle_endpoint(&endpoint, source);
-    }
-    say!("   fingerprint {}", fingerprint(&canonical));
-    say!();
-    say!("the device's config:");
-    for line in config_text.lines() {
-        say!("   {line}");
-    }
-    Ok(())
+    let _ = source;
+    Ok(Enrolled {
+        name: args.name.clone(),
+        address,
+        endpoint,
+        server_address: file
+            .interface_addresses()
+            .first()
+            .map(|network| network.addr().to_string()),
+        fingerprint: fingerprint(&canonical),
+        config: config_text,
+    })
 }
 
 #[derive(Debug, Args)]
@@ -638,6 +642,15 @@ pub struct InviteArgs {
     /// The configuration file this invite is for.
     #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
     pub config: PathBuf,
+
+    /// Bind the invite to the device's public line: a stolen token then
+    /// enrols nothing, because the attacker has no matching private key.
+    #[arg(long, value_name = "LINE", conflicts_with = "public_key_file")]
+    pub public_key: Option<String>,
+
+    /// A file holding the device's public line.
+    #[arg(long, value_name = "FILE")]
+    pub public_key_file: Option<PathBuf>,
 
     /// How long the invite lives, in minutes.
     #[arg(long, value_name = "MINUTES", default_value = "15")]
@@ -666,8 +679,35 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
             args.name, args.name
         )));
     }
-    let (token, path) = crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60)?;
-    let endpoint = bundle_endpoint(None, &load_server(&args.config)?, &args.config)?.0;
+    // A pinned invite names the key it will accept, which turns the token from
+    // a bearer credential into a registration for a key the client already has.
+    let expect =
+        match (&args.public_key, &args.public_key_file) {
+            (Some(line), None) => Some(line.trim().to_owned()),
+            (None, Some(path)) => Some(
+                std::fs::read_to_string(path)
+                    .map_err(|source| Error::IoPath {
+                        action: "read the device's public line",
+                        path: path.clone(),
+                        source,
+                    })?
+                    .trim()
+                    .to_owned(),
+            ),
+            (None, None) => None,
+            _ => return Err(Error::Usage(
+                "give the device's public line once: --public-key LINE or --public-key-file FILE"
+                    .to_owned(),
+            )),
+        };
+    let server = load_server(&args.config)?;
+    if let Some(line) = &expect {
+        validate_public_line(&server, line)?;
+    }
+    let (token, id, path) =
+        crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60, expect)?;
+    let server_fingerprint = fingerprint(&server.public_line);
+    let endpoint = bundle_endpoint(None, &server, &args.config)?.0;
     let port = endpoint
         .rsplit_once(':')
         .and_then(|(_, port)| port.parse::<u16>().ok())
@@ -683,7 +723,9 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "name": args.name,
+                "id": id,
                 "token": token.display(),
+                "fingerprint": server_fingerprint,
                 "expires_in_secs": args.ttl * 60,
                 "join": format!("{host}:{port}"),
             }))
@@ -702,8 +744,11 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     say!();
     say!("   on the client:");
     say!(
-        "      sudo vallum setup --join {host}:{port} --name {} --token {}",
-        args.name,
+        "      sudo vallum setup --join {host}:{port} --name {} \\",
+        args.name
+    );
+    say!(
+        "           --invite-id {id} --token {} --expect {server_fingerprint}",
         token.display()
     );
     say!();
@@ -1417,15 +1462,15 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
 }
 
 #[derive(Debug, Serialize)]
-struct Enrolled {
-    name: String,
-    address: String,
-    endpoint: String,
+pub(crate) struct Enrolled {
+    pub(crate) name: String,
+    pub(crate) address: String,
+    pub(crate) endpoint: String,
     /// The server's own tunnel address, so the client can prove the tunnel by
     /// pinging it straight after enrolling.
-    server_address: Option<String>,
-    fingerprint: String,
-    config: String,
+    pub(crate) server_address: Option<String>,
+    pub(crate) fingerprint: String,
+    pub(crate) config: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1702,11 +1747,7 @@ fn client_config(
     body
 }
 
-fn fingerprint(public_line: &str) -> String {
-    let suite = SdkSuite::tri_hybrid();
-    let hash = suite.hash(b"vallum/peer/fingerprint/v1", public_line.as_bytes());
-    keys::hex_encode(&hash[..6])
-}
+use crate::keys::fingerprint;
 
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::io::Write;
