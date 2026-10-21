@@ -89,6 +89,11 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
     }
 
     // ── host networking: per-config teardown covers nft/ufw/FORWARD ──
+    // One HostState snapshot and one deduplicated plan: two configs on this
+    // host must not emit the same rule removal twice, and a client config
+    // with `listen = "0.0.0.0:0"` contributes no port rule at all.
+    let state = crate::hostnet::inspect();
+    let mut steps = Vec::new();
     for config in std::fs::read_dir(CONFIG_DIR)
         .into_iter()
         .flatten()
@@ -96,8 +101,16 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
     {
-        teardown_host(&config, dry);
+        for step in teardown_plan(&config, &state) {
+            if !steps
+                .iter()
+                .any(|s: &crate::hostnet::HostStep| s.summary() == step.summary())
+            {
+                steps.push(step);
+            }
+        }
     }
+    let _ = crate::hostnet::apply(&steps, dry);
 
     remove_file(dry, Path::new(SYSCTL));
     if !dry && !Path::new(SYSCTL).exists() {
@@ -169,10 +182,15 @@ fn unit_known(name: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
-/// `server teardown`'s networking half, for every config install left behind.
-fn teardown_host(config: &Path, dry: bool) {
+/// `server teardown`'s networking half, planned for one config: its
+/// interface's rules plus the ports it actually listened on. Port 0 (a client
+/// config's ephemeral listen) contributes nothing — no rule ever opened it.
+fn teardown_plan(
+    config: &Path,
+    state: &crate::hostnet::HostState,
+) -> Vec<crate::hostnet::HostStep> {
     let Some(parsed) = vallum_config::Config::load(config).ok() else {
-        return;
+        return Vec::new();
     };
     let interface = parsed
         .interface
@@ -185,13 +203,19 @@ fn teardown_host(config: &Path, dry: bool) {
         .as_deref()
         .and_then(|listen| crate::commands::server::listen_port(listen).ok())
         .unwrap_or(51820);
-    let enroll = parsed
-        .enroll
-        .port
-        .unwrap_or_else(|| listen.saturating_add(1));
-    let steps =
-        crate::hostnet::plan_teardown(&crate::hostnet::inspect(), &[listen, enroll], &interface);
-    let _ = crate::hostnet::apply(&steps, dry);
+    // The responder's port only saw a firewall rule while enrolment ran.
+    let enroll = parsed.enroll.enabled.then(|| {
+        parsed
+            .enroll
+            .port
+            .unwrap_or_else(|| listen.saturating_add(1))
+    });
+    let ports: Vec<u16> = [Some(listen), enroll]
+        .into_iter()
+        .flatten()
+        .filter(|port| *port != 0)
+        .collect();
+    crate::hostnet::plan_teardown(state, &ports, &interface)
 }
 
 fn step(dry: bool, what: &str, action: impl Fn()) {
