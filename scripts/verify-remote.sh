@@ -11,6 +11,12 @@
 #   sudo ./scripts/verify-remote.sh user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --product user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --transports token user@vps.example.com
+#   sudo ./scripts/verify-remote.sh --clean-remote user@vps.example.com
+#
+# A host that already runs Vallum is refused, because the test installs its own
+# deployment and would otherwise delete a working one. `--clean-remote` is the
+# explicit override: it removes an existing Vallum deployment (listed below) and
+# then proceeds. It removes *Vallum's* files, never anyone else's.
 #
 # It enrols one client per enrolment transport — bundle, ssh (`setup --remote`),
 # token (`peer invite` + `setup --join`) — and proves each carries traffic. A
@@ -45,6 +51,7 @@ LOCAL_DIR=/tmp/vallum-remote-client
 CIFACE=vallumrc0
 PRODUCT=0
 KEEP=0
+CLEAN=0
 TRANSPORTS="bundle ssh token"
 TARGET=""
 
@@ -57,10 +64,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --product) PRODUCT=1 ;;
         --keep) KEEP=1 ;;
+        --clean-remote) CLEAN=1 ;;
         --transports) shift; TRANSPORTS=$1 ;;
         --port) shift; PORT=$1 ;;
         --subnet) shift; SUBNET=$1; PREFIX=${SUBNET#*/}; NET=${SUBNET%/*}; SRV_IP="${NET%.*}.1"; CLI_IP="${NET%.*}.2" ;;
-        -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) echo "unknown flag: $1" >&2; exit 1 ;;
         *) TARGET=$1 ;;
     esac
@@ -121,7 +129,27 @@ QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 
 say "remote checks ($TARGET)"
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
-rsh "test ! -e /etc/vallum" 2>/dev/null || bad "/etc/vallum already exists on the remote; refusing"
+if rsh "test -e /etc/vallum" 2>/dev/null; then
+    if [ "$CLEAN" != 1 ]; then
+        bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.
+   Re-run with --clean-remote to remove it first, or pick a host with no Vallum."
+    fi
+    say "removing the existing deployment (--clean-remote)"
+    echo "   units:      vallum@*, vallum-quick@*, vallum-enroll@*"
+    echo "   files:      /etc/vallum, /etc/sysctl.d/90-vallum.conf, /usr/bin/vallum{,-quick}"
+    echo "   firewall:   the UDP port rule, the vallum FORWARD rules, table inet vallum"
+    rsh "set +e
+        sudo systemctl disable --now 'vallum@*' 'vallum-quick@*' 'vallum-enroll@*' >/dev/null 2>&1
+        sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                   /etc/systemd/system/vallum-enroll@.service
+        sudo systemctl daemon-reload >/dev/null 2>&1
+        sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
+        sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+        sudo nft delete table inet vallum >/dev/null 2>&1
+        sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
+    rsh "test ! -e /etc/vallum" || bad "could not remove the existing deployment"
+    ok "existing deployment removed"
+fi
 FORWARD_WAS=$(rsh "cat /proc/sys/net/ipv4/ip_forward" 2>/dev/null | tr -d '[:space:]')
 [ -n "$FORWARD_WAS" ] || bad "cannot read the remote's ip_forward"
 ok "passwordless sudo, no existing deployment, ip_forward=$FORWARD_WAS"
