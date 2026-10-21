@@ -41,6 +41,34 @@
   collector exists. `scripts/check-package-manifest.sh` runs in CI so the
   three manifests cannot drift again.
 
+- **Exit codes follow the documented contract.** `show`, `showconf` and
+  `metrics` reported a missing control socket as a failure (1) while `metrics`
+  reported the same condition as a precondition (2), and a missing config file
+  differed between verb families. `docs/deployment/automation.md` promises 2
+  for "nothing was attempted"; every control-plane verb now agrees, and
+  `tests/exit_codes.rs` pins the matrix.
+- **A shortened interface name says so.** A peer name longer than eight
+  characters is truncated to `IFNAMSIZ`, so two peers sharing a prefix became
+  one interface with no word to anyone. The derivation now reports the
+  shortening, and why the result can collide.
+- **DNS is best-effort, and a route already in place is a no-op.** `attach`
+  failed outright when no DNS backend worked — `systemd-resolved` installed but
+  inactive, `resolvconf` a symlink to `resolvectl` — and threw away a working
+  tunnel over a missing convenience. It warns and keeps the tunnel. `ip route
+  add` for a route that already points at our own interface no longer fails the
+  unit with a raw `RTNETLINK answers: File exists`.
+- **A full tunnel is gated on a live handshake, in both directions.** `attach`
+  refuses to route one until a peer answers, and `vallum-quick` completes a
+  missing `fwmark` on load so a config minted before the mark existed still
+  attaches.
+- **`install.sh` authenticates without a token first.** It fetches the release
+  anonymously and falls back to `gh` only when rate-limited, running `gh` as the
+  invoking user rather than as root; `--package` routes deb/rpm through the same
+  signature check as the tarball.
+- **`verify-remote.sh` documents `--keep`,** the flag that preserves a
+  deployment you just proved, and its help no longer truncates itself with a
+  fixed line range.
+
 ## 1.6.1 — 2026-10-21
 
 Production readiness: signed and verifiable releases on two architectures, a
