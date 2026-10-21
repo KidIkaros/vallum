@@ -176,8 +176,17 @@ pub struct RotateArgs {
     pub public_key_file: Option<PathBuf>,
 
     /// Generate the new keypair here and write the client's bundle.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file", "identity"])]
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = ["public_key", "public_key_file", "identity"],
+        requires = "ship_key"
+    )]
     pub bundle_out: Option<PathBuf>,
+
+    /// Confirm that this server should generate the replacement key.
+    #[arg(long)]
+    pub ship_key: bool,
 
     /// The peer's new identity document.
     #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file", "bundle_out"])]

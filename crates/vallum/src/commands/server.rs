@@ -417,8 +417,13 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
         wait_for_socket(&control_path)
     };
 
+    // The modern paths first: a bundle needs `--ship-key`, because it carries
+    // a private key the server generated.
     let next = format!(
-        "vallum peer add laptop --config {} --bundle-out laptop.vallum-bundle",
+        "on the client: sudo vallum setup --remote you@<this-host>\n\
+         or here:       sudo vallum peer invite laptop   (one-time token)\n\
+         a bundle:      vallum peer add laptop --config {} --ship-key \
+         --bundle-out laptop.vallum-bundle",
         args.config.display()
     );
 

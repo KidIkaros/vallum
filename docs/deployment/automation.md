@@ -32,7 +32,7 @@ and a repair.
   "host_steps": ["persist forwarding in /etc/sysctl.d/90-vallum.conf", "…"],
   "service": "installed and started",
   "control": "/run/vallum/vallum0.sock",
-  "next": "vallum peer add laptop --config … --bundle-out laptop.vallum-bundle"
+  "next": "vallum peer add laptop --config … --ship-key --bundle-out laptop.vallum-bundle"
 }
 ```
 

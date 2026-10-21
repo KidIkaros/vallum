@@ -72,6 +72,12 @@ out of band: `peer invite` prints the server's **fingerprint**, and
 anything*. A user who ignores the fingerprint gets no protection — that is the
 residual risk, and the mismatch error names both values.
 
+One wrinkle worth knowing: the client checks *after* the server has already
+enrolled it, because the answer has to arrive before it can be judged. So a
+rejected answer leaves a peer record on that server which never connects —
+harmless, and `peer remove` clears it, but it is why the error says "if the
+server was rebuilt, mint a new invite".
+
 ### Not covered
 
 - Volumetric resistance: kernel and NIC limits, not measured.

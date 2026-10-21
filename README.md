@@ -160,7 +160,7 @@ If you would rather drive each step yourself:
 
 ```sh
 sudo ./scripts/install.sh --from-release --endpoint vpn.example.com --address 10.7.0.1/24
-sudo vallum peer add laptop --bundle-out laptop.vallum-bundle --forget-key
+sudo vallum peer add laptop --ship-key --bundle-out laptop.vallum-bundle --forget-key
 sudo vallum import-bundle laptop.vallum-bundle --install   # on the device
 ```
 

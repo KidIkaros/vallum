@@ -161,7 +161,7 @@ fi
 
 say "enrolling a client"
 rsh "$SERVER_CMD peer add laptop --config $CONFIG --endpoint $PUBLIC \
-        --bundle-out $REMOTE_DIR/bundle --dns 1.1.1.1" >/dev/null || bad "peer add"
+        --ship-key --bundle-out $REMOTE_DIR/bundle --dns 1.1.1.1" >/dev/null || bad "peer add"
 rsh "sudo cp $REMOTE_DIR/bundle $REMOTE_DIR/bundle.tmp && sudo chmod 644 $REMOTE_DIR/bundle.tmp" || bad "chmod"
 ok "bundle written on the remote"
 

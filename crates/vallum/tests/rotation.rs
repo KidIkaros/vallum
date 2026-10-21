@@ -134,7 +134,7 @@ fn rotate_with_a_bundle_generates_a_new_key_without_overwriting_the_old_one() {
     let (ok, stdout, stderr) = run(bin()
         .args(["peer", "rotate", "phone", "--config"])
         .arg(&config)
-        .args(["--endpoint", "203.0.113.5", "--bundle-out"])
+        .args(["--endpoint", "203.0.113.5", "--ship-key", "--bundle-out"])
         .arg(&bundle)
         .arg("--forget-key")
         .arg("--no-apply"));

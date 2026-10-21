@@ -209,7 +209,7 @@ add_client() {
     local name=$1 bundle
     [ -n "$name" ] || { echo "--add-client needs a name" >&2; exit 1; }
     bundle="$name.vallum-bundle"
-    local args=(peer add "$name" --bundle-out "$bundle" --forget-key)
+    local args=(peer add "$name" --ship-key --bundle-out "$bundle" --forget-key)
     if [ -n "$ENDPOINT" ]; then
         args+=(--endpoint "$ENDPOINT")
     fi

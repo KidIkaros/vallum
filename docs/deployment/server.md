@@ -91,7 +91,7 @@ ready: server `vallum0`
    service   installed and started
 
 add a client:
-   vallum peer add laptop --config /etc/vallum/vallum0.toml --bundle-out laptop.vallum-bundle
+   vallum peer add laptop --config /etc/vallum/vallum0.toml --ship-key --bundle-out laptop.vallum-bundle
 ```
 
 ## 3. Verify
@@ -143,7 +143,7 @@ Copy `laptop.toml` to the device as `/etc/vallum/laptop.toml`, next to
 ### B. The server generates the key and hands over a bundle
 
 ```sh
-sudo vallum peer add laptop --bundle-out laptop.vallum-bundle --forget-key
+sudo vallum peer add laptop --ship-key --bundle-out laptop.vallum-bundle --forget-key
 ```
 
 One command, but the server generated the private key. `--forget-key` deletes
@@ -191,7 +191,7 @@ sudo vallum peer finalize laptop
 `peer list` shows `ROT yes` while a rotation is open, and `doctor` warns until it
 is finalized. A rotation is only zero-downtime in the direction that matters: the
 **responder** accepts the previous key, so rotate the key of the peer that dials
-*you*. For a server-generated key, `peer rotate … --bundle-out FILE --forget-key`
+*you*. For a server-generated key, `peer rotate … --ship-key --bundle-out FILE --forget-key`
 writes a bundle instead.
 
 ## 7. Identity documents

@@ -78,7 +78,7 @@ plan; `--no-nat`, `--no-firewall`, `--no-forward`, `--no-host`, and
 Enrol a peer. Allocates an address from the interface's subnets unless one is
 given, refuses an overlapping prefix, writes the config without reformatting it,
 and applies it to a running daemon. `--public-key` keeps the private key on the
-device; `--bundle-out` generates it here and writes a client bundle.
+device; `--bundle-out` (with `--ship-key`) generates it here and writes a client bundle — that key then exists on the server, so prefer a public line or `peer invite`.
 .TP
 .B peer list | show NAME | remove NAME [--json]
 Manage the configured peers. `list` prints a fingerprint rather than the 4.7 KB

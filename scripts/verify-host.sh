@@ -180,7 +180,7 @@ ok "TUN $IFACE exists"
 say "peer add + import-bundle"
 mkdir -p "$WORK"
 "$VALLUM" peer add laptop --config "$SCONFIG" \
-    --bundle-out "$WORK/laptop.vallum-bundle" --dns 1.1.1.1 --forget-key \
+    --ship-key --bundle-out "$WORK/laptop.vallum-bundle" --dns 1.1.1.1 --forget-key \
     > "$WORK/peer.log" 2>&1 || { cat "$WORK/peer.log"; bad "peer add"; }
 grep -q "applied    yes" "$WORK/peer.log" || { cat "$WORK/peer.log"; bad "peer add did not apply to the running daemon"; }
 ok "peer added and applied live"

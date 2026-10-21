@@ -268,8 +268,9 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
     };
     if !add_client {
         say!();
-        say!("Next: enrol a client with");
-        say!("   sudo vallum peer add laptop --bundle-out laptop.vallum-bundle");
+        say!("Next: enrol a client — on that machine, run");
+        say!("   sudo vallum setup --remote you@<this-host>");
+        say!("or mint a one-time token here with `sudo vallum peer invite <name>`.");
         return Ok(());
     }
 
