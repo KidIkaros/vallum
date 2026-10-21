@@ -263,17 +263,19 @@ impl Theme {
 pub fn abbreviate_public_line(line: &str, max_chars: usize) -> String {
     let trimmed = line.trim();
     let count = trimmed.chars().count();
-    if count <= max_chars || max_chars < 20 {
+    if count <= max_chars || max_chars < 24 {
         return trimmed.to_owned();
     }
-    let head_len = (max_chars * 3) / 5;
-    let tail_len = max_chars.saturating_sub(head_len + 1);
+    let suffix = format!(" ({count} B)");
+    let budget = max_chars.saturating_sub(suffix.chars().count());
+    let head_len = (budget * 3) / 5;
+    let tail_len = budget.saturating_sub(head_len + 1);
     let head: String = trimmed.chars().take(head_len).collect();
     let tail: String = trimmed
         .chars()
         .skip(count.saturating_sub(tail_len))
         .collect();
-    format!("{head}…{tail} ({count} B)")
+    format!("{head}…{tail}{suffix}")
 }
 
 /// Render a compact proportional RX/TX bar (`━━━──────`) for Tufte data-ink

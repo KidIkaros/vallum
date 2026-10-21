@@ -247,9 +247,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("▼ RX ", t.accent()),
-                Span::styled(format!("{:<10}", rate_label(interface.rx_rate)), t.text()),
+                Span::styled(format!("{:<9}", rate_label(interface.rx_rate)), t.text()),
                 Span::styled(
-                    format!("Σ {} · pk {}", bytes(total_rx), bytes(rx_peak)),
+                    format!("Σ {} pk {}", bytes(total_rx), bytes(rx_peak)),
                     t.muted(),
                 ),
             ])),
@@ -272,9 +272,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("▲ TX ", t.tx_signal()),
-                Span::styled(format!("{:<10}", rate_label(interface.tx_rate)), t.text()),
+                Span::styled(format!("{:<9}", rate_label(interface.tx_rate)), t.text()),
                 Span::styled(
-                    format!("Σ {} · pk {}", bytes(total_tx), bytes(tx_peak)),
+                    format!("Σ {} pk {}", bytes(total_tx), bytes(tx_peak)),
                     t.muted(),
                 ),
             ])),
@@ -860,7 +860,10 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.push(t.section_rule(inner_w, "public line (y to copy)"));
         lines.push(Line::from(Span::styled(
-            abbreviate_public_line(&peer.public_line, usize::from(inner_w).max(36)),
+            abbreviate_public_line(
+                &peer.public_line,
+                usize::from(inner_w.saturating_sub(2)).max(36),
+            ),
             t.subtext(),
         )));
     } else if !app.peer_filter.is_empty() {
@@ -886,8 +889,8 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     ("fragments", stats.reassembled, stats.fragments_dropped),
                 ] {
                     let (ok_label, fail_label) = match label {
-                        "datagrams" => ("sent", "send failed"),
-                        "packets" => ("delivered", "write failed"),
+                        "datagrams" => ("sent", "failed"),
+                        "packets" => ("delivered", "failed"),
                         "handshakes" => ("established", "refused"),
                         _ => ("reassembled", "dropped"),
                     };
@@ -1455,7 +1458,7 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
             Line::from(""),
             if is_invite {
                 Line::from(vec![
-                    Span::styled(" ✔ ZERO PRIVATE KEYS ", theme().pill_ok()),
+                    Span::styled(" ● ZERO PRIVATE KEYS ", theme().pill_ok()),
                     Span::styled(" token + server fingerprint only", theme().ok()),
                 ])
             } else {
@@ -1487,14 +1490,33 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
             ),
             Line::from(""),
             Line::from(Span::styled(
-                "── Offline File Fallback ───────────────",
+                if is_invite {
+                    "── Client Handoff ──────────────────────"
+                } else {
+                    "── Offline File Fallback ───────────────"
+                },
                 Style::default().fg(Color::DarkGray),
             )),
-            detail_kv("saved", qr.path.clone(), Style::default().fg(Color::White)),
+            detail_kv(
+                if is_invite { "invite" } else { "saved" },
+                qr.path.clone(),
+                Style::default().fg(Color::White),
+            ),
             Line::from(vec![
-                Span::styled("import      ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("vallum import-bundle {}", qr.path),
+                    if is_invite {
+                        "join        "
+                    } else {
+                        "import      "
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    if is_invite {
+                        "vallum setup --join <host>:51821 ... (copied)".to_owned()
+                    } else {
+                        format!("vallum import-bundle {}", qr.path)
+                    },
                     Style::default().fg(Color::Green),
                 ),
             ]),

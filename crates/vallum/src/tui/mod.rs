@@ -256,13 +256,13 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
         "qr" => {
             app.qr = Some(qr::QrState {
                 frames: vec![
-                    "VALLUM1:1/1:e8a12c4b:{\"v\":1,\"iface\":\"vallum0\",\"peer\":\"charlie-macbook\",\"ep\":\"198.51.100.10:51820\",\"vip\":\"10.7.0.3/32\",\"suite\":\"0x0003\"}".to_owned(),
+                    "VALLUM1:1/1:afa1f7be:sudo vallum setup --join 198.51.100.10:51821 --name charlie-macbook --invite-id f19e9b24b97a687e --token a1b2-c3d4-e5f6-7890 --expect afa1f7be2ef6".to_owned(),
                 ],
                 index: 0,
                 last: Instant::now(),
-                hash: "e8a12c4b".to_owned(),
-                path: "/etc/vallum/charlie-macbook.vallum-bundle".to_owned(),
-                kind: qr::QrKind::Bundle,
+                hash: "afa1f7be".to_owned(),
+                path: "/run/vallum/enroll-vallum0-f19e9b24.json".to_owned(),
+                kind: qr::QrKind::Invite,
             });
         }
         "palette" => {

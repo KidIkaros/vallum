@@ -82,6 +82,14 @@ vallum_fingerprint=4a8f9c2d1e0b5a37
 vallum_address=10.7.0.1/24
 vallum_offload=true
 vallum_batching=true
+vallum_datagrams_sent=184210
+vallum_datagrams_failed=0
+vallum_packets_delivered=341920
+vallum_packets_failed=0
+vallum_handshakes_established=14
+vallum_handshakes_refused=0
+vallum_reassembled=56
+vallum_fragments_dropped=0
 public_key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 vallum_public_line=vallum1:0003:4a8f9c2d1e0b5a37:AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
 
@@ -634,12 +642,12 @@ def generate_brandkit_board():
 
     rx_info = qx0 + plate_px + 22
     draw.rounded_rectangle([(rx_info, qy0 + 4), (x1 - 24, qy0 + 30)], radius=4, fill="#39c5cf")
-    draw.text((rx_info + 10, qy0 + 9), "● VALLUM1 BUNDLE", font=f_small, fill="#0d1117")
-    draw.rounded_rectangle([(rx_info, qy0 + 40), (x1 - 24, qy0 + 66)], radius=4, fill="#d29922")
-    draw.text((rx_info + 10, qy0 + 45), "⚠ SECRET KEY MATERIAL", font=f_small, fill="#0d1117")
+    draw.text((rx_info + 10, qy0 + 9), "● ONE-TIME INVITE (VEN2)", font=f_small, fill="#0d1117")
+    draw.rounded_rectangle([(rx_info, qy0 + 40), (x1 - 24, qy0 + 66)], radius=4, fill="#2ea043")
+    draw.text((rx_info + 10, qy0 + 45), "● ZERO PRIVATE KEYS", font=f_small, fill="#0d1117")
     draw.text((rx_info, qy0 + 84), "Half-block 1:1 square", font=f_body, fill="#f0f6fc")
     draw.text((rx_info, qy0 + 108), "modules + 2px quiet zone", font=f_body, fill="#f0f6fc")
-    draw.text((rx_info, qy0 + 138), "hash  e8a12c4b", font=f_small, fill="#39c5cf")
+    draw.text((rx_info, qy0 + 138), "expect afa1f7be2ef6", font=f_small, fill="#39c5cf")
     draw.text((rx_info, qy0 + 160), "frame 1/1 [████████]", font=f_small, fill="#3fb950")
 
     # 08 / TRI-HYBRID CRYPTO ARCHITECTURE
