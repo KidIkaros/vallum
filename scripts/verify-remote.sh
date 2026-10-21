@@ -219,6 +219,9 @@ if [ "$UPGRADE" = 1 ]; then
     [ -n "$prev" ] || bad "cannot list releases — no published releases, and gh is not authenticated"
     asset="vallum-$prev-x86_64-linux.tar.gz"
     mkdir -p "$LOCAL_DIR"
+    # gh runs as the invoking user, so the download dir must be writable by
+    # them — the script itself is root and `mkdir` made it root's.
+    chown "${SUDO_USER:-root}" "$LOCAL_DIR" 2>/dev/null || true
     if ! curl -fsSL "https://github.com/KidIkaros/vallum/releases/download/$prev/$asset" \
         -o "$LOCAL_DIR/$asset" 2>/dev/null; then
         # A draft has no public download URL; gh reaches it with auth.
