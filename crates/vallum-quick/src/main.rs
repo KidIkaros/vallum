@@ -591,9 +591,23 @@ impl RoutePlan {
 
     /// Every command must succeed: a half-applied plan is the failure this
     /// type exists to prevent.
+    ///
+    /// The one exception is a route that already points where this one would.
+    /// A restarted unit, or a host that already owns the prefix on the same
+    /// interface, should be a no-op rather than `RTNETLINK answers: File
+    /// exists` and a failed unit. A prefix routed via *anything else* keeps
+    /// failing, because that is a real conflict.
     fn run(&self, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
         for command in &self.commands {
-            ip(command, dry_run)?;
+            match ip(command, dry_run) {
+                Ok(()) => {}
+                Err(error) => {
+                    if !dry_run && route_already_present(command) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(())
     }
@@ -604,6 +618,72 @@ impl RoutePlan {
             let _ = ip(command, dry_run);
         }
     }
+}
+
+/// Whether a failed `ip route add` is already satisfied by a route to the same
+/// prefix via the same interface.
+///
+/// Only that case is a no-op. A prefix routed via something else is a real
+/// conflict and keeps its own error.
+fn route_already_present(command: &[String]) -> bool {
+    let (Some(query), Some(dev)) = (route_query(command), dev_of(command)) else {
+        return false;
+    };
+    let Ok(output) = Command::new("ip").args(&query).output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0] == "dev" && pair[1] == dev)
+    })
+}
+
+/// The `ip route show` query that answers whether `command`'s route exists.
+///
+/// `None` for anything that is not a route add: a failed rule add is never
+/// idempotent, and guessing otherwise is how a half-applied plan gets waved
+/// through.
+fn route_query(command: &[String]) -> Option<Vec<String>> {
+    if !command.iter().any(|arg| arg == "route") {
+        return None;
+    }
+    let mut v6 = false;
+    let mut prefix = None;
+    let mut table = None;
+    let mut index = 0;
+    while index < command.len() {
+        match command[index].as_str() {
+            "-6" => v6 = true,
+            "add" => prefix = command.get(index + 1).cloned(),
+            "table" => table = command.get(index + 1).cloned(),
+            _ => {}
+        }
+        index += 1;
+    }
+    let mut query: Vec<String> = Vec::new();
+    if v6 {
+        query.push("-6".to_owned());
+    }
+    query.extend([
+        "-o".to_owned(),
+        "route".to_owned(),
+        "show".to_owned(),
+        prefix?,
+    ]);
+    if let Some(table) = table {
+        query.extend(["table".to_owned(), table]);
+    }
+    Some(query)
+}
+
+fn dev_of(command: &[String]) -> Option<&str> {
+    let index = command.iter().position(|arg| arg == "dev")?;
+    command.get(index + 1).map(String::as_str)
 }
 
 /// Everything an attach installs, in order, without touching the host.
@@ -931,7 +1011,31 @@ fn dns_domain(config: &Config) -> Option<String> {
     full_tunnel.then(|| "~.".to_owned())
 }
 
+/// Configure DNS for the interface, best-effort.
+///
+/// A tunnel with no DNS is degraded; a tunnel whose unit failed to attach is
+/// absent. The routes are installed before this runs, so a host with no usable
+/// DNS manager must not fail the attach — and that host exists: with
+/// `systemd-resolved` installed but inactive, `resolvconf` is a symlink to
+/// `resolvectl`, so neither backend succeeds. The operator gets a warning
+/// naming the servers instead of losing the tunnel.
 fn set_dns(
+    interface: &str,
+    servers: &[String],
+    domain: Option<&str>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Err(error) = apply_dns(interface, servers, domain, dry_run) {
+        eprintln!("vallum-quick: DNS not configured for {interface}: {error}");
+        eprintln!(
+            "vallum-quick: the tunnel is up — set `[quick] dns = []` to stop asking, \
+             or configure DNS for {interface} yourself"
+        );
+    }
+    Ok(())
+}
+
+fn apply_dns(
     interface: &str,
     servers: &[String],
     domain: Option<&str>,
@@ -1434,6 +1538,67 @@ mod tests {
              rule del not fwmark 51820 table 51820\n"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_route_add_is_ever_treated_as_already_applied() {
+        // A failed rule add is never idempotent; a route add may be, but only
+        // the route add itself can be asked about.
+        let rule = vec![
+            "rule".to_owned(),
+            "add".to_owned(),
+            "not".to_owned(),
+            "fwmark".to_owned(),
+            "51820".to_owned(),
+            "table".to_owned(),
+            "51820".to_owned(),
+        ];
+        assert!(route_query(&rule).is_none());
+
+        let route = vec![
+            "route".to_owned(),
+            "add".to_owned(),
+            "10.7.0.0/24".to_owned(),
+            "dev".to_owned(),
+            "vcli".to_owned(),
+        ];
+        assert_eq!(
+            route_query(&route).unwrap(),
+            vec!["-o", "route", "show", "10.7.0.0/24"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(dev_of(&route), Some("vcli"));
+
+        // A policy-table route is asked about in its own table, or the answer
+        // would be about the main table and wrong.
+        let policy = vec![
+            "route".to_owned(),
+            "add".to_owned(),
+            "0.0.0.0/0".to_owned(),
+            "dev".to_owned(),
+            "vcli".to_owned(),
+            "table".to_owned(),
+            "51820".to_owned(),
+        ];
+        assert_eq!(
+            route_query(&policy).unwrap(),
+            vec!["-o", "route", "show", "0.0.0.0/0", "table", "51820"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+
+        let v6 = vec![
+            "-6".to_owned(),
+            "route".to_owned(),
+            "add".to_owned(),
+            "::/0".to_owned(),
+            "dev".to_owned(),
+            "vcli".to_owned(),
+        ];
+        assert_eq!(route_query(&v6).unwrap()[0], "-6");
     }
 
     #[test]
