@@ -95,7 +95,7 @@ pub fn encode(data: &str, path: &str) -> Result<QrState, String> {
     Err("the bundle does not fit in a bounded QR frame set; use the .vallum-bundle file".to_owned())
 }
 
-/// Encode a v2 one-time invite command (`vallum setup --join ...`) as a QR modal.
+/// Encode a v2 one-time invite command (`vallum join <ticket>`) as a QR modal.
 ///
 /// Unlike a bundle QR, this carries no private key — only the single-use token,
 /// the invite id, and the server's expected fingerprint.

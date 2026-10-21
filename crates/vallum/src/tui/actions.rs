@@ -124,16 +124,22 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
         crate::enroll::issue_invite(&interface_name, name, ttl_mins * 60, pinned)
             .map_err(|e| form_error(None, e.to_string()))?;
     let (host_port, fp) = if let Some(device) = app.current_device() {
-        let port = device
-            .listen
-            .rsplit_once(':')
-            .and_then(|(_, p)| p.parse::<u16>().ok())
-            .unwrap_or(51820)
-            .saturating_add(1);
-        let host = app
+        let config = app
             .current()
             .and_then(|iface| iface.config_path.as_deref())
-            .and_then(|cfg| crate::config::Config::load(cfg).ok())
+            .and_then(|cfg| crate::config::Config::load(cfg).ok());
+        let port = config
+            .as_ref()
+            .and_then(|cfg| cfg.enroll.port)
+            .unwrap_or_else(|| {
+                device
+                    .listen
+                    .rsplit_once(':')
+                    .and_then(|(_, p)| p.parse::<u16>().ok())
+                    .unwrap_or(51820)
+                    .saturating_add(1)
+            });
+        let host = config
             .and_then(|cfg| cfg.interface.public_endpoint)
             .and_then(|ep| ep.rsplit_once(':').map(|(h, _)| h.to_owned()).or(Some(ep)))
             .unwrap_or_else(|| "<server>".to_owned());
@@ -144,16 +150,21 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
     } else {
         ("<server>:51821".to_owned(), "?".to_owned())
     };
-    let join_cmd = format!(
-        "sudo vallum setup --join {host_port} --name {name} --invite-id {id} --token {} --expect {fp}",
-        token.display()
-    );
+    let ticket = crate::enroll::JoinTicket {
+        server: host_port,
+        name: name.to_owned(),
+        invite_id: id,
+        token,
+        fingerprint: fp,
+    }
+    .encode();
+    let join_cmd = format!("sudo vallum join {ticket}");
     let _ = copy_to_clipboard(&join_cmd);
     if let Ok(qr_state) = qr::encode_invite(&join_cmd, &path.display().to_string()) {
         app.qr = Some(qr_state);
     }
     Ok(format!(
-        "invite minted for `{name}` (copied --join command)"
+        "invite minted for `{name}` (copied the join ticket)"
     ))
 }
 

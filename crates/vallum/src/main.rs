@@ -79,6 +79,8 @@ enum Command {
     Server(ServerArgs),
     /// Disconnect and remove a client tunnel installed by `vallum setup`.
     Client(ClientArgs),
+    /// Enrol this machine with the one-time ticket `vallum peer invite` printed.
+    Join(JoinArgs),
     /// Enrol, list, inspect, and remove peers.
     Peer(PeerArgs),
     /// Print the daemon's state as Prometheus metrics.
@@ -94,6 +96,24 @@ enum Command {
     Tui(TuiArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+struct JoinArgs {
+    /// The `vallum1-join:…` ticket `vallum peer invite` printed on the server.
+    /// It carries the responder address, invite id, token, and server
+    /// fingerprint in one string — there are no other flags to get right.
+    #[arg(value_name = "TICKET")]
+    ticket: String,
+
+    /// The name this machine's config files take. Defaults to the name the
+    /// invite was minted for.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+
+    /// Print every step and change nothing.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -118,8 +138,10 @@ fn main() -> ExitCode {
             "Vallum — a post-quantum tunnel between two machines.\n\n\
              On the server, where clients connect:\n\
              \x20  sudo vallum setup --server\n\n\
-             On a machine that a server gave a .vallum-bundle:\n\
-             \x20  sudo vallum setup --client <file>.vallum-bundle\n\n\
+             On a client, with what the server printed:\n\
+             \x20  sudo vallum join vallum1-join:…   (`vallum peer invite` prints this)\n\
+             \x20  sudo vallum setup --remote you@<server>   (over SSH instead)\n\
+             \x20  sudo vallum setup --client <file>.vallum-bundle   (a bundle file)\n\n\
              `vallum setup` with no flags asks which one this machine is.\n\
              Every command is under `vallum --help`; the dashboard is `vallum tui`."
         );
@@ -141,6 +163,23 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::doctor(&args),
         Command::Server(args) => server::server(&args),
         Command::Client(args) => client::client(&args),
+        Command::Join(args) => setup::setup(&SetupArgs {
+            server: false,
+            client: None,
+            yes: false,
+            endpoint: None,
+            address: None,
+            listen: "0.0.0.0:51820".to_owned(),
+            name: args.name.clone(),
+            remote: None,
+            remote_config: None,
+            join: Some(args.ticket.clone()),
+            token: None,
+            invite_id: None,
+            expect: None,
+            enroll: false,
+            dry_run: args.dry_run,
+        }),
         Command::Peer(args) => peer::peer(&args),
         Command::Metrics(args) => metrics::metrics(&args),
         Command::Identity(args) => identity::identity(&args),

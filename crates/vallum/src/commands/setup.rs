@@ -68,8 +68,9 @@ pub struct SetupArgs {
     pub remote_config: Option<PathBuf>,
 
     /// Enrol with a single-use token, for machines that cannot SSH to the
-    /// server. The server's `vallum peer invite` prints the whole command.
-    #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["server", "client", "remote"], requires = "token")]
+    /// server. Takes the `vallum1-join:…` ticket `vallum peer invite` prints,
+    /// or a bare `host:port` together with --invite-id and --token.
+    #[arg(long, value_name = "TICKET|HOST:PORT", conflicts_with_all = ["server", "client", "remote"])]
     pub join: Option<String>,
 
     /// The single-use token from `vallum peer invite`, or `-` to read it from
@@ -151,19 +152,19 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                 return as_remote(&remote, args);
             }
             "2" | "token" | "join" => {
-                let server = prompt("The server's enrolment address (host:51821)", None)?;
-                let invite_id = prompt("The invite id (32 hex chars)", None)?;
-                let token = prompt("The one-time token", None)?;
-                let expect = prompt("Expected server fingerprint (optional)", None)?;
+                let ticket = prompt(
+                    "Paste the join ticket (`vallum1-join:…` from `vallum peer invite`)",
+                    None,
+                )?;
                 let joined = SetupArgs {
                     server: false,
                     client: None,
                     remote: None,
                     remote_config: None,
-                    join: Some(server.clone()),
-                    token: Some(token),
-                    invite_id: Some(invite_id),
-                    expect: (!expect.is_empty()).then_some(expect),
+                    join: Some(ticket.clone()),
+                    token: None,
+                    invite_id: None,
+                    expect: None,
                     enroll: false,
                     endpoint: None,
                     address: None,
@@ -172,7 +173,7 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                     yes: args.yes,
                     dry_run: args.dry_run,
                 };
-                return as_join(&server, &joined);
+                return as_join(&ticket, &joined);
             }
             "3" | "bundle" => {
                 let bundle = ask_bundle()?;
@@ -761,14 +762,51 @@ fn read_token_arg(arg: Option<&str>, mut stdin: impl std::io::BufRead) -> Result
 }
 
 /// Enrol with a single-use token — transport B, for machines that cannot SSH.
+///
+/// `server` is either the `vallum1-join:…` ticket `peer invite` prints, or a
+/// bare `host:port` alongside `--invite-id`/`--token`/`--expect` (the form
+/// invites printed before tickets existed — kept working).
 fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
+    let ticket;
+    let server = if server.starts_with(crate::enroll::TICKET_PREFIX) {
+        if args.token.is_some() || args.invite_id.is_some() || args.expect.is_some() {
+            return Err(Error::Usage(
+                "a join ticket already carries the id, token, and fingerprint — \
+                 drop --invite-id/--token/--expect"
+                    .to_owned(),
+            ));
+        }
+        ticket = crate::enroll::JoinTicket::parse(server)?;
+        ticket.server.clone()
+    } else {
+        ticket = crate::enroll::JoinTicket {
+            server: server.to_owned(),
+            name: String::new(),
+            invite_id: args.invite_id.clone().ok_or_else(|| {
+                Error::Usage(
+                    "--invite-id is needed: `vallum peer invite` prints the whole command"
+                        .to_owned(),
+                )
+            })?,
+            token: crate::enroll::Token::parse(&read_token_arg(
+                args.token.as_deref(),
+                std::io::stdin().lock(),
+            )?)?,
+            fingerprint: args.expect.clone().unwrap_or_default(),
+        };
+        server.to_owned()
+    };
+    let server = server.as_str();
     let name = args
         .name
         .clone()
+        .or_else(|| (!ticket.name.is_empty()).then(|| ticket.name.clone()))
         .or_else(hostname)
         .unwrap_or_else(|| "client".to_owned());
-    let raw_token = read_token_arg(args.token.as_deref(), std::io::stdin().lock())?;
-    let token = crate::enroll::Token::parse(&raw_token)?;
+    let expect = args
+        .expect
+        .clone()
+        .or_else(|| (!ticket.fingerprint.is_empty()).then(|| ticket.fingerprint.clone()));
     if args.dry_run {
         say!("would generate a key here and ask {server} to enrol `{name}`");
         say!("   the token proves the server invited this machine; no secrets travel");
@@ -783,12 +821,13 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("generated a key here; the private half does not leave this machine");
     say!("asking {server} to enrol `{name}`…");
 
-    let invite_id = args.invite_id.clone().ok_or_else(|| {
-        Error::Usage(
-            "--invite-id is needed: `vallum peer invite` prints the whole command".to_owned(),
-        )
-    })?;
-    let answer = crate::enroll::join(server, &token, &invite_id, &name, &public_line)?;
+    let answer = crate::enroll::join(
+        server,
+        &ticket.token,
+        &ticket.invite_id,
+        &name,
+        &public_line,
+    )?;
     let report: serde_json::Value = serde_json::from_str(&answer)
         .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
     let config_text = report
@@ -807,7 +846,7 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
         .get("server_address")
         .and_then(|address| address.as_str());
     // Before anything is written: is this the server the invite named?
-    if let Some(expect) = &args.expect {
+    if let Some(expect) = &expect {
         let server_line = config_text
             .lines()
             .find_map(|line| line.trim().strip_prefix("public_key = \""))
@@ -907,8 +946,8 @@ fn guidance() -> Result<(), Error> {
     say!("   sudo vallum setup --server");
     say!();
     say!("On a client (generates its own key here — nothing secret leaves):");
+    say!("   sudo vallum join vallum1-join:…   (`vallum peer invite` on the server prints this)");
     say!("   sudo vallum setup --remote you@<server>");
-    say!("   sudo vallum setup --join <server>:51821 --invite-id <id> --token - --expect <fp>");
     say!("   sudo vallum setup --client <file>.vallum-bundle");
     say!();
     say!("`vallum setup` with no flags asks which of the two this machine is.");

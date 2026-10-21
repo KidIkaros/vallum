@@ -1505,7 +1505,7 @@ fn the_first_screen_asks_what_the_machine_is_and_shows_both_commands() {
     assert!(text.contains("The client"), "no client role");
     assert!(text.contains("vallum setup --server"), "no server command");
     assert!(
-        text.contains("vallum setup --remote"),
+        text.contains("vallum join") && text.contains("--remote"),
         "no client command: {text}"
     );
 }
@@ -1564,9 +1564,9 @@ fn invite_form_collects_name_ttl_and_optional_pin() {
 fn invite_qr_modal_says_one_time_and_no_private_key() {
     use ratatui::{backend::TestBackend, Terminal};
 
-    let command = "sudo vallum setup --join 203.0.113.10:51821 --name laptop \
-                   --invite-id f19e9b24b97a687e4b3a7a1bdc16aaed \
-                   --token aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh --expect afa1f7be2ef6";
+    let command = "sudo vallum join vallum1-join:203.0.113.10:51821/laptop/\
+                   f19e9b24b97a687e4b3a7a1bdc16aaed/\
+                   aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/afa1f7be2ef6";
     let state =
         qr::encode_invite(command, "/run/vallum/enroll-laptop.json").expect("invite encodes");
     assert_eq!(state.kind, qr::QrKind::Invite);

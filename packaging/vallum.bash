@@ -46,6 +46,9 @@ _vallum() {
             vallum,import-bundle)
                 cmd="vallum__subcmd__import__subcmd__bundle"
                 ;;
+            vallum,join)
+                cmd="vallum__subcmd__join"
+                ;;
             vallum,keygen)
                 cmd="vallum__subcmd__keygen"
                 ;;
@@ -123,6 +126,9 @@ _vallum() {
                 ;;
             vallum__subcmd__help,import-bundle)
                 cmd="vallum__subcmd__help__subcmd__import__subcmd__bundle"
+                ;;
+            vallum__subcmd__help,join)
+                cmd="vallum__subcmd__help__subcmd__join"
                 ;;
             vallum__subcmd__help,keygen)
                 cmd="vallum__subcmd__help__subcmd__keygen"
@@ -332,7 +338,7 @@ _vallum() {
 
     case "${cmd}" in
         vallum)
-            opts="-h -V --allow-insecure-key-permissions --help --version setup run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor server client peer metrics identity import-bundle enroll-serve tui completions help"
+            opts="-h -V --allow-insecure-key-permissions --help --version setup run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor server client join peer metrics identity import-bundle enroll-serve tui completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -544,7 +550,7 @@ _vallum() {
             return 0
             ;;
         vallum__subcmd__help)
-            opts="setup run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor server client peer metrics identity import-bundle enroll-serve tui completions help"
+            opts="setup run keygen pubkey genpsk show setconf addconf syncconf showconf bench doctor server client join peer metrics identity import-bundle enroll-serve tui completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -754,6 +760,20 @@ _vallum() {
             return 0
             ;;
         vallum__subcmd__help__subcmd__import__subcmd__bundle)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        vallum__subcmd__help__subcmd__join)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1337,6 +1357,24 @@ _vallum() {
             fi
             case "${prev}" in
                 --output-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        vallum__subcmd__join)
+            opts="-h --name --dry-run --allow-insecure-key-permissions --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --name)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

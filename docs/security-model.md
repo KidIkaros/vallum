@@ -27,7 +27,7 @@ operator must guarantee. The proofs behind the claims live in
 | Anchor | What it is | What happens if it's wrong |
 |---|---|---|
 | Release signing key | `packaging/vallum-release.pub`, committed to this repo; `install.sh` verifies `SHA256SUMS.sig` | a forged release tarball is refused |
-| Server fingerprint | `vallum setup --join … --expect <fp>` verifies the server's public line during enrolment | a wrong-server enrolment is refused — treat a mismatch as an attack, not a retry |
+| Server fingerprint | `vallum join vallum1-join:…/<fp>` verifies the server's public line during enrolment (the fingerprint is part of the ticket `peer invite` prints) | a wrong-server enrolment is refused — treat a mismatch as an attack, not a retry |
 | SSH in `--remote` | enrolment rides your existing SSH trust | the host key check is SSH's, not Vallum's |
 | Bundle custody | `--ship-key` bundles carry private key material | custody is yours; client-side keygen paths exist precisely so bundles are a fallback, not a default |
 | Peer public lines | pinned per peer in the config | a swapped line can't tunnel — keys won't establish |

@@ -736,15 +736,33 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
         crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60, expect)?;
     let server_fingerprint = fingerprint(&server.public_line);
     let endpoint = bundle_endpoint(None, &server, &args.config)?.0;
-    let port = endpoint
-        .rsplit_once(':')
-        .and_then(|(_, port)| port.parse::<u16>().ok())
-        .map(|port| port + 1)
+    // The responder's port is `[enroll].port`, defaulting to `listen + 1` —
+    // not necessarily the endpoint's port + 1 (the endpoint can name a
+    // different port than the one bound, e.g. behind NAT).
+    let config = vallum_config::Config::load(&args.config).ok();
+    let port = config
+        .as_ref()
+        .and_then(|cfg| cfg.enroll.port)
+        .or_else(|| {
+            endpoint
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .map(|port| port.saturating_add(1))
+        })
         .unwrap_or(51821);
     let host = endpoint
         .rsplit_once(':')
         .map(|(host, _)| host)
         .unwrap_or("?");
+
+    let ticket = crate::enroll::JoinTicket {
+        server: format!("{host}:{port}"),
+        name: args.name.clone(),
+        invite_id: id.clone(),
+        token: token.clone(),
+        fingerprint: server_fingerprint.clone(),
+    }
+    .encode();
 
     if args.json {
         say!(
@@ -756,14 +774,45 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 "fingerprint": server_fingerprint,
                 "expires_in_secs": args.ttl * 60,
                 "join": format!("{host}:{port}"),
+                "ticket": ticket,
             }))
             .map_err(|error| Error::Usage(format!("json: {error}")))?
         );
         return Ok(());
     }
-    let enroll_enabled = vallum_config::Config::load(&args.config)
+
+    // An invite that cannot be answered is dead code. When this operator is
+    // root on a systemd host, the invite starts its own responder rather than
+    // printing homework.
+    let enroll_enabled = config
+        .as_ref()
         .map(|config| config.enroll.enabled)
         .unwrap_or(false);
+    let systemd = Path::new("/run/systemd/system").exists();
+    let root = nix::unistd::geteuid().is_root();
+    if root && systemd && !enroll_enabled {
+        crate::commands::server::enroll(&crate::commands::server::EnrollArgs {
+            config: args.config.clone(),
+            enable: true,
+            disable: false,
+            dry_run: false,
+        })?;
+    } else if root && systemd {
+        let active = std::process::Command::new("systemctl")
+            .args([
+                "is-active",
+                "--quiet",
+                &format!("vallum-enroll@{interface}"),
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !active {
+            let _ = std::process::Command::new("systemctl")
+                .args(["enable", "--now", &format!("vallum-enroll@{interface}")])
+                .status();
+        }
+    }
+
     say!(
         "invite for `{}` — single use, expires in {} minutes",
         args.name,
@@ -771,14 +820,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     );
     say!();
     say!("   on the client:");
-    say!(
-        "      sudo vallum setup --join {host}:{port} --name {} \\",
-        args.name
-    );
-    say!(
-        "           --invite-id {id} --token {} --expect {server_fingerprint}",
-        token.display()
-    );
+    say!("      sudo vallum join {ticket}");
     say!();
     say!(
         "   the token lives in {} (0600) and is never logged;",
@@ -786,22 +828,24 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     );
     say!("   it is the only secret in this exchange — the client's private key");
     say!("   is generated on the client and never leaves it.");
-    say!();
-    if enroll_enabled {
-        say!("   [enroll] is enabled; if the responder is not running yet:");
-        say!(
-            "      sudo systemctl enable --now vallum-enroll@{}",
-            interface
-        );
-    } else {
-        say!(
-            "   this needs `[enroll] enabled = true` in {} and then",
-            args.config.display()
-        );
-        say!(
-            "   `sudo systemctl enable --now vallum-enroll@{}`.",
-            interface
-        );
+    if !(root && systemd) {
+        say!();
+        if enroll_enabled {
+            say!("   [enroll] is enabled; if the responder is not running yet:");
+            say!(
+                "      sudo systemctl enable --now vallum-enroll@{}",
+                interface
+            );
+        } else {
+            say!(
+                "   this needs `[enroll] enabled = true` in {} and then",
+                args.config.display()
+            );
+            say!(
+                "   `sudo systemctl enable --now vallum-enroll@{}`.",
+                interface
+            );
+        }
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ mutually authenticated key confirmation. It is configured by a TOML file; the
 daemon owns the tunnel, the TUN interface and the UDP socket, and nothing else.
 .SH COMMANDS
 .TP
-.B "setup [--server | --client FILE | --remote USER@HOST | --join HOST:PORT --invite-id HEX --token TOKEN]"
+.B "setup [--server | --client FILE | --remote USER@HOST | --join TICKET|HOST:PORT [--invite-id HEX --token TOKEN]]"
 The one entry point: asks what this machine is and runs only that role's
 steps. \fB--server\fR is \fBserver init\fR plus the offer to enrol a first
 client; \fB--client FILE\fR is \fBimport-bundle --install\fR. With no flags
@@ -24,6 +24,14 @@ uses a single-use token. \fB--token -\fR reads the token from stdin so it
 stays out of shell history. \fB--expect FINGERPRINT\fR refuses a server whose
 fingerprint does not match the invite. Either way, enrolment finishes by
 waiting for a real handshake and pinging the server's tunnel address.
+.TP
+.B "join TICKET"
+The shortest enrolment: one argument carries the responder endpoint, invite
+id, single-use token, peer name, and pinned server fingerprint
+(\fBvallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>\fR). The client
+generates its own key, proves the fingerprint before writing, and finishes by
+verifying the handshake. \fBpeer invite\fR prints exactly this command. The
+same ticket is accepted by \fBsetup --join\fR.
 .TP
 .B run --config FILE
 Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
@@ -141,8 +149,8 @@ automatically pruning expired invite files from `/run/vallum`.
 .PP
 .B peer invite NAME [--public-key LINE | --public-key-file FILE] [--config FILE] [--ttl MINUTES] [--json]
 Mint a single-use token so a device can enrol without SSH access. Prints the
-exact `vallum setup --join` line the client runs, including the invite id and
-the server's fingerprint. With `--public-key`, the invite is pinned to that
+exact `vallum join <ticket>` the client runs — one argument carrying the
+invite id, token, and the server's fingerprint. With `--public-key`, the invite is pinned to that
 device's key: a stolen token then enrols nothing. Needs `[enroll] enabled =
 true` and `vallum-enroll@<iface>` running.
 .PP

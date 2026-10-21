@@ -189,7 +189,10 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
         .as_deref()
         .and_then(|listen| listen_port(listen).ok())
         .unwrap_or(51820);
-    let port: u16 = listen.saturating_add(1);
+    let port: u16 = config
+        .enroll
+        .port
+        .unwrap_or_else(|| listen.saturating_add(1));
 
     let updated = set_enroll_flag(&text, args.enable);
     if args.dry_run {

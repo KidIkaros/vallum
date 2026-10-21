@@ -38,7 +38,7 @@ _arguments "${_arguments_options[@]}" : \
 '--name=[The instance name\: the config file stem and the unit instance]:NAME:_default' \
 '(--server --client --join --token)--remote=[Enrol this machine against a server over SSH, which needs no bundle and never sends this machine'\''s private key anywhere]:USER@HOST:_default' \
 '--remote-config=[The server config to edit when enrolling with \`--remote\` (for a server whose instance is not \`vallum0\`)]:FILE:_files' \
-'(--server --client --remote)--join=[Enrol with a single-use token, for machines that cannot SSH to the server. The server'\''s \`vallum peer invite\` prints the whole command]:HOST:PORT:_default' \
+'(--server --client --remote)--join=[Enrol with a single-use token, for machines that cannot SSH to the server. Takes the \`vallum1-join\:…\` ticket \`vallum peer invite\` prints, or a bare \`host\:port\` together with --invite-id and --token]:TICKET|HOST:PORT:_default' \
 '--token=[The single-use token from \`vallum peer invite\`, or \`-\` to read it from stdin so it stays out of shell history and \`ps\`]:TOKEN:_default' \
 '--invite-id=[The invite id from \`vallum peer invite\` (32 hex characters)]:HEX:_default' \
 '--expect=[Refuse the answer unless the server'\''s fingerprint matches this. Printed by \`vallum peer invite\`; it is how a client knows it reached the right server rather than one that answered first]:FINGERPRINT:_default' \
@@ -312,6 +312,16 @@ esac
         esac
     ;;
 esac
+;;
+(join)
+_arguments "${_arguments_options[@]}" : \
+'--name=[The name this machine'\''s config files take. Defaults to the name the invite was minted for]:NAME:_default' \
+'--dry-run[Print every step and change nothing]' \
+'--allow-insecure-key-permissions[Use a private key file that its group or the world can read]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':ticket -- The `vallum1-join\:…` ticket `vallum peer invite` printed on the server. It carries the responder address, invite id, token, and server fingerprint in one string — there are no other flags to get right:_default' \
+&& ret=0
 ;;
 (peer)
 _arguments "${_arguments_options[@]}" : \
@@ -783,6 +793,10 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(join)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (peer)
 _arguments "${_arguments_options[@]}" : \
 ":: :_vallum__subcmd__help__subcmd__peer_commands" \
@@ -917,6 +931,7 @@ _vallum_commands() {
 'doctor:Check the platform, config, control socket, and helper tools' \
 'server:Prepare this host to be a tunnel server' \
 'client:Disconnect and remove a client tunnel installed by \`vallum setup\`' \
+'join:Enrol this machine with the one-time ticket \`vallum peer invite\` printed' \
 'peer:Enrol, list, inspect, and remove peers' \
 'metrics:Print the daemon'\''s state as Prometheus metrics' \
 'identity:Issue, sign, verify, and inspect identity documents' \
@@ -1006,6 +1021,7 @@ _vallum__subcmd__help_commands() {
 'doctor:Check the platform, config, control socket, and helper tools' \
 'server:Prepare this host to be a tunnel server' \
 'client:Disconnect and remove a client tunnel installed by \`vallum setup\`' \
+'join:Enrol this machine with the one-time ticket \`vallum peer invite\` printed' \
 'peer:Enrol, list, inspect, and remove peers' \
 'metrics:Print the daemon'\''s state as Prometheus metrics' \
 'identity:Issue, sign, verify, and inspect identity documents' \
@@ -1098,6 +1114,11 @@ _vallum__subcmd__help__subcmd__identity__subcmd__verify_commands() {
 _vallum__subcmd__help__subcmd__import-bundle_commands() {
     local commands; commands=()
     _describe -t commands 'vallum help import-bundle commands' commands "$@"
+}
+(( $+functions[_vallum__subcmd__help__subcmd__join_commands] )) ||
+_vallum__subcmd__help__subcmd__join_commands() {
+    local commands; commands=()
+    _describe -t commands 'vallum help join commands' commands "$@"
 }
 (( $+functions[_vallum__subcmd__help__subcmd__keygen_commands] )) ||
 _vallum__subcmd__help__subcmd__keygen_commands() {
@@ -1304,6 +1325,11 @@ _vallum__subcmd__identity__subcmd__verify_commands() {
 _vallum__subcmd__import-bundle_commands() {
     local commands; commands=()
     _describe -t commands 'vallum import-bundle commands' commands "$@"
+}
+(( $+functions[_vallum__subcmd__join_commands] )) ||
+_vallum__subcmd__join_commands() {
+    local commands; commands=()
+    _describe -t commands 'vallum join commands' commands "$@"
 }
 (( $+functions[_vallum__subcmd__keygen_commands] )) ||
 _vallum__subcmd__keygen_commands() {

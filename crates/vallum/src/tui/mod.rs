@@ -256,7 +256,7 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
         "qr" => {
             app.qr = Some(qr::QrState {
                 frames: vec![
-                    "VALLUM1:1/1:afa1f7be:sudo vallum setup --join 198.51.100.10:51821 --name charlie-macbook --invite-id f19e9b24b97a687e --token a1b2-c3d4-e5f6-7890 --expect afa1f7be2ef6".to_owned(),
+                    "VALLUM1:1/1:afa1f7be:sudo vallum join vallum1-join:198.51.100.10:51821/charlie-macbook/f19e9b24b97a687e4b3a7a1bdc16aaed/a1b2-c3d4-e5f6-7890-a1b2-c3d4-e5f6-7890/afa1f7be2ef6".to_owned(),
                 ],
                 index: 0,
                 last: Instant::now(),

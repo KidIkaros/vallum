@@ -69,7 +69,7 @@ Reviewed after a live VPS run, then re-reviewed after enrolment v2 (ADR-0015).
 A server that lies can hand back a config pointing anywhere. The answer is
 authenticated to the token, not to the server's identity, so the mitigation is
 out of band: `peer invite` prints the server's **fingerprint**, and
-`setup --join --expect <fingerprint>` refuses a mismatch *before writing
+`vallum join <ticket>` (or `setup --join --expect <fingerprint>`) refuses a mismatch *before writing
 anything*. A user who ignores the fingerprint gets no protection — that is the
 residual risk, and the mismatch error names both values.
 

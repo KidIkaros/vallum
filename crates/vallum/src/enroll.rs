@@ -133,6 +133,100 @@ impl Token {
 }
 
 // ---------------------------------------------------------------------------
+// The join ticket: one pasteable string instead of four flags.
+//
+// WireGuard hands over an endpoint and a public key; a post-quantum public
+// line is ~4.7 KB of hex, so the operator pastes an *invite* instead. The
+// invite is still four values (address, id, token, fingerprint), and four CLI
+// flags is a ceremony — so `peer invite` packs them into one string and
+// `vallum join` takes it in one argument:
+
+// ```text
+// vallum1-join:<host>:<port>/<name>/<invite-id>/<token>/<fingerprint>
+// ```
+
+// The name is a hint for the client's own config file; the server enrols
+// under whatever name the invite was minted with. The fingerprint pins the
+// answer to the server the invite was minted on.
+pub const TICKET_PREFIX: &str = "vallum1-join:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinTicket {
+    /// The responder's `host:port` — the server's enrolment port.
+    pub server: String,
+    /// The name the invite was minted for; the client's config file uses it.
+    pub name: String,
+    pub invite_id: String,
+    pub token: Token,
+    /// `keys::fingerprint` of the server's public line.
+    pub fingerprint: String,
+}
+
+impl JoinTicket {
+    pub fn encode(&self) -> String {
+        format!(
+            "{TICKET_PREFIX}{}/{}/{}/{}/{}",
+            self.server,
+            self.name,
+            self.invite_id,
+            self.token.display(),
+            self.fingerprint
+        )
+    }
+
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        let body = text
+            .trim()
+            .strip_prefix(TICKET_PREFIX)
+            .ok_or_else(|| Error::Usage("a join ticket starts with `vallum1-join:`".to_owned()))?;
+        let parts: Vec<&str> = body.split('/').collect();
+        if parts.len() != 5 {
+            return Err(Error::Usage(
+                "a join ticket is vallum1-join:<host>:<port>/<name>/<id>/<token>/<fingerprint>"
+                    .to_owned(),
+            ));
+        }
+        let (server, name, invite_id, token, fingerprint) =
+            (parts[0], parts[1], parts[2], parts[3], parts[4]);
+        let port_ok = server
+            .rsplit_once(':')
+            .and_then(|(host, port)| (!host.is_empty()).then(|| port.parse::<u16>().is_ok()))
+            .unwrap_or(false);
+        if !port_ok {
+            return Err(Error::Usage(format!(
+                "`{server}` is not a host:port the responder listens on"
+            )));
+        }
+        if !valid_name(name) {
+            return Err(Error::Usage(format!(
+                "`{name}` is not a usable peer name (letters, digits, - _ .)"
+            )));
+        }
+        if !valid_id(invite_id) {
+            return Err(Error::Usage(
+                "the invite id is 32 hex characters".to_owned(),
+            ));
+        }
+        let token = Token::parse(token)?;
+        if fingerprint.len() < 8
+            || fingerprint.len() % 2 != 0
+            || !fingerprint.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Err(Error::Usage(
+                "the fingerprint is the hex `vallum peer invite` printed".to_owned(),
+            ));
+        }
+        Ok(Self {
+            server: server.to_owned(),
+            name: name.to_owned(),
+            invite_id: invite_id.to_owned(),
+            token,
+            fingerprint: fingerprint.to_owned(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The invite: what `peer invite` writes and `enroll-serve` consumes.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,6 +1107,52 @@ mod tests {
             let _ = limit.admit(known);
         }
         assert!(!limit.admit(known));
+    }
+
+    #[test]
+    fn a_join_ticket_round_trips_every_field() {
+        let token = Token::generate();
+        let ticket = JoinTicket {
+            server: "vpn.example.com:51821".to_owned(),
+            name: "laptop".to_owned(),
+            invite_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            token,
+            fingerprint: "a1b2c3d4e5f6".to_owned(),
+        };
+        let encoded = ticket.encode();
+        assert!(encoded.starts_with(TICKET_PREFIX));
+        // One line, one token: no whitespace, nothing a QR or a paste breaks.
+        assert!(!encoded.chars().any(|c| c.is_whitespace()));
+        assert_eq!(JoinTicket::parse(&encoded).unwrap(), ticket);
+    }
+
+    #[test]
+    fn a_join_ticket_tolerates_ipv6_and_a_wrapped_paste() {
+        let token = Token::generate();
+        let text = format!(
+            "  {TICKET_PREFIX}[fd00::1]:51821/phone.dead/{}/{}/001122334455  \n",
+            "aa".repeat(16),
+            token.display()
+        );
+        let ticket = JoinTicket::parse(&text).unwrap();
+        assert_eq!(ticket.server, "[fd00::1]:51821");
+        assert_eq!(ticket.name, "phone.dead");
+        assert_eq!(ticket.token, token);
+    }
+
+    #[test]
+    fn a_join_ticket_rejects_what_is_not_one() {
+        for bad in [
+            "host:51821/laptop/aa/bb/cc",
+            "vallum1-join:host:51821/laptop/aa",
+            "vallum1-join::51821/laptop/0123456789abcdef0123456789abcdef/aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/aabbccdd",
+            "vallum1-join:host:51821/bad name/0123456789abcdef0123456789abcdef/aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/aabbccdd",
+            "vallum1-join:host:notaport/laptop/0123456789abcdef0123456789abcdef/aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/aabbccdd",
+            "vallum1-join:host:51821/laptop/tooshort/aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/aabbccdd",
+            "vallum1-join:host:51821/laptop/0123456789abcdef0123456789abcdef/nothex!!/aabbccdd",
+        ] {
+            assert!(JoinTicket::parse(bad).is_err(), "{bad} parsed");
+        }
     }
 
     #[test]

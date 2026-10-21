@@ -81,10 +81,9 @@ sudo vallum setup --server
 # 2a. Client with SSH access — generates its own key locally; only the public line crosses SSH
 sudo vallum setup --remote you@vpn.example.com
 
-# 2b. Client without SSH — one-time v2 token + server fingerprint check
+# 2b. Client without SSH — one invite ticket, one command, fingerprint pinned
 sudo vallum peer invite laptop                  # on the server (or press `v` in `vallum tui`)
-sudo vallum setup --join vpn.example.com:51821 --name laptop \
-     --invite-id <hex> --token <token> --expect <fingerprint>
+sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
 
 # 2c. Offline fallback — server-minted bundle (carries the client private key)
 sudo vallum peer add laptop --ship-key --bundle-out laptop.vallum-bundle --forget-key

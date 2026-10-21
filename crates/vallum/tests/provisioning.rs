@@ -400,6 +400,9 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     // (or rather, refuse) on a shared one and look like a product failure.
     let port = 55000 + (std::process::id() % 1000) as u16;
     let mut text = std::fs::read_to_string(&config).unwrap();
+    // The ticket advertises the public endpoint, so this loopback test has to
+    // claim one that is actually routable: itself.
+    text = text.replace("203.0.113.5:", "127.0.0.1:");
     text.push_str(&format!("\n[enroll]\nenabled = true\nport = {port}\n"));
     std::fs::write(&config, text).unwrap();
     let rundir = dir.join("run");
@@ -414,6 +417,15 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     let token = invite["token"].as_str().unwrap().to_owned();
     let id = invite["id"].as_str().unwrap().to_owned();
     let fingerprint = invite["fingerprint"].as_str().unwrap().to_owned();
+    let ticket = invite["ticket"]
+        .as_str()
+        .expect("the invite carries a join ticket")
+        .to_owned();
+    assert!(
+        ticket.starts_with("vallum1-join:127.0.0.1:"),
+        "the ticket names the responder, not the listen port: {ticket}"
+    );
+    assert!(ticket.ends_with(&fingerprint), "{ticket}");
 
     let serve = bin()
         .arg("enroll-serve")
@@ -441,7 +453,11 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
 
     let client = dir.join("client");
     std::fs::create_dir_all(&client).unwrap();
-    let join = |id: &str, token: &str, expect: Option<&str>| {
+    // The one-argument form an operator actually uses: the ticket carries
+    // responder, invite id, token, and fingerprint in a single string.
+    let join_ticket = |ticket: &str| run(bin().args(["join", ticket]).current_dir(&client));
+    // The flag form `peer invite` printed before tickets — still supported.
+    let join_flags = |id: &str, token: &str, expect: Option<&str>| {
         let mut command = bin();
         command
             .args([
@@ -462,7 +478,7 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
         run(&mut command)
     };
 
-    let (ok, stdout, stderr) = join(&id, &token, Some(&fingerprint));
+    let (ok, stdout, stderr) = join_ticket(&ticket);
     assert!(ok, "stdout {stdout}\nstderr {stderr}");
     assert!(
         stdout.contains(&format!("server fingerprint {fingerprint}")),
@@ -490,14 +506,40 @@ fn a_token_enrolment_round_trips_and_refuses_a_second_key() {
     );
 
     // The same token with a different key is refused, and says so.
-    let (ok, _, stderr) = join(&id, &token, None);
+    let (ok, _, stderr) = join_flags(&id, &token, None);
     assert!(!ok, "a second key enrolled under a spent token");
     assert!(stderr.contains("different key"), "{stderr}");
 
     // A wrong token gets silence, then a clear timeout.
-    let (ok, _, stderr) = join(&id, "aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111", None);
+    let (ok, _, stderr) = join_flags(&id, "aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111", None);
     assert!(!ok);
     assert!(stderr.contains("no answer"), "{stderr}");
+
+    // A ticket whose fingerprint was forged refuses before writing — but a
+    // probe like this still spends the invite, so it needs its own.
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "invite", "burner", "--config"])
+        .arg(&config)
+        .arg("--json")
+        .env("VALLUM_RUN_DIR", &rundir));
+    assert!(ok, "{stderr}");
+    let probe: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let probe_ticket = probe["ticket"].as_str().unwrap();
+    let forged = format!(
+        "{}ffffee001122",
+        probe_ticket.trim_end_matches(|c: char| c.is_ascii_hexdigit())
+    );
+    let (ok, _, stderr) = join_ticket(&forged);
+    assert!(!ok, "a ticket with a forged fingerprint enrolled");
+    assert!(
+        stderr.contains("not the server the invite named"),
+        "{stderr}"
+    );
+    // And the client wrote nothing for it.
+    assert!(
+        !client.join("burner.toml").exists(),
+        "a refused join wrote a config"
+    );
 
     drop(serve);
     let _ = std::fs::remove_dir_all(&dir);

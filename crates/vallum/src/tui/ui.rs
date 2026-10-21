@@ -462,7 +462,7 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
             " 2 ",
             "The client",
             "it connects to a server (key stays on this machine)",
-            "sudo vallum setup --remote you@<server>   (or --join / --client <file>.vallum-bundle)",
+            "sudo vallum join vallum1-join:…   (or --remote / --client <file>.vallum-bundle)",
         ),
     ] {
         text.push(Line::from(vec![
@@ -1513,7 +1513,7 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
                 ),
                 Span::styled(
                     if is_invite {
-                        "vallum setup --join <host>:51821 ... (copied)".to_owned()
+                        "vallum join vallum1-join:… (copied)".to_owned()
                     } else {
                         format!("vallum import-bundle {}", qr.path)
                     },

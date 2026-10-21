@@ -44,6 +44,12 @@ live telemetry, and CI that runs on every push.
 - Interactive `vallum setup`, bare `vallum`, and the TUI empty state now lead
   with `--remote` and `--join` — client-owned keys — keeping `.vallum-bundle`
   as the explicit fallback for offline machines.
+- **One-ticket enrolment.** `peer invite` prints a single
+  `vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>` ticket (endpoint
+  honoring `[enroll].port`, fingerprint baked in) and auto-enables
+  `vallum-enroll@` when run as root on a systemd host. The client runs
+  `vallum join <ticket>` — one argument instead of four flags — or the same
+  ticket via `setup --join`. The flag form still works.
 - Dogfood fixes: `setup --join --token -` reads the token from stdin,
   per-peer interface names (`vallum-<peer>`) trim trailing separators at the
   15-byte IFNAMSIZ edge, `systemctl restart` replaces `enable --now` so a
