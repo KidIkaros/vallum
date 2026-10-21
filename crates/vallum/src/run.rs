@@ -305,6 +305,13 @@ pub fn run(
 
     log_info!(log, "tunnel up on interface `{}`", parts.name);
 
+    // Tell systemd the unit is alive: READY when the interface is serving,
+    // WATCHDOG at half the configured interval while the loop turns, STOPPING
+    // on the way out. No `$NOTIFY_SOCKET` (foreground run, tests) makes all
+    // three no-ops.
+    let mut notify = crate::notify::Notify::from_env();
+    notify.ready();
+
     let mut writer = parts.writer;
     let tick = Duration::from_millis(policy.tick_ms);
     // One warning per destination for a too-large datagram: the condition is a
@@ -316,6 +323,7 @@ pub fn run(
         if shutdown.is_triggered() {
             break;
         }
+        notify.pet_watchdog();
 
         let event = match rx.recv_timeout(tick) {
             Ok(Input::Control { request, reply }) => {
@@ -424,6 +432,7 @@ pub fn run(
         }
     }
 
+    notify.stopping();
     if let Some(path) = &control_path {
         let _ = std::fs::remove_file(path);
     }

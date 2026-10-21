@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-The current release line is `0.1.x`. Security fixes land on `main` and are
-released as a patch tag.
+The current release line is `1.x`. Security fixes land on `main` and are
+released as a patch tag. The trust model and explicit non-claims are in
+[docs/security-model.md](docs/security-model.md).
 
 ## Reporting a vulnerability
 

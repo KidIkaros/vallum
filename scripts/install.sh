@@ -10,6 +10,15 @@
 #   scripts/install.sh --add-client NAME   # enrol a client (writes a bundle)
 #   scripts/install.sh --remove-client NAME
 #   scripts/install.sh --uninstall
+#   scripts/install.sh --from-release --no-verify-signature   # skip sig check
+#   scripts/install.sh --from-release --require-signature     # fail if unsigned
+#
+# Release downloads are verified before use: the release signs SHA256SUMS with
+# an SSH key (`ssh-keygen -Y`); install.sh downloads SHA256SUMS.sig and
+# verifies it against the release public key embedded below (the same key as
+# packaging/vallum-release.pub — this script is the trust anchor, the
+# checksum file then authenticates the tarball). Releases before v1.6.1 have
+# no signature and install with a warning unless --require-signature is passed.
 #
 # Everything after `--` is passed to `vallum server init`, so the full set of
 # setup flags (`--endpoint`, `--address`, `--no-nat`, `--dry-run`, ...) works
@@ -31,6 +40,8 @@ VERSION=""
 UNINSTALL=0
 INSTALL_ONLY=0
 DRY=0
+NO_VERIFY_SIG=0
+REQUIRE_SIG=0
 ADD_CLIENT=""
 REMOVE_CLIENT=""
 ENDPOINT=""
@@ -62,6 +73,8 @@ while [ $# -gt 0 ]; do
             ;;
         --local) MODE="local" ;;
         --install-only) INSTALL_ONLY=1 ;;
+        --no-verify-signature) NO_VERIFY_SIG=1 ;;
+        --require-signature) REQUIRE_SIG=1 ;;
         --add-client) shift; ADD_CLIENT=${1:-} ;;
         --remove-client) shift; REMOVE_CLIENT=${1:-} ;;
         --endpoint) shift; ENDPOINT=${1:-}; PASSTHRU+=(--endpoint "$ENDPOINT") ;;
@@ -82,12 +95,55 @@ done
 arch() {
     case "$(uname -m)" in
         x86_64|amd64) echo "x86_64" ;;
-        aarch64|arm64)
-            echo "unsupported: release artifacts are x86_64 only" >&2
-            exit 1
-            ;;
+        aarch64|arm64) echo "aarch64" ;;
         *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
     esac
+}
+
+# OpenSSH >= 8.0 is needed for `ssh-keygen -Y sign/verify`. ssh and ssh-keygen
+# ship together, so the ssh version banner is the reliable probe.
+ssh_signing_supported() {
+    local v
+    v=$(ssh -V 2>&1 | sed -n 's/^OpenSSH_\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -n "$v" ] && [ "$v" -ge 8 ]
+}
+
+# The release signing key, pinned here AND in packaging/vallum-release.pub.
+# It is embedded in this script rather than fetched from the release: the
+# repository is the trust anchor, and an allowed_signers file downloaded
+# alongside the signature could be swapped for an attacker's key. Release
+# assets also ship allowed_signers for manual verification — it must contain
+# exactly this key.
+RELEASE_SIGNING_PUBKEY="vallum-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOcys6KuFRBEnzkhjmC5OvVQDUNCOl39qxrFcQO05dwQ"
+
+# Verify the SSH signature over SHA256SUMS before trusting any checksum in it.
+# allowed_signers is written from the pinned key above — never downloaded.
+# Releases built before signing (<= v1.6.0) have no .sig and are accepted
+# with a warning unless --require-signature is passed.
+verify_release_signature() {
+    local tag=$1 work=$2
+    [ "$NO_VERIFY_SIG" -eq 0 ] || { echo "   warn  signature verification disabled (--no-verify-signature)"; return; }
+    if ! download_asset "$tag" "SHA256SUMS.sig" "$work/SHA256SUMS.sig" 2>/dev/null; then
+        if [ "$REQUIRE_SIG" -eq 1 ]; then
+            echo "refusing: $tag carries no signature (--require-signature)" >&2
+            exit 1
+        fi
+        echo "   warn  $tag is unsigned; trusting SHA256SUMS only"
+        return
+    fi
+    ssh_signing_supported || {
+        echo "refusing: OpenSSH >= 8.0 is required to verify the release signature" >&2
+        echo "         upgrade openssh-client, or bypass with --no-verify-signature" >&2
+        exit 1
+    }
+    echo "$RELEASE_SIGNING_PUBKEY" > "$work/allowed_signers"
+    if ssh-keygen -Y verify -f "$work/allowed_signers" -n file \
+        -s "$work/SHA256SUMS.sig" -I vallum-release < "$work/SHA256SUMS" 2>/dev/null; then
+        echo "   ok    release signature verified (vallum-release)"
+    else
+        echo "refusing: SHA256SUMS.sig does not verify against allowed_signers — do not trust this download" >&2
+        exit 1
+    fi
 }
 
 auth_header() {
@@ -144,14 +200,16 @@ download_asset() {
 }
 
 install_from_release() {
-    local tag=$1 work=$2 target sums
-    target="vallum-$tag-x86_64-linux.tar.gz"
-    say "downloading $tag"
+    local tag=$1 work=$2 target sums A
+    A=$(arch)
+    target="vallum-$tag-$A-linux.tar.gz"
+    say "downloading $tag ($A)"
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
+    verify_release_signature "$tag" "$work"
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
     tar -C "$work" -xzf "$work/$target"
-    SOURCE_DIR="$work/vallum-$tag-x86_64-linux"
+    SOURCE_DIR="$work/vallum-$tag-$A-linux"
 }
 
 # ── local build ─────────────────────────────────────────────────────
@@ -179,13 +237,20 @@ install_binaries() {
 
 install_docs() {
     local unit
-    for unit in vallum@.service vallum-quick@.service; do
+    for unit in vallum@.service vallum-quick@.service vallum-enroll@.service \
+        vallum-metrics.service vallum-metrics.timer; do
         if [ -f "$SOURCE_DIR/$unit" ]; then
             run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
         elif [ -f "packaging/$unit" ]; then
             run install -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
         fi
     done
+    # The metrics timer is opt-in: it only earns an `enable` when this host
+    # already runs node_exporter's textfile collector, which is what it feeds.
+    if [ -d /var/lib/node_exporter/textfile_collector ]; then
+        run systemctl daemon-reload
+        run systemctl enable --now vallum-metrics.timer
+    fi
     local man
     for man in vallum.8 vallum-quick.8 vallum.toml.5; do
         if [ -f "$SOURCE_DIR/$man" ]; then
@@ -194,13 +259,19 @@ install_docs() {
             run install -D -m 0644 "packaging/$man" "/usr/share/man/man${man##*.}/$man"
         fi
     done
-    if [ -f "$SOURCE_DIR/vallum.bash" ]; then
-        run install -D -m 0644 "$SOURCE_DIR/vallum.bash" \
-            /usr/share/bash-completion/completions/vallum
-    elif [ -f "packaging/vallum.bash" ]; then
-        run install -D -m 0644 "packaging/vallum.bash" \
-            /usr/share/bash-completion/completions/vallum
-    fi
+    for shell in bash zsh fish; do
+        local dest
+        case "$shell" in
+            bash) dest=/usr/share/bash-completion/completions/vallum ;;
+            zsh)  dest=/usr/share/zsh/site-functions/_vallum ;;
+            fish) dest=/usr/share/fish/vendor_completions.d/vallum.fish ;;
+        esac
+        if [ -f "$SOURCE_DIR/vallum.$shell" ]; then
+            run install -D -m 0644 "$SOURCE_DIR/vallum.$shell" "$dest"
+        elif [ -f "packaging/vallum.$shell" ]; then
+            run install -D -m 0644 "packaging/vallum.$shell" "$dest"
+        fi
+    done
 }
 
 # ── client shims ────────────────────────────────────────────────────

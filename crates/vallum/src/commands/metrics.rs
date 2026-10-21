@@ -32,6 +32,15 @@ pub struct MetricsArgs {
     /// The metric name prefix.
     #[arg(long, default_value = "vallum", value_name = "PREFIX")]
     pub prefix: String,
+
+    /// Write the exposition to a file instead of stdout.
+    ///
+    /// The write is atomic — a temp file renamed into place — so a
+    /// `node_exporter` textfile collector never reads a half-written scrape.
+    /// When the daemon does not answer, the file still gets `up 0` (staleness
+    /// hides a dead daemon) while the command exits nonzero.
+    #[arg(long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
 }
 
 /// `vallum metrics`.
@@ -48,32 +57,61 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
         )));
     }
     let socket = socket_path(args.config.as_deref(), args.control.as_deref())?;
-    let reply = match control::request(&socket, "get=1\n") {
-        Ok(reply) => reply,
-        Err(error) => {
+    let reply = control::request(&socket, "get=1\n").and_then(|reply| {
+        if reply.lines().any(|line| line == "errno=0") {
+            Ok(reply)
+        } else {
+            Err(Error::Usage(format!(
+                "control request failed: {}",
+                reply.trim()
+            )))
+        }
+    });
+    let text = match &reply {
+        Ok(reply) => {
+            let response = uapi::parse_response(reply);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs());
+            render(&response, &args.prefix, now)
+        }
+        Err(_) => {
             // A scrape should see `up 0`, not silence: staleness hides a dead
             // daemon. The command still exits nonzero, so scripts can gate on it.
-            say!(
+            format!(
                 "# HELP {0}_up Whether the control socket answered.\n\
                  # TYPE {0}_up gauge\n\
-                 {0}_up 0",
+                 {0}_up 0\n",
                 args.prefix
-            );
-            return Err(error);
+            )
         }
     };
-    if !reply.lines().any(|line| line == "errno=0") {
-        return Err(Error::Usage(format!(
-            "control request failed: {}",
-            reply.trim()
-        )));
+    // One trailing newline: the textfile collector tolerates it missing but
+    // promtool and humans do not.
+    let text = format!("{}\n", text.trim_end());
+    if let Some(path) = &args.output {
+        write_atomic(path, &text)?;
+    } else {
+        say!("{}", text.trim_end());
     }
-    let response = uapi::parse_response(&reply);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    say!("{}", render(&response, &args.prefix, now).trim_end());
-    Ok(())
+    reply.map(|_| ())
+}
+
+/// Write via a sibling temp file renamed into place. A partial file under
+/// `node_exporter`'s textfile collector reads as corrupt metrics; a rename
+/// reads as either the old scrape or the new one.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), Error> {
+    let temp = path.with_extension("prom.tmp");
+    std::fs::write(&temp, contents).map_err(|source| Error::IoPath {
+        action: "write",
+        path: temp.clone(),
+        source,
+    })?;
+    std::fs::rename(&temp, path).map_err(|source| Error::IoPath {
+        action: "rename into place",
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn socket_path(config: Option<&Path>, control: Option<&Path>) -> Result<PathBuf, Error> {
@@ -124,11 +162,12 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
          {prefix}_up 1\n"
     ));
     out.push_str(&format!(
-        "# HELP {prefix}_interface_info The interface and suite this scrape describes.\n\
+        "# HELP {prefix}_interface_info The interface, suite and build this scrape describes.\n\
          # TYPE {prefix}_interface_info gauge\n\
-         {prefix}_interface_info{{interface=\"{}\",suite=\"{}\"}} 1\n",
+         {prefix}_interface_info{{interface=\"{}\",suite=\"{}\",version=\"{}\"}} 1\n",
         escape(interface),
-        escape(suite)
+        escape(suite),
+        escape(env!("CARGO_PKG_VERSION"))
     ));
 
     // Dataplane counters, emitted only when the daemon reported them — a
@@ -372,6 +411,23 @@ errno=0\n";
         let text = render(&response(), "vpn_a", 1792522042);
         assert!(text.contains("vpn_a_up 1"));
         assert!(!text.contains("vallum_up"));
+    }
+
+    #[test]
+    fn interface_info_carries_the_build_version() {
+        let text = render(&response(), "vallum", 0);
+        assert!(text.contains(&format!("version=\"{}\"", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn write_atomic_leaves_only_the_final_file() {
+        let dir = std::env::temp_dir().join(format!("vallum-metrics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vallum.prom");
+        write_atomic(&path, "vallum_up 1\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "vallum_up 1\n");
+        assert!(!dir.join("vallum.prom.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

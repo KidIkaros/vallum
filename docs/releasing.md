@@ -25,13 +25,46 @@ tarball missing a unit) to get the artifact right.
 | `CHANGELOG.md` has a `## <version>` section | a release nobody can read |
 | `scripts/verify-remote.sh` recorded a pass **for this commit** | one host is not the product; two hosts are |
 | `E2E=1 ./scripts/verify.sh` passes | the namespace gate of record |
+| the SSH signing key matches `packaging/vallum-release.pub` | releases are only as trustworthy as what `install.sh` verifies |
+| packaged shell completions diff-clean against this binary | stale completions once shipped a `teardown` nobody could tab-complete |
 
-After building, the tarball is inspected for both binaries, all three units and
+After building, the tarballs are inspected for both binaries, all units and
 the man pages before anything is uploaded.
 
 `--dry-run` runs the cheap checks and prints the rest. `--skip-remote "reason"`
-releases without the two-host pass; the reason is printed, and it should be a
-sentence someone would be willing to read later.
+releases without the two-host pass, and `--skip-arm "reason"` releases without
+the aarch64 artifact; each reason is printed, and it should be a sentence
+someone would be willing to read later.
+
+## The artifacts
+
+Every release ships, per architecture (`x86_64`, `aarch64`):
+
+- `vallum-<tag>-<arch>-linux.tar.gz` — both binaries, all units, man pages,
+  completions, sample alert rules;
+- `vallum-<tag>-x86_64-linux.deb` and `.rpm`;
+- `SHA256SUMS` + `SHA256SUMS.sig` + `allowed_signers` — the signature file
+  `install.sh` verifies before trusting any checksum;
+- `vallum-<tag>-sbom.spdx.json` — SPDX 2.3 SBOM of the crates.io graph (the
+  SDK is a git dependency and appears as such).
+
+The aarch64 artifact is cross-built with `cargo zigbuild`; the E2E gate runs
+on x86_64 only — say so in the release notes if it ever matters.
+
+## Signing
+
+Releases sign `SHA256SUMS` with an SSH key (`ssh-keygen -Y sign`, OpenSSH
+>= 8.0 — present on every supported target). The private key lives at
+`~/.config/vallum/release-signing-key` or `$VALLUM_RELEASE_KEY`; the public
+half is committed at `packaging/vallum-release.pub`, which makes the
+repository the trust anchor: a forged release page cannot forge the repo's
+pinned key. `scripts/release.sh` refuses to sign with a key that does not
+match the committed public half.
+
+Key custody is one person + offline storage; the fingerprint is printed in
+every release's notes. Losing the key means generating a new one, committing
+the new public half, and telling users — the same trust model WireGuard's
+minisign releases use.
 
 ## The two-host stamp
 

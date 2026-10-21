@@ -177,6 +177,8 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         }
     }
 
+    checks.push(check_clock());
+
     for tool in ["ip", "systemctl", "journalctl", "resolvconf", "nft"] {
         let found = which(tool);
         checks.push(Check::new(
@@ -619,6 +621,37 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
                 "{host} carries {measured} bytes, below outer_mtu {configured};                  set `interface.outer_mtu = {measured}` or packets will be dropped"
             ),
         )
+    }
+}
+
+/// Replay-window timestamps and identity validity windows are wall-clock
+/// checks, so a host drifting minutes or hours peers and re-keys badly. Warn,
+/// never fail: an offline lab without NTP still tunnels correctly today.
+fn check_clock() -> Check {
+    let synced = std::process::Command::new("timedatectl")
+        .args(["show", "-p", "NTPSynchronized", "--value"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .eq_ignore_ascii_case("yes")
+        });
+    match synced {
+        Some(true) => Check::new("clock", Status::Pass, "NTP synchronized"),
+        Some(false) => Check::new(
+            "clock",
+            Status::Warn,
+            "system clock is not NTP-synchronized; handshake timestamps and \
+             identity validity windows depend on wall clock (timedatectl)",
+        ),
+        None => Check::new(
+            "clock",
+            Status::Warn,
+            "cannot check clock sync (no timedatectl); handshake timestamps \
+             and identity validity windows depend on wall clock",
+        ),
     }
 }
 

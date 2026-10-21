@@ -97,11 +97,13 @@ its current key.
 .B peer finalize NAME [--no-apply] [--json]
 Retire the previous identity a rotation kept. The old key is refused afterwards.
 .TP
-.B metrics [--config FILE | --control SOCKET] [--prefix PREFIX]
+.B metrics [--config FILE | --control SOCKET] [--prefix PREFIX] [--output FILE]
 Print the daemon's state as Prometheus text exposition. One
 .B get=1
 is one scrape; there is no listener. Labels carry the interface, the peer name
-and its fingerprint, never the public line.
+and its fingerprint, never the public line. `--output` writes atomically
+(temp + rename) so a textfile collector never reads a torn scrape; on a failed
+scrape it still writes `up 0` while the command exits nonzero.
 .TP
 .B identity issue --ca-key FILE (--peer-public LINE | --peer-public-file FILE) --label NAME --days N [--output FILE] [--json]
 Issue an identity document signed by a CA key that carries a signing half. The
@@ -120,6 +122,12 @@ document is checked against its own key.
 .TP
 .B identity show [--suite ID] --document FILE [--json]
 Print a document's label, key sizes, window and fingerprint without verifying it.
+.TP
+.B client teardown (--name NAME | --config FILE) [--purge] [--dry-run]
+Undo the host changes `setup` installed for a client: stop and disable
+`vallum@` and `vallum-quick@` for the tunnel, and remove the stale control
+socket. Keeps `/etc/vallum/<name>.toml` and its key unless `--purge` is given,
+so the tunnel can be brought back up without re-enrolling.
 .TP
 .B server teardown [--config FILE] [--purge] [--dry-run]
 Undo the host changes `server init` installed: stop and disable the units,
@@ -159,6 +167,16 @@ Configuration files.
 .TP
 .I /run/vallum/*.sock
 Control sockets, mode 0600.
+.SH SERVICES
+.BR vallum@.service
+is `Type=notify` with `WatchdogSec=30s`: the daemon sends `READY=1` once the
+interface serves and `WATCHDOG=1` while the run loop turns, so a wedged loop
+is restarted by systemd rather than hanging silently.
+.BR vallum-metrics.service
+and
+.BR vallum-metrics.timer
+scrape metrics into `node_exporter`'s textfile directory every 15 seconds;
+the timer is enabled by `install.sh` only when that directory exists.
 .SH SECURITY
 The private key is refused if its file is group- or world-readable, unless
 .B --allow-insecure-key-permissions

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use vallum::commands::bench::BenchArgs;
+use vallum::commands::client::ClientArgs;
 use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::identity::IdentityArgs;
@@ -19,7 +20,7 @@ use vallum::commands::setup::SetupArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::{
-    bench, control, doctor, identity, import, keys, metrics, peer, run, server, setup,
+    bench, client, control, doctor, identity, import, keys, metrics, peer, run, server, setup,
 };
 use vallum::Error;
 
@@ -76,6 +77,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Prepare this host to be a tunnel server.
     Server(ServerArgs),
+    /// Disconnect and remove a client tunnel installed by `vallum setup`.
+    Client(ClientArgs),
     /// Enrol, list, inspect, and remove peers.
     Peer(PeerArgs),
     /// Print the daemon's state as Prometheus metrics.
@@ -137,6 +140,7 @@ fn main() -> ExitCode {
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),
         Command::Server(args) => server::server(&args),
+        Command::Client(args) => client::client(&args),
         Command::Peer(args) => peer::peer(&args),
         Command::Metrics(args) => metrics::metrics(&args),
         Command::Identity(args) => identity::identity(&args),

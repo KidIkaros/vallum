@@ -1,0 +1,62 @@
+# Sample Prometheus alert rules for Vallum.
+#
+# Install: copy into a directory Prometheus reads with `rule_files`, or paste
+# the groups into your existing rules file. Thresholds are starting points —
+# tune `for:` durations to your environment before paging anyone on them.
+
+groups:
+  - name: vallum
+    rules:
+      # The scrape itself failed: the daemon is dead, the socket is gone, or
+      # the metrics timer stopped. This is the "is the tunnel up at all" alert.
+      - alert: VallumDown
+        expr: vallum_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Vallum control socket not answering on {{ $labels.instance }}"
+
+      # A peer configured to carry traffic that has not handshaked recently is
+      # either dead, roaming to a dead path, or fighting the firewall. 4
+      # minutes covers two full rekey intervals before paging.
+      - alert: VallumPeerHandshakeStale
+        expr: vallum_peer_handshaked == 1 and vallum_peer_handshake_age_seconds > 240
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} has not re-keyed in {{ $value }}s"
+
+      # Handshakes being refused means something on the wire is asking and
+      # being told no — expired identities, pinned-endpoint mismatches, or a
+      # replay storm. Any sustained rate deserves a look at the journal.
+      - alert: VallumHandshakesRefused
+        expr: rate(vallum_loop_handshakes_refused_total[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum refusing handshakes on {{ $labels.interface }} ({{ $value }}/s)"
+
+      # Fragments dropped is the segmentation layer saying a datagram was
+      # refused or a half-assembled message abandoned — path-MTU loss or an
+      # adversary spraying partial fragments, both worth knowing about.
+      - alert: VallumFragmentsDropped
+        expr: increase(vallum_loop_fragments_dropped_total[15m]) > 100
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Vallum dropping fragments on {{ $labels.interface }} — check path MTU"
+
+      # Send failures: the kernel refused a datagram. Usually a dead route or
+      # an interface flap; a sustained rate means traffic is being lost, not
+      # just delayed.
+      - alert: VallumSendFailures
+        expr: rate(vallum_loop_datagrams_failed_total[10m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum failing to send datagrams on {{ $labels.interface }}"

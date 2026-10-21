@@ -834,3 +834,50 @@ pub fn resolve_key_path(config_path: &Path, declared: &Path) -> PathBuf {
         _ => declared.to_path_buf(),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use vallum_crypto::SharedSecret;
+
+    /// The privacy contract the whole logging layer leans on: `Resolved`'s
+    /// `Debug` lists field names an operator can see and relies on
+    /// `SharedSecret`'s own redacting `Debug` for the seed. If a future field
+    /// ever prints raw key bytes, this test is what catches it — a secret in a
+    /// log line is a finding, not a style issue.
+    #[test]
+    fn resolved_debug_never_carries_key_material() {
+        let suite: std::sync::Arc<dyn vallum_crypto::CryptoSuite> =
+            std::sync::Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let seed = [0xABu8; 32];
+        let resolved = Resolved {
+            interface_name: Some("vallum0".to_owned()),
+            addresses: Vec::new(),
+            mtu: 1420,
+            listen: "0.0.0.0:51820".parse().expect("addr"),
+            control: None,
+            fwmark: 0,
+            identity: StaticIdentity::generate(&*suite, &seed).expect("identity"),
+            seed: SharedSecret::new(seed),
+            peers: Vec::new(),
+            level: Level::parse("info").expect("level"),
+            warnings: Vec::new(),
+            privileges: None,
+            outer_budget: 1372,
+        };
+        let rendered = format!("{resolved:?}");
+        // The seed is 32 bytes of 0xAB — if any of it reached the log line it
+        // would appear as "abab" repeats.
+        assert!(!rendered.contains("abab"));
+        assert!(rendered.contains("redacted"));
+    }
+
+    #[test]
+    fn shared_secret_debug_redacts() {
+        let secret = SharedSecret::new([0xABu8; 32]);
+        let rendered = format!("{secret:?}");
+        assert!(!rendered.contains("abab"));
+        assert!(rendered.contains("redacted"));
+    }
+}

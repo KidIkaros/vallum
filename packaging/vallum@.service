@@ -5,10 +5,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/bin/vallum run --config /etc/vallum/%i.toml
 Restart=on-failure
 RestartSec=2s
+WatchdogSec=30s
 
 # The daemon needs the interface and socket, then drops to `interface.user`.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE

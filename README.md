@@ -100,13 +100,18 @@ sudo vallum peer invites                        # list live unspent invites & TT
 sudo vallum peer rotate laptop --public-key <new-line>
 sudo vallum peer finalize laptop
 sudo vallum server teardown --dry-run           # cleanly reverse server init
+sudo vallum client teardown --name laptop       # cleanly remove a client tunnel
 ```
 
 Guides: [server](docs/deployment/server.md) ·
 [client](docs/deployment/client.md) ·
 [site-to-site](docs/deployment/site-to-site.md) ·
 [automation](docs/deployment/automation.md) ·
-[troubleshooting](docs/deployment/troubleshooting.md).
+[upgrades](docs/deployment/upgrades.md) ·
+[monitoring](docs/deployment/monitoring.md) ·
+[backup](docs/deployment/backup.md) ·
+[troubleshooting](docs/deployment/troubleshooting.md) ·
+[security model](docs/security-model.md).
 
 ## TUI (`vallum tui`)
 

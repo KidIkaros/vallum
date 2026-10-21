@@ -1,5 +1,113 @@
 # Changelog
 
+## 1.6.1 — 2026-10-21
+
+Production readiness: signed and verifiable releases on two architectures, a
+complete install→upgrade→monitor→backup→remove lifecycle, a redesigned TUI,
+live telemetry, and CI that runs on every push.
+
+### Terminal operations
+
+- **"Boundary & Signal" design system.** A centralized theme with a semantic
+  palette and glyph vocabulary, plus TTY-aware CLI styling — `NO_COLOR` and
+  `TERM=dumb` degrade to modifiers instead of ANSI noise, and piped/`--json`
+  output stays byte-exact plain.
+- **Tufte pass.** RX/TX sparklines share one scale so keepalive noise cannot
+  fill the bar; the peer detail trades a 40-line hex dump for a
+  `vallum1:0003:head…tail` capsule with a proportional transfer bar; the
+  footer discloses actions contextually (`f finalize` glows when a rotation
+  is open); diffs carry explicit `+`/`-`/`~` glyphs.
+- **Full enrolment & rotation parity in the TUI**: `v` mints a one-time v2
+  invite with a QR labeled `ONE-TIME ENROLMENT INVITE · ZERO PRIVATE KEYS`;
+  `K` rotates a peer's key and `f` finalizes it — without leaving the
+  dashboard or dropping the tunnel.
+
+### Telemetry & measurement
+
+- **Live loop counters** (`datagrams`, `packets`, `handshakes
+  established/refused`, `reassembled`, `fragments dropped`) ride the run loop
+  through `get=1` into `vallum metrics` and the TUI dataplane pane. Daemons
+  that predate the fields report absent, never a false zero.
+- **`vallum bench` reports a distribution**, not a mean: median, IQR, p95,
+  p99, and a 95% confidence interval, sampled in batches.
+- **Boundary hardening**: a spent invite is persisted before the responder
+  says `ok`; the enrol rate limiter caps its source map at 4096 entries per
+  window; config placement writes the private key at 0600 atomically.
+
+### Server lifecycle
+
+- **`vallum server teardown`** reverses `server init` — units, `inet vallum`
+  NAT table, firewall/FORWARD rules, sysctl — with `--dry-run` and `--purge`.
+- **`vallum peer invites`** lists live unspent invites and TTLs (tokens never
+  printed) and prunes expired files; `peer remove` now also revokes an
+  unspent invite before enrolment.
+- Interactive `vallum setup`, bare `vallum`, and the TUI empty state now lead
+  with `--remote` and `--join` — client-owned keys — keeping `.vallum-bundle`
+  as the explicit fallback for offline machines.
+- Dogfood fixes: `setup --join --token -` reads the token from stdin,
+  per-peer interface names (`vallum-<peer>`) trim trailing separators at the
+  15-byte IFNAMSIZ edge, `systemctl restart` replaces `enable --now` so a
+  re-init actually restarts a live daemon, and `peer invite` port opening no
+  longer duplicates interface FORWARD rules.
+- Fuzz coverage grew an `enroll_parse` target — 35,000 runs found and fixed
+  real parser edges.
+
+### Distribution
+
+- **Signed releases.** `scripts/release.sh` signs `SHA256SUMS` with an SSH key
+  (`ssh-keygen -Y`); `install.sh --from-release` verifies the signature against
+  the key pinned at `packaging/vallum-release.pub` *before* trusting a
+  checksum, and refuses a tampered file. Releases before 1.6.1 install with a
+  warning; `--require-signature` / `--no-verify-signature` control the policy.
+- **aarch64 artifacts.** Cross-built with `cargo zigbuild`; `install.sh` maps
+  `aarch64|arm64` to the arm64 tarball.
+- **SBOM.** `vallum-<tag>-sbom.spdx.json` (SPDX 2.3) ships with every release.
+- **Self-contained source.** `origin-crypto-sdk` is pinned to an exact git tag,
+  so a bare `git clone` builds without a sibling checkout; `verify.sh` gates
+  it. The sibling-edit workflow survives as a documented `[patch]` override.
+- Release binaries are stripped and thin-LTO; zsh and fish completions ship
+  alongside bash, and `release.sh` refuses to package stale completions.
+
+### Lifecycle
+
+- **`vallum client teardown (--name NAME | --config FILE)`** — the missing
+  outflow for `setup --client/--remote/--join`: stops and disables the
+  `vallum@`/`vallum-quick@` units and removes the stale control socket;
+  `--purge` also deletes the config and key, `--dry-run` prints the plan.
+- **`vallum metrics --output FILE`** writes atomically (temp + rename) so a
+  textfile collector never reads a torn scrape, and still writes `up 0` on a
+  failed scrape.
+- **`vallum@.service` is `Type=notify` with `WatchdogSec=30s`** — the daemon
+  sends `READY=1` when the interface serves and `WATCHDOG=1` while the loop
+  turns, so a wedged loop is restarted by systemd rather than hanging.
+- **`vallum doctor` warns on unsynchronized clocks** — handshake timestamps
+  and identity validity windows are wall-clock checks.
+- `vallum_interface_info` carries a `version` label for fleet-version
+  dashboards.
+- **`scripts/verify-remote.sh --upgrade`** installs the previous published
+  release, enrols a client, proves traffic, swaps in the new binaries and
+  units, and proves the tunnel again — upgrading in place is now a tested,
+  gate-stamped path.
+- **Shipped monitoring**: `vallum-metrics.service`/`.timer` (enabled only
+  when node_exporter's textfile directory exists) and
+  `packaging/vallum-alerts.yml` (starting-point Prometheus rules).
+
+### Documentation
+
+- New guides: `docs/deployment/upgrades.md` (in-place upgrade + rollback +
+  schema-compat contract), `monitoring.md`, `backup.md` (all state is
+  `/etc/vallum`; restoring `server.key` restores the same server identity —
+  zero client re-enrolment DR), and `docs/security-model.md` (trust anchors,
+  host guarantees, honest non-claims).
+
+### Engineering
+
+- CI runs on `push`/`pull_request` again (the SDK being public and git-pinned
+  removed the sibling-checkout machinery); fuzzing smokes on every change and
+  runs deep weekly, now including the `enroll_parse` target.
+- Pinned privacy invariant: `Resolved`'s `Debug` is tested to never render
+  key material — the seed rides `SharedSecret`'s redacting formatter.
+
 ## 1.6.0 — 2026-10-21
 
 Enrolment stops being a side door and takes the shape of the tunnel handshake

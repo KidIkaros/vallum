@@ -10,6 +10,7 @@
 #
 #   sudo ./scripts/verify-remote.sh user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --product user@vps.example.com
+#   sudo ./scripts/verify-remote.sh --upgrade user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --transports token user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --clean-remote user@vps.example.com
 #
@@ -52,6 +53,7 @@ CIFACE=vallumrc0
 PRODUCT=0
 KEEP=0
 CLEAN=0
+UPGRADE=0
 TRANSPORTS="bundle ssh token"
 TARGET=""
 
@@ -63,6 +65,11 @@ note(){ printf '   note  %s\n' "$*"; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --product) PRODUCT=1 ;;
+        # An upgrade is the product install plus a swap: previous release in,
+        # client enrolled and proved, new binaries+units over the top, tunnel
+        # proved again. Only the bundle transport runs — it is the one stable
+        # across every release's CLI.
+        --upgrade) UPGRADE=1; PRODUCT=1; TRANSPORTS="bundle" ;;
         --keep) KEEP=1 ;;
         --clean-remote) CLEAN=1 ;;
         --transports) shift; TRANSPORTS=$1 ;;
@@ -184,13 +191,42 @@ ok "binaries on the remote"
 
 REMOTE_STARTED=1
 
+if [ "$UPGRADE" = 1 ]; then
+    # Install the previous *release* first: the point of this mode is that a
+    # daemon written by an older tree must be upgraded by this one, with the
+    # config and peers it wrote still valid.
+    say "installing the previous release on the remote"
+    prev=$(gh release list --repo KidIkaros/vallum --limit 20 \
+        --json tagName,isDraft --jq '[.[] | select(.isDraft | not)][0].tagName' 2>/dev/null)
+    [ -n "$prev" ] || bad "cannot list releases — check gh auth"
+    asset="vallum-$prev-x86_64-linux.tar.gz"
+    gh release download "$prev" --repo KidIkaros/vallum --pattern "$asset" \
+        --dir "$LOCAL_DIR" --clobber || bad "cannot download $prev"
+    rscp "$LOCAL_DIR/$asset" "$TARGET:$REMOTE_DIR/" || bad "scp previous release"
+    rsh "cd $REMOTE_DIR && tar -xzf $asset && \
+         sudo install -m0755 vallum-$prev-x86_64-linux/vallum /usr/bin/vallum && \
+         sudo install -m0755 vallum-$prev-x86_64-linux/vallum-quick /usr/bin/vallum-quick && \
+         for u in vallum@.service vallum-quick@.service vallum-enroll@.service; do \
+             sudo install -m0644 vallum-$prev-x86_64-linux/\$u /etc/systemd/system/\$u; \
+         done && sudo systemctl daemon-reload" || bad "install previous release"
+    ok "previous release $prev installed"
+    rscp packaging/vallum@.service packaging/vallum-quick@.service \
+        packaging/vallum-enroll@.service "$TARGET:$REMOTE_DIR/" || bad "scp new units"
+fi
+
 if [ "$PRODUCT" = 1 ]; then
     say "server init, every host step on (--product)"
-    rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
+    if [ "$UPGRADE" = 1 ]; then
+        rsh "sudo /usr/bin/vallum server init --config /etc/vallum/vallumrc.toml --name vallumrc \
+             --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT --endpoint $PUBLIC" \
+            | tail -6 || bad "server init (previous release)"
+    else
+        rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
          sudo install -m0755 $REMOTE_DIR/vallum-quick /usr/bin/vallum-quick && \
          sudo /usr/bin/vallum server init --config /etc/vallum/vallumrc.toml --name vallumrc \
               --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT --endpoint $PUBLIC" \
-        | tail -6 || bad "server init"
+            | tail -6 || bad "server init"
+    fi
     for unit in vallum@vallumrc vallum-quick@vallumrc; do
         rsh "systemctl is-active $unit" | grep -q '^active$' || bad "$unit is not active"
     done
@@ -370,6 +406,30 @@ for kind in $TRANSPORTS; do
     ok "$kind: client config on this machine"
     prove_client "$name" "$dir"
 done
+
+if [ "$UPGRADE" = 1 ]; then
+    name="laptop-bundle"
+    dir="$LOCAL_DIR/bundle"
+    say "upgrading the remote to this tree"
+    rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
+         sudo install -m0755 $REMOTE_DIR/vallum-quick /usr/bin/vallum-quick && \
+         for u in vallum@.service vallum-quick@.service vallum-enroll@.service; do \
+             sudo install -m0644 $REMOTE_DIR/\$u /etc/systemd/system/\$u; \
+         done && sudo systemctl daemon-reload && \
+         sudo systemctl restart vallum@vallumrc vallum-quick@vallumrc" || bad "binary+unit upgrade"
+    for _ in $(seq 1 20); do
+        rsh "test -S /run/vallum/vallumrc.sock" 2>/dev/null && break
+        sleep 0.5
+    done
+    rsh "test -S /run/vallum/vallumrc.sock" \
+        || bad "the upgraded daemon did not come up over the old config"
+    rsh "sudo /usr/bin/vallum peer list --config $CONFIG" | grep -q "$name" \
+        || bad "peer state lost in the upgrade"
+    ok "new binaries run the old config; peers intact"
+    say "proving the tunnel again on the upgraded daemon"
+    prove_client "$name" "$dir"
+    ok "the tunnel survives an in-place upgrade"
+fi
 
 say "PASS — a real client, a real server, real egress, three enrolment transports"
 

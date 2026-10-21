@@ -5,14 +5,16 @@
 # and the artifact upload, which are the two things a crash needs to be
 # reproducible.
 #
-# Both repositories are checked out as siblings because the fuzz workspace's path
-# dependencies reach into the main workspace, which pins the SDK by path.
+# One checkout: the crypto SDK is a git dependency and cargo fetches it.
 
 name: fuzz
 
-# Hosted Actions is unavailable on the private/free plan. Run locally with
-# scripts/fuzz.sh; re-enable the schedule when Actions is available.
 on:
+  push:
+  pull_request:
+  schedule:
+    # A long run every week: 900s per target instead of the 60s smoke.
+    - cron: '17 4 * * 0'
   workflow_dispatch:
 
 concurrency:
@@ -32,16 +34,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [message_parse, handshake_decode, replay, shaping]
+        target: [message_parse, handshake_decode, replay, shaping, enroll_parse]
     steps:
       - uses: actions/checkout@v4
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz

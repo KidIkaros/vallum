@@ -10,6 +10,13 @@
 #   scripts/release.sh --no-upload     # build into dist/ and stop
 #   scripts/release.sh --dry-run       # print what would be built and uploaded
 #   scripts/release.sh --skip-remote "why"   # release without a recent two-host run
+#   scripts/release.sh --skip-arm "why"      # release without an aarch64 artifact
+#
+# Releases are signed with an SSH key (`ssh-keygen -Y sign`, OpenSSH >= 8.0):
+# the private key lives at ~/.config/vallum/release-signing-key (or
+# $VALLUM_RELEASE_KEY) and the public half is committed at
+# packaging/vallum-release.pub — the repository is the trust anchor, and
+# install.sh verifies SHA256SUMS.sig before trusting any checksum.
 #
 # Nothing here is remembered, it is checked. A tag whose tree has the wrong
 # version, a changelog that does not mention the release, a tarball missing a
@@ -24,6 +31,8 @@ REPO="KidIkaros/vallum"
 DRY=0
 UPLOAD=1
 SKIP_REMOTE=""
+SKIP_ARM=""
+SIGN_KEY="${VALLUM_RELEASE_KEY:-$HOME/.config/vallum/release-signing-key}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1 ;;
@@ -33,7 +42,12 @@ while [ $# -gt 0 ]; do
             SKIP_REMOTE="${1:-}"
             [ -n "$SKIP_REMOTE" ] || { echo "--skip-remote needs a reason" >&2; exit 1; }
             ;;
-        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --skip-arm)
+            shift
+            SKIP_ARM="${1:-}"
+            [ -n "$SKIP_ARM" ] || { echo "--skip-arm needs a reason" >&2; exit 1; }
+            ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -52,12 +66,9 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [ -n "$version" ] || { echo "cannot read the workspace version" >&2; exit 1; }
 tag="v$version"
 name="vallum-$tag-x86_64-linux"
+name_arm="vallum-$tag-aarch64-linux"
 
 say "release $tag"
-if [ ! -d ../origin-crypto-sdk ]; then
-    echo "the SDK must be a sibling checkout: ../origin-crypto-sdk" >&2
-    exit 1
-fi
 
 # ── Preflight ────────────────────────────────────────────────────────────
 # Every check here exists because it has already gone wrong once.
@@ -102,6 +113,22 @@ else
    Or release anyway with: --skip-remote \"reason\""
 fi
 
+# The signing key. Releases are only as trustworthy as the verification
+# install.sh can do, so an unsigned release is a refusal — except in --dry-run,
+# which signs nothing anyway.
+if [ "$DRY" -eq 0 ]; then
+    [ -f "$SIGN_KEY" ] || fail "no release signing key at $SIGN_KEY.
+   Generate one:  ssh-keygen -t ed25519 -f ~/.config/vallum/release-signing-key -C vallum-release
+   Then commit the public half: cp ~/.config/vallum/release-signing-key.pub packaging/vallum-release.pub"
+    actual=$(ssh-keygen -y -f "$SIGN_KEY" 2>/dev/null || true)
+    committed=$(cut -d' ' -f2-3 packaging/vallum-release.pub 2>/dev/null || true)
+    [ -n "$actual" ] && [ -n "$committed" ] || fail "cannot compare $SIGN_KEY with packaging/vallum-release.pub"
+    [ "$actual" = "$committed" ] || fail "$SIGN_KEY does not match packaging/vallum-release.pub — sign with the committed key or update the trust anchor"
+    ok "signing key matches packaging/vallum-release.pub"
+else
+    echo "   would verify the release signing key against packaging/vallum-release.pub"
+fi
+
 if [ "$DRY" -eq 1 ]; then
     echo "   would run: E2E=1 ./scripts/verify.sh"
 else
@@ -114,38 +141,91 @@ fi
 say "building"
 run cargo build --release -p vallum -p vallum-quick
 
+if [ "$DRY" -eq 0 ]; then
+    # Stale completions once shipped a `teardown` nobody could tab-complete.
+    # The packaged file must be the file this binary generates.
+    for shell in bash zsh fish; do
+        ./target/release/vallum completions "$shell" > /tmp/vallum-completions-check
+        diff -q /tmp/vallum-completions-check "packaging/vallum.$shell" >/dev/null \
+            || fail "packaging/vallum.$shell is stale — regenerate: vallum completions $shell > packaging/vallum.$shell"
+    done
+    ok "shell completions match this binary"
+fi
+
+if [ -n "$SKIP_ARM" ]; then
+    printf '   skip  aarch64 artifact: %s\n' "$SKIP_ARM"
+else
+    say "building aarch64"
+    if [ "$DRY" -eq 0 ]; then
+        # cargo-zigbuild needs no sudo and no system cross toolchain: zig's cc
+        # shim translates Rust triples, which a raw `zig cc` wrapper cannot do
+        # for cc-rs builds (zstd-sys, via the SDK, compiles C).
+        command -v cargo-zigbuild >/dev/null \
+            || fail "cargo-zigbuild missing; cargo install cargo-zigbuild --locked (or --skip-arm \"reason\")"
+        command -v zig >/dev/null \
+            || fail "zig missing; install zig (or --skip-arm \"reason\")"
+        run cargo zigbuild --release -p vallum -p vallum-quick --target aarch64-unknown-linux-gnu
+        file "target/aarch64-unknown-linux-gnu/release/vallum" | grep -q "ARM aarch64" \
+            || fail "the aarch64 artifact is not aarch64"
+        ok "aarch64 build (cargo zigbuild)"
+    else
+        echo "   would cross-build aarch64 (cargo zigbuild)"
+    fi
+fi
+
 say "packaging"
 run rm -rf target/debian crates/vallum/target/generate-rpm dist
 run cargo deb -p vallum --no-build
 run bash -c "cd crates/vallum && cargo generate-rpm"
 
-say "assembling the tarball"
-if [ "$DRY" -eq 0 ]; then
+assemble() {
+    local bindir=$1 name=$2
     mkdir -p "dist/$name"
-    cp target/release/vallum target/release/vallum-quick "dist/$name/"
+    cp "$bindir/vallum" "$bindir/vallum-quick" "dist/$name/"
     cp LICENSE README.md "dist/$name/"
     cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
-    cp packaging/vallum.bash "dist/$name/"
+    cp packaging/vallum.bash packaging/vallum.zsh packaging/vallum.fish "dist/$name/"
     cp packaging/vallum@.service packaging/vallum-quick@.service \
-        packaging/vallum-enroll@.service "dist/$name/"
+        packaging/vallum-enroll@.service packaging/vallum-metrics.service \
+        packaging/vallum-metrics.timer packaging/vallum-alerts.yml "dist/$name/"
     tar -C dist -czf "dist/$name.tar.gz" "$name"
     rm -rf "dist/$name"
-    cp target/debian/*.deb dist/ 2>/dev/null || true
-    cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
-    ( cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS )
-
     # Inspect what we are about to publish. A release once shipped a tarball
     # without the enrolment unit because a copy line had been edited in the
     # wrong place; nobody noticed until it was installed on a host.
     for member in vallum vallum-quick vallum@.service vallum-quick@.service \
-        vallum-enroll@.service vallum.8 vallum-quick.8 vallum.toml.5; do
+        vallum-enroll@.service vallum-metrics.service vallum-metrics.timer \
+        vallum-alerts.yml vallum.8 vallum-quick.8 vallum.toml.5; do
         tar -tzf "dist/$name.tar.gz" | grep -qx "$name/$member" \
             || fail "the tarball is missing $member"
     done
-    ok "the tarball carries both binaries, all three units and the man pages"
+}
+
+say "assembling the tarballs"
+if [ "$DRY" -eq 0 ]; then
+    assemble target/release "$name"
+    [ -n "$SKIP_ARM" ] || assemble target/aarch64-unknown-linux-gnu/release "$name_arm"
+    cp target/debian/*.deb dist/ 2>/dev/null || true
+    cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
+    ok "the tarballs carry both binaries, all three units and the man pages"
+
+    say "sbom"
+    cargo sbom --output-format spdx_json_2_3 > "dist/vallum-$tag-sbom.spdx.json"
+    ok "SBOM: dist/vallum-$tag-sbom.spdx.json (crates.io graph; the SDK is a git dependency)"
+
+    say "signing"
+    ( cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS )
+    cp packaging/allowed_signers dist/allowed_signers
+    ssh-keygen -Y sign -f "$SIGN_KEY" -n file dist/SHA256SUMS
+    ssh-keygen -Y verify -f dist/allowed_signers -n file \
+        -s dist/SHA256SUMS.sig -I vallum-release < dist/SHA256SUMS >/dev/null \
+        || fail "self-verification of dist/SHA256SUMS.sig failed"
+    ok "SHA256SUMS signed with $(ssh-keygen -lf "$SIGN_KEY" | awk '{print $2}')"
+
     ls -l dist
 else
-    echo "   would assemble dist/$name.tar.gz, the .deb, the .rpm, and SHA256SUMS"
+    echo "   would assemble dist/$name{,-aarch64}.tar.gz, the .deb, the .rpm,"
+    echo "   dist/vallum-$tag-sbom.spdx.json, SHA256SUMS + SHA256SUMS.sig + allowed_signers"
 fi
 
 if [ "$UPLOAD" -eq 0 ]; then
@@ -164,11 +244,24 @@ if ! git rev-parse "$tag" >/dev/null 2>&1; then
 fi
 run git push origin "$tag"
 
+# Release notes: the CHANGELOG section for this version, plus the verified
+# install line and the signing key fingerprint that authenticates the assets.
+fingerprint=$(ssh-keygen -lf "$SIGN_KEY" 2>/dev/null | awk '{print $2}')
+{
+    awk -v v="$version" '
+        $0 ~ "^## " v "([^0-9]|$)" { f=1; next }
+        /^## / && f { f=0 }
+        f' CHANGELOG.md
+    printf '\n## Install\n\n```sh\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sudo bash -s -- --from-release %s\n```\n' "$REPO" "$tag"
+    printf '\nAssets are SSH-signed (`SHA256SUMS.sig` + `allowed_signers`); install.sh verifies them. Signing key fingerprint: `%s`\n' "$fingerprint"
+} > /tmp/vallum-release-notes.md
+
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
     run gh release upload "$tag" dist/* --repo "$REPO" --clobber
+    run gh release edit "$tag" --repo "$REPO" --notes-file /tmp/vallum-release-notes.md
 else
     run gh release create "$tag" dist/* --repo "$REPO" \
         --title "Vallum $tag" \
-        --notes "Vallum $tag. Verification: scripts/verify.sh with E2E=1."
+        --notes-file /tmp/vallum-release-notes.md
 fi
 say "published $tag"

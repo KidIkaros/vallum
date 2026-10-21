@@ -1,9 +1,7 @@
 # Vallum's CI: the gates that were run by hand through P6.8, now repeatable.
 #
-# Two checkouts, as siblings, because the workspace pins the SDK by path
-# (`origin-crypto-sdk = { path = "../origin-crypto-sdk" }`). If the SDK
-# repository is private, add a `SDK_TOKEN` secret; otherwise the workflow uses
-# the run's own token, which works for a public repository.
+# One checkout: the crypto SDK is a git dependency (`origin-crypto-sdk = { git,
+# tag }`), so cargo fetches it itself.
 #
 # The e2e job needs unprivileged user namespaces. GitHub's Ubuntu runners
 # normally allow them; where they do not, the step falls back to `sudo`, which
@@ -11,9 +9,9 @@
 
 name: ci
 
-# Hosted Actions is unavailable on the private/free plan. The gate of record is
-# scripts/verify.sh; re-enable push/pull_request when Actions is available.
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -39,11 +37,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@master
@@ -57,7 +50,7 @@ jobs:
 
       - name: Format (scoped to the Vallum crates)
         working-directory: vallum
-        # Never `--all`: the SDK is a path dependency and is not ours to format.
+        # Never `--all`: the SDK is an external dependency and is not ours to format.
         run: >
           cargo fmt
           -p vallum-core -p vallum-tunnel -p vallum
@@ -90,11 +83,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -127,11 +115,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: rustsec/audit-check@v2
         with:

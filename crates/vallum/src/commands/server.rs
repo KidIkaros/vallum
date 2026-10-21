@@ -878,7 +878,7 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     Ok("installed and started".to_owned())
 }
 
-fn systemctl(args: &[&str]) -> Result<(), Error> {
+pub(crate) fn systemctl(args: &[&str]) -> Result<(), Error> {
     let status = Command::new("systemctl")
         .args(args)
         .status()
