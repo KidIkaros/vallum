@@ -121,7 +121,7 @@ if [ "$DRY" -eq 0 ]; then
    Generate one:  ssh-keygen -t ed25519 -f ~/.config/vallum/release-signing-key -C vallum-release
    Then commit the public half: cp ~/.config/vallum/release-signing-key.pub packaging/vallum-release.pub"
     actual=$(ssh-keygen -y -f "$SIGN_KEY" 2>/dev/null || true)
-    committed=$(cut -d' ' -f2-3 packaging/vallum-release.pub 2>/dev/null || true)
+    committed=$(cat packaging/vallum-release.pub 2>/dev/null || true)
     [ -n "$actual" ] && [ -n "$committed" ] || fail "cannot compare $SIGN_KEY with packaging/vallum-release.pub"
     [ "$actual" = "$committed" ] || fail "$SIGN_KEY does not match packaging/vallum-release.pub — sign with the committed key or update the trust anchor"
     ok "signing key matches packaging/vallum-release.pub"
