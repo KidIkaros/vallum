@@ -677,6 +677,15 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(uninstall)
+_arguments "${_arguments_options[@]}" : \
+'--purge[Also remove /etc/vallum — configs and private keys. Without this they stay, so a reinstall brings the same tunnels back up]' \
+'--dry-run[Show the full removal plan without changing the host]' \
+'--allow-insecure-key-permissions[Use a private key file that its group or the world can read]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 '--allow-insecure-key-permissions[Use a private key file that its group or the world can read]' \
@@ -897,6 +906,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(uninstall)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -938,6 +951,7 @@ _vallum_commands() {
 'import-bundle:Import a client \`.vallum-bundle\` file' \
 'enroll-serve:Answer token-gated enrolment requests (runs as its own service)' \
 'tui:Operate a tunnel in a terminal dashboard' \
+'uninstall:Remove everything the installer and setup put on this host' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -1028,6 +1042,7 @@ _vallum__subcmd__help_commands() {
 'import-bundle:Import a client \`.vallum-bundle\` file' \
 'enroll-serve:Answer token-gated enrolment requests (runs as its own service)' \
 'tui:Operate a tunnel in a terminal dashboard' \
+'uninstall:Remove everything the installer and setup put on this host' \
 'completions:Print a shell completion script' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -1253,6 +1268,11 @@ _vallum__subcmd__help__subcmd__syncconf_commands() {
 _vallum__subcmd__help__subcmd__tui_commands() {
     local commands; commands=()
     _describe -t commands 'vallum help tui commands' commands "$@"
+}
+(( $+functions[_vallum__subcmd__help__subcmd__uninstall_commands] )) ||
+_vallum__subcmd__help__subcmd__uninstall_commands() {
+    local commands; commands=()
+    _describe -t commands 'vallum help uninstall commands' commands "$@"
 }
 (( $+functions[_vallum__subcmd__identity_commands] )) ||
 _vallum__subcmd__identity_commands() {
@@ -1562,6 +1582,11 @@ _vallum__subcmd__syncconf_commands() {
 _vallum__subcmd__tui_commands() {
     local commands; commands=()
     _describe -t commands 'vallum tui commands' commands "$@"
+}
+(( $+functions[_vallum__subcmd__uninstall_commands] )) ||
+_vallum__subcmd__uninstall_commands() {
+    local commands; commands=()
+    _describe -t commands 'vallum uninstall commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_vallum" ]; then

@@ -16,3 +16,4 @@ pub mod server;
 pub mod setup;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod uninstall;

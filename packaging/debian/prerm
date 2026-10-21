@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stop and disable every Vallum unit before the package's files leave.
+# A running unit whose binary was just removed becomes a failed service.
+set -e
+if [ -d /run/systemd/system ]; then
+    systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
+        | awk '{print $1}' | sed 's/\.service$//;s/\.timer$//' \
+        | while read -r unit; do
+            systemctl disable --now "$unit" 2>/dev/null || true
+        done
+    systemctl disable --now vallum-metrics.timer 2>/dev/null || true
+    systemctl disable --now vallum-metrics.service 2>/dev/null || true
+fi
+exit 0

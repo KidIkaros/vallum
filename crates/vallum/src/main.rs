@@ -19,8 +19,10 @@ use vallum::commands::server::ServerArgs;
 use vallum::commands::setup::SetupArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
+use vallum::commands::uninstall::UninstallArgs;
 use vallum::commands::{
     bench, client, control, doctor, identity, import, keys, metrics, peer, run, server, setup,
+    uninstall,
 };
 use vallum::Error;
 
@@ -94,6 +96,8 @@ enum Command {
     /// Operate a tunnel in a terminal dashboard.
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
+    /// Remove everything the installer and setup put on this host.
+    Uninstall(UninstallArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
 }
@@ -184,6 +188,7 @@ fn main() -> ExitCode {
         Command::Metrics(args) => metrics::metrics(&args),
         Command::Identity(args) => identity::identity(&args),
         Command::ImportBundle(args) => import::import(&args),
+        Command::Uninstall(args) => uninstall::uninstall(&args),
         #[cfg(feature = "tui")]
         Command::Tui(args) => vallum::commands::tui::run(&args),
         Command::Completions(args) => {

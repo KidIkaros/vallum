@@ -260,9 +260,11 @@ to let it write `/etc/resolv.conf` or run a shell.
 ## Uninstall
 
 ```sh
-sudo ./scripts/install.sh --uninstall
+sudo vallum uninstall --dry-run   # the plan: units, firewall, files, secrets
+sudo vallum uninstall             # everything except /etc/vallum
+sudo vallum uninstall --purge     # including /etc/vallum — keys are gone for good
 ```
 
-Stops and removes both units, deletes `/etc/vallum` and `/run/vallum`, removes
-the binaries, the NAT table, and the sysctl file. It does not reset
-`ip_forward`, because another service on the host may be using it.
+`install.sh --uninstall` runs the same command. `apt remove vallum` /
+`rpm -e vallum` stop the units first (maintainer scripts); `apt purge` also
+clears `/etc/vallum`.

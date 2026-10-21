@@ -1,0 +1,15 @@
+#!/bin/sh
+# remove: reload systemd so the unit files dpkg deleted stop resolving.
+# purge:  also remove configs, keys, and kernel state — the convention that
+#         keeps `apt remove` reversible and `apt purge` final.
+set -e
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+fi
+if [ "$1" = "purge" ]; then
+    rm -rf /etc/vallum /run/vallum
+    rm -f /etc/sysctl.d/90-vallum.conf
+    nft delete table inet vallum 2>/dev/null || true
+    sysctl --system >/dev/null 2>&1 || true
+fi
+exit 0

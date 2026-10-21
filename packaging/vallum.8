@@ -142,6 +142,15 @@ Undo the host changes `server init` installed: stop and disable the units,
 remove the `inet vallum` NAT table, remove the firewall and FORWARD rules, and
 delete `/etc/sysctl.d/90-vallum.conf`. Keeps `/etc/vallum` unless `--purge` is
 given.
+.TP
+.B uninstall [--dry-run] [--purge]
+Remove everything the installer and setup put on this host: every
+`vallum{,-quick,-enroll,-metrics}` unit stopped and disabled, per-config
+firewall and sysctl state, unit files, man pages, shell completions,
+`/run/vallum`, and finally the binaries (a running process can unlink
+itself). `/etc/vallum` — configs and private keys — is kept unless
+`--purge`, matching the `apt remove`/`apt purge` convention. `--dry-run`
+prints the whole plan without root.
 .PP
 .B peer invites [--config FILE] [--json]
 List live one-time invites and their remaining TTL (tokens are never printed),

@@ -58,4 +58,7 @@ Removing Vallum cleanly is part of lifecycle hygiene:
 - Server: `sudo vallum server teardown [--config /etc/vallum/vallum0.toml]`
   (`--purge` also removes configs+keys; `--dry-run` prints the plan first).
 - Client: `sudo vallum client teardown --name <name>` (same flags).
-- Binaries+everything: `scripts/install.sh --uninstall`.
+- The whole install: `sudo vallum uninstall [--dry-run] [--purge]` — every
+  unit, firewall/sysctl state, man pages, completions, `/run/vallum`, and the
+  binaries. `/etc/vallum` is kept unless `--purge` (the `apt remove`/`apt
+  purge` convention). `scripts/install.sh --uninstall` delegates to it.

@@ -93,8 +93,9 @@ and the completion, then hands off to `vallum server init`:
   `--dry-run` work here without being duplicated.
 - `--add-client NAME` and `--remove-client NAME` are shims over
   `vallum peer add`/`peer remove`.
-- `--uninstall` stops and removes both units, the binaries, `/etc/vallum`, the
-  NAT table, and the sysctl file.
+- `--uninstall` runs `vallum uninstall`: stops and removes all Vallum units,
+  the binaries, the NAT table, the sysctl file, man pages, and completions —
+  `/etc/vallum` stays unless `--purge`.
 
 The setup itself — key, config, forwarding, firewall, NAT, units — lives in
 `vallum server init` (ADR-0013) so it has one implementation, unit tests, and a

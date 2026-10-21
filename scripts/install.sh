@@ -9,7 +9,8 @@
 #   scripts/install.sh --local             # install target/release, no download
 #   scripts/install.sh --add-client NAME   # enrol a client (writes a bundle)
 #   scripts/install.sh --remove-client NAME
-#   scripts/install.sh --uninstall
+#   scripts/install.sh --uninstall           # keeps /etc/vallum (configs+keys)
+#   scripts/install.sh --uninstall --purge   # removes /etc/vallum too
 #   scripts/install.sh --from-release --no-verify-signature   # skip sig check
 #   scripts/install.sh --from-release --require-signature     # fail if unsigned
 #
@@ -38,6 +39,7 @@ SYSCTL_FILE="/etc/sysctl.d/90-vallum.conf"
 MODE="local"
 VERSION=""
 UNINSTALL=0
+UNINSTALL_ARGS=()
 INSTALL_ONLY=0
 DRY=0
 NO_VERIFY_SIG=0
@@ -79,7 +81,8 @@ while [ $# -gt 0 ]; do
         --remove-client) shift; REMOVE_CLIENT=${1:-} ;;
         --endpoint) shift; ENDPOINT=${1:-}; PASSTHRU+=(--endpoint "$ENDPOINT") ;;
         --uninstall) UNINSTALL=1 ;;
-        --dry-run) DRY=1; PASSTHRU+=(--dry-run) ;;
+        --purge) UNINSTALL_ARGS+=(--purge) ;;
+        --dry-run) DRY=1; PASSTHRU+=(--dry-run); UNINSTALL_ARGS+=(--dry-run) ;;
         --help|-h)
             sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -305,19 +308,40 @@ remove_client() {
 }
 
 uninstall() {
+    # The binary owns the install manifest — delegate to it so this list
+    # cannot drift behind it. Only binaries from before `vallum uninstall`
+    # existed (pre-1.6.2) take the inline fallback below.
+    if [ "$DRY" -eq 0 ] && /usr/bin/vallum uninstall --help >/dev/null 2>&1; then
+        exec /usr/bin/vallum uninstall "$@"
+    fi
+    say "uninstalling (vallum uninstall not available on this binary — legacy path)"
     local instance
-    say "uninstalling"
     for instance in $(systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
-        | awk '{print $1}' | sed 's/\.service$//' | sort -u); do
+        | awk '{print $1}' | sed 's/\.service$//;s/\.timer$//' | sort -u); do
         run systemctl disable --now "$instance"
     done
-    run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-quick@.service"
+    run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
+    run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-quick@.service" \
+        "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
+        "$UNIT_DIR/vallum-metrics.timer"
+    run rm -f /usr/share/man/man8/vallum.8 /usr/share/man/man8/vallum-quick.8 \
+        /usr/share/man/man5/vallum.toml.5 \
+        /usr/share/bash-completion/completions/vallum \
+        /usr/share/zsh/site-functions/_vallum \
+        /usr/share/fish/vendor_completions.d/vallum.fish
     run systemctl daemon-reload
-    run rm -rf "$CONFIG_DIR" "$RUNTIME_DIR"
+    run rm -rf "$RUNTIME_DIR"
+    # /etc/vallum holds private keys: kept by default, removed only by --purge.
+    if printf '%s\n' "$@" | grep -qx -- '--purge'; then
+        run rm -rf "$CONFIG_DIR"
+    else
+        echo "   kept  $CONFIG_DIR (pass --purge to remove configs and keys)"
+    fi
     run rm -f "$BIN_DIR/vallum" "$BIN_DIR/vallum-quick"
     if [ "$DRY" -eq 0 ]; then
         nft delete table inet vallum 2>/dev/null || true
         rm -f "$SYSCTL_FILE"
+        sysctl --system >/dev/null 2>&1 || true
     fi
 }
 
@@ -326,7 +350,7 @@ uninstall() {
 need_root
 
 if [ "$UNINSTALL" -eq 1 ]; then
-    uninstall
+    uninstall "${UNINSTALL_ARGS[@]}"
     exit 0
 fi
 

@@ -82,6 +82,7 @@ vallum-crypto-sdk.workspace = true
 
 [package.metadata.deb]
 maintainer = "Vallum contributors"
+maintainer-scripts = "../../packaging/debian"
 copyright = "2026, Vallum contributors"
 license-file = ["../../LICENSE", "4"]
 extended-description = "Hybrid post-quantum layer-3 tunnel."
@@ -115,3 +116,20 @@ assets = [
     { source = "../../packaging/vallum.toml.5", dest = "/usr/share/man/man5/vallum.toml.5", mode = "644" },
     { source = "../../packaging/vallum.bash", dest = "/usr/share/bash-completion/completions/vallum", mode = "644" },
 ]
+# Same lifecycle contract as the deb maintainer scripts: stop units before
+# the binaries leave, reload after, keep /etc/vallum (secrets are never the
+# package manager's to delete silently — `vallum uninstall --purge` is).
+[package.metadata.generate-rpm.scriptlets]
+preun = """
+if [ -d /run/systemd/system ]; then
+    systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
+        | awk '{print $1}' | sed 's/\\.service$//;s/\\.timer$//' \
+        | while read -r unit; do systemctl disable --now "$unit" 2>/dev/null || true; done
+    systemctl disable --now vallum-metrics.timer vallum-metrics.service 2>/dev/null || true
+fi
+exit 0
+"""
+postun = """
+if [ -d /run/systemd/system ]; then systemctl daemon-reload 2>/dev/null || true; fi
+exit 0
+"""
