@@ -624,7 +624,10 @@ fn place_config(
 /// them were visible at the moment of enrolment. So enrolment finishes here:
 /// a real handshake, and a real packet, or a named reason why not.
 fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
-    let socket = PathBuf::from(format!("/run/vallum/{name}.sock"));
+    let socket = vallum_config::Config::load(config)
+        .ok()
+        .and_then(|cfg| cfg.interface.control)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{name}.sock")));
     say!();
     say!("proving the tunnel…");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -682,6 +685,26 @@ fn handshake_seen(response: &str) -> bool {
     })
 }
 
+/// Resolve `--token`: `-` reads a line from `stdin` so the token stays out of
+/// shell history and `ps`; a literal token warns and returns it.
+fn read_token_arg(arg: Option<&str>, mut stdin: impl std::io::BufRead) -> Result<String, Error> {
+    match arg {
+        Some("-") => {
+            let mut line = String::new();
+            stdin
+                .read_line(&mut line)
+                .map_err(|error| Error::Usage(format!("reading the token: {error}")))?;
+            Ok(line.trim().to_owned())
+        }
+        Some(token) => {
+            say!("note: a token passed as an argument is visible in `ps` and stays in");
+            say!("      shell history; `--token -` reads it from stdin instead");
+            Ok(token.to_owned())
+        }
+        None => Ok(String::new()),
+    }
+}
+
 /// Enrol with a single-use token — transport B, for machines that cannot SSH.
 fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     let name = args
@@ -689,7 +712,8 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
         .clone()
         .or_else(hostname)
         .unwrap_or_else(|| "client".to_owned());
-    let token = crate::enroll::Token::parse(args.token.as_deref().unwrap_or_default())?;
+    let raw_token = read_token_arg(args.token.as_deref(), std::io::stdin().lock())?;
+    let token = crate::enroll::Token::parse(&raw_token)?;
     if args.dry_run {
         say!("would generate a key here and ask {server} to enrol `{name}`");
         say!("   the token proves the server invited this machine; no secrets travel");
@@ -901,6 +925,14 @@ mod tests {
         assert_eq!(listen_port("0.0.0.0:51820").unwrap(), 51820);
         assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
         assert!(listen_port("0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn dash_token_reads_from_stdin_and_trims() {
+        let cursor = std::io::Cursor::new(b"a1b2-c3d4-e5f6-0011-2233-4455-6677-8899\n");
+        let raw = read_token_arg(Some("-"), cursor).unwrap();
+        let parsed = crate::enroll::Token::parse(&raw).unwrap();
+        assert_eq!(parsed.display(), "a1b2-c3d4-e5f6-0011-2233-4455-6677-8899");
     }
 
     #[test]

@@ -1783,6 +1783,9 @@ fn client_interface_name(peer: &str) -> String {
             '-'
         });
     }
+    while name.len() > 7 && name.ends_with(['-', '_']) {
+        name.pop();
+    }
     name
 }
 

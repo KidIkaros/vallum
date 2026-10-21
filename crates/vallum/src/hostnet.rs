@@ -313,6 +313,17 @@ pub fn plan_forwarding(state: &HostState, v4: bool, v6: bool) -> Vec<HostStep> {
     steps
 }
 
+/// Open a single UDP port in whichever firewall the host actually uses, without
+/// adding forwarding rules. Used for the enrolment responder's port so it does
+/// not duplicate the interface's FORWARD rules.
+#[must_use]
+pub fn plan_port(state: &HostState, port: u16) -> Vec<HostStep> {
+    let mut state = state.clone();
+    state.forward_drop = false;
+    state.iptables_forward_drop = false;
+    plan_firewall(&state, port, "")
+}
+
 /// Open the UDP port and let forwarded traffic through, in whichever firewall
 /// the host actually uses.
 #[must_use]

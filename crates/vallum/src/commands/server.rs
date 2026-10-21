@@ -113,7 +113,7 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
 
     if args.enable {
         install_service(&interface, false)?;
-        let steps = hostnet::plan_firewall(&hostnet::inspect(), port, &interface);
+        let steps = hostnet::plan_port(&hostnet::inspect(), port);
         let _ = hostnet::apply(&steps, false)?;
         say!("token enrolment on for {interface}: UDP {port}");
         say!("   invite a device with `vallum peer invite <name>`");
@@ -392,11 +392,7 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
             if args.enroll {
                 // The responder listens on the next port up; open it too, or the
                 // feature exists but nothing can reach it.
-                steps.extend(hostnet::plan_firewall(
-                    &host,
-                    port.saturating_add(1),
-                    &interface,
-                ));
+                steps.extend(hostnet::plan_port(&host, port.saturating_add(1)));
             }
         }
         if !args.no_nat {
@@ -421,8 +417,8 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
     // a private key the server generated.
     let next = format!(
         "on the client: sudo vallum setup --remote you@<this-host>\n\
-         or here:       sudo vallum peer invite laptop   (one-time token)\n\
-         a bundle:      vallum peer add laptop --config {} --ship-key \
+         \x20  or here:       sudo vallum peer invite laptop   (one-time token)\n\
+         \x20  a bundle:      vallum peer add laptop --config {} --ship-key \
          --bundle-out laptop.vallum-bundle",
         args.config.display()
     );
@@ -758,17 +754,24 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     let enroll_unit = unit_dir.join("vallum-enroll@.service");
     write_atomic(&enroll_unit, ENROLL_UNIT, 0o644)?;
     systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", "--now", &format!("vallum@{instance}")])?;
-    // The host-networking unit depends on the daemon; enabling it explicitly
-    // makes `systemctl stop vallum@x` also undo the routes, via `PartOf=`.
-    systemctl(&["enable", "--now", &format!("vallum-quick@{instance}")])?;
-    // The enrolment responder only runs where it was asked for.
+    // Enable for boot, then restart: `enable --now` is a no-op when the unit is
+    // already active, which leaves an older daemon running with a stale key or
+    // an unlinked control socket after a re-init.
+    for unit in [
+        format!("vallum@{instance}"),
+        format!("vallum-quick@{instance}"),
+    ] {
+        systemctl(&["enable", &unit])?;
+        systemctl(&["restart", &unit])?;
+    }
     let enroll_enabled =
         vallum_config::Config::load(&PathBuf::from(format!("/etc/vallum/{instance}.toml")))
             .map(|config| config.enroll.enabled)
             .unwrap_or(false);
     if enroll_enabled {
-        systemctl(&["enable", "--now", &format!("vallum-enroll@{instance}")])?;
+        let unit = format!("vallum-enroll@{instance}");
+        systemctl(&["enable", &unit])?;
+        systemctl(&["restart", &unit])?;
     }
     Ok("installed and started".to_owned())
 }

@@ -141,7 +141,8 @@ if rsh "test -e /etc/vallum" 2>/dev/null; then
     echo "   files:      /etc/vallum, /etc/sysctl.d/90-vallum.conf, /usr/bin/vallum{,-quick}"
     echo "   firewall:   the UDP port rule, the vallum FORWARD rules, table inet vallum"
     rsh "set +e
-        sudo systemctl disable --now 'vallum@*' 'vallum-quick@*' 'vallum-enroll@*' >/dev/null 2>&1
+        sudo systemctl stop 'vallum@*' 'vallum-quick@*' 'vallum-enroll@*' >/dev/null 2>&1
+        sudo rm -rf /etc/systemd/system/multi-user.target.wants/vallum*@*
         sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
                    /etc/systemd/system/vallum-enroll@.service
         sudo systemctl daemon-reload >/dev/null 2>&1
