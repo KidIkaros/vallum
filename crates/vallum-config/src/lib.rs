@@ -366,3 +366,49 @@ impl std::error::Error for ConfigError {
         }
     }
 }
+
+/// The policy-routing mark a full-tunnel client uses so its own packets can
+/// escape the policy table to the real gateway. A local routing detail — the
+/// server has no business dictating it — so it has a fixed default.
+pub const DEFAULT_FWMARK: u32 = 51820;
+
+/// Complete a full-tunnel client config for this machine: if a peer's
+/// `allowed_ips` covers `0.0.0.0/0` or `::/0`, `vallum-quick` requires
+/// `[interface] fwmark` or it refuses to attach (an unmarked full tunnel
+/// would route the daemon's own packets into the dead tunnel). Configs minted
+/// before the field existed lack it; the mark is local to the machine that
+/// runs the tunnel, so the client fills it in rather than refusing the
+/// server's answer. Text that does not parse is returned untouched — the
+/// caller's own parse will report it.
+#[must_use]
+pub fn with_local_fwmark(config_text: &str) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.interface.fwmark.is_some() {
+        return config_text.to_owned();
+    }
+    let full_tunnel = config.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
+    });
+    if !full_tunnel {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + 24);
+    let mut placed = false;
+    for line in config_text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !placed && line.trim() == "[interface]" {
+            out.push_str(&format!("fwmark = {DEFAULT_FWMARK}\n"));
+            placed = true;
+        }
+    }
+    if placed {
+        out
+    } else {
+        config_text.to_owned()
+    }
+}

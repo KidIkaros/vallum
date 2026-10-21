@@ -652,6 +652,9 @@ fn place_config(
     let key_path = directory.join(format!("{name}.key"));
     let config_path = directory.join(format!("{name}.toml"));
     crate::keys::save_secret(&key_path, secret)?;
+    // `fwmark` is this machine's routing detail: a server released before the
+    // field existed hands back a config that would refuse to attach.
+    let config_text = vallum_config::with_local_fwmark(config_text);
     crate::keys::write_private(&config_path, config_text.as_bytes())?;
 
     say!();

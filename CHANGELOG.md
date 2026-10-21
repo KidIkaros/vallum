@@ -50,6 +50,11 @@ live telemetry, and CI that runs on every push.
   `vallum-enroll@` when run as root on a systemd host. The client runs
   `vallum join <ticket>` — one argument instead of four flags — or the same
   ticket via `setup --join`. The flag form still works.
+- **Mixed-version enrolment**: a client config whose peer routes `0.0.0.0/0`
+  or `::/0` but carries no `[interface] fwmark` (bundles minted before the
+  field existed) gains `fwmark = 51820` when the client materializes it —
+  `vallum join`, `setup --join/--remote`, and `import-bundle` all normalize.
+  The mark is the local machine's routing detail, not a negotiated parameter.
 - Dogfood fixes: `setup --join --token -` reads the token from stdin,
   per-peer interface names (`vallum-<peer>`) trim trailing separators at the
   15-byte IFNAMSIZ edge, `systemctl restart` replaces `enable --now` so a

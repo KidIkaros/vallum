@@ -79,7 +79,10 @@ pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("create {}: {error}", directory.display()))?;
     write_private(&key_path, bundle.key.as_bytes())?;
-    write_private(&config_path, bundle.config.as_bytes())?;
+    // The mark is the client's own routing detail: a bundle minted by a
+    // server that predates `fwmark` still has to run here.
+    let config_text = vallum_config::with_local_fwmark(&bundle.config);
+    write_private(&config_path, config_text.as_bytes())?;
     vallum_config::Config::load(&config_path)
         .map_err(|error| format!("written config: {error}"))?;
     Ok(Imported {
