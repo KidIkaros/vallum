@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.2 — 2026-10-21
 
 - **The routes now follow the session.** A new `vallum-quick watch` runs as
   `vallum-quick-watch@.service` and asks the control socket how old the newest
