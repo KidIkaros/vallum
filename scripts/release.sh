@@ -193,10 +193,13 @@ assemble() {
     # Inspect what we are about to publish. A release once shipped a tarball
     # without the enrolment unit because a copy line had been edited in the
     # wrong place; nobody noticed until it was installed on a host.
+    # grep -c reads the whole listing; `grep -q` would exit on the first
+    # match, tar would die on SIGPIPE, and pipefail would turn a present
+    # member into a false failure.
     for member in vallum vallum-quick vallum@.service vallum-quick@.service \
         vallum-enroll@.service vallum-metrics.service vallum-metrics.timer \
         vallum-alerts.yml vallum.8 vallum-quick.8 vallum.toml.5; do
-        tar -tzf "dist/$name.tar.gz" | grep -qx "$name/$member" \
+        [ "$(tar -tzf "dist/$name.tar.gz" | grep -xc "$name/$member")" -ge 1 ] \
             || fail "the tarball is missing $member"
     done
 }
