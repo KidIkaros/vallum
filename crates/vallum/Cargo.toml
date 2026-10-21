@@ -89,16 +89,23 @@ extended-description = "Hybrid post-quantum layer-3 tunnel."
 section = "net"
 priority = "optional"
 depends = "$auto"
+# The asset list is one manifest across all three channels — install.sh
+# installs this same set. scripts/check-package-manifest.sh fails CI when
+# either table drifts from it.
 assets = [
     ["target/release/vallum", "usr/bin/vallum", "755"],
     ["target/release/vallum-quick", "usr/bin/vallum-quick", "755"],
     ["../../packaging/vallum@.service", "lib/systemd/system/vallum@.service", "644"],
     ["../../packaging/vallum-quick@.service", "lib/systemd/system/vallum-quick@.service", "644"],
     ["../../packaging/vallum-enroll@.service", "lib/systemd/system/vallum-enroll@.service", "644"],
+    ["../../packaging/vallum-metrics.service", "lib/systemd/system/vallum-metrics.service", "644"],
+    ["../../packaging/vallum-metrics.timer", "lib/systemd/system/vallum-metrics.timer", "644"],
     ["../../packaging/vallum.8", "usr/share/man/man8/vallum.8", "644"],
     ["../../packaging/vallum-quick.8", "usr/share/man/man8/vallum-quick.8", "644"],
     ["../../packaging/vallum.toml.5", "usr/share/man/man5/vallum.toml.5", "644"],
     ["../../packaging/vallum.bash", "usr/share/bash-completion/completions/vallum", "644"],
+    ["../../packaging/vallum.zsh", "usr/share/zsh/site-functions/_vallum", "644"],
+    ["../../packaging/vallum.fish", "usr/share/fish/vendor_completions.d/vallum.fish", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -111,15 +118,31 @@ assets = [
     { source = "../../packaging/vallum@.service", dest = "/lib/systemd/system/vallum@.service", mode = "644" },
     { source = "../../packaging/vallum-quick@.service", dest = "/lib/systemd/system/vallum-quick@.service", mode = "644" },
     { source = "../../packaging/vallum-enroll@.service", dest = "/lib/systemd/system/vallum-enroll@.service", mode = "644" },
+    { source = "../../packaging/vallum-metrics.service", dest = "/lib/systemd/system/vallum-metrics.service", mode = "644" },
+    { source = "../../packaging/vallum-metrics.timer", dest = "/lib/systemd/system/vallum-metrics.timer", mode = "644" },
     { source = "../../packaging/vallum.8", dest = "/usr/share/man/man8/vallum.8", mode = "644" },
     { source = "../../packaging/vallum-quick.8", dest = "/usr/share/man/man8/vallum-quick.8", mode = "644" },
     { source = "../../packaging/vallum.toml.5", dest = "/usr/share/man/man5/vallum.toml.5", mode = "644" },
     { source = "../../packaging/vallum.bash", dest = "/usr/share/bash-completion/completions/vallum", mode = "644" },
+    { source = "../../packaging/vallum.zsh", dest = "/usr/share/zsh/site-functions/_vallum", mode = "644" },
+    { source = "../../packaging/vallum.fish", dest = "/usr/share/fish/vendor_completions.d/vallum.fish", mode = "644" },
 ]
 # Same lifecycle contract as the deb maintainer scripts: stop units before
 # the binaries leave, reload after, keep /etc/vallum (secrets are never the
 # package manager's to delete silently — `vallum uninstall --purge` is).
 [package.metadata.generate-rpm.scriptlets]
+# post: mirror install.sh — reload so the new units resolve, and enable the
+# metrics timer only where node_exporter's textfile collector exists (it is
+# opt-in telemetry, never a default).
+post = """
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    if [ -d /var/lib/node_exporter/textfile_collector ]; then
+        systemctl enable --now vallum-metrics.timer 2>/dev/null || true
+    fi
+fi
+exit 0
+"""
 preun = """
 if [ -d /run/systemd/system ]; then
     systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \

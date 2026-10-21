@@ -76,6 +76,10 @@ jobs:
           cargo run -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/tui.txt
           grep -q Vallum /tmp/tui.txt
 
+      - name: Package manifest parity (install.sh == deb == rpm)
+        working-directory: vallum
+        run: scripts/check-package-manifest.sh
+
   e2e:
     name: end-to-end (two namespaces, real kernel)
     runs-on: ubuntu-latest

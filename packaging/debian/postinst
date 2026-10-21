@@ -1,0 +1,12 @@
+#!/bin/sh
+# Mirror install.sh: reload so the new units resolve, and enable the metrics
+# timer only where node_exporter's textfile collector exists — it is opt-in
+# telemetry, never a default.
+set -e
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    if [ -d /var/lib/node_exporter/textfile_collector ]; then
+        systemctl enable --now vallum-metrics.timer 2>/dev/null || true
+    fi
+fi
+exit 0

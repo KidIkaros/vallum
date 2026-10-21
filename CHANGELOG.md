@@ -8,6 +8,12 @@
   unless `--purge`, Debian-style. `install.sh --uninstall` delegates to it;
   the deb ships `prerm`/`postrm` and the rpm `%preun`/`%postun` so
   `apt remove`/`rpm -e` converge on the same teardown.
+- **Package-channel parity.** The deb and rpm now ship the full install set
+  `install.sh` lays down — metrics units and all three shell completions
+  were previously missing — plus `postinst`/`%post` hooks that reload
+  systemd and opt the metrics timer in only where node_exporter's textfile
+  collector exists. `scripts/check-package-manifest.sh` runs in CI so the
+  three manifests cannot drift again.
 
 ## 1.6.1 — 2026-10-21
 
@@ -59,12 +65,6 @@ live telemetry, and CI that runs on every push.
   `vallum-enroll@` when run as root on a systemd host. The client runs
   `vallum join <ticket>` — one argument instead of four flags — or the same
   ticket via `setup --join`. The flag form still works.
-- **`vallum uninstall`**: one manifest-driven removal of everything the
-  installer and setup put down — live units, firewall/sysctl state, unit
-  files, man pages, completions, `/run/vallum` — keeping `/etc/vallum` (keys)
-  unless `--purge`, Debian-style. `install.sh --uninstall` delegates to it;
-  the deb ships `prerm`/`postrm` and the rpm `%preun`/`%postun` so
-  `apt remove`/`rpm -e` converge on the same teardown.
 - **Mixed-version enrolment**: a client config whose peer routes `0.0.0.0/0`
   or `::/0` but carries no `[interface] fwmark` (bundles minted before the
   field existed) gains `fwmark = 51820` when the client materializes it —
