@@ -34,6 +34,10 @@ enum Action {
         /// Print the commands instead of running them.
         #[arg(long)]
         dry_run: bool,
+        /// Run hooks even though this config is not root-owned (they run as
+        /// root, so a config another user can edit is root execution).
+        #[arg(long)]
+        allow_insecure_config: bool,
     },
     /// Run the down hooks, remove routes and DNS, and stop the daemon.
     Down {
@@ -42,6 +46,10 @@ enum Action {
         /// Print the commands instead of running them.
         #[arg(long)]
         dry_run: bool,
+        /// Run hooks even though this config is not root-owned (they run as
+        /// root, so a config another user can edit is root execution).
+        #[arg(long)]
+        allow_insecure_config: bool,
     },
     /// Apply routes, DNS and hooks to an interface a supervisor already owns.
     ///
@@ -54,6 +62,10 @@ enum Action {
         /// Print the commands instead of running them.
         #[arg(long)]
         dry_run: bool,
+        /// Run hooks even though this config is not root-owned (they run as
+        /// root, so a config another user can edit is root execution).
+        #[arg(long)]
+        allow_insecure_config: bool,
     },
     /// Remove what `attach` applied, leaving the daemon running.
     Detach {
@@ -62,6 +74,10 @@ enum Action {
         /// Print the commands instead of running them.
         #[arg(long)]
         dry_run: bool,
+        /// Run hooks even though this config is not root-owned (they run as
+        /// root, so a config another user can edit is root execution).
+        #[arg(long)]
+        allow_insecure_config: bool,
     },
     /// Print the config without its `[quick]` table.
     Strip {
@@ -87,10 +103,26 @@ enum Action {
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let outcome = match &cli.command {
-        Action::Up { config, dry_run } => up(config, *dry_run),
-        Action::Down { config, dry_run } => down(config, *dry_run),
-        Action::Attach { config, dry_run } => attach(config, *dry_run),
-        Action::Detach { config, dry_run } => detach(config, *dry_run),
+        Action::Up {
+            config,
+            dry_run,
+            allow_insecure_config,
+        } => up(config, *dry_run, *allow_insecure_config),
+        Action::Down {
+            config,
+            dry_run,
+            allow_insecure_config,
+        } => down(config, *dry_run, *allow_insecure_config),
+        Action::Attach {
+            config,
+            dry_run,
+            allow_insecure_config,
+        } => attach(config, *dry_run, *allow_insecure_config),
+        Action::Detach {
+            config,
+            dry_run,
+            allow_insecure_config,
+        } => detach(config, *dry_run, *allow_insecure_config),
         Action::Strip { config } => strip(config),
         Action::Save {
             config,
@@ -108,7 +140,12 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn up(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn up(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
     let interface = config
         .interface
@@ -208,7 +245,12 @@ fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, d
     }
 }
 
-fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn down(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
     let interface = config
         .interface
@@ -248,7 +290,12 @@ fn down(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Err
 /// `vallum@.service` owns the daemon and `vallum-quick@.service` runs this, so
 /// routes and DNS are applied without spawning a second daemon and without
 /// widening the daemon's sandbox to let it write `/etc/resolv.conf`.
-fn attach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn attach(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
     let interface = config
         .interface
@@ -283,7 +330,12 @@ fn attach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::E
 }
 
 /// Remove what [`attach`] applied, leaving the daemon running.
-fn detach(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn detach(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
     let interface = config
         .interface
@@ -810,6 +862,77 @@ fn unset_dns(interface: &str, dry_run: bool) -> Result<(), Box<dyn std::error::E
     }
 }
 
+/// Refuse to run hooks from a config another user can edit.
+///
+/// `pre_up`/`post_up`/`pre_down`/`post_down` are `sh -c` strings executed as
+/// root, so the config file is a privilege boundary, not just settings. The
+/// installed path (`/etc/vallum/<iface>.toml`) is root-owned and `0600`; a
+/// config anywhere else, or one that is group/world-writable, is refused rather
+/// than silently becoming root execution. `wg-quick` has the same shape and the
+/// same warning; this one fails closed.
+fn check_config_ownership(
+    config_path: &Path,
+    allow_insecure: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_config_ownership_as(config_path, effective_uid_is_root(), allow_insecure)
+        .map_err(Into::into)
+}
+
+/// Whether this process runs as root, read without a libc dependency.
+///
+/// `/proc/self/status` lists real, effective, saved and filesystem uids; the
+/// second is the effective one, which is what decides whether hooks escalate.
+fn effective_uid_is_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .and_then(|rest| rest.split_whitespace().nth(1).map(|uid| uid == "0"))
+        })
+        .unwrap_or(false)
+}
+
+fn check_config_ownership_as(
+    config_path: &Path,
+    is_root: bool,
+    allow_insecure: bool,
+) -> Result<(), String> {
+    if !is_root {
+        // Hooks run with the caller's own privileges: their own config is fine.
+        return Ok(());
+    }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let metadata = std::fs::metadata(config_path)
+        .map_err(|error| format!("read {}: {error}", config_path.display()))?;
+    let owner = metadata.uid();
+    let writable_by_others = metadata.permissions().mode() & 0o022 != 0;
+    if owner == 0 && !writable_by_others {
+        return Ok(());
+    }
+    if allow_insecure {
+        eprintln!(
+            "vallum-quick: warning: {} is owned by uid {owner} or writable by others; \
+             its hooks run as root",
+            config_path.display()
+        );
+        return Ok(());
+    }
+    Err(format!(
+        "{} is owned by uid {owner}{} — its hooks (pre_up, post_up, …) would run as \
+         root from a file another user can change.\n\
+         Move it to /etc/vallum and chown root:root, or pass \
+         --allow-insecure-config if you trust every writer of that path.",
+        config_path.display(),
+        if writable_by_others {
+            " and is writable by others"
+        } else {
+            ""
+        }
+    ))
+}
+
 fn run_hook(hook: &str, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     if dry_run {
         println!("sh -c {hook:?}");
@@ -930,6 +1053,32 @@ mod tests {
         assert!(fs::read_to_string(&config).unwrap().contains("showconf"));
         assert!(config.with_extension("toml.bak").exists());
         std::env::remove_var("VALLUM_BIN");
+    }
+
+    #[test]
+    fn hooks_are_refused_from_a_config_another_user_can_edit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vallum-quick-own-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(&path, "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n").unwrap();
+
+        // Not root: the caller's own config, hooks run with their privileges.
+        assert!(check_config_ownership_as(&path, false, false).is_ok());
+
+        // Root, and the file belongs to someone else (the test user).
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_config_ownership_as(&path, true, false).is_err());
+        // …unless the operator says so explicitly.
+        assert!(check_config_ownership_as(&path, true, true).is_ok());
+
+        // Root-owned but world-writable is just as bad.
+        use std::os::unix::fs::MetadataExt as _;
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+            assert!(check_config_ownership_as(&path, true, false).is_err());
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

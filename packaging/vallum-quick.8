@@ -25,6 +25,24 @@ vallum-quick \- bring a Vallum config up with its routes, DNS and hooks
 .B detach
 .I FILE
 .RB [ --dry-run ]
+.RB [ --allow-insecure-config ]
+.SH HOOKS AND PRIVILEGE
+The
+.B pre_up
+,
+.B post_up
+,
+.B pre_down
+and
+.B post_down
+entries in
+.I [quick]
+are shell commands run as root. The config file is therefore a privilege
+boundary, not just settings: when run as root, hooks are refused unless the
+file is owned by root and not group- or world-writable (the installed
+/etc/vallum/<iface>.toml is both). Pass
+.B --allow-insecure-config
+to override, having considered who else can write that path.
 .SH DESCRIPTION
 .B vallum-quick
 is the admin-side helper. It starts

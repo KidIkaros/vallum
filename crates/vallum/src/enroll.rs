@@ -599,6 +599,7 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
     let mut cookies = CookieSecret::new(&crate::entropy::seed());
     let mut rotated = Instant::now();
     let mut limit = RateLimit::new();
+    let mut legacy: Option<Instant> = None;
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
         if rotated.elapsed().as_secs() >= COOKIE_ROTATION_SECONDS {
@@ -612,7 +613,17 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             continue;
         }
         let Some(hello) = parse_hello(&buf[..size]) else {
-            continue; // not for us, or malformed
+            // A v1 client cannot be answered in a form it would understand, so
+            // the honest thing is to say so where an operator will see it
+            // rather than let them debug a silent timeout.
+            if buf[..size].starts_with(b"VEN1") && legacy_notice(&mut legacy, source.ip()) {
+                eprintln!(
+                    "vallum: a v1 enrolment client ({}) tried to enrol; this server \
+                     speaks v2 — upgrade that client (`vallum setup --join`)",
+                    source.ip()
+                );
+            }
+            continue;
         };
         // The cookie gate: before any invite lookup, any filesystem access, or
         // any KEM work. A spoofed source cannot receive it.
@@ -737,6 +748,18 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                     let _ = socket.send_to(&datagram, source);
                 }
             }
+        }
+    }
+}
+
+/// Whether to log a legacy-client notice now: at most once a minute, so a
+/// v1 client retrying does not fill the journal.
+fn legacy_notice(last: &mut Option<Instant>, _source: IpAddr) -> bool {
+    match last {
+        Some(when) if when.elapsed() < Duration::from_secs(60) => false,
+        _ => {
+            *last = Some(Instant::now());
+            true
         }
     }
 }

@@ -61,6 +61,7 @@ Reviewed after a live VPS run, then re-reviewed after enrolment v2 (ADR-0015).
 | 7 | Expiry uses the server's clock | low | **accepted** — a skewed clock expires an invite early or late; both fail closed. The reply carries the config the client will use, so a wildly wrong server clock shows up as a failed handshake in `setup`'s proof step |
 | 8 | The responder runs as root | medium | **mitigated** — in-process enrolment (no subprocess), and the unit runs with an empty capability set, `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute`, `Protect*` on kernel/clock/hostname/cgroups, `RestrictAddressFamilies`, `UMask=0077`, and only `/etc/vallum` + `/run/vallum` writable |
 | 9 | Enrolment is off unless asked for | — | by design — `[enroll] enabled` defaults to false; `vallum server enroll --disable` stops the unit and closes the port |
+| 11 | `vallum-quick` runs `pre_up`/`post_up` hooks as root, from any config path — so a config another user can edit is root execution | **high** | **fixed** — hooks are refused unless the config is root-owned and not group/world-writable, with `--allow-insecure-config` as the explicit override. The installed path (`/etc/vallum/<iface>.toml`, `0600`) passes; `sudo vallum-quick up ~/mine.toml` does not |
 | 10 | The bundle path shipped a client private key | **high** (custody) | **mitigated** — `peer add` requires a public line; generating the key needs an explicit `--ship-key` with a warning; `import-bundle` states the key came from the server. `--remote` and `--join` are the default advice |
 
 ### Hostile server

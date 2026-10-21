@@ -51,6 +51,16 @@ protocol is unchanged.
 - `doctor` reports a config the units cannot read (root without
   `CAP_DAC_OVERRIDE` cannot read a `0600` file owned by someone else).
 
+### Security
+
+- `vallum-quick` refuses to run `pre_up`/`post_up` hooks from a config that is
+  not root-owned and not group/world-writable, because those hooks are `sh -c`
+  as root. `--allow-insecure-config` is the explicit override.
+- The enrolment responder logs a legacy-client notice when a `VEN1` client
+  tries to enrol, naming the address and the upgrade command — a v1 client
+  cannot be answered in a form it understands, so the operator is told instead
+  of debugging a silent timeout.
+
 ### Fixes
 
 - `install.sh --local` installs and stops, instead of silently preparing the

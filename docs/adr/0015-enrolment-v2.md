@@ -86,5 +86,8 @@ framed `VEN2`:
   none for junk.
 - The invite file now holds the config in plaintext (it already held the token);
   it is `0600` in `/run/vallum`, so it dies with the machine.
-- Breaking the wire is deliberate: a `VEN1` client is told to upgrade rather
-  than silently timing out.
+- Breaking the wire is deliberate, but a `VEN1` client **cannot be told**: it
+  can only parse a v1 reply, so anything this server sends is noise to it. The
+  operator is told instead — the responder logs a legacy-client notice (at most
+  once a minute) naming the address and the upgrade command, which is where a
+  silent timeout would otherwise be debugged.
