@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — enrolment v2
+## 1.6.0 — 2026-10-21
 
 Enrolment stops being a side door and takes the shape of the tunnel handshake
 (ADR-0015). It is a breaking change to the enrolment wire only; the tunnel

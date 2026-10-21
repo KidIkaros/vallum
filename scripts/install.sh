@@ -299,8 +299,17 @@ fi
 # the operator actually said something about the server (`--endpoint`,
 # `--address`, `--listen`, …); otherwise a plain install on a laptop would
 # silently start a daemon, open a port and add NAT rules.
-if [ "$INSTALL_ONLY" -eq 1 ] || [ "${#PASSTHRU[@]}" -eq 0 ]; then
-    say "installed"
+# `--dry-run` lands in PASSTHRU too, so count only arguments that actually say
+# something about the server.
+substantive=0
+for arg in "${PASSTHRU[@]:-}"; do
+    case "$arg" in
+        --dry-run | "") ;;
+        *) substantive=1 ;;
+    esac
+done
+if [ "$INSTALL_ONLY" -eq 1 ] || [ "$substantive" -eq 0 ]; then
+    if [ "$DRY" -eq 1 ]; then say "would install, and stop here"; else say "installed"; fi
     echo "this machine is ready. To make it a server:  sudo vallum setup --server"
     echo "to join an existing server:                  sudo vallum setup --remote user@host"
     exit 0
