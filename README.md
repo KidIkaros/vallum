@@ -332,3 +332,8 @@ A dual-stack tunnel is one config: `addresses = ["10.7.0.1/24", "fd00:7::1/64"]`
 ## Partnership
  
 Vallum is co-developed through a joint engineering partnership between **Ikaros Digital** and **Atomguard**, uniting post-quantum cryptographic research, zero-compromise security engineering, and operator-focused systems design.
+
+## Releasing
+
+See `docs/releasing.md`: one release per batch, and `scripts/release.sh`
+refuses unless the tree passes the gate.
