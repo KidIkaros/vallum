@@ -555,7 +555,24 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("asking {server} to enrol `{name}`…");
 
     let config_text = crate::enroll::join(server, &token, &name, &public_line)?;
-    place_config(&name, &config_text, &secret, &name, server)
+    // For the summary line, take the values the server actually wrote: the
+    // tunnel's own address and its real endpoint (51820), not the enrolment
+    // port (51821) we happened to ask on.
+    let pick = |key: &str| {
+        config_text.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix(key)?
+                .trim_start_matches(' ')
+                .trim_start_matches('=')
+                .trim_start_matches(' ')
+                .split('"')
+                .nth(1)
+                .map(|value| value.to_owned())
+        })
+    };
+    let address = pick("addresses").unwrap_or_else(|| "?".to_owned());
+    let endpoint = pick("endpoint").unwrap_or_else(|| server.to_owned());
+    place_config(&name, &config_text, &secret, &address, &endpoint)
 }
 
 /// Finish a machine that is already enrolled: install the service, or say how
