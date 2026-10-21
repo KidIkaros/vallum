@@ -55,6 +55,12 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
 
     say!("config {}", imported.config.display());
     say!("key    {}", imported.key.display());
+    // A bundle is the one path where this machine's private key existed on
+    // another machine first. Say so: it is a custody fact, not a detail.
+    say!();
+    say!("note: this key was generated on the server and travelled in the bundle.");
+    say!("      `vallum setup --remote` and `vallum setup --join` never do that —");
+    say!("      the key is generated here and only its public line leaves.");
 
     if !args.install {
         say!();

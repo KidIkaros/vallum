@@ -1429,7 +1429,9 @@ fn an_expiring_identity_and_an_open_rotation_are_visible_in_the_detail_pane() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let expires = now + 14 * 86_400;
+    // An hour of slack: at exactly 14 days, one second of clock movement
+    // between building the response and drawing it truncates to "13d left".
+    let expires = now + 14 * 86_400 + 3_600;
     let response = crate::uapi::parse_response(&format!(
         "vallum_interface=vallum0\n\
          vallum_suite=0x0003\n\

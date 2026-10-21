@@ -147,11 +147,25 @@ fn a_server_generated_bundle_round_trips_through_import() {
     let (ok, stdout, stderr) = run(bin()
         .args(["peer", "add", "phone", "--config"])
         .arg(&config)
-        .args(["--endpoint", "203.0.113.5", "--forget-key", "--bundle-out"])
+        .args([
+            "--endpoint",
+            "203.0.113.5",
+            "--forget-key",
+            "--ship-key",
+            "--bundle-out",
+        ])
         .arg(&bundle));
     assert!(ok, "{stdout}{stderr}");
     assert!(bundle.exists());
     assert_eq!(mode(&bundle), 0o600, "a bundle contains a private key");
+
+    // Without --ship-key the server refuses to mint a client key at all.
+    let (ok, _, stderr) = run(bin()
+        .args(["peer", "add", "tablet", "--config"])
+        .arg(&config)
+        .args(["--endpoint", "203.0.113.5"]));
+    assert!(!ok, "peer add generated a key without being asked");
+    assert!(stderr.contains("--ship-key"), "{stderr}");
 
     let imported = dir.join("imported");
     let (ok, stdout, stderr) = run(bin()

@@ -78,8 +78,22 @@ pub struct AddArgs {
     pub public_key_file: Option<PathBuf>,
 
     /// Generate the keypair here and write the client's bundle to this path.
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["public_key", "public_key_file"])]
+    ///
+    /// A bundle carries a *private* key, so it needs `--ship-key`: a server
+    /// that generates a client's key means a server compromise is a client
+    /// compromise. Prefer `--public-key`, `peer invite`, or `setup --remote`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with_all = ["public_key", "public_key_file"],
+        requires = "ship_key"
+    )]
     pub bundle_out: Option<PathBuf>,
+
+    /// Confirm that this server should generate the device's key and hand it
+    /// over. Only for devices that cannot generate their own.
+    #[arg(long)]
+    pub ship_key: bool,
 
     /// Write the client's config to this path (no private key: the device has
     /// its own). Use with `--public-key`.
@@ -449,6 +463,7 @@ pub(crate) fn add_for_setup(config: &Path, name: &str, bundle_out: &Path) -> Res
         public_key: None,
         public_key_file: None,
         bundle_out: Some(bundle_out.to_path_buf()),
+        ship_key: true,
         client_config_out: None,
         identity: None,
         address: None,
@@ -582,6 +597,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
                 public_key: Some(canonical.clone()),
                 public_key_file: None,
                 bundle_out: None,
+                ship_key: false,
                 client_config_out: None,
                 identity: None,
                 address: args.address.clone(),
@@ -779,6 +795,38 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
 }
 
 fn add(args: &AddArgs) -> Result<(), Error> {
+    // The default must not be "the server makes the key": that is the custody
+    // finding this command used to embody. A device that can run `vallum
+    // keygen` should send its public line; one that cannot must be named.
+    if args.public_key.is_none()
+        && args.public_key_file.is_none()
+        && args.identity.is_none()
+        && !args.ship_key
+    {
+        return Err(Error::Usage(format!(
+            "give `{}`'s public line with --public-key or --public-key-file — it \
+             generates its own key with `vallum keygen`.\n\
+             If the device cannot do that (a phone, an appliance), pass --ship-key \
+             to have this server generate the key and hand it over in a bundle.",
+            args.name
+        )));
+    }
+    if args.ship_key && args.bundle_out.is_none() && args.client_config_out.is_none() {
+        return Err(Error::Usage(
+            "--ship-key generates a key; say where it goes with --bundle-out or \
+             --client-config-out, or drop --ship-key"
+                .to_owned(),
+        ));
+    }
+    if args.ship_key {
+        say!(
+            "warning: this server is generating `{}`'s private key.",
+            args.name
+        );
+        say!("         a compromise here is a compromise of that device. The key");
+        say!("         leaves in the bundle and stays on the server until --forget-key.");
+    }
+
     require_config(&args.config)?;
     let mut file = ConfigFile::load(&args.config)?;
     if file.has_peer(&args.name) {
