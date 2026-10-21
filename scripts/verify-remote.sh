@@ -10,6 +10,7 @@
 #
 #   sudo ./scripts/verify-remote.sh user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --product user@vps.example.com
+#   sudo ./scripts/verify-remote.sh --product --keep user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --upgrade user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --transports token user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --clean-remote user@vps.example.com
@@ -33,6 +34,11 @@
 # installs /usr/bin/vallum{,-quick}, /etc/vallum, both units, and the firewall
 # rules the product would add. That is the honest test of `server init` on a
 # real host, and it needs a disposable one.
+#
+# Everything is removed on exit, pass or fail, unless --keep is given. Use it
+# when the point of the run is a deployment to dogfood rather than a gate to
+# record: without it a --product run proves `server init` and then uninstalls
+# what it just proved, leaving a host with no Vallum and no keys.
 #
 # The local half needs root for the TUN; the SSH half runs as the invoking user
 # so its keys work.
@@ -75,7 +81,12 @@ while [ $# -gt 0 ]; do
         --transports) shift; TRANSPORTS=$1 ;;
         --port) shift; PORT=$1 ;;
         --subnet) shift; SUBNET=$1; PREFIX=${SUBNET#*/}; NET=${SUBNET%/*}; SRV_IP="${NET%.*}.1"; CLI_IP="${NET%.*}.2" ;;
-        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)
+            # The header block itself: a line range here silently truncated the
+            # help whenever the block grew.
+            awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+            exit 0
+            ;;
         -*) echo "unknown flag: $1" >&2; exit 1 ;;
         *) TARGET=$1 ;;
     esac
