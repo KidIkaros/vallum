@@ -15,7 +15,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use vallum_config::Config;
+use vallum_config::{Config, ConfigError};
 use vallum_tunnel::Prefix;
 
 #[derive(Parser)]
@@ -140,12 +140,28 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Load a config the way materialization would have written it. Configs
+/// minted before `[interface] fwmark` existed get the local routing mark
+/// completed here — and written back best-effort so `down`, `detach`, and
+/// `vallum uninstall` later compute the same mark this attach used. A
+/// read-only config still works: every entry point normalizes, so the mark
+/// is consistent even when it never reaches disk.
+fn load_normalized(config_path: &Path) -> Result<Config, ConfigError> {
+    if let Ok(text) = std::fs::read_to_string(config_path) {
+        let normalized = vallum_config::with_local_fwmark(&text);
+        if normalized != text {
+            let _ = std::fs::write(config_path, normalized);
+        }
+    }
+    Config::load_normalized(config_path)
+}
+
 fn up(
     config_path: &Path,
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load(config_path)?;
+    let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
@@ -250,7 +266,7 @@ fn down(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load(config_path)?;
+    let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
@@ -295,7 +311,7 @@ fn attach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load(config_path)?;
+    let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
@@ -335,7 +351,7 @@ fn detach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load(config_path)?;
+    let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
@@ -1123,6 +1139,26 @@ mod tests {
         let routes: Vec<Prefix> = vec!["0.0.0.0/0".parse().unwrap()];
         let error = policy_for(&config, &routes, "auto").unwrap_err();
         assert!(error.to_string().contains("fwmark"), "{error}");
+    }
+
+    #[test]
+    fn a_stale_full_tunnel_gains_the_mark_on_load() {
+        // Configs minted before fwmark existed must still attach after an
+        // upgrade: the entry points complete the local mark themselves, and
+        // persist it so detach sees the same mark attach used.
+        let dir = std::env::temp_dir().join(format!("vallum-quick-heal-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        let config = load_normalized(&path).unwrap();
+        assert_eq!(config.interface.fwmark, Some(51820));
+        let rewritten = fs::read_to_string(&path).unwrap();
+        assert!(rewritten.contains("fwmark = 51820"), "{rewritten}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -324,6 +324,20 @@ impl Config {
             source,
         })
     }
+
+    /// [`load`] with [`with_local_fwmark`] applied first: a full-tunnel
+    /// config minted before `fwmark` existed gains the local routing mark
+    /// in memory so clients that load a stale on-disk config still attach.
+    pub fn load_normalized(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 /// A configuration file that could not be read or parsed.
