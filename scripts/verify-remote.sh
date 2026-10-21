@@ -196,17 +196,36 @@ if [ "$UPGRADE" = 1 ]; then
     # daemon written by an older tree must be upgraded by this one, with the
     # config and peers it wrote still valid.
     say "installing the previous release on the remote"
-    # `gh` under sudo reads root's config, not the invoking user's, and this
-    # script runs as root for the local TUN. The release API and asset URLs
-    # are public — drafts are not listed there, which is the filter we want —
-    # so curl is both sufficient and credential-free.
-    prev=$(curl -fsSL "https://api.github.com/repos/KidIkaros/vallum/releases" 2>/dev/null \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-    [ -n "$prev" ] || bad "cannot list releases — check network access to api.github.com"
+    # This script runs as root for the local TUN, but `gh` credentials live
+    # with the invoking user — run it as them, which also makes drafts
+    # (which have assets but no public API entry) usable as the base. Fall
+    # back to the public API when gh is absent or unauthenticated.
+    gh_as_user() {
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+            sudo -u "$SUDO_USER" gh "$@"
+        else
+            gh "$@"
+        fi
+    }
+    prev=""
+    if command -v gh >/dev/null 2>&1 && gh_as_user auth status >/dev/null 2>&1; then
+        prev=$(gh_as_user release list --repo KidIkaros/vallum --limit 20 \
+            --json tagName --jq '.[0].tagName' 2>/dev/null)
+    fi
+    if [ -z "$prev" ]; then
+        prev=$(curl -fsSL "https://api.github.com/repos/KidIkaros/vallum/releases" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    [ -n "$prev" ] || bad "cannot list releases — no published releases, and gh is not authenticated"
     asset="vallum-$prev-x86_64-linux.tar.gz"
     mkdir -p "$LOCAL_DIR"
-    curl -fsSL "https://github.com/KidIkaros/vallum/releases/download/$prev/$asset" \
-        -o "$LOCAL_DIR/$asset" || bad "cannot download $prev"
+    if ! curl -fsSL "https://github.com/KidIkaros/vallum/releases/download/$prev/$asset" \
+        -o "$LOCAL_DIR/$asset" 2>/dev/null; then
+        # A draft has no public download URL; gh reaches it with auth.
+        gh_as_user release download "$prev" --repo KidIkaros/vallum \
+            --pattern "$asset" --dir "$LOCAL_DIR" --clobber \
+            || bad "cannot download $prev"
+    fi
     rscp "$LOCAL_DIR/$asset" "$TARGET:$REMOTE_DIR/" || bad "scp previous release"
     rsh "cd $REMOTE_DIR && tar -xzf $asset && \
          sudo install -m0755 vallum-$prev-x86_64-linux/vallum /usr/bin/vallum && \
