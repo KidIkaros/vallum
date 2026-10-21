@@ -102,10 +102,12 @@ cleanup() {
             sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
             sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
             sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
-            sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service
+            sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                       /etc/systemd/system/vallum-enroll@.service
             sudo systemctl daemon-reload >/dev/null 2>&1
-            sudo rm -rf /etc/vallum /etc/sysctl.d/90-vallum.conf
+            sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
             sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+            sudo ufw delete allow $((PORT+1))/udp >/dev/null 2>&1
             sudo iptables -D FORWARD -i vallumrc -j ACCEPT 2>/dev/null
             sudo iptables -D FORWARD -o vallumrc -j ACCEPT 2>/dev/null
             sudo iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
@@ -268,7 +270,7 @@ enrol_ssh() {
         rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum" || bad "install vallum on the remote"
         note "installed vallum to /usr/bin on the remote for the ssh transport"
     fi
-    as_owner "$dir" "$VALLUM setup --remote $TARGET --name $name" > "$dir/setup.log" 2>&1 \
+    as_owner "$dir" "$VALLUM setup --remote $TARGET --remote-config $CONFIG --name $name" > "$dir/setup.log" 2>&1 \
         || { cat "$dir/setup.log"; bad "setup --remote ($name)"; }
 }
 

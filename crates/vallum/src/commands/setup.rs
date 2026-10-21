@@ -62,6 +62,11 @@ pub struct SetupArgs {
     #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client", "join", "token"])]
     pub remote: Option<String>,
 
+    /// The server config to edit when enrolling with `--remote` (for a server
+    /// whose instance is not `vallum0`).
+    #[arg(long, value_name = "FILE", requires = "remote")]
+    pub remote_config: Option<PathBuf>,
+
     /// Enrol with a single-use token, for machines that cannot SSH to the
     /// server. The server's `vallum peer invite` prints the whole command.
     #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["server", "client", "remote"], requires = "token")]
@@ -320,7 +325,7 @@ fn ask_bundle() -> Result<PathBuf, Error> {
         if answer.is_empty() {
             return Err(Error::Usage(
                 "give the path to a .vallum-bundle file, or ask the server for one: \
-                 `vallum peer add <name> --bundle-out <name>.vallum-bundle`"
+                 `vallum peer add <name> --ship-key --bundle-out <name>.vallum-bundle`"
                     .to_owned(),
             ));
         }
@@ -470,8 +475,12 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
     say!("generated a key here; the private half does not leave this machine");
 
+    let config_flag = match &args.remote_config {
+        Some(path) => format!(" --config {}", path.display()),
+        None => String::new(),
+    };
     let remote_command =
-        format!("sudo vallum peer enroll {name} --public-key-file /dev/stdin --json");
+        format!("sudo vallum peer enroll {name}{config_flag} --public-key-file /dev/stdin --json");
     let mut child = std::process::Command::new("ssh")
         .arg(remote)
         .arg(&remote_command)
@@ -500,7 +509,7 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
              That command runs `sudo vallum peer enroll` there, so it needs vallum \
              installed on the server and passwordless sudo for this user. \
              If that is not available, ask the server for a bundle instead: \
-             `vallum peer add {name} --bundle-out {name}.vallum-bundle`",
+             `vallum peer add {name} --ship-key --bundle-out {name}.vallum-bundle`",
             stderr.trim()
         )));
     }
