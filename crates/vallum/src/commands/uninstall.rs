@@ -46,6 +46,8 @@ const COMPLETIONS: [&str; 3] = [
 const SYSCTL: &str = "/etc/sysctl.d/90-vallum.conf";
 const RUNTIME_DIR: &str = "/run/vallum";
 const CONFIG_DIR: &str = "/etc/vallum";
+/// Where `vallum-quick` records the routing plan each attach executed.
+const STATE_DIR: &str = "/var/lib/vallum";
 
 #[derive(Debug, Args)]
 pub struct UninstallArgs {
@@ -88,19 +90,51 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
         }
     }
 
+    // ── host routing: `vallum-quick` owns it, so ask it ──
+    // Routes and the policy rules an attach installed are the quick helper's,
+    // and it records the plan it executed. Delegating — while the binary is
+    // still here — keeps one implementation and removes what was actually
+    // installed rather than what today's config would imply. Left behind,
+    // `table main suppress_prefixlength 0` takes the host's default route away
+    // and it does not come back without a reboot.
+    //
+    // `detach` runs the config's down hooks, as it does from the unit; a config
+    // another user can edit is refused, so nothing here widens what root runs.
+    for config in configs() {
+        let what = format!("vallum-quick detach {}", config.display());
+        if dry {
+            say!("   would {what}");
+            continue;
+        }
+        match Command::new("/usr/bin/vallum-quick")
+            .arg("detach")
+            .arg(&config)
+            .status()
+        {
+            Ok(status) if status.success() => say!("   ok    {what}"),
+            _ => say!("   skip  {what} (routing may remain; run it by hand)"),
+        }
+    }
+    // A record with no config beside it cannot be reversed here: the format is
+    // `vallum-quick`'s. Name it rather than deleting the evidence.
+    let orphans = orphan_plans();
+    for orphan in &orphans {
+        say!(
+            "   warn  {} has no config; remove its rules by hand",
+            orphan.display()
+        );
+    }
+    if orphans.is_empty() {
+        remove_dir(dry, Path::new(STATE_DIR));
+    }
+
     // ── host networking: per-config teardown covers nft/ufw/FORWARD ──
     // One HostState snapshot and one deduplicated plan: two configs on this
     // host must not emit the same rule removal twice, and a client config
     // with `listen = "0.0.0.0:0"` contributes no port rule at all.
     let state = crate::hostnet::inspect();
     let mut steps = Vec::new();
-    for config in std::fs::read_dir(CONFIG_DIR)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
-    {
+    for config in configs() {
         for step in teardown_plan(&config, &state) {
             if !steps
                 .iter()
@@ -216,6 +250,38 @@ fn teardown_plan(
         .filter(|port| *port != 0)
         .collect();
     crate::hostnet::plan_teardown(state, &ports, &interface)
+}
+
+/// Every config on this host, as the uninstaller sees them.
+fn configs() -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(CONFIG_DIR)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect()
+}
+
+/// Recorded routing plans with no config of the same name left beside them.
+///
+/// The plan format belongs to `vallum-quick`, so this does not try to parse it:
+/// it names what it found rather than deleting the evidence.
+fn orphan_plans() -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(STATE_DIR)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "quick"))
+        .filter(|path| {
+            let interface = path.file_stem().unwrap_or_default();
+            !Path::new(CONFIG_DIR)
+                .join(interface)
+                .with_extension("toml")
+                .exists()
+        })
+        .collect()
 }
 
 fn step(dry: bool, what: &str, action: impl Fn()) {

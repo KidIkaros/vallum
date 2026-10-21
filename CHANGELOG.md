@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Host routing teardown removes what was installed.** `vallum-quick` records
+  the exact `ip` plan an attach executes under `/var/lib/vallum`, and teardown
+  replays it in reverse. Teardown used to re-derive the plan from the config,
+  so any edit between attach and detach — a narrowed `allowed_ips`, a cleared
+  `fwmark`, a changed `[quick] table` — computed *nothing to remove* and
+  stranded the policy rules. One of them, `table main suppress_prefixlength 0`,
+  suppresses the main table's default route: the host kept its gateway and lost
+  the internet until it was rebooted. Re-attaching now also reverses the
+  previous plan first, so `ip rule` duplicates cannot accumulate.
+- **`vallum uninstall` tears the routing down too.** It delegates to
+  `vallum-quick detach` for every config while the binary is still present,
+  instead of removing units, firewall state and binaries while leaving the
+  policy rules behind. A recorded plan with no config beside it is named, not
+  silently deleted.
+- **`--dry-run` no longer writes.** Completing a config's missing `fwmark`
+  happened on load, so `vallum-quick attach --dry-run` edited the file it had
+  just read — and did so before the ownership check. It is now a separate step
+  that runs after the check and only on a real run.
 - **`vallum uninstall`**: one manifest-driven removal of everything the
   installer and setup put down — live units, firewall/sysctl state, unit
   files, man pages, completions, `/run/vallum` — keeping `/etc/vallum` (keys)
