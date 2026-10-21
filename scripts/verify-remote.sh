@@ -444,12 +444,16 @@ if [ "$UPGRADE" = 1 ]; then
              sudo install -m0644 $REMOTE_DIR/\$u /etc/systemd/system/\$u; \
          done && sudo systemctl daemon-reload && \
          sudo systemctl restart vallum@vallumrc vallum-quick@vallumrc" || bad "binary+unit upgrade"
+    # /run/vallum is 0750 root:root — an unprivileged stat never sees the
+    # socket even when the daemon is healthy. Probe as root, and on failure
+    # show the journal rather than a bare FAIL.
     for _ in $(seq 1 20); do
-        rsh "test -S /run/vallum/vallumrc.sock" 2>/dev/null && break
+        rsh "sudo test -S /run/vallum/vallumrc.sock" 2>/dev/null && break
         sleep 0.5
     done
-    rsh "test -S /run/vallum/vallumrc.sock" \
-        || bad "the upgraded daemon did not come up over the old config"
+    rsh "sudo test -S /run/vallum/vallumrc.sock" \
+        || { rsh "sudo journalctl -u vallum@vallumrc -u vallum-quick@vallumrc --since '-3min' --no-pager | tail -20"
+             bad "the upgraded daemon did not come up over the old config"; }
     rsh "sudo /usr/bin/vallum peer list --config $CONFIG" | grep -q "$name" \
         || bad "peer state lost in the upgrade"
     ok "new binaries run the old config; peers intact"
