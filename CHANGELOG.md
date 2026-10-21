@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **`verify-host.sh` no longer destroys a deployment it refused to touch.** The
+  cleanup trap was armed before the precondition checks, and cleanup removes
+  `/etc/vallum`, the units, the nft table and the sysctl drop-in unconditionally
+  — so refusing to run against a live deployment tore that deployment down. The
+  trap is now armed only once every read-only check has passed.
+- **The gate says what it proved.** It printed "the privileged path works end to
+  end" while three traffic assertions were informational, and a client on the
+  same host as the server cannot exercise egress at all. Those lines now read
+  `NOT VERIFIED`, and the verdict names the gates that do verify traffic.
+- **A leftover work directory no longer looks like a product failure.**
+  `import-bundle` refuses to overwrite client keys, so a previous `--keep` run
+  made the next run fail at that step. The work directory is cleared first.
+- **The failure dump captures the routing that matters.** A full tunnel keeps its
+  default route in its own table behind a policy rule, so the main table showed
+  nothing either way and the dump could not distinguish "no routes" from "routes
+  elsewhere". It now prints the namespace's rules and `ip route show table all`.
+
 ## 1.6.2 — 2026-10-21
 
 - **The routes now follow the session.** A new `vallum-quick watch` runs as

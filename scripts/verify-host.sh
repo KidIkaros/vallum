@@ -72,7 +72,6 @@ cleanup() {
     ok "host state restored"
 }
 [ "$(id -u)" = 0 ] || { echo "verify-host.sh needs root; run it with sudo"; exit 1; }
-[ "$KEEP" = "--keep" ] || trap cleanup EXIT
 # Build, rather than trusting whatever is in target/release: a stale binary is
 # how this script would test yesterday's code. `sudo` resets PATH, so cargo is
 # looked for in the usual places, and the build runs as the invoking user so
@@ -100,7 +99,7 @@ build() {
 }
 build > "$WORK-build.log" 2>&1 || { tail -20 "$WORK-build.log"; bad "build"; }
 [ -x "$VALLUM" ] && [ -x "$QUICK" ] || bad "the build produced no binaries at $VALLUM / $QUICK"
-[ -e /etc/vallum ] && bad "/etc/vallum already exists; this script removes it on cleanup"
+[ -e /etc/vallum ] && bad "/etc/vallum already exists; refusing to run against a live deployment"
 [ -e "$SYSCTL_FILE" ] && bad "$SYSCTL_FILE already exists; a real deployment may be using it"
 nft list table inet vallum >/dev/null 2>&1 && bad "nftables table 'inet vallum' already exists"
 ip link show "$IFACE" >/dev/null 2>&1 && bad "interface $IFACE already exists"
@@ -110,6 +109,11 @@ say "installing the release binaries"
 if [ -e /usr/bin/vallum ] || [ -e /usr/bin/vallum-quick ]; then
     bad "/usr/bin/vallum{,-quick} already exist; refusing to overwrite them"
 fi
+# Arm cleanup only now. Every check above is read-only, and cleanup removes
+# /etc/vallum, the units, the nft table and the sysctl drop-in unconditionally —
+# so arming it earlier meant a refusal tore down the very deployment it had just
+# refused to touch.
+[ "$KEEP" = "--keep" ] || trap cleanup EXIT
 install -m0755 "$VALLUM" /usr/bin/vallum
 install -m0755 "$QUICK" /usr/bin/vallum-quick
 installed_bins=1
@@ -180,6 +184,9 @@ ok "TUN $IFACE exists"
 
 # ── a client through the product path ────────────────────────────────────────
 say "peer add + import-bundle"
+# Clear it first: a previous --keep run leaves client keys here, and
+# import-bundle refuses to overwrite them, which looks like a product failure.
+rm -rf "$WORK"
 mkdir -p "$WORK"
 "$VALLUM" peer add laptop --config "$SCONFIG" \
     --ship-key --bundle-out "$WORK/laptop.vallum-bundle" --dns 1.1.1.1 --forget-key \
@@ -289,20 +296,20 @@ done
 if ip netns exec vallumtest-ns ping -c2 -W3 "$SRV_IP" > "$WORK/ns-inner.log" 2>&1; then
     ok "the client's tunnel is up: it reaches the server's $SRV_IP"
 else
-    note "the client cannot reach $SRV_IP from this host; see the dump"
+    note "NOT VERIFIED: the client cannot reach $SRV_IP from this host; see the dump"
 fi
 
 if ip netns exec vallumtest-ns ping -c2 -W3 1.1.1.1 > "$WORK/ns-ping.log" 2>&1; then
     ok "the tunnel carries traffic to the internet: $(tail -2 "$WORK/ns-ping.log" | head -1)"
 else
-    note "no ICMP through the tunnel; see the dump below"
+    note "NOT VERIFIED: no ICMP through the tunnel; see the dump below"
 fi
 
 if ip netns exec vallumtest-ns dig +time=3 +tries=1 @1.1.1.1 example.com A > "$WORK/ns-dig.log" 2>&1 \
    && grep -q "ANSWER SECTION" "$WORK/ns-dig.log"; then
     ok "DNS crosses the tunnel and the server's NAT: $(grep -E '^example.com' "$WORK/ns-dig.log" | head -1)"
 else
-    note "DNS through the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
+    note "NOT VERIFIED: DNS through the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
     {
         echo "== ns: ping the server's tunnel address ($SRV_IP)"
         cat "$WORK/ns-inner.log" 2>/dev/null
@@ -341,6 +348,13 @@ else
         ip rule 2>&1
         echo "== ns: ip route"
         ip netns exec vallumtest-ns ip route 2>&1
+        # A full tunnel keeps its default route in its own table, reached by a
+        # policy rule, so the main table above shows nothing either way. Without
+        # these two the dump cannot tell "no routes" from "routes elsewhere".
+        echo "== ns: ip rule"
+        ip netns exec vallumtest-ns ip rule 2>&1
+        echo "== ns: ip route show table all"
+        ip netns exec vallumtest-ns ip route show table all 2>&1 | head -20
         echo "== forwarding and rp_filter"
         sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
     } > /tmp/vallum-host-dns.log 2>&1
@@ -370,4 +384,6 @@ ok "namespace client torn down"
 say "doctor, live"
 "$VALLUM" doctor --config "$SCONFIG" 2>&1 | head -8
 
-say "PASS — the privileged path works end to end"
+say "PASS — the privileged path is installed and the control plane works"
+say "     traffic is not verified here: a same-host client cannot exercise egress,"
+say "     so scripts/e2e-netns.sh and scripts/verify-remote.sh are the gates of record"
