@@ -10,6 +10,12 @@
 #
 #   sudo ./scripts/verify-remote.sh user@vps.example.com
 #   sudo ./scripts/verify-remote.sh --product user@vps.example.com
+#   sudo ./scripts/verify-remote.sh --transports token user@vps.example.com
+#
+# It enrols one client per enrolment transport — bundle, ssh (`setup --remote`),
+# token (`peer invite` + `setup --join`) — and proves each carries traffic. A
+# pass records the commit in ~/.local/state/vallum/remote-verified, which
+# scripts/release.sh requires before it will build a release.
 #
 # Default is a *scratch* server: binaries and config live in /tmp on the remote,
 # no systemd units, no /etc/vallum, nothing installed. The only host changes are
@@ -25,7 +31,7 @@
 # so its keys work.
 
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 VALLUM=${VALLUM:-target/release/vallum}
 QUICK=${QUICK:-target/release/vallum-quick}
@@ -39,6 +45,7 @@ LOCAL_DIR=/tmp/vallum-remote-client
 CIFACE=vallumrc0
 PRODUCT=0
 KEEP=0
+TRANSPORTS="bundle ssh token"
 TARGET=""
 
 say(){ printf '── %s\n' "$*"; }
@@ -50,6 +57,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --product) PRODUCT=1 ;;
         --keep) KEEP=1 ;;
+        --transports) shift; TRANSPORTS=$1 ;;
         --port) shift; PORT=$1 ;;
         --subnet) shift; SUBNET=$1; PREFIX=${SUBNET#*/}; NET=${SUBNET%/*}; SRV_IP="${NET%.*}.1"; CLI_IP="${NET%.*}.2" ;;
         -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -71,7 +79,6 @@ else
     rscp() { scp -q "$@"; }
 fi
 
-SERVER_PID=""
 CLIENT_PID=""
 REMOTE_STARTED=0
 FORWARD_WAS=""
@@ -84,6 +91,8 @@ cleanup() {
     if [ "$REMOTE_STARTED" = 1 ]; then
         rsh "set +e
             sudo pkill -f '^$REMOTE_DIR/vallum run' 2>/dev/null
+            sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
+            sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
             sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
             sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service
             sudo systemctl daemon-reload >/dev/null 2>&1
@@ -106,6 +115,9 @@ cleanup() {
 [ "$KEEP" = 1 ] || trap cleanup EXIT
 
 [ -x "$VALLUM" ] || bad "build first: cargo build --release -p vallum -p vallum-quick"
+# Absolute, because the client half runs with a working directory of its own.
+VALLUM=$(cd "$(dirname "$VALLUM")" && pwd)/$(basename "$VALLUM")
+QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 
 say "remote checks ($TARGET)"
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
@@ -159,20 +171,80 @@ else
     CONFIG=$REMOTE_DIR/server.toml
 fi
 
-say "enrolling a client"
-rsh "$SERVER_CMD peer add laptop --config $CONFIG --endpoint $PUBLIC \
-        --ship-key --bundle-out $REMOTE_DIR/bundle --dns 1.1.1.1" >/dev/null || bad "peer add"
-rsh "sudo cp $REMOTE_DIR/bundle $REMOTE_DIR/bundle.tmp && sudo chmod 644 $REMOTE_DIR/bundle.tmp" || bad "chmod"
-ok "bundle written on the remote"
+say "server ready for enrolment"
 
-BUNDLE=/tmp/vallum-remote.bundle
-rscp "$TARGET:$REMOTE_DIR/bundle.tmp" "$BUNDLE" || bad "could not fetch the bundle"
-rm -rf "$LOCAL_DIR" && mkdir -p "$LOCAL_DIR"
-"$VALLUM" import-bundle "$BUNDLE" --output-dir "$LOCAL_DIR" >/dev/null || bad "import-bundle"
-CLIENT_CONFIG=$(ls "$LOCAL_DIR"/*.toml | head -1)
-# Split tunnel: only the server's tunnel address and one internet address go
-# through the tunnel, so the local default route and DNS are untouched.
-python3 - "$CLIENT_CONFIG" "$CIFACE" "$SRV_IP" "$LOCAL_DIR" <<'PY'
+# ── the three transports ─────────────────────────────────────────────────
+# Each one ends with a client config on this machine. What they prove is that
+# *provisioning* works three ways; the tunnel that follows is the same for all.
+
+ENROLL_READY=0
+ensure_enroll() {
+    [ "$ENROLL_READY" = 1 ] && return 0
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo /usr/bin/vallum server enroll --config $CONFIG --enable" >/dev/null || bad "server enroll --enable"
+    else
+        rsh "sudo sh -c 'grep -q \"^\\[enroll\\]\" $CONFIG || printf \"\\n[enroll]\\nenabled = true\\nport = $((PORT+1))\\n\" >> $CONFIG'"
+        rsh "sudo ufw allow $((PORT+1))/udp >/dev/null 2>&1
+             sudo nohup $REMOTE_DIR/vallum enroll-serve --config $CONFIG >> $REMOTE_DIR/enroll.log 2>&1 &
+             sleep 1"
+    fi
+    ENROLL_READY=1
+}
+
+# Run a command as the invoking user, in a directory, so `setup` writes there
+# instead of /etc/vallum.
+as_owner() {
+    local dir=$1
+    shift
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" sh -c "cd '$dir' && $*"
+    else
+        sh -c "cd '$dir' && $*"
+    fi
+}
+
+enrol_bundle() {
+    local name=$1 dir=$2
+    rsh "$SERVER_CMD peer add $name --config $CONFIG --endpoint $PUBLIC \
+            --ship-key --bundle-out $REMOTE_DIR/$name.bundle" >/dev/null || bad "peer add ($name)"
+    rsh "sudo chmod 644 $REMOTE_DIR/$name.bundle" || bad "chmod bundle"
+    rscp "$TARGET:$REMOTE_DIR/$name.bundle" "$dir/$name.vallum-bundle" || bad "fetch bundle"
+    "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" >/dev/null || bad "import-bundle"
+}
+
+enrol_ssh() {
+    local name=$1 dir=$2
+    # `setup --remote` runs `sudo vallum peer enroll` over there, so the binary
+    # must be installed. Cleanup removes it again.
+    if [ "$PRODUCT" != 1 ]; then
+        rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum" || bad "install vallum on the remote"
+        note "installed vallum to /usr/bin on the remote for the ssh transport"
+    fi
+    as_owner "$dir" "$VALLUM setup --remote $TARGET --name $name" > "$dir/setup.log" 2>&1 \
+        || { cat "$dir/setup.log"; bad "setup --remote ($name)"; }
+}
+
+enrol_token() {
+    local name=$1 dir=$2
+    ensure_enroll
+    local invite id token fingerprint
+    invite=$(rsh "$SERVER_CMD peer invite $name --config $CONFIG --json") || bad "peer invite ($name)"
+    id=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+    token=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+    fingerprint=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')
+    as_owner "$dir" "$VALLUM setup --join $PUBLIC:$((PORT+1)) --name $name \
+            --invite-id $id --token $token --expect $fingerprint" > "$dir/setup.log" 2>&1 \
+        || { cat "$dir/setup.log"; bad "setup --join ($name)"; }
+    grep -q "server fingerprint $fingerprint" "$dir/setup.log" || bad "the fingerprint was not verified"
+}
+
+# A client config from any transport, rewritten to a split tunnel so this
+# machine's default route and resolver are never touched, then run and proved.
+prove_client() {
+    local name=$1 dir=$2 config iface=$CIFACE
+    config=$(ls "$dir"/*.toml | head -1)
+    [ -n "$config" ] || bad "$name: no client config was produced"
+    python3 - "$config" "$iface" "$SRV_IP" "$dir" <<'PY'
 import re, sys
 path, iface, srv, workdir = sys.argv[1:5]
 text = open(path).read()
@@ -182,39 +254,58 @@ text = re.sub(r'allowed_ips = \[.*?\]', f'allowed_ips = ["{srv}/32", "1.1.1.1/32
 text = re.sub(r'^dns = .*\n', '', text, flags=re.M)
 open(path, 'w').write(text)
 PY
-ok "client config prepared (split tunnel)"
 
-say "client daemon"
-"$VALLUM" run --config "$CLIENT_CONFIG" > "$LOCAL_DIR/client.log" 2>&1 &
-CLIENT_PID=$!
-sleep 2
-kill -0 "$CLIENT_PID" 2>/dev/null || { cat "$LOCAL_DIR/client.log"; bad "the client daemon exited"; }
-"$QUICK" attach "$CLIENT_CONFIG" > "$LOCAL_DIR/attach.log" 2>&1 || { cat "$LOCAL_DIR/attach.log"; bad "attach"; }
+    "$VALLUM" run --config "$config" > "$dir/client.log" 2>&1 &
+    CLIENT_PID=$!
+    sleep 2
+    kill -0 "$CLIENT_PID" 2>/dev/null || { cat "$dir/client.log"; bad "$name: the client daemon exited"; }
+    "$QUICK" attach "$config" > "$dir/attach.log" 2>&1 || { cat "$dir/attach.log"; bad "$name: attach"; }
 
-established=0
-for _ in $(seq 1 20); do
-    ping -c1 -W1 "$SRV_IP" >/dev/null 2>&1
-    "$VALLUM" show --control "$LOCAL_DIR/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
-    sleep 0.5
+    local established=0
+    for _ in $(seq 1 20); do
+        "$VALLUM" show --control "$dir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    [ "$established" = 1 ] || bad "$name: no handshake (is UDP $PORT reachable?)"
+
+    ping -c2 -W3 "$SRV_IP" > "$dir/tunnel.log" 2>&1 || { cat "$dir/tunnel.log"; bad "$name: the tunnel does not ping"; }
+    ping -c3 -W4 1.1.1.1 > "$dir/egress.log" 2>&1 || { cat "$dir/egress.log"; bad "$name: no egress through the server"; }
+    if command -v dig >/dev/null 2>&1; then
+        dig +time=3 +tries=1 @1.1.1.1 example.com A > "$dir/dig.log" 2>&1
+        grep -q "ANSWER SECTION" "$dir/dig.log" || bad "$name: DNS through the tunnel did not answer"
+    fi
+    ok "$name: handshake, tunnel, egress$(command -v dig >/dev/null 2>&1 && printf ', DNS')"
+
+    kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
+    CLIENT_PID=""
+    "$QUICK" detach "$config" >/dev/null 2>&1
+}
+
+for kind in $TRANSPORTS; do
+    name="laptop-$kind"
+    dir="$LOCAL_DIR/$kind"
+    rm -rf "$dir" && mkdir -p "$dir"
+    say "transport: $kind"
+    case "$kind" in
+        bundle) enrol_bundle "$name" "$dir" ;;
+        ssh)    enrol_ssh "$name" "$dir" ;;
+        token)  enrol_token "$name" "$dir" ;;
+        *) bad "unknown transport: $kind (bundle, ssh, token)" ;;
+    esac
+    ok "$kind: client config on this machine"
+    prove_client "$name" "$dir"
 done
-[ "$established" = 1 ] && ok "handshake" || bad "no handshake: is UDP $PORT reachable?"
 
-say "the tunnel"
-ping -c2 -W3 "$SRV_IP" > "$LOCAL_DIR/tunnel.log" 2>&1 || { cat "$LOCAL_DIR/tunnel.log"; bad "the tunnel does not ping"; }
-ok "tunnel: $(tail -2 "$LOCAL_DIR/tunnel.log" | head -1)"
+say "PASS — a real client, a real server, real egress, three enrolment transports"
 
-say "the internet, through the server's NAT"
-ping -c3 -W4 1.1.1.1 > "$LOCAL_DIR/egress.log" 2>&1 || { cat "$LOCAL_DIR/egress.log"; bad "no egress through the server"; }
-ok "egress: $(tail -2 "$LOCAL_DIR/egress.log" | head -1)"
-
-say "DNS through the tunnel"
-if command -v dig >/dev/null 2>&1; then
-    dig +time=3 +tries=1 @1.1.1.1 example.com A > "$LOCAL_DIR/dig.log" 2>&1 \
-        && grep -q "ANSWER SECTION" "$LOCAL_DIR/dig.log" \
-        && ok "DNS: $(grep -E '^example.com' "$LOCAL_DIR/dig.log" | head -1)" \
-        || bad "DNS through the tunnel did not answer"
+# The stamp scripts/release.sh requires. It lives outside the repository and
+# names the commit it proved, so an old pass cannot vouch for a new tree.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    OWNER_STATE=$(sudo -u "$SUDO_USER" sh -c 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}"')
 else
-    note "dig not installed; skipped"
+    OWNER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
 fi
-
-say "PASS — a real client, a real server, real egress"
+mkdir -p "$OWNER_STATE/vallum"
+printf '%s\n' "$(git rev-parse HEAD)" > "$OWNER_STATE/vallum/remote-verified"
+chown -R "${SUDO_USER:-root}" "$OWNER_STATE/vallum" 2>/dev/null
+say "recorded $(git rev-parse --short HEAD) as verified on two hosts"
