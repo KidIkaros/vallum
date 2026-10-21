@@ -31,8 +31,9 @@
 # setup flags (`--endpoint`, `--address`, `--no-nat`, `--dry-run`, ...) works
 # here without being repeated in this script.
 #
-# The repository is private, so `--from-release` needs `GH_TOKEN` or
-# `GITHUB_TOKEN` unless the release assets are reachable anonymously.
+# `--from-release` tries the public download URL first — on a public repo it
+# needs nothing but curl. While the repo is private it falls back to `gh`
+# (run as the invoking user, not root) or to `GH_TOKEN`/`GITHUB_TOKEN`.
 set -euo pipefail
 
 REPO="KidIkaros/vallum"
@@ -182,18 +183,23 @@ gh_as_user() {
     fi
 }
 
+# Resolution order matters for DX: the anonymous public path is first
+# because it is the end state — anyone can `curl | bash` a public release
+# with zero tooling. gh is the *fallback* for a private repo where the
+# invoking user happens to have a login, not a prerequisite.
 latest_version() {
-    if command -v gh >/dev/null 2>&1; then
-        gh_as_user release view --repo "$REPO" --json tagName -q .tagName
-        return
-    fi
-    local header
+    local header out
     header=$(auth_header)
-    if [ -n "$header" ]; then
+    out=$( { if [ -n "$header" ]; then
         curl -fsSL -H "$header" "https://api.github.com/repos/$REPO/releases/latest"
     else
-        curl -fsSL "https://api.github.com/repos/$REPO/releases/latest"
-    fi | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+        curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null
+    fi; } | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 )
+    [ -n "$out" ] && { echo "$out"; return; }
+    # Private repo and no anonymous answer: the user's gh session is the
+    # last resort.
+    command -v gh >/dev/null 2>&1 || return 0
+    gh_as_user release view --repo "$REPO" --json tagName -q .tagName
 }
 
 download_asset() {
@@ -202,30 +208,33 @@ download_asset() {
     local header token asset_id
     header=$(auth_header)
     token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
-    if command -v gh >/dev/null 2>&1 && [ -z "$token" ]; then
-        gh_as_user release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
-        return
-    fi
-    if [ -n "$header" ]; then
-        # A private repository's `releases/download/...` URL is the web front
-        # end: it wants a browser session and answers 404 to a token. The REST
-        # asset endpoint is the one that accepts one, so resolve the id first.
+    # Explicit token: private repo, authenticated API path.
+    if [ -n "$token" ]; then
+        if curl -fsSL -H "$header" -o "$out" "$url" 2>/dev/null; then
+            return
+        fi
         asset_id=$(curl -fsSL -H "$header" \
             "https://api.github.com/repos/$REPO/releases/tags/$tag" \
             | awk -v want="$name" '
                 /"id":/ { line = $0; sub(/.*"id": */, "", line); sub(/,.*/, "", line); last = line }
                 $0 ~ "\"name\": \"" want "\"" { print last; exit }
             ')
-        if [ -n "$asset_id" ]; then
-            curl -fsSL -H "$header" -H "Accept: application/octet-stream" \
-                -o "$out" "https://api.github.com/repos/$REPO/releases/assets/$asset_id"
-            return
-        fi
-        # No id resolved: fall back to the web URL rather than failing here.
-        curl -fsSL -H "$header" -o "$out" "$url"
-    else
-        curl -fsSL -o "$out" "$url"
+        [ -n "$asset_id" ] && curl -fsSL -H "$header" -H "Accept: application/octet-stream" \
+            -o "$out" "https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+        return
     fi
+    # Public repo: the release download URL answers anonymously — no gh,
+    # no login, works for anyone.
+    if curl -fsSL -o "$out" "$url" 2>/dev/null; then
+        return
+    fi
+    # Private repo: the user's gh login is the fallback, never a gate.
+    if command -v gh >/dev/null 2>&1; then
+        gh_as_user release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
+        return
+    fi
+    echo "cannot download $name — repo may be private; set GH_TOKEN or run gh auth login" >&2
+    return 1
 }
 
 install_from_release() {
