@@ -65,7 +65,8 @@ if [ "$DRY" -eq 0 ]; then
     cp LICENSE README.md "dist/$name/"
     cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
     cp packaging/vallum.bash "dist/$name/"
-    cp packaging/vallum@.service packaging/vallum-quick@.service "dist/$name/"
+    cp packaging/vallum@.service packaging/vallum-quick@.service \
+        packaging/vallum-enroll@.service "dist/$name/"
     tar -C dist -czf "dist/$name.tar.gz" "$name"
     rm -rf "dist/$name"
     cp target/debian/*.deb dist/ 2>/dev/null || true
