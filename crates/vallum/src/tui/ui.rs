@@ -11,6 +11,7 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use super::app::{App, Form, HandshakeFreshness, Interface, ServiceState, View};
+use super::theme::{abbreviate_public_line, theme, transfer_share_bar};
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
@@ -229,80 +230,66 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         ])
         .split(inner);
 
+        let t = theme();
         let (total_rx, total_tx) = interface.device.as_ref().map_or((0u64, 0u64), |dev| {
             (
                 dev.peers.iter().map(|p| p.rx_bytes).sum(),
                 dev.peers.iter().map(|p| p.tx_bytes).sum(),
             )
         });
+        let rx_peak = interface.rx_history.iter().copied().max().unwrap_or(0);
+        let tx_peak = interface.tx_history.iter().copied().max().unwrap_or(0);
+        // Shared scale ceiling across RX & TX with a 1 KB/s floor so sub-1KB/s
+        // keepalive noise never renders as full-height bars (Tufte Lie Factor = 1).
+        let scale_max = rx_peak.max(tx_peak).max(1024);
         let baseline = "▁".repeat(inner.width as usize);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled("▼ RX ", t.accent()),
+                Span::styled(format!("{:<10}", rate_label(interface.rx_rate)), t.text()),
                 Span::styled(
-                    "▼ RX ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:<10}", rate_label(interface.rx_rate)),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled(
-                    format!("Σ {}", bytes(total_rx)),
-                    Style::default().fg(Color::DarkGray),
+                    format!("Σ {} · pk {}", bytes(total_rx), bytes(rx_peak)),
+                    t.muted(),
                 ),
             ])),
             rows[0],
         );
-        if interface.rx_history.iter().any(|&v| v > 0) {
+        if rx_peak > 0 {
             frame.render_widget(
                 Sparkline::default()
                     .data(&interface.rx_history)
-                    .style(Style::default().fg(Color::Cyan)),
+                    .max(scale_max)
+                    .style(t.signal()),
                 rows[1],
             );
         } else {
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    baseline.clone(),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Paragraph::new(Span::styled(baseline.clone(), t.muted())),
                 rows[1],
             );
         }
         frame.render_widget(
             Paragraph::new(Line::from(vec![
+                Span::styled("▲ TX ", t.tx_signal()),
+                Span::styled(format!("{:<10}", rate_label(interface.tx_rate)), t.text()),
                 Span::styled(
-                    "▲ TX ",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{:<10}", rate_label(interface.tx_rate)),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled(
-                    format!("Σ {}", bytes(total_tx)),
-                    Style::default().fg(Color::DarkGray),
+                    format!("Σ {} · pk {}", bytes(total_tx), bytes(tx_peak)),
+                    t.muted(),
                 ),
             ])),
             rows[2],
         );
-        if interface.tx_history.iter().any(|&v| v > 0) {
+        if tx_peak > 0 {
             frame.render_widget(
                 Sparkline::default()
                     .data(&interface.tx_history)
-                    .style(Style::default().fg(Color::Magenta)),
+                    .max(scale_max)
+                    .style(t.tx_bar()),
                 rows[3],
             );
         } else {
-            frame.render_widget(
-                Paragraph::new(Span::styled(baseline, Style::default().fg(Color::DarkGray))),
-                rows[3],
-            );
+            frame.render_widget(Paragraph::new(Span::styled(baseline, t.muted())), rows[3]);
         }
     }
 }
@@ -738,12 +725,7 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(brand_block(table_title))
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::Rgb(30, 45, 60))
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .row_highlight_style(theme().row_selected())
         .highlight_symbol("❯ ");
     let selected = if filtered_count > 0 {
         Some(app.peer_selected.min(filtered_count - 1))
@@ -824,16 +806,18 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 )
             },
         ]));
-        lines.push(detail_kv(
-            "transfer",
-            format!("rx {} / tx {}", bytes(peer.rx_bytes), bytes(peer.tx_bytes)),
-            Style::default().fg(Color::White),
-        ));
-        lines.push(detail_kv(
-            "epoch",
-            peer.epoch.to_string(),
-            Style::default().fg(Color::Gray),
-        ));
+        let t = theme();
+        let (rx_bar, tx_bar) = transfer_share_bar(peer.rx_bytes, peer.tx_bytes, 10);
+        lines.push(Line::from(vec![
+            Span::styled("transfer    ", t.muted()),
+            Span::styled(
+                format!("rx {} / tx {} ", bytes(peer.rx_bytes), bytes(peer.tx_bytes)),
+                t.text(),
+            ),
+            Span::styled(rx_bar, t.signal()),
+            Span::styled(tx_bar, t.tx_bar()),
+        ]));
+        lines.push(detail_kv("epoch", peer.epoch.to_string(), t.subtext()));
         // An expiring credential is the one thing a peer detail can show that
         // the operator must act on, so it is never silent.
         if let Some(valid_until) = peer.valid_until {
@@ -844,29 +828,19 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 - i64::try_from(now).unwrap_or(i64::MAX))
             .div_euclid(86_400);
             let (label, style) = if days < 0 {
-                (
-                    format!("EXPIRED {}d ago", -days),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )
+                (format!("EXPIRED {}d ago", -days), t.danger_bold())
             } else if days <= 14 {
-                (
-                    format!("{days}d left"),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
+                (format!("{days}d left"), t.warn_bold())
             } else {
-                (format!("{days}d left"), Style::default().fg(Color::Green))
+                (format!("{days}d left"), t.ok())
             };
             lines.push(detail_kv("identity", label, style));
         }
         if peer.rotating {
             lines.push(detail_kv(
                 "rotation",
-                "open — the previous key is still accepted (`peer finalize`)",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                "open — previous key still accepted (press f to finalize)",
+                t.warn_bold(),
             ));
         }
         lines.push(detail_kv(
@@ -877,24 +851,22 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 "none"
             },
             if peer.preshared_key {
-                Style::default().fg(Color::Green)
+                t.ok()
             } else {
-                Style::default().fg(Color::DarkGray)
+                t.muted()
             },
         ));
+        let inner_w = area.width.saturating_sub(2);
         lines.push(Line::from(""));
+        lines.push(t.section_rule(inner_w, "public line (y to copy)"));
         lines.push(Line::from(Span::styled(
-            "── public line ────────────────────────",
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(Span::styled(
-            peer.public_line.clone(),
-            Style::default().fg(Color::Gray),
+            abbreviate_public_line(&peer.public_line, usize::from(inner_w).max(36)),
+            t.subtext(),
         )));
     } else if !app.peer_filter.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("No peers match filter \"{}\"", app.peer_filter),
-            Style::default().fg(Color::Yellow),
+            theme().warn(),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from("Press Esc or Ctrl-U to clear filter."));
@@ -904,10 +876,34 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if let Some(interface) = app.current() {
         if let Some(device) = &interface.device {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "── interface dataplane ────────────────",
-                Style::default().fg(Color::DarkGray),
-            )));
+            lines.push(theme().section_rule(area.width.saturating_sub(2), "interface dataplane"));
+            if let Some(stats) = device.stats {
+                let t = theme();
+                for (label, ok, failed) in [
+                    ("datagrams", stats.datagrams_sent, stats.datagrams_failed),
+                    ("packets", stats.packets_delivered, stats.packets_failed),
+                    ("handshakes", stats.established, stats.refusals),
+                    ("fragments", stats.reassembled, stats.fragments_dropped),
+                ] {
+                    let (ok_label, fail_label) = match label {
+                        "datagrams" => ("sent", "send failed"),
+                        "packets" => ("delivered", "write failed"),
+                        "handshakes" => ("established", "refused"),
+                        _ => ("reassembled", "dropped"),
+                    };
+                    let fail_style = if failed > 0 {
+                        t.danger_bold()
+                    } else {
+                        t.muted()
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{label:<11}"), t.muted()),
+                        Span::styled(format!("{ok_label} {ok}"), t.text()),
+                        Span::styled("  ·  ", t.muted()),
+                        Span::styled(format!("{fail_label} {failed}"), fail_style),
+                    ]));
+                }
+            }
             lines.push(detail_kv(
                 "rates",
                 format!(
@@ -1099,25 +1095,35 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled(" help", Style::default().fg(Color::DarkGray)),
         ])
     } else {
+        let has_peers = app
+            .current_device()
+            .is_some_and(|dev| !dev.peers.is_empty());
+        let rotating = app.current_peer().is_some_and(|peer| peer.rotating);
         let mut act_spans = Vec::new();
         act_spans.extend(key_capsule("Space", "toggle"));
         act_spans.extend(key_capsule("a", "add"));
-        act_spans.extend(key_capsule("e", "edit"));
-        if area.width < 100 {
-            act_spans.extend(key_capsule("d", "rm"));
-            act_spans.extend(key_capsule("i", "import"));
-            act_spans.extend(key_capsule("b", "bundle"));
-            act_spans.extend(key_capsule("y", "copy"));
+        act_spans.extend(key_capsule("v", "invite"));
+        if has_peers {
+            act_spans.extend(key_capsule("e", "edit"));
+            if area.width < 100 {
+                act_spans.extend(key_capsule("d", "rm"));
+                act_spans.extend(key_capsule("y", "copy"));
+            } else {
+                act_spans.extend(key_capsule("d", "remove"));
+                act_spans.extend(key_capsule("p", "ping"));
+                act_spans.extend(key_capsule("y", "copy"));
+            }
+            if rotating {
+                act_spans.push(Span::styled("f", theme().warn_bold()));
+                act_spans.push(Span::raw(" "));
+                act_spans.push(Span::styled("finalize  ", theme().warn()));
+            }
         } else {
-            act_spans.extend(key_capsule("d", "remove"));
-            act_spans.extend(key_capsule("b", "bundle"));
             act_spans.extend(key_capsule("i", "import"));
-            act_spans.extend(key_capsule("p", "ping"));
-            act_spans.extend(key_capsule("y", "copy"));
-            act_spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+        }
+        if area.width >= 100 {
+            act_spans.push(Span::styled("│ ", theme().muted()));
             act_spans.extend(key_capsule("C", "config"));
-            act_spans.extend(key_capsule("E", "edit"));
-            act_spans.extend(key_capsule("W", "save"));
             act_spans.extend(key_capsule("l", "logs"));
             act_spans.extend(key_capsule("r", "refresh"));
         }
@@ -1185,7 +1191,10 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         Line::from(""),
         help_section("Peer Management & Optical Provisioning"),
         help_row("a", "add peer…"),
+        help_row("v", "invite peer — one-time token + QR (no private key)…"),
         help_row("e", "edit name, endpoint, allowed IPs, keepalive, PSK…"),
+        help_row("K", "rotate peer key — zero-downtime rekey…"),
+        help_row("f", "finalize open key rotation — retires old key…"),
         help_row("d", "remove peer (with confirmation preview)…"),
         help_row("g", "generate a key and prefill the add form…"),
         help_row("b / x", "export client bundle and show scannable QR…"),
@@ -1240,19 +1249,21 @@ fn draw_diff(frame: &mut Frame<'_>, app: &App) {
         format!("old │ new    backup {}", diff.backup.display()),
         Style::default().fg(Color::DarkGray),
     ))];
+    let t = theme();
     for row in &diff.rows {
-        let style = match row.kind {
-            super::app::DiffKind::Equal => Style::default().fg(Color::Gray),
-            super::app::DiffKind::Delete => Style::default().fg(Color::Red),
-            super::app::DiffKind::Insert => Style::default().fg(Color::Green),
-            super::app::DiffKind::Replace => Style::default().fg(Color::Yellow),
+        let (glyph, style) = match row.kind {
+            super::app::DiffKind::Equal => (' ', t.subtext()),
+            super::app::DiffKind::Delete => ('-', t.danger()),
+            super::app::DiffKind::Insert => ('+', t.ok()),
+            super::app::DiffKind::Replace => ('~', t.warn()),
         };
         let left = row.left.as_deref().unwrap_or("");
         let right = row.right.as_deref().unwrap_or("");
+        let col_w = width.saturating_sub(2);
         lines.push(Line::from(vec![
-            Span::styled(format!("{left:<width$}"), style),
+            Span::styled(format!("{glyph} {left:<col_w$}"), style),
             Span::raw(" │ "),
-            Span::styled(right.to_owned(), style),
+            Span::styled(format!("{glyph} {right}"), style),
         ]));
     }
     let visible = usize::from(frame.area().height.saturating_sub(2));
@@ -1351,7 +1362,12 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
 fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
     let popup = centered(area, 92, 92);
     frame.render_widget(Clear, popup);
-    let block = modal_block("CLIENT BUNDLE QR  ·  optical provisioning");
+    let is_invite = qr.kind == super::qr::QrKind::Invite;
+    let block = modal_block(if is_invite {
+        "ONE-TIME ENROLMENT INVITE  ·  optical provisioning"
+    } else {
+        "CLIENT BUNDLE QR  ·  optical provisioning"
+    });
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1429,26 +1445,25 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
         let info_lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                " ● OPTICAL CLIENT PROVISIONING ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
+                if is_invite {
+                    " ● ONE-TIME ENROLMENT INVITE "
+                } else {
+                    " ● OPTICAL CLIENT PROVISIONING "
+                },
+                theme().pill_accent(),
             )),
             Line::from(""),
-            Line::from(vec![
-                Span::styled(
-                    " ⚠ SECRET MATERIAL ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " contains peer private key",
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
+            if is_invite {
+                Line::from(vec![
+                    Span::styled(" ✔ ZERO PRIVATE KEYS ", theme().pill_ok()),
+                    Span::styled(" token + server fingerprint only", theme().ok()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(" ⚠ SECRET MATERIAL ", theme().pill_warn()),
+                    Span::styled(" contains peer private key", theme().warn()),
+                ])
+            },
             Line::from(""),
             Line::from(Span::styled(
                 "── Frame Telemetry ─────────────────────",
@@ -1736,6 +1751,23 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     Span::raw(" cancels"),
                 ]));
             }
+            super::app::ConfirmAction::FinalizePeer { name } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Finalize key rotation for '{name}'?"),
+                    theme().warn_bold(),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "The previous identity will be retired immediately.",
+                ));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Enter", theme().accent()),
+                    Span::raw(" retires old key  ·  "),
+                    Span::styled("Esc", theme().muted()),
+                    Span::raw(" keeps rotation open"),
+                ]));
+            }
             super::app::ConfirmAction::ApplyConfig => {
                 lines.push(Line::from(Span::styled(
                     "Config parsed successfully.",
@@ -1790,7 +1822,12 @@ fn palette_command_context(app: &App, action: super::keymap::Action) -> (Option<
     let has_device = app.current_device().is_some();
     let has_iface = app.current().is_some();
     match action {
-        Action::EditPeer | Action::RemovePeer | Action::ExportBundle | Action::Ping => {
+        Action::EditPeer
+        | Action::RotatePeer
+        | Action::FinalizePeer
+        | Action::RemovePeer
+        | Action::ExportBundle
+        | Action::Ping => {
             if let Some(name) = peer_name {
                 (Some(format!("({name})")), true)
             } else {

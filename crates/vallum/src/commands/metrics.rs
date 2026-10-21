@@ -131,6 +131,61 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
         escape(suite)
     ));
 
+    // Dataplane counters, emitted only when the daemon reported them — a
+    // missing field stays missing rather than becoming a false zero.
+    for (field, metric, help) in [
+        (
+            uapi::field::VALLUM_DATAGRAMS_SENT,
+            "loop_datagrams_sent_total",
+            "Datagrams handed to the socket.",
+        ),
+        (
+            uapi::field::VALLUM_DATAGRAMS_FAILED,
+            "loop_datagrams_failed_total",
+            "Datagrams the socket refused to send.",
+        ),
+        (
+            uapi::field::VALLUM_PACKETS_DELIVERED,
+            "loop_packets_delivered_total",
+            "Packets written to the tunnel interface.",
+        ),
+        (
+            uapi::field::VALLUM_PACKETS_FAILED,
+            "loop_packets_failed_total",
+            "Packets the interface write failed on.",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKES,
+            "loop_handshakes_established_total",
+            "Completed peer handshakes.",
+        ),
+        (
+            uapi::field::VALLUM_REFUSALS,
+            "loop_handshakes_refused_total",
+            "Handshakes refused on policy (expired identity, pinned endpoint).",
+        ),
+        (
+            uapi::field::VALLUM_REASSEMBLED,
+            "loop_reassembled_total",
+            "Messages delivered out of reassembled fragments.",
+        ),
+        (
+            uapi::field::VALLUM_FRAGMENTS_DROPPED,
+            "loop_fragments_dropped_total",
+            "Fragments refused or half-assembled messages abandoned.",
+        ),
+    ] {
+        let Some(value) = response.field(field) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "# HELP {prefix}_{metric} {help}\n\
+             # TYPE {prefix}_{metric} counter\n\
+             {prefix}_{metric}{{interface=\"{interface}\"}} {value}\n",
+            interface = escape(interface)
+        ));
+    }
+
     let peers = response.peers.len();
     let handshaked = (0..peers)
         .filter(|index| {
@@ -333,6 +388,34 @@ errno=0\n";
         assert!(text.contains("vallum_peers_total 0"));
         assert!(text.contains("vallum_peers_handshaked 0"));
         assert!(!text.contains("vallum_peer_rx_bytes_total{"));
+    }
+
+    #[test]
+    fn loop_counters_scrape_as_counters_and_stay_absent_when_unknown() {
+        let with = uapi::parse_response(
+            "vallum_interface=vallum0\n\
+             vallum_datagrams_sent=42\n\
+             vallum_datagrams_failed=1\n\
+             vallum_packets_delivered=7\n\
+             vallum_packets_failed=0\n\
+             vallum_handshakes_established=3\n\
+             vallum_handshakes_refused=0\n\
+             vallum_reassembled=5\n\
+             vallum_fragments_dropped=2\n\
+             errno=0\n",
+        );
+        let text = render(&with, "vallum", 0);
+        assert!(text.contains("# TYPE vallum_loop_datagrams_sent_total counter"));
+        assert!(text.contains("vallum_loop_datagrams_sent_total{interface=\"vallum0\"} 42"));
+        assert!(text.contains("vallum_loop_fragments_dropped_total{interface=\"vallum0\"} 2"));
+        assert!(text.contains("# HELP vallum_loop_handshakes_refused_total"));
+
+        // An older daemon without telemetry fields: the families are absent,
+        // not reported as a false zero.
+        let without = uapi::parse_response("vallum_interface=vallum0\nerrno=0\n");
+        let text = render(&without, "vallum", 0);
+        assert!(!text.contains("vallum_loop_datagrams_sent_total"));
+        assert!(text.contains("vallum_up 1"));
     }
 
     #[test]

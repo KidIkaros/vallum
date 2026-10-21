@@ -849,11 +849,11 @@ fn invites(args: &InvitesArgs) -> Result<(), Error> {
         return Ok(());
     }
     say!(
-        "{:<16} {:<32} {:<8} {:<8} EXPIRES IN",
-        "NAME",
-        "ID",
-        "PINNED",
-        "STATUS"
+        "{}",
+        crate::style::table_header(&format!(
+            "{:<16} {:<32} {:<8} {:<8} EXPIRES IN",
+            "NAME", "ID", "PINNED", "STATUS"
+        ))
     );
     for inv in &live {
         let remaining = inv.expires.saturating_sub(now);

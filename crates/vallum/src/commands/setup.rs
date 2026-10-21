@@ -651,15 +651,7 @@ fn place_config(
     let key_path = directory.join(format!("{name}.key"));
     let config_path = directory.join(format!("{name}.toml"));
     crate::keys::save_secret(&key_path, secret)?;
-    std::fs::write(&config_path, config_text).map_err(|source| Error::IoPath {
-        action: "write the config",
-        path: config_path.clone(),
-        source,
-    })?;
-    let _ = std::fs::set_permissions(
-        &config_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    );
+    crate::keys::write_private(&config_path, config_text.as_bytes())?;
 
     say!();
     say!("enrolled `{name}` — {address}, through {endpoint}");

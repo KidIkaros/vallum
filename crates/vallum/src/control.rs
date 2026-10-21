@@ -49,6 +49,8 @@ pub struct ControlContext {
     pub socket: Arc<crate::net::SharedSocket>,
     /// The suite, for a runtime identity change.
     pub suite: Arc<dyn CryptoSuite>,
+    /// Live loop counters; `run` publishes here once per iteration.
+    pub stats: Arc<crate::run::SharedStats>,
 }
 
 impl fmt::Debug for ControlContext {
@@ -206,6 +208,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             set_listen_port: true,
             set_fwmark: true,
         },
+        stats: context.stats.snapshot(),
         peers,
     }
 }
@@ -352,6 +355,7 @@ mod tests {
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
+            stats: Arc::new(crate::run::SharedStats::default()),
         }
     }
 

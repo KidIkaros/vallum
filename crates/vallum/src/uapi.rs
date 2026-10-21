@@ -99,6 +99,23 @@ pub mod field {
     /// 1 when a rotation is open (a previous identity is still accepted).
     pub const VALLUM_ROTATING: &str = "vallum_rotating";
     pub const VALLUM_EPOCH: &str = "vallum_epoch";
+
+    /// Datagrams handed to the socket.
+    pub const VALLUM_DATAGRAMS_SENT: &str = "vallum_datagrams_sent";
+    /// Datagrams that could not be sent.
+    pub const VALLUM_DATAGRAMS_FAILED: &str = "vallum_datagrams_failed";
+    /// Packets written to the interface.
+    pub const VALLUM_PACKETS_DELIVERED: &str = "vallum_packets_delivered";
+    /// Packets that could not be written.
+    pub const VALLUM_PACKETS_FAILED: &str = "vallum_packets_failed";
+    /// Completed handshakes.
+    pub const VALLUM_HANDSHAKES: &str = "vallum_handshakes_established";
+    /// Handshakes refused on policy.
+    pub const VALLUM_REFUSALS: &str = "vallum_handshakes_refused";
+    /// Messages reassembled from fragments.
+    pub const VALLUM_REASSEMBLED: &str = "vallum_reassembled";
+    /// Fragments refused or abandoned.
+    pub const VALLUM_FRAGMENTS_DROPPED: &str = "vallum_fragments_dropped";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
     /// Request markers and flags.
@@ -342,6 +359,8 @@ pub struct DeviceState {
     pub batching: bool,
     /// What a `set` can actually change.
     pub capabilities: Capabilities,
+    /// Live loop counters.
+    pub stats: crate::run::LoopStats,
     /// The peers, in configuration order.
     pub peers: Vec<PeerState>,
 }
@@ -448,6 +467,19 @@ pub fn render_get(state: &DeviceState) -> String {
         state.capabilities.set_fwmark
     ));
     out.push_str(&format!("{}={:#06x}\n", field::VALLUM_SUITE, state.suite));
+    let stats = state.stats;
+    for (key, value) in [
+        (field::VALLUM_DATAGRAMS_SENT, stats.datagrams_sent),
+        (field::VALLUM_DATAGRAMS_FAILED, stats.datagrams_failed),
+        (field::VALLUM_PACKETS_DELIVERED, stats.packets_delivered),
+        (field::VALLUM_PACKETS_FAILED, stats.packets_failed),
+        (field::VALLUM_HANDSHAKES, stats.established),
+        (field::VALLUM_REFUSALS, stats.refusals),
+        (field::VALLUM_REASSEMBLED, stats.reassembled),
+        (field::VALLUM_FRAGMENTS_DROPPED, stats.fragments_dropped),
+    ] {
+        out.push_str(&format!("{key}={value}\n"));
+    }
     for peer in &state.peers {
         out.push_str(&format!(
             "\n{}={}\n",
@@ -931,6 +963,7 @@ mod tests {
                     addresses,
                     offload: false,
                     batching: false,
+                    stats: crate::run::LoopStats::default(),
                     capabilities: Capabilities {
                         set_private_key,
                         set_listen_port,
@@ -1102,6 +1135,7 @@ mod tests {
             addresses: vec!["10.7.0.1/24".parse().unwrap()],
             offload: false,
             batching: false,
+            stats: crate::run::LoopStats::default(),
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,
@@ -1152,6 +1186,7 @@ mod tests {
             addresses: Vec::new(),
             offload: false,
             batching: false,
+            stats: crate::run::LoopStats::default(),
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,

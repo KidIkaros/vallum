@@ -13,6 +13,12 @@ use vallum_crypto::CryptoSuite;
 const HEADER: &str = "VALLUM1";
 const MAX_FRAMES: usize = 16;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrKind {
+    Bundle,
+    Invite,
+}
+
 #[derive(Debug)]
 pub struct QrState {
     pub frames: Vec<String>,
@@ -20,6 +26,7 @@ pub struct QrState {
     pub last: Instant,
     pub hash: String,
     pub path: String,
+    pub kind: QrKind,
 }
 
 impl QrState {
@@ -81,10 +88,21 @@ pub fn encode(data: &str, path: &str) -> Result<QrState, String> {
                 last: Instant::now(),
                 hash,
                 path: path.to_owned(),
+                kind: QrKind::Bundle,
             });
         }
     }
     Err("the bundle does not fit in a bounded QR frame set; use the .vallum-bundle file".to_owned())
+}
+
+/// Encode a v2 one-time invite command (`vallum setup --join ...`) as a QR modal.
+///
+/// Unlike a bundle QR, this carries no private key — only the single-use token,
+/// the invite id, and the server's expected fingerprint.
+pub fn encode_invite(command: &str, path: &str) -> Result<QrState, String> {
+    let mut state = encode(command, path)?;
+    state.kind = QrKind::Invite;
+    Ok(state)
 }
 
 fn split_chars(data: &str, size: usize) -> Vec<&str> {

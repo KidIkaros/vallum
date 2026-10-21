@@ -58,7 +58,9 @@ pub fn submit_form(app: &mut App) {
     };
     let result = match form.kind {
         FormKind::AddPeer => add_peer(app, &form),
+        FormKind::InvitePeer => invite_peer(app, &form),
         FormKind::EditPeer(index) => edit_peer(app, &form, index),
+        FormKind::RotatePeer(index) => rotate_peer(app, &form, index),
         FormKind::Device => apply_device(app, &form),
         FormKind::ExportBundle => finish_export(app, &form),
         FormKind::ImportBundle => finish_import_bundle(app, &form),
@@ -90,6 +92,137 @@ fn form_error(field: Option<&'static str>, message: impl Into<String>) -> FormEr
 
 fn field_error(field: &'static str, message: impl Into<String>) -> FormError {
     form_error(Some(field), message)
+}
+
+fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
+    let name = form.field("name").trim();
+    if name.is_empty() {
+        return Err(field_error("name", "peer name is required"));
+    }
+    let ttl_mins: u64 =
+        form.field("TTL (minutes)").trim().parse().map_err(|_| {
+            field_error("TTL (minutes)", "TTL must be a positive number of minutes")
+        })?;
+    if ttl_mins == 0 {
+        return Err(field_error(
+            "TTL (minutes)",
+            "TTL must be at least 1 minute",
+        ));
+    }
+    let pinned_raw = form.field("pinned public line").trim();
+    let pinned = if pinned_raw.is_empty() {
+        None
+    } else {
+        let (_, _) = keys::decode_public(pinned_raw)
+            .map_err(|e| field_error("pinned public line", e.to_string()))?;
+        Some(pinned_raw.to_owned())
+    };
+    let interface_name = app
+        .current()
+        .map_or_else(|| "vallum0".to_owned(), |iface| iface.name.clone());
+    let (token, id, path) =
+        crate::enroll::issue_invite(&interface_name, name, ttl_mins * 60, pinned)
+            .map_err(|e| form_error(None, e.to_string()))?;
+    let (host_port, fp) = if let Some(device) = app.current_device() {
+        let port = device
+            .listen
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(51820)
+            .saturating_add(1);
+        let host = app
+            .current()
+            .and_then(|iface| iface.config_path.as_deref())
+            .and_then(|cfg| crate::config::Config::load(cfg).ok())
+            .and_then(|cfg| cfg.interface.public_endpoint)
+            .and_then(|ep| ep.rsplit_once(':').map(|(h, _)| h.to_owned()).or(Some(ep)))
+            .unwrap_or_else(|| "<server>".to_owned());
+        (
+            format!("{host}:{port}"),
+            keys::fingerprint(&device.public_line),
+        )
+    } else {
+        ("<server>:51821".to_owned(), "?".to_owned())
+    };
+    let join_cmd = format!(
+        "sudo vallum setup --join {host_port} --name {name} --invite-id {id} --token {} --expect {fp}",
+        token.display()
+    );
+    let _ = copy_to_clipboard(&join_cmd);
+    if let Ok(qr_state) = qr::encode_invite(&join_cmd, &path.display().to_string()) {
+        app.qr = Some(qr_state);
+    }
+    Ok(format!(
+        "invite minted for `{name}` (copied --join command)"
+    ))
+}
+
+fn rotate_peer(app: &mut App, form: &super::app::Form, index: usize) -> FormResult {
+    let config_path = app
+        .current()
+        .and_then(|iface| iface.config_path.clone())
+        .ok_or_else(|| form_error(None, "no config file attached to this interface"))?;
+    let device = app
+        .current_device()
+        .ok_or_else(|| form_error(None, "no device"))?;
+    let peer = device
+        .peers
+        .get(index)
+        .ok_or_else(|| form_error(None, "peer not found"))?;
+    if peer.name.is_empty() {
+        return Err(form_error(None, "peer has no name in config"));
+    }
+    let peer_name = peer.name.clone();
+    let new_line = form.field("new public line").trim();
+    if new_line.is_empty() {
+        return Err(field_error(
+            "new public line",
+            "replacement public line is required",
+        ));
+    }
+    let (suite, identity) =
+        keys::decode_public(new_line).map_err(|e| field_error("new public line", e.to_string()))?;
+    if suite != device.suite_id {
+        return Err(field_error(
+            "new public line",
+            format!(
+                "suite 0x{suite:04x} does not match device 0x{:04x}",
+                device.suite_id
+            ),
+        ));
+    }
+    let canonical = keys::encode_public(suite, &identity);
+    let mut file = crate::config_edit::ConfigFile::load(&config_path)
+        .map_err(|e| form_error(None, e.to_string()))?;
+    file.rotate_peer(
+        &peer_name,
+        &crate::config_edit::IdentityFields {
+            public_key: Some(canonical),
+            identity: None,
+            identity_file: None,
+        },
+    )
+    .map_err(|e| form_error(None, e.to_string()))?;
+    file.validate()
+        .map_err(|e| form_error(None, e.to_string()))?;
+    file.save().map_err(|e| form_error(None, e.to_string()))?;
+    let _ = crate::commands::control::syncconf_running(&config_path);
+    Ok(format!(
+        "rotated `{peer_name}` — old key kept until finalize (press f)"
+    ))
+}
+
+fn finalize_peer_rotation(app: &mut App, name: &str) -> Result<String, String> {
+    let config_path = app
+        .current()
+        .and_then(|iface| iface.config_path.clone())
+        .ok_or_else(|| "no config file attached to this interface".to_owned())?;
+    let mut file = crate::config_edit::ConfigFile::load(&config_path).map_err(|e| e.to_string())?;
+    file.finalize_peer(name).map_err(|e| e.to_string())?;
+    file.validate().map_err(|e| e.to_string())?;
+    file.save().map_err(|e| e.to_string())?;
+    let _ = crate::commands::control::syncconf_running(&config_path);
+    Ok(format!("finalized `{name}` — previous key retired"))
 }
 
 fn add_peer(app: &mut App, form: &super::app::Form) -> FormResult {
@@ -253,6 +386,13 @@ pub fn confirm(app: &mut App) {
                 Err(error) => app.notify(error),
             }
         }
+        ConfirmAction::FinalizePeer { name } => match finalize_peer_rotation(app, &name) {
+            Ok(msg) => {
+                app.notify(msg);
+                refresh(app);
+            }
+            Err(err) => app.notify(err),
+        },
         ConfirmAction::ApplyConfig => {
             let Some(path) = app
                 .current()

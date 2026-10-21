@@ -34,6 +34,9 @@ pub struct PeerView {
 pub struct DeviceView {
     pub interface: String,
     pub listen: String,
+    /// Live loop counters from the control socket; `None` when the daemon is
+    /// older than the telemetry fields.
+    pub stats: Option<LoopStatsView>,
     pub fwmark: u32,
     pub suite: String,
     pub suite_id: u16,
@@ -43,6 +46,36 @@ pub struct DeviceView {
     pub offload: bool,
     pub batching: bool,
     pub peers: Vec<PeerView>,
+}
+
+/// The eight dataplane counters, for the detail pane.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoopStatsView {
+    pub datagrams_sent: u64,
+    pub datagrams_failed: u64,
+    pub packets_delivered: u64,
+    pub packets_failed: u64,
+    pub established: u64,
+    pub refusals: u64,
+    pub reassembled: u64,
+    pub fragments_dropped: u64,
+}
+
+impl LoopStatsView {
+    fn from_response(response: &Response) -> Option<Self> {
+        // Honest-missing: only a fully populated block counts as telemetry.
+        let counter = |key: &str| response.field(key)?.parse::<u64>().ok();
+        Some(Self {
+            datagrams_sent: counter(field::VALLUM_DATAGRAMS_SENT)?,
+            datagrams_failed: counter(field::VALLUM_DATAGRAMS_FAILED)?,
+            packets_delivered: counter(field::VALLUM_PACKETS_DELIVERED)?,
+            packets_failed: counter(field::VALLUM_PACKETS_FAILED)?,
+            established: counter(field::VALLUM_HANDSHAKES)?,
+            refusals: counter(field::VALLUM_REFUSALS)?,
+            reassembled: counter(field::VALLUM_REASSEMBLED)?,
+            fragments_dropped: counter(field::VALLUM_FRAGMENTS_DROPPED)?,
+        })
+    }
 }
 
 impl DeviceView {
@@ -113,6 +146,7 @@ impl DeviceView {
         Self {
             interface: get(field::VALLUM_INTERFACE),
             listen: get(field::VALLUM_LISTEN),
+            stats: LoopStatsView::from_response(response),
             fwmark: get(field::FWMARK).parse().unwrap_or(0),
             suite,
             suite_id,
@@ -345,7 +379,9 @@ impl SortMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormKind {
     AddPeer,
+    InvitePeer,
     EditPeer(usize),
+    RotatePeer(usize),
     Device,
     ExportBundle,
     ImportBundle,
@@ -599,6 +635,54 @@ impl Form {
     }
 
     #[must_use]
+    pub fn invite_peer() -> Self {
+        Self {
+            title: "Invite peer (one-time token)".to_owned(),
+            fields: vec![
+                Field {
+                    label: "name",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "e.g. laptop, phone",
+                },
+                Field {
+                    label: "TTL (minutes)",
+                    value: "15".to_owned(),
+                    masked: false,
+                    placeholder: "e.g. 15",
+                },
+                Field {
+                    label: "pinned public line",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "optional vallum1:... to bind token to one key",
+                },
+            ],
+            focus: 0,
+            cursor: 0,
+            error: None,
+            kind: FormKind::InvitePeer,
+        }
+    }
+
+    #[must_use]
+    pub fn rotate_peer(index: usize, peer: &PeerView) -> Self {
+        Self {
+            title: format!("Rotate key for {}", peer.name),
+            fields: vec![Field {
+                label: "new public line",
+                value: String::new(),
+                masked: false,
+                placeholder: "vallum1:... replacement public line from device",
+            }],
+            focus: 0,
+            cursor: 0,
+            error: None,
+            kind: FormKind::RotatePeer(index),
+        }
+    }
+
+    #[must_use]
     pub fn export_bundle(device: &DeviceView) -> Self {
         Self {
             title: "Export client bundle".to_owned(),
@@ -725,6 +809,7 @@ impl Form {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     RemovePeer { index: usize, label: String },
+    FinalizePeer { name: String },
     ApplyConfig,
 }
 

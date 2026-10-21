@@ -386,6 +386,7 @@ fn escape_closes_the_qr_modal() {
         last: std::time::Instant::now(),
         hash: "hash".to_owned(),
         path: "/tmp/x".to_owned(),
+        kind: qr::QrKind::Bundle,
     });
     super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.qr.is_none());
@@ -1297,6 +1298,7 @@ fn qr_render_packs_half_blocks_with_a_quiet_zone_and_fits_in_modal() {
         last: std::time::Instant::now(),
         hash: "e8a12c4b".to_owned(),
         path: "/etc/vallum/client.vallum-bundle".to_owned(),
+        kind: qr::QrKind::Bundle,
     });
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).expect("test terminal");
     terminal
@@ -1545,4 +1547,160 @@ fn the_palette_offers_both_setup_roles() {
     // Category badges must not collide with an existing one.
     let categories: Vec<&str> = super::keymap::COMMANDS.iter().map(|c| c.category).collect();
     assert!(categories.contains(&"SETUP"));
+}
+
+#[test]
+fn invite_form_collects_name_ttl_and_optional_pin() {
+    let form = Form::invite_peer();
+    assert_eq!(form.fields.len(), 3);
+    assert_eq!(form.field("name"), "");
+    assert_eq!(form.field("TTL (minutes)"), "15");
+    assert_eq!(form.field("pinned public line"), "");
+    // The pinned field must not be masked — it is a public line, not a secret.
+    assert!(!form.fields[2].masked);
+}
+
+#[test]
+fn invite_qr_modal_says_one_time_and_no_private_key() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let command = "sudo vallum setup --join 203.0.113.10:51821 --name laptop \
+                   --invite-id f19e9b24b97a687e4b3a7a1bdc16aaed \
+                   --token aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-hhhh --expect afa1f7be2ef6";
+    let state =
+        qr::encode_invite(command, "/run/vallum/enroll-laptop.json").expect("invite encodes");
+    assert_eq!(state.kind, qr::QrKind::Invite);
+
+    let mut app = App::new(Vec::new());
+    app.qr = Some(state);
+    let mut terminal = Terminal::new(TestBackend::new(160, 48)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw invite modal");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("ONE-TIME ENROLMENT INVITE"));
+    assert!(text.contains("ZERO PRIVATE KEYS"));
+    assert!(!text.contains("SECRET MATERIAL"));
+}
+
+#[test]
+fn v_opens_the_invite_form_and_k_opens_rotation() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+    );
+    assert!(matches!(
+        app.form.as_ref().map(|f| f.kind),
+        Some(super::app::FormKind::InvitePeer)
+    ));
+    app.form = None;
+
+    // K needs a selected peer.
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
+    );
+    assert!(app.form.is_none());
+    let device = DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![super::app::PeerView {
+            name: "laptop".to_owned(),
+            ..super::app::PeerView::default()
+        }],
+        ..DeviceView::default()
+    };
+    let mut app = App::new(Vec::new());
+    app.interfaces.push(super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    ));
+    app.interfaces[0].device = Some(device);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE),
+    );
+    assert!(matches!(
+        app.form.as_ref().map(|f| f.kind),
+        Some(super::app::FormKind::RotatePeer(0))
+    ));
+}
+
+#[test]
+fn f_only_confirms_finalize_when_a_rotation_is_open() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    app.interfaces.push(super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    ));
+    app.interfaces[0].device = Some(DeviceView {
+        interface: "vallum0".to_owned(),
+        peers: vec![super::app::PeerView {
+            name: "laptop".to_owned(),
+            rotating: false,
+            ..super::app::PeerView::default()
+        }],
+        ..DeviceView::default()
+    });
+    // Not rotating: f must not open the destructive confirm.
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    );
+    assert!(app.confirm.is_none());
+
+    app.interfaces[0].device.as_mut().expect("device").peers[0].rotating = true;
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+    );
+    assert!(matches!(
+        app.confirm.as_ref().map(|c| &c.action),
+        Some(super::app::ConfirmAction::FinalizePeer { name }) if name == "laptop"
+    ));
+}
+
+#[test]
+fn device_view_parses_loop_stats_and_stays_honest_when_absent() {
+    let with = Response {
+        device: vec![
+            ("vallum_interface".to_owned(), "vallum0".to_owned()),
+            ("vallum_datagrams_sent".to_owned(), "42".to_owned()),
+            ("vallum_datagrams_failed".to_owned(), "1".to_owned()),
+            ("vallum_packets_delivered".to_owned(), "7".to_owned()),
+            ("vallum_packets_failed".to_owned(), "0".to_owned()),
+            ("vallum_handshakes_established".to_owned(), "3".to_owned()),
+            ("vallum_handshakes_refused".to_owned(), "2".to_owned()),
+            ("vallum_reassembled".to_owned(), "5".to_owned()),
+            ("vallum_fragments_dropped".to_owned(), "4".to_owned()),
+        ],
+        peers: Vec::new(),
+    };
+    let device = DeviceView::from_response(&with);
+    let stats = device.stats.expect("stats parsed");
+    assert_eq!(stats.datagrams_sent, 42);
+    assert_eq!(stats.refusals, 2);
+    assert_eq!(stats.fragments_dropped, 4);
+
+    // Partial telemetry is unknown, not a row of confident zeros.
+    let partial = Response {
+        device: vec![
+            ("vallum_interface".to_owned(), "vallum0".to_owned()),
+            ("vallum_datagrams_sent".to_owned(), "42".to_owned()),
+        ],
+        peers: Vec::new(),
+    };
+    assert!(DeviceView::from_response(&partial).stats.is_none());
 }

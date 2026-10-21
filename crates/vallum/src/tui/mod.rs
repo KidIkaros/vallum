@@ -9,6 +9,7 @@ pub mod client;
 pub mod input;
 pub mod keymap;
 pub mod qr;
+pub mod theme;
 pub mod ui;
 
 use std::io::{self, IsTerminal, Write};
@@ -261,6 +262,7 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
                 last: Instant::now(),
                 hash: "e8a12c4b".to_owned(),
                 path: "/etc/vallum/charlie-macbook.vallum-bundle".to_owned(),
+                kind: qr::QrKind::Bundle,
             });
         }
         "palette" => {

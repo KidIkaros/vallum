@@ -36,7 +36,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
@@ -134,6 +134,59 @@ impl Shutdown {
     #[must_use]
     pub fn is_triggered(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
+    }
+}
+
+/// [`LoopStats`] live, behind atomics.
+///
+/// The control socket answers `get` on the loop thread, but a scrape must not
+/// wait for the loop to finish to read counters — and `metrics`/`uapi` render
+/// them while the daemon is still running. Each field is a `Relaxed` counter
+/// written once per loop iteration; readers get a slightly stale but always
+/// consistent-with-itself value.
+#[derive(Debug, Default)]
+pub struct SharedStats {
+    datagrams_sent: AtomicU64,
+    datagrams_failed: AtomicU64,
+    packets_delivered: AtomicU64,
+    packets_failed: AtomicU64,
+    established: AtomicU64,
+    refusals: AtomicU64,
+    reassembled: AtomicU64,
+    fragments_dropped: AtomicU64,
+}
+
+impl SharedStats {
+    /// Publish a snapshot of the loop's counters.
+    pub fn publish(&self, stats: &LoopStats) {
+        self.datagrams_sent
+            .store(stats.datagrams_sent, Ordering::Relaxed);
+        self.datagrams_failed
+            .store(stats.datagrams_failed, Ordering::Relaxed);
+        self.packets_delivered
+            .store(stats.packets_delivered, Ordering::Relaxed);
+        self.packets_failed
+            .store(stats.packets_failed, Ordering::Relaxed);
+        self.established.store(stats.established, Ordering::Relaxed);
+        self.refusals.store(stats.refusals, Ordering::Relaxed);
+        self.reassembled.store(stats.reassembled, Ordering::Relaxed);
+        self.fragments_dropped
+            .store(stats.fragments_dropped, Ordering::Relaxed);
+    }
+
+    /// Read every counter as one [`LoopStats`].
+    #[must_use]
+    pub fn snapshot(&self) -> LoopStats {
+        LoopStats {
+            datagrams_sent: self.datagrams_sent.load(Ordering::Relaxed),
+            datagrams_failed: self.datagrams_failed.load(Ordering::Relaxed),
+            packets_delivered: self.packets_delivered.load(Ordering::Relaxed),
+            packets_failed: self.packets_failed.load(Ordering::Relaxed),
+            established: self.established.load(Ordering::Relaxed),
+            refusals: self.refusals.load(Ordering::Relaxed),
+            reassembled: self.reassembled.load(Ordering::Relaxed),
+            fragments_dropped: self.fragments_dropped.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -237,6 +290,10 @@ pub fn run(
     // the readers going away; the loop still exits on the shutdown flag. The
     // context stays on this thread: the server thread only parses and forwards.
     let mut control = control;
+    let shared_stats = control.as_ref().map_or_else(
+        || Arc::new(SharedStats::default()),
+        |server| Arc::clone(&server.context.stats),
+    );
     let control_path = control.as_ref().map(|server| server.path.clone());
     if let Some(path) = &control_path {
         control::serve(path.clone(), tx.clone(), shutdown.clone())?;
@@ -262,6 +319,11 @@ pub fn run(
 
         let event = match rx.recv_timeout(tick) {
             Ok(Input::Control { request, reply }) => {
+                // Reassembly counters live in `segments`, so fold them in before
+                // the request handler takes its snapshot.
+                stats.reassembled = segments.reassembled();
+                stats.fragments_dropped = segments.dropped();
+                shared_stats.publish(&stats);
                 let body = match control.as_mut() {
                     Some(server) => control::handle(&mut device, &mut server.context, request),
                     None => crate::uapi::render_errno(crate::uapi::errno::ENOSYS),

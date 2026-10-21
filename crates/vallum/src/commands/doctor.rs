@@ -210,8 +210,8 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
     } else {
         for check in &checks {
             println!(
-                "{:<5} {:<10} {}",
-                check.status.as_str(),
+                "{} {:<10} {}",
+                crate::style::status_badge(check.status.as_str()),
                 check.name,
                 check.detail
             );

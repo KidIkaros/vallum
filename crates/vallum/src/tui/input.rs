@@ -510,6 +510,33 @@ fn dispatch(app: &mut App, action: Action) {
         Action::FirstPeer => app.select_first_peer(),
         Action::LastPeer => app.select_last_peer(),
         Action::AddPeer => app.form = Some(Form::add_peer()),
+        Action::InvitePeer => app.form = Some(Form::invite_peer()),
+        Action::RotatePeer => {
+            if let Some(peer) = app.current_peer().cloned() {
+                let orig_index = app
+                    .current_peer_original_index()
+                    .unwrap_or(app.peer_selected);
+                app.form = Some(Form::rotate_peer(orig_index, &peer));
+            } else {
+                app.notify("no peer selected");
+            }
+        }
+        Action::FinalizePeer => {
+            if let Some(peer) = app.current_peer().cloned() {
+                if !peer.rotating {
+                    app.notify(format!("{} has no open key rotation", peer.name));
+                } else {
+                    app.confirm = Some(Confirm {
+                        action: ConfirmAction::FinalizePeer {
+                            name: peer.name.clone(),
+                        },
+                        config: String::new(),
+                    });
+                }
+            } else {
+                app.notify("no peer selected");
+            }
+        }
         Action::EditPeer => {
             if let Some(peer) = app.current_peer().cloned() {
                 let orig_index = app

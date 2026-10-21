@@ -61,6 +61,13 @@ const MAX_DATAGRAM: usize = 16384;
 const MAX_NAME: usize = 32;
 /// Requests per source IP per second; beyond that the source is dropped.
 const RATE_PER_SECOND: u32 = 8;
+/// Distinct source IPs tracked inside one window.
+///
+/// The limiter runs *before* the cookie gate, so it sees spoofed sources too;
+/// without a bound an attacker rotating source IPs would grow the map a line
+/// per packet. Past the cap a new source is not admitted this window — which
+/// is also the honest behaviour, since we could not answer it anyway.
+const RATE_LIMIT_SOURCES: usize = 4096;
 /// How long an invite lives. One sitting: enough to walk to the other machine.
 pub const INVITE_TTL_SECS: u64 = 15 * 60;
 
@@ -602,6 +609,9 @@ impl RateLimit {
             self.counts.clear();
             self.window_start = Instant::now();
         }
+        if !self.counts.contains_key(&source) && self.counts.len() >= RATE_LIMIT_SOURCES {
+            return false;
+        }
         let count = self.counts.entry(source).or_insert(0);
         *count += 1;
         *count <= RATE_PER_SECOND
@@ -751,6 +761,21 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                 let Ok(json) = serde_json::to_string(&report) else {
                     continue;
                 };
+                // Persist the spent invite *before* the answer leaves the
+                // socket: a crash between send and store would otherwise leave
+                // a live invite the client believes is consumed. Stored first,
+                // a retry is answered from `Retransmit` with the same config.
+                let mut spent = invite.clone();
+                spent.public_line = Some(hello.public_line.clone());
+                spent.config = Some(json.clone());
+                if store_invite(&interface, &spent).is_err() {
+                    eprintln!(
+                        "vallum: enrolled `{}` for {} but could not persist the spent invite;                          refusing the send so the client retries",
+                        invite.name,
+                        source.ip()
+                    );
+                    continue;
+                }
                 if let Ok(datagram) = encode_reply(
                     &token,
                     &hello,
@@ -762,10 +787,6 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                 ) {
                     let _ = socket.send_to(&datagram, source);
                 }
-                let mut spent = invite.clone();
-                spent.public_line = Some(hello.public_line.clone());
-                spent.config = Some(json);
-                let _ = store_invite(&interface, &spent);
                 eprintln!(
                     "vallum: enrolled `{}` for {} (token enrolment)",
                     invite.name,
@@ -946,6 +967,7 @@ pub fn join(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn nonce(byte: u8) -> [u8; NONCE_LEN] {
         [byte; NONCE_LEN]
@@ -967,6 +989,30 @@ mod tests {
             },
             token,
         )
+    }
+
+    #[test]
+    fn the_rate_limiter_bounds_tracked_sources_and_repeats() {
+        let mut limit = RateLimit::new();
+        // The cap, not the flood, is what a spoofed-source spray hits first:
+        // each unique address costs one map entry, so the map must stop
+        // growing at the bound rather than at memory exhaustion.
+        for last_octet in 0..=u8::MAX {
+            for third in 0..=u8::MAX {
+                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, third, last_octet));
+                let _ = limit.admit(ip);
+            }
+        }
+        assert_eq!(limit.counts.len(), RATE_LIMIT_SOURCES);
+        // A brand-new source is refused while the map is at the cap; a source
+        // already inside the window is still counted (and throttled at 8/s).
+        let known = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
+        assert!(limit.admit(known));
+        assert!(!limit.admit(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+        for _ in 0..RATE_PER_SECOND {
+            let _ = limit.admit(known);
+        }
+        assert!(!limit.admit(known));
     }
 
     #[test]

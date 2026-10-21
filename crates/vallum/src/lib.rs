@@ -54,6 +54,7 @@ pub mod logging;
 pub mod net;
 pub mod privileges;
 pub mod run;
+pub mod style;
 pub mod tun;
 
 #[cfg(feature = "tui")]
