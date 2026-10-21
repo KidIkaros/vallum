@@ -28,6 +28,14 @@ curl -fsSL https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/insta
 The repository is private, so set `GH_TOKEN` (or `GITHUB_TOKEN`) first unless the
 release assets are reachable anonymously.
 
+Prefer the `.deb`/`.rpm`? Route it through the installer so the package gets the
+same signature check as the tarball — `dpkg -i`/`rpm -i` verify nothing on their
+own:
+
+```sh
+... | sudo bash -s -- --from-release --package deb    # or rpm; bare --package autodetects
+```
+
 From a checkout:
 
 ```sh

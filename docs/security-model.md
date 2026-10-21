@@ -27,7 +27,7 @@ operator must guarantee. The proofs behind the claims live in
 | Anchor | What it is | What happens if it's wrong |
 |---|---|---|
 | Release signing key | `packaging/vallum-release.pub`, committed to this repo; `install.sh` verifies `SHA256SUMS.sig` before install | a forged release tarball is refused |
-| `.deb` / `.rpm` packages | carried in the same signed `SHA256SUMS`, but `dpkg -i`/`rpm -i` verify nothing themselves — check the file against `SHA256SUMS` before installing, or the package path trusts the channel (GitHub + TLS) alone | an unverified package install is unauthenticated |
+| `.deb` / `.rpm` packages | carried in the same signed `SHA256SUMS`; `dpkg -i`/`rpm -i` verify nothing themselves, so `install.sh --from-release --package` checks sig + checksum *before* calling them — a manual `dpkg -i` skips that entirely | a hand-installed package trusts the channel (GitHub + TLS) alone |
 | Server fingerprint | `vallum join vallum1-join:…/<fp>` verifies the server's public line during enrolment (the fingerprint is part of the ticket `peer invite` prints) | a wrong-server enrolment is refused — treat a mismatch as an attack, not a retry |
 | SSH in `--remote` | enrolment rides your existing SSH trust | the host key check is SSH's, not Vallum's |
 | Bundle custody | `--ship-key` bundles carry private key material | custody is yours; client-side keygen paths exist precisely so bundles are a fallback, not a default |

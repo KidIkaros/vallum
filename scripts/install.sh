@@ -13,6 +13,12 @@
 #   scripts/install.sh --uninstall --purge   # removes /etc/vallum too
 #   scripts/install.sh --from-release --no-verify-signature   # skip sig check
 #   scripts/install.sh --from-release --require-signature     # fail if unsigned
+#   scripts/install.sh --from-release --package deb|rpm       # verified dpkg/rpm install
+#
+# `--package` routes the package through the same signature check as the
+# tarball: `dpkg -i`/`rpm -i` verify nothing themselves, so install.sh
+# verifies SHA256SUMS.sig and the package's checksum *before* handing the
+# file to the package manager. Bare `--package` auto-detects deb vs rpm.
 #
 # Release downloads are verified before use: the release signs SHA256SUMS with
 # an SSH key (`ssh-keygen -Y`); install.sh downloads SHA256SUMS.sig and
@@ -46,6 +52,7 @@ NO_VERIFY_SIG=0
 REQUIRE_SIG=0
 ADD_CLIENT=""
 REMOVE_CLIENT=""
+PACKAGE=""
 ENDPOINT=""
 PASSTHRU=()
 
@@ -74,6 +81,14 @@ while [ $# -gt 0 ]; do
             fi
             ;;
         --local) MODE="local" ;;
+        --package)
+            if [ $# -gt 1 ] && [ "${2#-}" = "$2" ]; then
+                PACKAGE=$2
+                shift
+            else
+                PACKAGE="auto"
+            fi
+            ;;
         --install-only) INSTALL_ONLY=1 ;;
         --no-verify-signature) NO_VERIFY_SIG=1 ;;
         --require-signature) REQUIRE_SIG=1 ;;
@@ -213,6 +228,46 @@ install_from_release() {
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
     tar -C "$work" -xzf "$work/$target"
     SOURCE_DIR="$work/vallum-$tag-$A-linux"
+}
+
+# Package asset names follow the builders' conventions: cargo-deb emits
+# `vallum_<ver>-<rev>_<deb-arch>.deb` (amd64/arm64), cargo-generate-rpm emits
+# `vallum-<ver>-<rev>.<rpm-arch>.rpm` (x86_64/aarch64). The tag carries a
+# leading `v` the package version does not.
+package_asset_name() {
+    local tag=$1 ver
+    ver=${tag#v}
+    case "$PACKAGE" in
+        deb) case "$(arch)" in
+            x86_64)  echo "vallum_${ver}-1_amd64.deb" ;;
+            aarch64) echo "vallum_${ver}-1_arm64.deb" ;;
+        esac ;;
+        rpm) echo "vallum-${ver}-1.$(arch).rpm" ;;
+    esac
+}
+
+# The package path exists because `dpkg -i`/`rpm -i` verify nothing: the
+# signature + checksum check here is what makes a package install as
+# trustworthy as the tarball path, not the package format.
+install_package() {
+    local tag=$1 work=$2 target
+    target=$(package_asset_name "$tag")
+    say "downloading $tag ($PACKAGE)"
+    download_asset "$tag" "$target" "$work/$target"
+    download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
+    verify_release_signature "$tag" "$work"
+    ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    case "$PACKAGE" in
+        deb) run dpkg -i "$work/$target" ;;
+        rpm)
+            if command -v dnf >/dev/null 2>&1; then
+                run dnf install -y "$work/$target"
+            else
+                run rpm -Uvh "$work/$target"
+            fi
+            ;;
+    esac
+    echo "   ok    $target installed ($PACKAGE)"
 }
 
 # ── local build ─────────────────────────────────────────────────────
@@ -360,6 +415,23 @@ if [ "$DRY" -eq 0 ]; then
     trap 'rm -rf "$WORK"' EXIT
 fi
 
+if [ -n "$PACKAGE" ]; then
+    if [ "$MODE" != "release" ]; then
+        echo "--package only makes sense with --from-release (local builds have no package)" >&2
+        exit 1
+    fi
+    if [ "$PACKAGE" = "auto" ]; then
+        if command -v dpkg >/dev/null 2>&1; then PACKAGE=deb
+        elif command -v rpm >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PACKAGE=rpm
+        else echo "could not detect a package manager; pass --package deb|rpm" >&2; exit 1; fi
+    fi
+    case "$PACKAGE" in
+        deb) command -v dpkg >/dev/null 2>&1 || { echo "dpkg not found on this host" >&2; exit 1; } ;;
+        rpm) ;;
+        *) echo "--package must be deb or rpm" >&2; exit 1 ;;
+    esac
+fi
+
 SOURCE_DIR=""
 if [ "$MODE" = "release" ]; then
     if [ -z "$VERSION" ]; then
@@ -367,7 +439,13 @@ if [ "$MODE" = "release" ]; then
     fi
     [ -n "$VERSION" ] || { echo "could not determine the latest release" >&2; exit 1; }
     if [ "$DRY" -eq 1 ]; then
-        say "would download $VERSION and install it to $BIN_DIR"
+        if [ -n "$PACKAGE" ]; then
+            say "would download $(package_asset_name "$VERSION"), verify the signature, and $PACKAGE-install it"
+        else
+            say "would download $VERSION and install it to $BIN_DIR"
+        fi
+    elif [ -n "$PACKAGE" ]; then
+        install_package "$VERSION" "$WORK"
     else
         install_from_release "$VERSION" "$WORK"
     fi
@@ -375,7 +453,9 @@ else
     install_from_local
 fi
 
-if [ "$DRY" -eq 0 ] || [ -n "$SOURCE_DIR" ]; then
+# A package's own maintainer scripts lay down and reload everything; manual
+# file installation is only for the tarball/local paths.
+if [ -z "$PACKAGE" ] && { [ "$DRY" -eq 0 ] || [ -n "$SOURCE_DIR" ]; }; then
     install_binaries
     install_docs
     run systemctl daemon-reload
