@@ -82,7 +82,10 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
         return Ok(path.to_path_buf());
     }
     let Some(config_path) = config else {
-        return Err(Error::Usage(
+        // Nothing was attempted and retrying cannot help: the documented
+        // automation contract calls that a precondition (exit 2), and `metrics`
+        // already reports this same condition that way.
+        return Err(Error::Precondition(
             "give --control <socket>, or --config <file> with a `control` field".to_owned(),
         ));
     };
@@ -213,7 +216,7 @@ pub fn show(args: &ShowArgs) -> Result<(), Error> {
                 })
             }
             (None, None) => {
-                return Err(Error::Usage(
+                return Err(Error::Precondition(
                     "give --control <socket>, or --config <file> with a `control` field".to_owned(),
                 ))
             }
@@ -255,7 +258,7 @@ pub fn show(args: &ShowArgs) -> Result<(), Error> {
     let (Some(cfg), Some(config_path)) = (cfg.as_ref(), config_path) else {
         return match reply {
             Some(Err(error)) => Err(error),
-            _ => Err(Error::Usage(
+            _ => Err(Error::Precondition(
                 "give --control <socket>, or --config <file> with a `control` field".to_owned(),
             )),
         };

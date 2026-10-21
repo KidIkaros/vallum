@@ -1905,10 +1905,17 @@ fn say_bundle_endpoint(endpoint: &str, source: EndpointSource) {
 /// The name is local to this machine, and it must not be `vallum0`, which is
 /// what a server calls its own interface: a host that is both a server and a
 /// client would otherwise have two daemons fighting over one interface.
-fn client_interface_name(peer: &str) -> String {
+///
+/// Returns whether the name had to be shortened. A shortened name is not
+/// unique: `vpsclient-a` and `vpsclient-b` both become `vallum-vpsclien`, and
+/// two configs on one machine would then fight over one interface. The caller
+/// says so out loud rather than letting the collision surface later.
+fn client_interface_name(peer: &str) -> (String, bool) {
     let mut name = String::from("vallum-");
+    let mut shortened = false;
     for ch in peer.chars() {
         if name.len() >= 15 {
+            shortened = true;
             break;
         }
         name.push(if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
@@ -1920,7 +1927,7 @@ fn client_interface_name(peer: &str) -> String {
     while name.len() > 7 && name.ends_with(['-', '_']) {
         name.pop();
     }
-    name
+    (name, shortened)
 }
 
 fn client_config(
@@ -1936,7 +1943,15 @@ fn client_config(
     // Named after the peer, not `vallum0`: a machine that is already a server
     // has a `vallum0`, and two daemons cannot own one interface. 15 characters
     // is the kernel's IFNAMSIZ limit minus the terminator.
-    let interface = client_interface_name(name);
+    let (interface, shortened) = client_interface_name(name);
+    if shortened {
+        eprintln!(
+            "vallum: peer name `{name}` is longer than the kernel's 15-character \
+             interface name allows, so this config uses `{interface}`. Two peers whose \
+             names share that prefix would collide on one machine — give them names \
+             that differ early."
+        );
+    }
     body.push_str(&format!("name = \"{interface}\"\n"));
     body.push_str(&format!("private_key = \"{name}.key\"\n"));
     body.push_str(&format!("addresses = [\"{address}\"]\n"));
@@ -2012,6 +2027,24 @@ mod tests {
             "10.7.0.0/24"
         );
         assert!(parse_host_prefix("nope").is_err());
+    }
+
+    #[test]
+    fn a_long_peer_name_is_shortened_and_reported() {
+        // IFNAMSIZ is 16 including the terminator, so 15 bytes is the ceiling.
+        // A name that fits is used whole, and nothing is reported.
+        assert_eq!(
+            client_interface_name("laptop"),
+            ("vallum-laptop".to_owned(), false)
+        );
+        // One that does not is shortened — and says so, because the shortened
+        // name is not unique: these two are the same interface.
+        let (a, cut_a) = client_interface_name("vpsclient-a");
+        let (b, cut_b) = client_interface_name("vpsclient-b");
+        assert_eq!(a, "vallum-vpsclien");
+        assert_eq!(a, b);
+        assert!(cut_a && cut_b, "both were shortened and must be reported");
+        assert!(a.len() <= 15);
     }
 
     #[test]

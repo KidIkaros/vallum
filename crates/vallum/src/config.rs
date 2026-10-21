@@ -123,6 +123,18 @@ impl std::fmt::Debug for Resolved {
 impl From<ConfigError> for Error {
     fn from(error: ConfigError) -> Self {
         match error {
+            // A config that is not there is a precondition, not a failed
+            // command: nothing was attempted, and retrying will not help until
+            // the file exists. docs/deployment/automation.md promises code 2
+            // for exactly this, and the `peer` verbs already report it so.
+            ConfigError::Io { path, source } if source.kind() == std::io::ErrorKind::NotFound => {
+                Error::Precondition(format!(
+                    "config `{}` does not exist; create it with \
+                     `vallum server init --config {}`",
+                    path.display(),
+                    path.display()
+                ))
+            }
             ConfigError::Io { path, source } => Error::IoPath {
                 action: "read config",
                 path,
