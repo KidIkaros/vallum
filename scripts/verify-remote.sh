@@ -285,6 +285,12 @@ prove_client() {
     local name=$1 dir=$2 config iface=$CIFACE
     config=$(ls "$dir"/*.toml | head -1)
     [ -n "$config" ] || bad "$name: no client config was produced"
+
+    # Before rewriting it into a split tunnel, check the config as the server
+    # produced it: `attach --dry-run` prints the plan and refuses a config it
+    # could not install (a full tunnel without a fwmark, for instance).
+    "$QUICK" attach "$config" --dry-run > "$dir/attach-dry.log" 2>&1 \
+        || { cat "$dir/attach-dry.log"; bad "$name: the config as produced cannot be attached"; }
     python3 - "$config" "$iface" "$SRV_IP" "$dir" <<'PY'
 import re, sys
 path, iface, srv, workdir = sys.argv[1:5]
@@ -304,6 +310,9 @@ PY
 
     local established=0
     for _ in $(seq 1 20); do
+        # Traffic drives the handshake — the daemon does not dial an idle peer
+        # on its own, exactly as WireGuard does not. The ping is what starts it.
+        ping -c1 -W1 "$SRV_IP" >/dev/null 2>&1
         "$VALLUM" show --control "$dir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
         sleep 0.5
     done

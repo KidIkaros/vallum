@@ -1805,6 +1805,11 @@ fn client_config(
     body.push_str(&format!("addresses = [\"{address}\"]\n"));
     body.push_str("listen = \"0.0.0.0:0\"\n");
     body.push_str(&format!("control = \"/run/vallum/{interface}.sock\"\n"));
+    // This is a full-tunnel config (allowed_ips is 0.0.0.0/0 below), so the
+    // default route moves to a policy table. The mark is what lets the daemon's
+    // own packets escape to the real gateway; without it `vallum-quick` refuses
+    // the config, and with a wrong one the tunnel would carry itself.
+    body.push_str("fwmark = 51820\n");
     body.push_str("\n[log]\nlevel = \"info\"\n");
     body.push_str("\n[quick]\n");
     if !dns.is_empty() {
@@ -1902,6 +1907,13 @@ mod tests {
         assert!(text.contains("endpoint = \"vpn.example.com:51820\""));
         assert!(text.contains("allowed_ips = [\"0.0.0.0/0\", \"::/0\"]"));
         assert!(text.contains("preshared_key = \"0011\""));
+        // A full tunnel needs a socket mark, or `vallum-quick` refuses to
+        // install the default route and the daemon's own packets would be
+        // routed into the tunnel it is trying to establish.
+        assert!(
+            text.contains("fwmark = 51820"),
+            "a full-tunnel client config must carry a fwmark"
+        );
         // It must parse as a config the daemon accepts.
         let parsed: vallum_config::Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
