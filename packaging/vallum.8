@@ -121,6 +121,16 @@ document is checked against its own key.
 .B identity show [--suite ID] --document FILE [--json]
 Print a document's label, key sizes, window and fingerprint without verifying it.
 .TP
+.B server teardown [--config FILE] [--purge] [--dry-run]
+Undo the host changes `server init` installed: stop and disable the units,
+remove the `inet vallum` NAT table, remove the firewall and FORWARD rules, and
+delete `/etc/sysctl.d/90-vallum.conf`. Keeps `/etc/vallum` unless `--purge` is
+given.
+.PP
+.B peer invites [--config FILE] [--json]
+List live one-time invites and their remaining TTL (tokens are never printed),
+automatically pruning expired invite files from `/run/vallum`.
+.PP
 .B peer invite NAME [--public-key LINE | --public-key-file FILE] [--config FILE] [--ttl MINUTES] [--json]
 Mint a single-use token so a device can enrol without SSH access. Prints the
 exact `vallum setup --join` line the client runs, including the invite id and

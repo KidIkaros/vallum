@@ -122,10 +122,7 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
     }
     match ask_role()? {
         Role::Server => as_server(args),
-        Role::Client => {
-            let bundle = ask_bundle()?;
-            as_client(&bundle, args.dry_run, true)
-        }
+        Role::Client => as_interactive_client(args),
     }
 }
 
@@ -133,6 +130,57 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
 enum Role {
     Server,
     Client,
+}
+
+fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
+    say!();
+    say!("How will this client enrol with the server?");
+    say!("  1) Over SSH — generates the key here; nothing secret leaves (recommended)");
+    say!("  2) With a one-time invite token (`vallum peer invite` on the server)");
+    say!("  3) From a .vallum-bundle file (offline / air-gapped)");
+    say!();
+    loop {
+        match prompt("Choose 1, 2, or 3", Some("1"))?.as_str() {
+            "1" | "ssh" | "remote" => {
+                let remote = prompt("The server's SSH target (e.g. you@vpn.example.com)", None)?;
+                if remote.is_empty() {
+                    return Err(Error::Usage(
+                        "give an SSH target like you@vpn.example.com".to_owned(),
+                    ));
+                }
+                return as_remote(&remote, args);
+            }
+            "2" | "token" | "join" => {
+                let server = prompt("The server's enrolment address (host:51821)", None)?;
+                let invite_id = prompt("The invite id (32 hex chars)", None)?;
+                let token = prompt("The one-time token", None)?;
+                let expect = prompt("Expected server fingerprint (optional)", None)?;
+                let joined = SetupArgs {
+                    server: false,
+                    client: None,
+                    remote: None,
+                    remote_config: None,
+                    join: Some(server.clone()),
+                    token: Some(token),
+                    invite_id: Some(invite_id),
+                    expect: (!expect.is_empty()).then_some(expect),
+                    enroll: false,
+                    endpoint: None,
+                    address: None,
+                    listen: args.listen.clone(),
+                    name: args.name.clone(),
+                    yes: args.yes,
+                    dry_run: args.dry_run,
+                };
+                return as_join(&server, &joined);
+            }
+            "3" | "bundle" => {
+                let bundle = ask_bundle()?;
+                return as_client(&bundle, args.dry_run, true);
+            }
+            other => say!("`{other}` is not one of the three. Type 1, 2, or 3."),
+        }
+    }
 }
 
 fn ask_role() -> Result<Role, Error> {
@@ -280,6 +328,21 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
     }
 
     let name = prompt("A name for that client", Some("laptop"))?;
+    if init.enroll {
+        crate::commands::peer::peer(&crate::commands::peer::PeerArgs {
+            command: crate::commands::peer::PeerCommand::Invite(
+                crate::commands::peer::InviteArgs {
+                    name,
+                    config: init.config.clone(),
+                    public_key: None,
+                    public_key_file: None,
+                    ttl: 15,
+                    json: false,
+                },
+            ),
+        })?;
+        return Ok(());
+    }
     let bundle = PathBuf::from(format!("{name}.vallum-bundle"));
     crate::commands::peer::add_for_setup(&init.config, &name, &bundle)?;
 
@@ -851,7 +914,9 @@ fn guidance() -> Result<(), Error> {
     say!("On the server, where clients connect:");
     say!("   sudo vallum setup --server");
     say!();
-    say!("On this machine, if a server gave you a .vallum-bundle:");
+    say!("On a client (generates its own key here — nothing secret leaves):");
+    say!("   sudo vallum setup --remote you@<server>");
+    say!("   sudo vallum setup --join <server>:51821 --invite-id <id> --token - --expect <fp>");
     say!("   sudo vallum setup --client <file>.vallum-bundle");
     say!();
     say!("`vallum setup` with no flags asks which of the two this machine is.");

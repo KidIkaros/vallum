@@ -53,6 +53,8 @@ pub enum PeerCommand {
     Enroll(EnrollArgs),
     /// Mint a single-use token so a device can enrol without SSH access.
     Invite(InviteArgs),
+    /// List live one-time invites and their remaining TTL (pruning expired ones).
+    Invites(InvitesArgs),
     /// Install a new identity while the old one keeps working.
     Rotate(RotateArgs),
     /// Retire the previous identity a rotation kept.
@@ -311,6 +313,7 @@ pub fn peer(args: &PeerArgs) -> Result<(), Error> {
         PeerCommand::Remove(args) => remove(args),
         PeerCommand::Enroll(args) => enroll(args),
         PeerCommand::Invite(args) => invite(args),
+        PeerCommand::Invites(args) => invites(args),
         PeerCommand::Rotate(args) => rotate(args),
         PeerCommand::Finalize(args) => finalize(args),
     }
@@ -798,6 +801,79 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
         say!(
             "   `sudo systemctl enable --now vallum-enroll@{}`.",
             interface
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Args)]
+pub struct InvitesArgs {
+    /// The configuration file whose interface to inspect.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// Emit JSON instead of a table (tokens are never printed here).
+    #[arg(long)]
+    pub json: bool,
+}
+
+fn invites(args: &InvitesArgs) -> Result<(), Error> {
+    let interface = vallum_config::Config::load(&args.config)
+        .ok()
+        .and_then(|config| config.interface.name)
+        .unwrap_or_else(|| "vallum0".to_owned());
+    let live = crate::enroll::list_invites(&interface);
+    let now = now_unix();
+    if args.json {
+        let rows: Vec<serde_json::Value> = live
+            .iter()
+            .map(|inv| {
+                serde_json::json!({
+                    "name": inv.name,
+                    "id": inv.id,
+                    "pinned": inv.expect_public_line.is_some(),
+                    "spent": inv.public_line.is_some(),
+                    "expires_in_secs": inv.expires.saturating_sub(now),
+                })
+            })
+            .collect();
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&rows)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+        );
+        return Ok(());
+    }
+    if live.is_empty() {
+        say!("no live invites for `{interface}`");
+        return Ok(());
+    }
+    say!(
+        "{:<16} {:<32} {:<8} {:<8} EXPIRES IN",
+        "NAME",
+        "ID",
+        "PINNED",
+        "STATUS"
+    );
+    for inv in &live {
+        let remaining = inv.expires.saturating_sub(now);
+        let status = if inv.public_line.is_some() {
+            "spent"
+        } else {
+            "open"
+        };
+        let pinned = if inv.expect_public_line.is_some() {
+            "yes"
+        } else {
+            "no"
+        };
+        say!(
+            "{:<16} {:<32} {:<8} {:<8} {}s",
+            inv.name,
+            inv.id,
+            pinned,
+            status,
+            remaining
         );
     }
     Ok(())
@@ -1468,16 +1544,30 @@ fn show(args: &ShowArgs) -> Result<(), Error> {
 
 fn remove(args: &RemoveArgs) -> Result<(), Error> {
     require_config(&args.config)?;
+    let interface = vallum_config::Config::load(&args.config)
+        .ok()
+        .and_then(|config| config.interface.name)
+        .unwrap_or_else(|| "vallum0".to_owned());
+    // Revoke any live invite first: if the operator is cancelling an unspent
+    // invite before the device ever enrolled, that alone is a valid removal.
+    let revoked = crate::enroll::revoke_invite(&interface, &args.name);
     let mut file = ConfigFile::load(&args.config)?;
-    let removed = file.remove_peer(&args.name)?;
-    // A live invite for this name must not outlive the peer.
-    if let Ok(config) = vallum_config::Config::load(&args.config) {
-        let interface = config
-            .interface
-            .name
-            .unwrap_or_else(|| "vallum0".to_owned());
-        crate::enroll::revoke_invite(&interface, &args.name);
+    if !file.has_peer(&args.name) && revoked > 0 {
+        if args.json {
+            say!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": args.name,
+                    "revoked_invites": revoked,
+                }))
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
+            );
+        } else {
+            say!("revoked pending invite for `{}`", args.name);
+        }
+        return Ok(());
     }
+    let removed = file.remove_peer(&args.name)?;
     file.validate()?;
     let backup = file.save()?;
     let applied = if args.no_apply {

@@ -1142,7 +1142,7 @@ pub fn setup_hint(app: &mut App, server: bool) {
             "sudo vallum setup --client <file>.vallum-bundle   (press i to import one here)"
                 .to_owned()
         } else {
-            "sudo vallum setup --client <file>.vallum-bundle".to_owned()
+            "sudo vallum setup --remote you@<server>".to_owned()
         }
     };
     let channels = copy_to_clipboard(&command);

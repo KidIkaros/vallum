@@ -490,6 +490,9 @@ pub fn issue_invite(
         path: dir.clone(),
         source,
     })?;
+    // Prune expired invites as new ones are minted so `/run/vallum` does not
+    // accumulate stale credentials.
+    let _ = list_invites(interface);
     let path = invite_path(interface, &id);
     write_private(
         &path,
@@ -518,13 +521,15 @@ fn store_invite(interface: &str, invite: &Invite) -> Result<(), Error> {
     )
 }
 
-/// Remove every live invite for a peer name (after `peer remove`).
-pub fn revoke_invite(interface: &str, name: &str) {
+/// List live invites for `interface`, pruning any whose TTL has already passed.
+pub fn list_invites(interface: &str) -> Vec<Invite> {
     let dir = run_dir();
     let prefix = format!("enroll-{interface}-");
+    let now = unix_now();
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
+        return Vec::new();
     };
+    let mut active = Vec::new();
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let Some(file_name) = file_name.to_str() else {
@@ -537,11 +542,44 @@ pub fn revoke_invite(interface: &str, name: &str) {
             continue;
         };
         if let Ok(invite) = serde_json::from_slice::<Invite>(&bytes) {
-            if invite.name == name {
+            if invite.expires < now {
                 let _ = std::fs::remove_file(entry.path());
+            } else {
+                active.push(invite);
             }
         }
     }
+    active.sort_by(|a, b| a.name.cmp(&b.name));
+    active
+}
+
+/// Remove every live invite for a peer name (after `peer remove`), returning
+/// how many invite files were removed.
+pub fn revoke_invite(interface: &str, name: &str) -> usize {
+    let dir = run_dir();
+    let prefix = format!("enroll-{interface}-");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with(&prefix) || !file_name.ends_with(".json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        if let Ok(invite) = serde_json::from_slice::<Invite>(&bytes) {
+            if invite.name == name && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Per-source-IP admission: the cookie already stops spoofing, but a real

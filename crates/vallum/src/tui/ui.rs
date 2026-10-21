@@ -474,8 +474,8 @@ fn draw_empty_state(frame: &mut Frame<'_>, area: Rect) {
         (
             " 2 ",
             "The client",
-            "it connects to a server",
-            "sudo vallum setup --client <file>.vallum-bundle",
+            "it connects to a server (key stays on this machine)",
+            "sudo vallum setup --remote you@<server>   (or --join / --client <file>.vallum-bundle)",
         ),
     ] {
         text.push(Line::from(vec![

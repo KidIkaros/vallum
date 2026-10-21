@@ -1502,7 +1502,10 @@ fn the_first_screen_asks_what_the_machine_is_and_shows_both_commands() {
     assert!(text.contains("The server"), "no server role");
     assert!(text.contains("The client"), "no client role");
     assert!(text.contains("vallum setup --server"), "no server command");
-    assert!(text.contains("vallum setup --client"), "no client command");
+    assert!(
+        text.contains("vallum setup --remote"),
+        "no client command: {text}"
+    );
 }
 
 #[test]
@@ -1528,7 +1531,7 @@ fn the_numbered_roles_hand_over_the_command_for_this_machine() {
     );
     let toast = app.toast.as_ref().expect("a toast says what happened");
     assert!(
-        toast.message.contains("setup --client"),
+        toast.message.contains("setup --remote") || toast.message.contains("setup --client"),
         "{}",
         toast.message
     );

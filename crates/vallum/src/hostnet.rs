@@ -551,6 +551,97 @@ pub fn plan_nat(v4: &[IpNet], v6: &[IpNet]) -> Vec<HostStep> {
     ]
 }
 
+/// Undo the host networking changes `server init` installed: the NAT table and
+/// the firewall / FORWARD rules for `ports` and `interface`.
+#[must_use]
+pub fn plan_teardown(state: &HostState, ports: &[u16], interface: &str) -> Vec<HostStep> {
+    let mut steps = vec![HostStep::Run {
+        summary: format!("remove the `inet {NAT_TABLE}` NAT table"),
+        program: "nft".to_owned(),
+        args: vec![
+            "delete".to_owned(),
+            "table".to_owned(),
+            "inet".to_owned(),
+            NAT_TABLE.to_owned(),
+        ],
+        stdin: None,
+        ignore_failure: true,
+    }];
+    if state.iptables_forward_drop {
+        for flag in ["-i", "-o"] {
+            steps.push(HostStep::Run {
+                summary: format!("remove iptables FORWARD rule ({flag} {interface})"),
+                program: "iptables".to_owned(),
+                args: vec![
+                    "-D".to_owned(),
+                    "FORWARD".to_owned(),
+                    flag.to_owned(),
+                    interface.to_owned(),
+                    "-j".to_owned(),
+                    "ACCEPT".to_owned(),
+                ],
+                stdin: None,
+                ignore_failure: true,
+            });
+        }
+    }
+    for &port in ports {
+        if matches!(state.firewall, Firewall::Ufw) || state.ufw_installed {
+            steps.push(HostStep::Run {
+                summary: format!("remove UDP {port} from ufw"),
+                program: "ufw".to_owned(),
+                args: vec![
+                    "delete".to_owned(),
+                    "allow".to_owned(),
+                    format!("{port}/udp"),
+                ],
+                stdin: None,
+                ignore_failure: true,
+            });
+        }
+        if matches!(state.firewall, Firewall::Firewalld) || state.firewalld_installed {
+            steps.push(HostStep::Run {
+                summary: format!("remove UDP {port} from firewalld"),
+                program: "firewall-cmd".to_owned(),
+                args: vec![
+                    "--permanent".to_owned(),
+                    format!("--remove-port={port}/udp"),
+                ],
+                stdin: None,
+                ignore_failure: true,
+            });
+        }
+        if state.iptables_input_drop {
+            steps.push(HostStep::Run {
+                summary: format!("remove UDP {port} from iptables INPUT"),
+                program: "iptables".to_owned(),
+                args: vec![
+                    "-D".to_owned(),
+                    "INPUT".to_owned(),
+                    "-p".to_owned(),
+                    "udp".to_owned(),
+                    "--dport".to_owned(),
+                    port.to_string(),
+                    "-j".to_owned(),
+                    "ACCEPT".to_owned(),
+                ],
+                stdin: None,
+                ignore_failure: true,
+            });
+        }
+    }
+    if matches!(state.firewall, Firewall::Firewalld) {
+        steps.push(HostStep::Run {
+            summary: "reload firewalld".to_owned(),
+            program: "firewall-cmd".to_owned(),
+            args: vec!["--reload".to_owned()],
+            stdin: None,
+            ignore_failure: true,
+        });
+    }
+    steps
+}
+
 /// Run a plan, or print it.
 ///
 /// # Errors
@@ -619,6 +710,38 @@ mod tests {
             .join("");
         assert!(text.contains("net.ipv4.ip_forward = 1"));
         assert!(text.contains("net.ipv6.conf.all.forwarding = 1"));
+    }
+
+    #[test]
+    fn teardown_removes_nat_forward_and_both_ports() {
+        let state = HostState {
+            forward_v4: true,
+            forward_v6: false,
+            firewall: Firewall::Ufw,
+            ufw_installed: true,
+            firewalld_installed: false,
+            input_drop: false,
+            forward_drop: false,
+            iptables_input_drop: true,
+            iptables_forward_drop: true,
+        };
+        let steps = plan_teardown(&state, &[51820, 51821], "vallum0");
+        let summaries: Vec<&str> = steps.iter().map(HostStep::summary).collect();
+        assert!(summaries
+            .iter()
+            .any(|s| s.contains("remove the `inet vallum` NAT table")));
+        assert!(summaries
+            .iter()
+            .any(|s| s.contains("remove iptables FORWARD rule (-i vallum0)")));
+        assert!(summaries
+            .iter()
+            .any(|s| s.contains("remove UDP 51820 from ufw")));
+        assert!(summaries
+            .iter()
+            .any(|s| s.contains("remove UDP 51821 from ufw")));
+        assert!(summaries
+            .iter()
+            .any(|s| s.contains("remove UDP 51820 from iptables INPUT")));
     }
 
     #[test]

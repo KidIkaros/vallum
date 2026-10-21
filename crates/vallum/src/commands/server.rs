@@ -39,6 +39,107 @@ pub enum ServerCommand {
     Init(InitArgs),
     /// Turn one-time token enrolment on or off, with its service and port.
     Enroll(EnrollArgs),
+    /// Undo the host changes `server init` made (units, NAT, firewall, sysctl).
+    Teardown(TeardownArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TeardownArgs {
+    /// The server configuration file to tear down.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// Also delete the config file and keys in `/etc/vallum`. Without this,
+    /// they stay in place so `server init` can bring the same server back up.
+    #[arg(long)]
+    pub purge: bool,
+
+    /// Show what would be removed, without changing the host.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Reverse the host changes `server init` installed.
+///
+/// A system with an inflow (`server init`) and no outflow forces operators to
+/// copy-paste an eight-line shell block to undo a trial server install.
+pub fn teardown(args: &TeardownArgs) -> Result<(), Error> {
+    if !args.dry_run && !nix::unistd::geteuid().is_root() {
+        return Err(Error::Precondition(
+            "`vallum server teardown` removes systemd units and firewall rules; \
+             run it as root, or pass --dry-run to see the plan"
+                .to_owned(),
+        ));
+    }
+    let config = vallum_config::Config::load(&args.config).ok();
+    let instance = args
+        .config
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0")
+        .to_owned();
+    let interface = config
+        .as_ref()
+        .and_then(|cfg| cfg.interface.name.clone())
+        .unwrap_or_else(|| instance.clone());
+    let listen = config
+        .as_ref()
+        .and_then(|cfg| cfg.interface.listen.as_deref())
+        .and_then(|listen| listen_port(listen).ok())
+        .unwrap_or(51820);
+    let enroll_port = config
+        .as_ref()
+        .and_then(|cfg| cfg.enroll.port)
+        .unwrap_or_else(|| listen.saturating_add(1));
+    let ports = [listen, enroll_port];
+
+    for unit in [
+        format!("vallum-enroll@{instance}"),
+        format!("vallum-quick@{instance}"),
+        format!("vallum@{instance}"),
+    ] {
+        if args.dry_run {
+            say!("   would disable --now {unit}");
+        } else {
+            let _ = systemctl(&["disable", "--now", &unit]);
+        }
+    }
+
+    let steps = hostnet::plan_teardown(&hostnet::inspect(), &ports, &interface);
+    let _ = hostnet::apply(&steps, args.dry_run)?;
+
+    let sysctl = Path::new("/etc/sysctl.d/90-vallum.conf");
+    if sysctl.exists() || args.dry_run {
+        if args.dry_run {
+            say!("   would remove {}", sysctl.display());
+        } else {
+            let _ = std::fs::remove_file(sysctl);
+            say!("   ok    remove {}", sysctl.display());
+        }
+    }
+
+    if args.purge {
+        if args.dry_run {
+            say!(
+                "   would remove {} and its keys (--purge)",
+                args.config.display()
+            );
+        } else {
+            if let Some(cfg) = &config {
+                let key = crate::config::resolve_key_path(&args.config, &cfg.interface.private_key);
+                let _ = std::fs::remove_file(key);
+            }
+            let _ = std::fs::remove_file(&args.config);
+            say!("   ok    removed {}", args.config.display());
+        }
+    } else {
+        say!(
+            "   kept  {} (pass --purge to delete the config and key too)",
+            args.config.display()
+        );
+    }
+    say!("torn down: server `{instance}`");
+    Ok(())
 }
 
 #[derive(Debug, Args)]
@@ -302,6 +403,7 @@ pub fn server(args: &ServerArgs) -> Result<(), Error> {
     match &args.command {
         ServerCommand::Init(init) => self::init(init),
         ServerCommand::Enroll(args) => enroll(args),
+        ServerCommand::Teardown(args) => teardown(args),
     }
 }
 
@@ -873,6 +975,27 @@ mod tests {
             normalise_endpoint("[2001:db8::1]:1234", 51820),
             "[2001:db8::1]:1234"
         );
+    }
+
+    #[test]
+    fn teardown_dry_run_succeeds_without_root() {
+        let dir = std::env::temp_dir().join(format!("vallum-teardown-dry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vallum0.toml");
+        std::fs::write(
+            &config,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"server.key\"\nlisten = \"0.0.0.0:51820\"\n",
+        )
+        .unwrap();
+        teardown(&TeardownArgs {
+            config: config.clone(),
+            purge: true,
+            dry_run: true,
+        })
+        .unwrap();
+        assert!(config.exists(), "dry-run must not delete the config");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

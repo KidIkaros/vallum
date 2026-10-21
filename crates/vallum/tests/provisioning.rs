@@ -571,3 +571,49 @@ fn a_pinned_invite_only_enrols_the_key_it_named() {
     drop(serve);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn peer_invites_lists_live_invites_without_leaking_tokens_and_prunes_expired_ones() {
+    let dir = scratch("invites");
+    let config = init(&dir);
+    let rundir = dir.join("run");
+
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "invite", "laptop", "--config"])
+        .arg(&config)
+        .arg("--json")
+        .env("VALLUM_RUN_DIR", &rundir));
+    assert!(ok, "{stderr}");
+    let created: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let secret_token = created["token"].as_str().unwrap();
+
+    // Write an already-expired invite into the same directory to verify pruning.
+    let expired_path = rundir.join("enroll-vallum0-00000000000000000000000000000000.json");
+    std::fs::write(
+        &expired_path,
+        "{\"version\":2,\"id\":\"00000000000000000000000000000000\",\"name\":\"stale\",\"token_hex\":\"00000000000000000000000000000000\",\"expires\":1}",
+    )
+    .unwrap();
+
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "invites", "--config"])
+        .arg(&config)
+        .arg("--json")
+        .env("VALLUM_RUN_DIR", &rundir));
+    assert!(ok, "{stderr}");
+    assert!(
+        !stdout.contains(secret_token),
+        "peer invites must never print the secret token: {stdout}"
+    );
+    assert!(
+        !expired_path.exists(),
+        "expired invite file was not pruned by peer invites"
+    );
+    let listed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let arr = listed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"].as_str(), Some("laptop"));
+    assert_eq!(arr[0]["spent"].as_bool(), Some(false));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
