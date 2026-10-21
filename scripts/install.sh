@@ -171,9 +171,20 @@ auth_header() {
     fi
 }
 
+# gh reads the *caller's* config; run under sudo and it opens root's empty
+# one. Delegate to the invoking user's session so their `gh auth login`
+# applies (the repo is private) — the same fix verify-remote.sh needed.
+gh_as_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" gh "$@"
+    else
+        gh "$@"
+    fi
+}
+
 latest_version() {
     if command -v gh >/dev/null 2>&1; then
-        gh release view --repo "$REPO" --json tagName -q .tagName
+        gh_as_user release view --repo "$REPO" --json tagName -q .tagName
         return
     fi
     local header
@@ -192,7 +203,7 @@ download_asset() {
     header=$(auth_header)
     token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
     if command -v gh >/dev/null 2>&1 && [ -z "$token" ]; then
-        gh release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
+        gh_as_user release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
         return
     fi
     if [ -n "$header" ]; then
@@ -413,6 +424,9 @@ WORK=""
 if [ "$DRY" -eq 0 ]; then
     WORK=$(mktemp -d)
     trap 'rm -rf "$WORK"' EXIT
+    # gh runs as the invoking user, so the download dir must be writable by
+    # them — mktemp -d under sudo lands 0700 root.
+    chown "${SUDO_USER:-root}" "$WORK" 2>/dev/null || true
 fi
 
 if [ -n "$PACKAGE" ]; then
