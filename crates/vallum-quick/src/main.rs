@@ -1347,11 +1347,19 @@ const DEAD_AFTER: Duration = Duration::from_secs(90);
 const WATCH_POLL: Duration = Duration::from_secs(5);
 
 fn dead_after() -> Duration {
-    std::env::var("VALLUM_DEAD_AFTER_SECS")
+    let configured = std::env::var("VALLUM_DEAD_AFTER_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or(DEAD_AFTER)
+        .unwrap_or(DEAD_AFTER);
+    clamp_dead_after(configured)
+}
+
+/// A window no longer than the poll interval can never be observed: every
+/// sample would land after it closed, so the routes would be withdrawn and
+/// never restored. Two intervals guarantees a live session is seen.
+fn clamp_dead_after(configured: Duration) -> Duration {
+    configured.max(WATCH_POLL * 2)
 }
 
 /// How long ago the newest handshake happened, if there has been one.
@@ -1391,57 +1399,57 @@ fn watch(
         .clone()
         .unwrap_or_else(|| "vallum0".to_owned());
     let table = config.quick.table.as_deref().unwrap_or("auto");
-    let full_tunnel = config.peers.iter().any(|peer| {
-        peer.allowed_ips
-            .iter()
-            .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
-    });
-    if !full_tunnel {
-        // A dead split tunnel hurts only its own prefixes, so there is nothing
-        // to withdraw and no reason to hold a process open.
-        eprintln!("vallum-quick: {interface}: split tunnel — nothing to withdraw");
-        return Ok(());
-    }
 
     let socket = control_socket(&config, config_path, &interface);
     let dead_after = dead_after();
+    // Guard exactly what attach installed. A config whose routes are all covered
+    // by its own interface installs nothing, so there is nothing to withdraw —
+    // but the process stays resident so the unit has one lifecycle either way.
+    let guarded = !plan_routes(&config, &interface, table, dry_run)?
+        .commands
+        .is_empty();
+    if !guarded {
+        eprintln!("vallum-quick: {interface}: no routes of its own to guard");
+    }
     let mut attached = read_plan(&state_path(&interface)).is_some();
     loop {
-        match verdict(attached, session_age(&socket), dead_after) {
-            Verdict::Withdraw => {
-                if dry_run {
-                    println!(
-                        "would withdraw {interface}: no handshake within {}s",
-                        dead_after.as_secs()
-                    );
-                } else {
-                    remove_routes(&config, &interface, table, false);
-                    eprintln!(
-                        "vallum-quick: {interface}: no handshake for {}s — routes withdrawn, \
-                         this host keeps its own gateway",
-                        dead_after.as_secs()
-                    );
+        if guarded {
+            match verdict(attached, session_age(&socket), dead_after) {
+                Verdict::Withdraw => {
+                    if dry_run {
+                        println!(
+                            "would withdraw {interface}: no handshake within {}s",
+                            dead_after.as_secs()
+                        );
+                    } else {
+                        remove_routes(&config, &interface, table, false);
+                        eprintln!(
+                            "vallum-quick: {interface}: no handshake for {}s — routes withdrawn, \
+                             this host keeps its own gateway",
+                            dead_after.as_secs()
+                        );
+                    }
+                    attached = false;
                 }
-                attached = false;
-            }
-            Verdict::Restore => {
-                if dry_run {
-                    println!("would restore {interface}: the session is back");
-                } else {
-                    match apply_routes(&config, &interface, table, false) {
-                        Ok(()) => {
-                            attached = true;
-                            eprintln!(
-                                "vallum-quick: {interface}: session is back — routes restored"
-                            );
-                        }
-                        Err(error) => {
-                            eprintln!("vallum-quick: {interface}: could not restore: {error}");
+                Verdict::Restore => {
+                    if dry_run {
+                        println!("would restore {interface}: the session is back");
+                    } else {
+                        match apply_routes(&config, &interface, table, false) {
+                            Ok(()) => {
+                                attached = true;
+                                eprintln!(
+                                    "vallum-quick: {interface}: session is back — routes restored"
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!("vallum-quick: {interface}: could not restore: {error}");
+                            }
                         }
                     }
                 }
+                Verdict::Hold => {}
             }
-            Verdict::Hold => {}
         }
         std::thread::sleep(WATCH_POLL);
     }
@@ -1759,6 +1767,17 @@ mod tests {
             "vcli".to_owned(),
         ];
         assert_eq!(route_query(&v6).unwrap()[0], "-6");
+    }
+
+    #[test]
+    fn a_window_shorter_than_the_poll_is_widened_so_a_live_session_is_seen() {
+        // The bug this prevents: with a 3s window and a 5s poll the loop can
+        // sample only after the window closed, so routes went out and never
+        // came back. Observed exactly that in a two-namespace run.
+        assert_eq!(clamp_dead_after(Duration::from_secs(3)), WATCH_POLL * 2);
+        assert_eq!(clamp_dead_after(Duration::ZERO), WATCH_POLL * 2);
+        // A window that can be observed is left alone.
+        assert_eq!(clamp_dead_after(DEAD_AFTER), DEAD_AFTER);
     }
 
     #[test]
