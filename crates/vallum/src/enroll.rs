@@ -293,6 +293,13 @@ pub fn parse_hello(datagram: &[u8]) -> Option<Hello> {
         return None;
     }
     let flags = datagram[5];
+    // Unknown flag bits are a rejection, not something to ignore: this parser
+    // and any other must agree byte for byte about what a HELLO is, or the two
+    // can be made to disagree about the same datagram. The fuzzer found this
+    // one by re-encoding a parsed HELLO and comparing.
+    if flags & !FLAG_COOKIE != 0 {
+        return None;
+    }
     let has_cookie = flags & FLAG_COOKIE != 0;
     let mut offset = 6;
     let id = crate::keys::hex_encode(datagram.get(offset..offset + ID_LEN)?);
@@ -407,14 +414,12 @@ pub fn encode_reply(
     Ok(out)
 }
 
-/// Open a reply against the token and the ephemeral secret the client kept.
-pub fn open_reply(
-    token: &Token,
-    invite_id: &str,
-    client_nonce: &[u8; NONCE_LEN],
-    ephemeral_sk: &vallum_crypto::KemSecretKey,
-    datagram: &[u8],
-) -> Option<(String, String)> {
+/// Split a reply's framing without touching crypto.
+///
+/// Returns `(server_nonce, ciphertext, sealed)`. Public so the fuzzer can hold
+/// the framing to "never panic, and the three slices tile the datagram" without
+/// a KEM decapsulation per input.
+pub fn reply_framing(datagram: &[u8]) -> Option<([u8; NONCE_LEN], &[u8], &[u8])> {
     if datagram.len() < 4 + 1 + NONCE_LEN + 2 || &datagram[..4] != MAGIC {
         return None;
     }
@@ -423,12 +428,23 @@ pub fn open_reply(
     }
     let mut server_nonce = [0u8; NONCE_LEN];
     server_nonce.copy_from_slice(datagram.get(5..5 + NONCE_LEN)?);
-    let mut offset = 5 + NONCE_LEN;
+    let offset = 5 + NONCE_LEN;
     let ct_len = u16::from_be_bytes(datagram.get(offset..offset + 2)?.try_into().ok()?) as usize;
-    offset += 2;
-    let ciphertext = datagram.get(offset..offset + ct_len)?;
-    offset += ct_len;
-    let sealed = datagram.get(offset..)?;
+    let start = offset + 2;
+    let ciphertext = datagram.get(start..start + ct_len)?;
+    let sealed = datagram.get(start + ct_len..)?;
+    Some((server_nonce, ciphertext, sealed))
+}
+
+/// Open a reply against the token and the ephemeral secret the client kept.
+pub fn open_reply(
+    token: &Token,
+    invite_id: &str,
+    client_nonce: &[u8; NONCE_LEN],
+    ephemeral_sk: &vallum_crypto::KemSecretKey,
+    datagram: &[u8],
+) -> Option<(String, String)> {
+    let (server_nonce, ciphertext, sealed) = reply_framing(datagram)?;
     let legs = suite().kem_decaps(ephemeral_sk, ciphertext).ok()?;
     let shared = combine_legs(&legs);
     let key = reply_key(token, &shared, client_nonce, &server_nonce).ok()?;

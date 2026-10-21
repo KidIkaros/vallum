@@ -13,6 +13,7 @@ into the daemon.
 
 | Target | Input | Invariants |
 |---|---|---|
+| `enroll_parse` | arbitrary bytes | `parse_hello`, `parse_cookie`, `reply_framing` never panic; a `HELLO` that parses **re-encodes to the same framing** — the parser must not accept a datagram the builder would never emit |
 | `message_parse` | arbitrary bytes | never panic; a message that parses **round-trips** — rebuilt field by field it is byte-identical; `mac1_input`, `mac2_input`, and `resp_tag_input` never panic; `segment::parse`/`is_fragment` never panic |
 | `handshake_decode` | arbitrary bytes into the three pre-session decoders | never panic; every rejection is a typed `HandshakeError`; `responder_identify`, `initiator_process_resp`, and `responder_process_conf` are each exercised |
 | `replay` | 9-byte chunks: `u64` counter + flag | `next()` never decreases; a counter is accepted at most once; nothing panics |
@@ -36,10 +37,22 @@ that is stated rather than hidden.
 
 ---
 
+### What `enroll_parse` found
+
+On its first run — 35,000 executions — the round-trip invariant failed:
+`parse_hello` masked the flags byte to the one bit it knew and ignored the
+rest, so a datagram with `flags = 0xfe` parsed, then re-encoded as
+`flags = 0x00`. Two implementations could be made to disagree about the same
+bytes. Reserved bits are now a rejection, and the input is kept as
+`seeds/enroll_parse/regression-reserved-flags.seed`. After the fix: 3.7 M
+executions, no crash.
+
 ## 2. Seeds
 
 `fuzz/seeds/<target>/` holds a committed seed corpus:
 
+- `enroll_parse`: a well-formed `HELLO` and a `REPLY` framing, plus the
+  reserved-flags regression input
 - `message_parse` and `handshake_decode`: the three frozen tri-hybrid messages
   from `tests/interop.rs` (4 609 B `InitHello`, 4 414 B `RespHello`, 52 B
   `InitConf`), so the first run starts from valid, maximum-size inputs.
