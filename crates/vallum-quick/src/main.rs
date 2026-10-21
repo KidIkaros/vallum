@@ -142,20 +142,29 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Load a config the way materialization would have written it. Configs
-/// minted before `[interface] fwmark` existed get the local routing mark
-/// completed here — and written back best-effort so `down`, `detach`, and
-/// `vallum uninstall` later compute the same mark this attach used. A
-/// read-only config still works: every entry point normalizes, so the mark
-/// is consistent even when it never reaches disk.
+/// Load a config the way materialization would have written it.
+///
+/// The completed mark lives in the returned value only. Persisting it is a
+/// separate, explicit step ([`heal_config_on_disk`]) because a command that
+/// prints its plan must not edit the file it read, and a config another user
+/// can edit must not be rewritten before that is refused.
 fn load_normalized(config_path: &Path) -> Result<Config, ConfigError> {
-    if let Ok(text) = std::fs::read_to_string(config_path) {
-        let normalized = vallum_config::with_local_fwmark(&text);
-        if normalized != text {
-            let _ = std::fs::write(config_path, normalized);
-        }
-    }
     Config::load_normalized(config_path)
+}
+
+/// Persist the completed local routing mark so every later tool — `down`,
+/// `detach`, `vallum uninstall` — computes the same one this attach used.
+fn heal_config_on_disk(config_path: &Path, dry_run: bool) {
+    if dry_run {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(config_path) else {
+        return;
+    };
+    let normalized = vallum_config::with_local_fwmark(&text);
+    if normalized != text {
+        let _ = std::fs::write(config_path, normalized);
+    }
 }
 
 fn up(
@@ -165,6 +174,7 @@ fn up(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
+    heal_config_on_disk(config_path, dry_run);
     let interface = config
         .interface
         .name
@@ -271,6 +281,7 @@ fn down(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
+    heal_config_on_disk(config_path, dry_run);
     let interface = config
         .interface
         .name
@@ -316,6 +327,7 @@ fn attach(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
+    heal_config_on_disk(config_path, dry_run);
     let interface = config
         .interface
         .name
@@ -357,6 +369,7 @@ fn detach(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
+    heal_config_on_disk(config_path, dry_run);
     let interface = config
         .interface
         .name
@@ -463,33 +476,146 @@ fn policy_for(
     }))
 }
 
-/// `ip rule add/del` for one family, ignoring failures on `del`.
-fn rule(v6: bool, args: &[&str], del: bool, dry_run: bool) {
-    let mut full: Vec<String> = if v6 {
-        vec!["-6".to_owned()]
+/// Where an attach records the plan it executed.
+///
+/// Not `/run/vallum`: that is the daemon's `RuntimeDirectory`, and systemd
+/// deletes it when the daemon stops — exactly when teardown needs the record.
+/// Not `/etc/vallum` either: this is state, not configuration.
+const STATE_DIR: &str = "/var/lib/vallum";
+
+fn state_dir() -> PathBuf {
+    // Overridable for the same reason `VALLUM_BIN` is: a test harness needs to
+    // exercise the record without writing to the host's `/var/lib`.
+    std::env::var_os("VALLUM_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(STATE_DIR))
+}
+
+fn state_path(interface: &str) -> PathBuf {
+    state_dir().join(format!("{interface}.quick"))
+}
+
+fn read_plan(path: &Path) -> Option<RoutePlan> {
+    let plan = RoutePlan::parse(&fs::read_to_string(path).ok()?);
+    if plan.commands.is_empty() {
+        None
     } else {
-        Vec::new()
-    };
-    full.extend(args.iter().map(|a| (*a).to_owned()));
-    if del {
-        let _ = ip(&full, dry_run);
-    } else {
-        // A rule that fails to install must abort, not half-apply.
-        if let Err(error) = ip(&full, dry_run) {
-            eprintln!("vallum-quick: {error}");
+        Some(plan)
+    }
+}
+
+fn write_plan(path: &Path, plan: &RoutePlan) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, plan.render())?;
+    Ok(())
+}
+
+/// The exact `ip` invocations an attach performs, and the record of them that
+/// teardown replays in reverse.
+///
+/// Teardown used to re-derive the plan from the config, so any edit made
+/// between attach and detach — a narrowed `allowed_ips`, a cleared `fwmark`, a
+/// changed `[quick] table` — made `policy_for` return `None` and the policy
+/// rules were never removed. One of those rules suppresses the main table's
+/// default route, so the host kept its gateway and lost the internet until it
+/// was rebooted. The plan is recorded and reversed verbatim instead.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RoutePlan {
+    commands: Vec<Vec<String>>,
+}
+
+impl RoutePlan {
+    fn rule(&mut self, v6: bool, args: &[&str]) {
+        let mut command: Vec<String> = Vec::with_capacity(args.len() + 1);
+        if v6 {
+            command.push("-6".to_owned());
+        }
+        command.extend(args.iter().map(|arg| (*arg).to_owned()));
+        self.commands.push(command);
+    }
+
+    fn route(&mut self, interface: &str, prefix: &Prefix, table: &str) {
+        let mut command: Vec<String> = Vec::new();
+        if matches!(prefix.as_ipnet(), ipnet::IpNet::V6(_)) {
+            command.push("-6".to_owned());
+        }
+        command.extend(["route", "add", &prefix.to_string(), "dev", interface].map(str::to_owned));
+        if table != "auto" && table != "off" {
+            command.extend(["table".to_owned(), table.to_owned()]);
+        }
+        self.commands.push(command);
+    }
+
+    /// `add` → `del`, last command first: installation order reversed.
+    fn reversed(&self) -> Self {
+        let mut commands: Vec<Vec<String>> = self.commands.iter().rev().cloned().collect();
+        for command in &mut commands {
+            if let Some(verb) = command
+                .iter_mut()
+                .find(|arg| *arg == "add" || *arg == "del")
+            {
+                *verb = if *verb == "add" {
+                    "del".to_owned()
+                } else {
+                    "add".to_owned()
+                };
+            }
+        }
+        Self { commands }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        for command in &self.commands {
+            out.push_str(&command.join(" "));
+            out.push('\n');
+        }
+        out
+    }
+
+    fn parse(text: &str) -> Self {
+        Self {
+            commands: text
+                .lines()
+                .map(|line| {
+                    line.split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<String>>()
+                })
+                .filter(|command| !command.is_empty())
+                .collect(),
+        }
+    }
+
+    /// Every command must succeed: a half-applied plan is the failure this
+    /// type exists to prevent.
+    fn run(&self, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+        for command in &self.commands {
+            ip(command, dry_run)?;
+        }
+        Ok(())
+    }
+
+    /// Removing something that is not there is not a failure.
+    fn run_lenient(&self, dry_run: bool) {
+        for command in &self.commands {
+            let _ = ip(command, dry_run);
         }
     }
 }
 
-/// Install the routes, and policy rules if a default route is among them.
-fn apply_routes(
+/// Everything an attach installs, in order, without touching the host.
+fn plan_routes(
     config: &Config,
     interface: &str,
     table: &str,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<RoutePlan, Box<dyn std::error::Error>> {
     let routes = managed_routes(config, interface, table, dry_run)?;
     let policy = policy_for(config, &routes, table)?;
+    let mut plan = RoutePlan::default();
     if let Some(policy) = &policy {
         // Rules before routes, so no lookup can find an empty table.
         let mark = policy.mark.to_string();
@@ -497,7 +623,7 @@ fn apply_routes(
             if (v6 && !policy.v6) || (!v6 && !policy.v4) {
                 continue;
             }
-            rule(
+            plan.rule(
                 v6,
                 &[
                     "rule",
@@ -508,14 +634,10 @@ fn apply_routes(
                     "table",
                     &policy.table,
                 ],
-                false,
-                dry_run,
             );
-            rule(
+            plan.rule(
                 v6,
                 &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
-                false,
-                dry_run,
             );
         }
     }
@@ -524,22 +646,62 @@ fn apply_routes(
             Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
             _ => table,
         };
-        add_route(interface, prefix, route_table, dry_run)?;
+        plan.route(interface, prefix, route_table);
     }
-    Ok(())
+    Ok(plan)
 }
 
-/// Undo [`apply_routes`]. Deletion ignores failures: whatever was never added
-/// is simply absent.
-fn remove_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
+/// Install the routes, and policy rules if a default route is among them.
+fn apply_routes(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if table == "off" {
-        return;
+        return Ok(());
     }
+    let path = state_path(interface);
+    // Undo a previous attach first: `ip rule add` does not dedupe, so a second
+    // attach would otherwise stack a duplicate of every policy rule.
+    if let Some(previous) = read_plan(&path) {
+        previous.reversed().run_lenient(dry_run);
+    }
+
+    let plan = plan_routes(config, interface, table, dry_run)?;
+    if !dry_run {
+        // Recorded before it runs: a plan that fails halfway still has to be
+        // reversible, and a failed attach is exactly when teardown matters.
+        write_plan(&path, &plan)?;
+    }
+    plan.run(dry_run)
+}
+
+/// What teardown executes: the recorded plan reversed, or — for an install
+/// made before the record existed — one re-derived from the config.
+///
+/// The two are not equivalent, which is the whole point. A config edited
+/// between attach and detach re-derives to *nothing*, so the recorded plan
+/// wins whenever there is one.
+fn teardown_plan(
+    recorded: Option<&RoutePlan>,
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> RoutePlan {
+    if let Some(plan) = recorded {
+        return plan.reversed();
+    }
+    // No record: the config is the only evidence left. This is the path that
+    // stranded rules on a config edit; it is kept solely to clean up after
+    // installs made before the record existed.
     let routes = managed_routes(config, interface, table, dry_run).unwrap_or_default();
+    let mut plan = RoutePlan::default();
     if let Some(policy) = policy_for(config, &routes, table).ok().flatten() {
         for prefix in &routes {
             if prefix.as_ipnet().prefix_len() == 0 {
-                del_route(interface, prefix, &policy.table, dry_run).ok();
+                plan.route(interface, prefix, &policy.table);
             }
         }
         let mark = policy.mark.to_string();
@@ -547,32 +709,43 @@ fn remove_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
             if (v6 && !policy.v6) || (!v6 && !policy.v4) {
                 continue;
             }
-            rule(
+            plan.rule(
                 v6,
                 &[
                     "rule",
-                    "del",
+                    "add",
                     "not",
                     "fwmark",
                     &mark,
                     "table",
                     &policy.table,
                 ],
-                true,
-                dry_run,
             );
-            rule(
+            plan.rule(
                 v6,
-                &["rule", "del", "table", "main", "suppress_prefixlength", "0"],
-                true,
-                dry_run,
+                &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
             );
         }
     }
     for prefix in &routes {
         if prefix.as_ipnet().prefix_len() != 0 {
-            let _ = del_route(interface, prefix, table, dry_run);
+            plan.route(interface, prefix, table);
         }
+    }
+    plan.reversed()
+}
+
+/// Undo [`apply_routes`] — what was installed, not what the config now implies.
+fn remove_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
+    if table == "off" {
+        return;
+    }
+    let path = state_path(interface);
+    let recorded = read_plan(&path);
+    let plan = teardown_plan(recorded.as_ref(), config, interface, table, dry_run);
+    plan.run_lenient(dry_run);
+    if recorded.is_some() && !dry_run {
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -691,42 +864,6 @@ fn strip_quick(text: &str) -> String {
 fn strip(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let text = fs::read_to_string(config_path)?;
     print!("{}", strip_quick(&text));
-    Ok(())
-}
-
-fn add_route(
-    interface: &str,
-    prefix: &Prefix,
-    table: &str,
-    dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut args: Vec<String> = Vec::new();
-    if matches!(prefix.as_ipnet(), ipnet::IpNet::V6(_)) {
-        args.push("-6".to_owned());
-    }
-    args.extend(["route", "add", &prefix.to_string(), "dev", interface].map(str::to_owned));
-    if table != "auto" && table != "off" {
-        args.extend(["table".to_owned(), table.to_owned()]);
-    }
-    ip(&args, dry_run)
-}
-
-fn del_route(
-    interface: &str,
-    prefix: &Prefix,
-    table: &str,
-    dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut args: Vec<String> = Vec::new();
-    if matches!(prefix.as_ipnet(), ipnet::IpNet::V6(_)) {
-        args.push("-6".to_owned());
-    }
-    args.extend(["route", "del", &prefix.to_string(), "dev", interface].map(str::to_owned));
-    if table != "auto" && table != "off" {
-        args.extend(["table".to_owned(), table.to_owned()]);
-    }
-    // Deleting a route that is already gone is not a failure.
-    let _ = ip(&args, dry_run);
     Ok(())
 }
 
@@ -1215,20 +1352,33 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_full_tunnel_gains_the_mark_on_load() {
+    fn a_stale_full_tunnel_gains_the_mark_in_memory_and_writes_it_only_for_real() {
         // Configs minted before fwmark existed must still attach after an
-        // upgrade: the entry points complete the local mark themselves, and
-        // persist it so detach sees the same mark attach used.
+        // upgrade: the entry points complete the local mark in memory, and
+        // persist it only on a real run. A `--dry-run` that rewrote the file
+        // it had just read was a bug, not a feature.
         let dir = std::env::temp_dir().join(format!("vallum-quick-heal-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("v.toml");
-        fs::write(
-            &path,
-            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
-        )
-        .unwrap();
+        let original = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n";
+        fs::write(&path, original).unwrap();
+
         let config = load_normalized(&path).unwrap();
         assert_eq!(config.interface.fwmark, Some(51820));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original,
+            "loading a config must not rewrite it"
+        );
+
+        heal_config_on_disk(&path, true);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original,
+            "a dry run must not rewrite the config it read"
+        );
+
+        heal_config_on_disk(&path, false);
         let rewritten = fs::read_to_string(&path).unwrap();
         assert!(rewritten.contains("fwmark = 51820"), "{rewritten}");
         let _ = fs::remove_dir_all(&dir);
@@ -1250,6 +1400,128 @@ mod tests {
         assert_eq!(policy.table, POLICY_TABLE);
         assert_eq!(policy.mark, 51820);
         assert!(policy.v4 && policy.v6);
+    }
+
+    #[test]
+    fn an_attach_records_a_plan_that_teardown_reverses_exactly() {
+        // The regression that took a host's internet away: teardown re-derived
+        // the plan from the config, so an edit between attach and detach made
+        // it compute nothing and strand the policy rules — including the one
+        // that suppresses the main table's default route.
+        let dir = std::env::temp_dir().join(format!("vallum-quick-plan-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let plan = plan_routes(&config, "v0", "auto", true).unwrap();
+
+        assert_eq!(
+            plan.render(),
+            "rule add not fwmark 51820 table 51820\n\
+             rule add table main suppress_prefixlength 0\n\
+             route add 0.0.0.0/0 dev v0 table 51820\n"
+        );
+        // Reverse order, verbs swapped: teardown undoes installation.
+        assert_eq!(
+            plan.reversed().render(),
+            "route del 0.0.0.0/0 dev v0 table 51820\n\
+             rule del table main suppress_prefixlength 0\n\
+             rule del not fwmark 51820 table 51820\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_edited_after_attach_still_tears_down_what_was_installed() {
+        // The incident: attach a full tunnel, then narrow the config. Teardown
+        // re-derived from the narrowed config, computed no policy, and left
+        // `table main suppress_prefixlength 0` behind — so the host kept its
+        // gateway and lost the internet until it was rebooted.
+        let dir = std::env::temp_dir().join(format!("vallum-quick-edit-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let full = dir.join("full.toml");
+        fs::write(
+            &full,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        let narrowed_path = dir.join("narrowed.toml");
+        fs::write(
+            &narrowed_path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"10.9.0.0/24\"]\n",
+        )
+        .unwrap();
+
+        let attached = plan_routes(&Config::load(&full).unwrap(), "v0", "auto", true).unwrap();
+        let narrowed = Config::load(&narrowed_path).unwrap();
+
+        // Re-deriving from the edited config finds nothing to undo. This is
+        // the old behaviour, asserted so the regression cannot come back.
+        let derived = teardown_plan(None, &narrowed, "v0", "auto", true);
+        assert!(
+            !derived.render().contains("suppress_prefixlength"),
+            "the config-derived path is expected to miss the rules: {}",
+            derived.render()
+        );
+
+        // The record wins, so teardown still removes every policy rule.
+        let teardown = teardown_plan(Some(&attached), &narrowed, "v0", "auto", true);
+        assert_eq!(teardown.render(), attached.reversed().render());
+        assert!(
+            teardown
+                .render()
+                .contains("rule del table main suppress_prefixlength 0"),
+            "{}",
+            teardown.render()
+        );
+        assert!(
+            teardown
+                .render()
+                .contains("rule del not fwmark 51820 table 51820"),
+            "{}",
+            teardown.render()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorded_plan_survives_being_written_and_read_back() {
+        let plan = RoutePlan {
+            commands: vec![
+                vec![
+                    "rule".to_owned(),
+                    "add".to_owned(),
+                    "table".to_owned(),
+                    "main".to_owned(),
+                ],
+                vec!["route".to_owned(), "add".to_owned(), "0.0.0.0/0".to_owned()],
+            ],
+        };
+        assert_eq!(RoutePlan::parse(&plan.render()), plan);
+    }
+
+    #[test]
+    fn a_split_tunnel_records_no_policy_rules() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-split-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"10.9.0.0/24\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let plan = plan_routes(&config, "v0", "auto", true).unwrap();
+        assert_eq!(plan.render(), "route add 10.9.0.0/24 dev v0\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
