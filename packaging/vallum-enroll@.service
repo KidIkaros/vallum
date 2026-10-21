@@ -10,12 +10,34 @@ Type=simple
 ExecStart=/usr/bin/vallum enroll-serve --config /etc/vallum/%i.toml
 Restart=on-failure
 RestartSec=2
+UMask=0077
+
+# It binds a high port and speaks UDP; nothing else is needed.
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectHome=yes
+ProtectSystem=full
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 # It must write /etc/vallum (peer records) and /run/vallum (invites); the rest
 # of the filesystem stays read-only.
-ProtectSystem=full
 ReadWritePaths=/etc/vallum /run/vallum
 
 [Install]
