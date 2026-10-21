@@ -320,12 +320,21 @@ PY
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     CLIENT_PID=""
     "$QUICK" detach "$config" >/dev/null 2>&1
+    # The next transport reuses this interface name; wait for the kernel to
+    # release it rather than failing on "device exists".
+    for _ in $(seq 1 25); do
+        ip link show "$iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
 }
 
 for kind in $TRANSPORTS; do
     name="laptop-$kind"
     dir="$LOCAL_DIR/$kind"
     rm -rf "$dir" && mkdir -p "$dir"
+    # The client half runs as the invoking user (their SSH keys, and `setup`
+    # writes here instead of /etc/vallum), so the directory must be theirs.
+    chown "${SUDO_USER:-root}" "$LOCAL_DIR" "$dir" 2>/dev/null
     say "transport: $kind"
     case "$kind" in
         bundle) enrol_bundle "$name" "$dir" ;;
