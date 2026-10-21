@@ -201,6 +201,13 @@ else
             --endpoint $PUBLIC --control $REMOTE_DIR/server.sock" >/dev/null || bad "server init"
     rsh "sudo sysctl -q -w net.ipv4.ip_forward=1
          sudo ufw allow $PORT/udp >/dev/null 2>&1
+         # Forwarding acceptance is not optional. ufw's before-forward chain
+         # accepts ICMP echo, so a tunnel with no FORWARD rule pings happily
+         # and drops every TCP and UDP packet — the trap in
+         # docs/deployment/troubleshooting.md, found here the first time this
+         # script ran a DNS query through the tunnel.
+         sudo iptables -I FORWARD 1 -i vallumrc -j ACCEPT
+         sudo iptables -I FORWARD 1 -o vallumrc -j ACCEPT
          sudo nft add table inet vallumtest 2>/dev/null
          sudo nft 'add chain inet vallumtest postrouting { type nat hook postrouting priority srcnat; }' 2>/dev/null
          sudo nft add rule inet vallumtest postrouting ip saddr $SUBNET masquerade 2>/dev/null
@@ -322,7 +329,13 @@ PY
     ping -c3 -W4 1.1.1.1 > "$dir/egress.log" 2>&1 || { cat "$dir/egress.log"; bad "$name: no egress through the server"; }
     if command -v dig >/dev/null 2>&1; then
         dig +time=3 +tries=1 @1.1.1.1 example.com A > "$dir/dig.log" 2>&1
-        grep -q "ANSWER SECTION" "$dir/dig.log" || bad "$name: DNS through the tunnel did not answer"
+        if ! grep -q "ANSWER SECTION" "$dir/dig.log"; then
+            cat "$dir/dig.log"
+            note "ICMP crossed but UDP did not, which is the signature of a"
+            note "FORWARD policy that drops everything except echo — see"
+            note "docs/deployment/troubleshooting.md, \"ping works, nothing else\""
+            bad "$name: DNS through the tunnel did not answer"
+        fi
     fi
     ok "$name: handshake, tunnel, egress$(command -v dig >/dev/null 2>&1 && printf ', DNS')"
 
