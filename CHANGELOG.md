@@ -65,9 +65,12 @@
   anonymously and falls back to `gh` only when rate-limited, running `gh` as the
   invoking user rather than as root; `--package` routes deb/rpm through the same
   signature check as the tarball.
-- **`verify-remote.sh` documents `--keep`,** the flag that preserves a
-  deployment you just proved, and its help no longer truncates itself with a
-  fixed line range.
+- **`verify-remote.sh` documents `--keep`** — the flag that preserves a
+  deployment you just proved — and says on exit what it actually kept. In
+  scratch mode that is a test daemon still listening on the port, not a
+  deployment, which is worth knowing before walking away from a host that does
+  something else. Its help also no longer truncates itself with a fixed line
+  range.
 
 ## 1.6.1 — 2026-10-21
 

@@ -40,6 +40,11 @@
 # record: without it a --product run proves `server init` and then uninstalls
 # what it just proved, leaving a host with no Vallum and no keys.
 #
+# --keep skips cleanup entirely, so it keeps whatever the run left running. In
+# the default scratch mode that is a test daemon still listening on the port,
+# with its config in /tmp — not a deployment. The script says what it kept on
+# exit; on a host that does anything else, stop it when you are done.
+#
 # The local half needs root for the TUN; the SSH half runs as the invoking user
 # so its keys work.
 
@@ -141,7 +146,14 @@ cleanup() {
     rm -rf "$LOCAL_DIR"
     ok "both ends restored"
 }
-[ "$KEEP" = 1 ] || trap cleanup EXIT
+kept() {
+    say "kept (--keep) — nothing was cleaned up"
+    echo "   remote daemon   $TARGET, UDP $PORT, config $REMOTE_DIR/server.toml"
+    echo "   remote files    $REMOTE_DIR and /usr/bin/vallum{,-quick}"
+    echo "   stop it         ssh $TARGET \"sudo pkill -f '^$REMOTE_DIR/vallum run'\""
+    echo "   local client    $LOCAL_DIR"
+}
+[ "$KEEP" = 1 ] && trap kept EXIT || trap cleanup EXIT
 
 [ -x "$VALLUM" ] || bad "build first: cargo build --release -p vallum -p vallum-quick"
 # Absolute, because the client half runs with a working directory of its own.
