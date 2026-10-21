@@ -145,8 +145,8 @@ fn up(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
+    check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
         .name
@@ -250,8 +250,8 @@ fn down(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
+    check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
         .name
@@ -295,8 +295,8 @@ fn attach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
+    check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
         .name
@@ -335,8 +335,8 @@ fn detach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_config_ownership(config_path, allow_insecure_config)?;
     let config = Config::load(config_path)?;
+    check_config_ownership(config_path, &config, allow_insecure_config)?;
     let interface = config
         .interface
         .name
@@ -872,10 +872,19 @@ fn unset_dns(interface: &str, dry_run: bool) -> Result<(), Box<dyn std::error::E
 /// same warning; this one fails closed.
 fn check_config_ownership(
     config_path: &Path,
+    config: &Config,
     allow_insecure: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    check_config_ownership_as(config_path, effective_uid_is_root(), allow_insecure)
+    check_config_ownership_as(config_path, config, effective_uid_is_root(), allow_insecure)
         .map_err(Into::into)
+}
+
+/// Whether a config asks for any shell hooks at all.
+fn has_hooks(config: &Config) -> bool {
+    !(config.quick.pre_up.is_empty()
+        && config.quick.post_up.is_empty()
+        && config.quick.pre_down.is_empty()
+        && config.quick.post_down.is_empty())
 }
 
 /// Whether this process runs as root, read without a libc dependency.
@@ -896,11 +905,14 @@ fn effective_uid_is_root() -> bool {
 
 fn check_config_ownership_as(
     config_path: &Path,
+    config: &Config,
     is_root: bool,
     allow_insecure: bool,
 ) -> Result<(), String> {
-    if !is_root {
-        // Hooks run with the caller's own privileges: their own config is fine.
+    if !is_root || !has_hooks(config) {
+        // Nothing escalates: either the caller keeps their own privileges, or
+        // there is no hook to run as root. Routes and DNS from a user's own
+        // config are not a privilege boundary.
         return Ok(());
     }
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1063,20 +1075,34 @@ mod tests {
         let path = dir.join("v.toml");
         fs::write(&path, "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n").unwrap();
 
+        let hooks = Config::load(&{
+            let hooked = dir.join("hooks.toml");
+            fs::write(
+                &hooked,
+                "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[quick]\npre_up = [\"true\"]\n",
+            )
+            .unwrap();
+            hooked
+        })
+        .unwrap();
+        let plain = Config::load(&path).unwrap();
+
+        // No hooks: a user-owned config is fine even as root.
+        assert!(check_config_ownership_as(&path, &plain, true, false).is_ok());
         // Not root: the caller's own config, hooks run with their privileges.
-        assert!(check_config_ownership_as(&path, false, false).is_ok());
+        assert!(check_config_ownership_as(&path, &hooks, false, false).is_ok());
 
         // Root, and the file belongs to someone else (the test user).
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(check_config_ownership_as(&path, true, false).is_err());
+        assert!(check_config_ownership_as(&path, &hooks, true, false).is_err());
         // …unless the operator says so explicitly.
-        assert!(check_config_ownership_as(&path, true, true).is_ok());
+        assert!(check_config_ownership_as(&path, &hooks, true, true).is_ok());
 
         // Root-owned but world-writable is just as bad.
         use std::os::unix::fs::MetadataExt as _;
         if std::fs::metadata(&path).unwrap().uid() == 0 {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
-            assert!(check_config_ownership_as(&path, true, false).is_err());
+            assert!(check_config_ownership_as(&path, &hooks, true, false).is_err());
         }
         let _ = fs::remove_dir_all(&dir);
     }
