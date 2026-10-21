@@ -127,7 +127,12 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         .or_else(|| config.as_ref().and_then(control_from_config));
     match socket {
         Some(path) => match check_control(&path) {
-            Ok(detail) => checks.push(Check::new("control", Status::Pass, detail)),
+            Ok(detail) => {
+                checks.push(Check::new("control", Status::Pass, detail));
+                // The parts can all pass while nothing crosses the wire. This
+                // is the only check that says whether the tunnel is *live*.
+                checks.push(check_tunnel(&path));
+            }
             Err(error) => checks.push(Check::new("control", Status::Fail, error.to_string())),
         },
         None => checks.push(Check::new(
@@ -247,6 +252,66 @@ fn check_control(path: &Path) -> Result<String, Error> {
     Ok(format!(
         "interface `{interface}`, listen {port}, suite {suite}, {peers} peer(s)"
     ))
+}
+
+/// Whether traffic is actually crossing: the age of the newest handshake.
+///
+/// Three dogfood failures ended in "everything configured" and "no internet":
+/// a unit that could not exec, a config root could not read, and a default
+/// route into a dead interface. `doctor` checked the parts and passed all three
+/// times. This check is about the whole.
+fn check_tunnel(path: &Path) -> Check {
+    let reply = match control::request(path, "get=1\n") {
+        Ok(reply) => reply,
+        Err(error) => return Check::new("tunnel", Status::Warn, error.to_string()),
+    };
+    let response = uapi::parse_response(&reply);
+    if response.peers.is_empty() {
+        return Check::new(
+            "tunnel",
+            Status::Warn,
+            "no peers yet: enrol one, then this check reports the handshake age",
+        );
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    // `parse_response` returns raw key/value blocks; read the field directly.
+    let newest = response
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            peer.iter()
+                .find(|(key, _)| key == uapi::field::LAST_HANDSHAKE_TIME_SEC)
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+        })
+        .max();
+    match newest {
+        Some(secs) if secs > 0 => {
+            let age = now.saturating_sub(secs);
+            if age <= 180 {
+                Check::new("tunnel", Status::Pass, format!("handshake {age}s ago"))
+            } else {
+                Check::new(
+                    "tunnel",
+                    Status::Warn,
+                    format!(
+                        "last handshake {age}s ago — the peer may be offline, or the path \
+                         changed. `vallum show` has the counters"
+                    ),
+                )
+            }
+        }
+        _ => Check::new(
+            "tunnel",
+            Status::Warn,
+            format!(
+                "no handshake since the daemon started: UDP {} may be filtered on one \
+                 side, the endpoint may be wrong, or the other daemon may not be running",
+                response.field(uapi::field::LISTEN_PORT).unwrap_or("?")
+            ),
+        ),
+    }
 }
 
 fn which(program: &str) -> bool {

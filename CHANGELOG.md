@@ -51,6 +51,15 @@ protocol is unchanged.
 - `doctor` reports a config the units cannot read (root without
   `CAP_DAC_OVERRIDE` cannot read a `0600` file owned by someone else).
 
+### Client
+
+- A generated client config names its interface after the peer (`vallum-laptop`,
+  at most 15 bytes) instead of `vallum0`, so a machine can be a server and a
+  client at once. The control socket follows it.
+- `vallum doctor` reports whether the tunnel is *live* — the age of the newest
+  handshake, or the three reasons there is none — instead of only checking that
+  the parts are configured.
+
 ### Security
 
 - `vallum-quick` refuses to run `pre_up`/`post_up` hooks from a config that is

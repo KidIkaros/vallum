@@ -188,7 +188,8 @@ ok "peer added and applied live"
 "$VALLUM" import-bundle "$WORK/laptop.vallum-bundle" --output-dir "$WORK/client" \
     > "$WORK/import.log" 2>&1 || { cat "$WORK/import.log"; bad "import-bundle"; }
 # Same-host dogfood: the second daemon needs its own interface and socket.
-sed -i "s/name = \"vallum0\"/name = \"$CIFACE\"/; s|/run/vallum/vallum0.sock|/run/vallum/$CIFACE.sock|" "$WORK/client/laptop.toml"
+# Client configs are named after their peer now, so match whatever it is.
+sed -i "0,/^name = \".*\"/s//name = \"$CIFACE\"/; s|/run/vallum/[^/]*\.sock|/run/vallum/$CIFACE.sock|" "$WORK/client/laptop.toml"
 ok "client config imported"
 
 # ── run the client and attach ────────────────────────────────────────────────

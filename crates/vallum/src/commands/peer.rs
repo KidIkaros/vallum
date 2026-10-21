@@ -1766,6 +1766,26 @@ fn say_bundle_endpoint(endpoint: &str, source: EndpointSource) {
     }
 }
 
+/// The interface name a client config uses: `vallum-<peer>`, at most 15 bytes.
+///
+/// The name is local to this machine, and it must not be `vallum0`, which is
+/// what a server calls its own interface: a host that is both a server and a
+/// client would otherwise have two daemons fighting over one interface.
+fn client_interface_name(peer: &str) -> String {
+    let mut name = String::from("vallum-");
+    for ch in peer.chars() {
+        if name.len() >= 15 {
+            break;
+        }
+        name.push(if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            ch
+        } else {
+            '-'
+        });
+    }
+    name
+}
+
 fn client_config(
     name: &str,
     address: &str,
@@ -1776,11 +1796,15 @@ fn client_config(
 ) -> String {
     let mut body = String::new();
     body.push_str("[interface]\n");
-    body.push_str("name = \"vallum0\"\n");
+    // Named after the peer, not `vallum0`: a machine that is already a server
+    // has a `vallum0`, and two daemons cannot own one interface. 15 characters
+    // is the kernel's IFNAMSIZ limit minus the terminator.
+    let interface = client_interface_name(name);
+    body.push_str(&format!("name = \"{interface}\"\n"));
     body.push_str(&format!("private_key = \"{name}.key\"\n"));
     body.push_str(&format!("addresses = [\"{address}\"]\n"));
     body.push_str("listen = \"0.0.0.0:0\"\n");
-    body.push_str("control = \"/run/vallum/vallum0.sock\"\n");
+    body.push_str(&format!("control = \"/run/vallum/{interface}.sock\"\n"));
     body.push_str("\n[log]\nlevel = \"info\"\n");
     body.push_str("\n[quick]\n");
     if !dns.is_empty() {
