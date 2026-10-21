@@ -15,6 +15,8 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use clap::Args;
+use std::path::Path;
+
 use ipnet::IpNet;
 use vallum_crypto_sdk::SdkSuite;
 
@@ -65,9 +67,15 @@ pub struct SetupArgs {
     #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["server", "client", "remote"], requires = "token")]
     pub join: Option<String>,
 
-    /// The single-use token from `vallum peer invite`.
+    /// The single-use token from `vallum peer invite`, or `-` to read it from
+    /// stdin so it stays out of shell history and `ps`.
     #[arg(long, value_name = "TOKEN", requires = "join")]
     pub token: Option<String>,
+
+    /// On a server, allow devices to enrol with a one-time token (opens UDP
+    /// `listen + 1`).
+    #[arg(long)]
+    pub enroll: bool,
 
     /// Print every step and change nothing.
     #[arg(long)]
@@ -125,6 +133,25 @@ fn ask_role() -> Result<Role, Error> {
             "2" | "c" | "client" => return Ok(Role::Client),
             other => say!("`{other}` is not one of the two. Type 1 or 2."),
         }
+    }
+}
+
+/// Ask whether devices may enrol with a one-time token.
+///
+/// Asked, not assumed: it opens a second UDP port and runs another root
+/// service, which is not something to switch on behind an operator's back.
+fn ask_enroll(listen: &str) -> Result<bool, Error> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    let port = listen_port(listen).unwrap_or(51820).saturating_add(1);
+    say!();
+    say!("Devices can join in two ways: you hand them a bundle or SSH to them, or");
+    say!("they use a one-time token you print with `vallum peer invite`.");
+    say!("The token way needs UDP {port} open and a small responder service.");
+    match prompt("Allow token enrolment? (y/N)", Some("n"))?.as_str() {
+        "y" | "Y" | "yes" => Ok(true),
+        _ => Ok(false),
     }
 }
 
@@ -195,6 +222,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
         dry_run: args.dry_run,
         force: false,
         json: false,
+        enroll: args.enroll || (!args.yes && ask_enroll(&args.listen)?),
     };
 
     if interactive && !args.dry_run {
@@ -480,7 +508,17 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
         .and_then(|e| e.as_str())
         .unwrap_or("?");
 
-    place_config(&name, config_text, &secret, address, endpoint)
+    let server_address = report
+        .get("server_address")
+        .and_then(|address| address.as_str());
+    place_config(
+        &name,
+        config_text,
+        &secret,
+        address,
+        endpoint,
+        server_address,
+    )
 }
 
 /// Write the enrolled config and its key, and either install the service
@@ -491,6 +529,7 @@ fn place_config(
     secret: &crate::keys::SecretFile,
     address: &str,
     endpoint: &str,
+    server_address: Option<&str>,
 ) -> Result<(), Error> {
     let root = nix::unistd::Uid::effective().is_root();
     let directory = if root {
@@ -522,6 +561,7 @@ fn place_config(
     say!("   key        {} (this machine only)", key_path.display());
     if root && config_path.starts_with("/etc/vallum") {
         crate::commands::server::install_service(name, false)?;
+        prove_tunnel(name, &config_path, server_address);
         say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
     } else {
         say!(
@@ -530,6 +570,73 @@ fn place_config(
         );
     }
     Ok(())
+}
+
+/// Prove the tunnel actually carries traffic, rather than trusting that a
+/// config was written.
+///
+/// Three separate failures in this project's dogfooding all ended in
+/// "enrolled" followed by "no internet": a unit that could not exec, a config
+/// root could not read, and a default route into a dead interface. None of
+/// them were visible at the moment of enrolment. So enrolment finishes here:
+/// a real handshake, and a real packet, or a named reason why not.
+fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
+    let socket = PathBuf::from(format!("/run/vallum/{name}.sock"));
+    say!();
+    say!("proving the tunnel…");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut handshaked = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(response) = crate::control::request(&socket, "get=1\n") {
+            if handshake_seen(&response) {
+                handshaked = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    if !handshaked {
+        say!("   fail  no handshake within 15s");
+        say!("         likely causes, in order:");
+        say!("           · UDP 51820 is filtered on the server (firewall, provider)");
+        say!("           · the endpoint in this config is not reachable from here");
+        say!("           · the server's daemon is not running");
+        say!(
+            "         `vallum doctor --config {}` checks all three.",
+            config.display()
+        );
+        return;
+    }
+    say!("   ok    handshake with the server");
+    let Some(address) = server_address else {
+        return;
+    };
+    let status = std::process::Command::new("ping")
+        .args(["-c", "2", "-W", "1", address])
+        .output();
+    match status {
+        Ok(output) if output.status.success() => say!("   ok    ping {address} (2/2)"),
+        Ok(output) => {
+            let lost = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| line.contains("packet loss"))
+                .unwrap_or("no reply")
+                .to_owned();
+            say!("   warn  handshake ok, but ping {address} failed: {lost}");
+            say!("         the server may not route its own tunnel address, or ICMP");
+            say!("         is filtered; a TCP check through the tunnel settles it.");
+        }
+        Err(_) => say!("   skip  ping is not installed; handshake is the proof"),
+    }
+}
+
+/// Whether any peer has completed a handshake, read from the UAPI `get`.
+fn handshake_seen(response: &str) -> bool {
+    response.lines().any(|line| {
+        line.strip_prefix("last_handshake_time_sec=")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .is_some_and(|seconds| seconds > 0)
+    })
 }
 
 /// Enrol with a single-use token — transport B, for machines that cannot SSH.
@@ -554,25 +661,32 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("generated a key here; the private half does not leave this machine");
     say!("asking {server} to enrol `{name}`…");
 
-    let config_text = crate::enroll::join(server, &token, &name, &public_line)?;
-    // For the summary line, take the values the server actually wrote: the
-    // tunnel's own address and its real endpoint (51820), not the enrolment
-    // port (51821) we happened to ask on.
-    let pick = |key: &str| {
-        config_text.lines().find_map(|line| {
-            line.trim()
-                .strip_prefix(key)?
-                .trim_start_matches(' ')
-                .trim_start_matches('=')
-                .trim_start_matches(' ')
-                .split('"')
-                .nth(1)
-                .map(|value| value.to_owned())
-        })
-    };
-    let address = pick("addresses").unwrap_or_else(|| "?".to_owned());
-    let endpoint = pick("endpoint").unwrap_or_else(|| server.to_owned());
-    place_config(&name, &config_text, &secret, &address, &endpoint)
+    let answer = crate::enroll::join(server, &token, &name, &public_line)?;
+    let report: serde_json::Value = serde_json::from_str(&answer)
+        .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
+    let config_text = report
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage("the server's answer had no config".to_owned()))?;
+    let address = report
+        .get("address")
+        .and_then(|address| address.as_str())
+        .unwrap_or("?");
+    let endpoint = report
+        .get("endpoint")
+        .and_then(|endpoint| endpoint.as_str())
+        .unwrap_or(server);
+    let server_address = report
+        .get("server_address")
+        .and_then(|address| address.as_str());
+    place_config(
+        &name,
+        config_text,
+        &secret,
+        address,
+        endpoint,
+        server_address,
+    )
 }
 
 /// Finish a machine that is already enrolled: install the service, or say how

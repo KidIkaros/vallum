@@ -598,6 +598,10 @@ fn enroll(args: &EnrollArgs) -> Result<(), Error> {
             name: args.name.clone(),
             address: address.clone(),
             endpoint: endpoint.clone(),
+            server_address: file
+                .interface_addresses()
+                .first()
+                .map(|network| network.addr().to_string()),
             fingerprint: fingerprint(&canonical),
             config: config_text,
         };
@@ -1417,6 +1421,9 @@ struct Enrolled {
     name: String,
     address: String,
     endpoint: String,
+    /// The server's own tunnel address, so the client can prove the tunnel by
+    /// pinging it straight after enrolling.
+    server_address: Option<String>,
     fingerprint: String,
     config: String,
 }

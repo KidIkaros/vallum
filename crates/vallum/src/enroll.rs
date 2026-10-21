@@ -530,9 +530,18 @@ fn answer_request(
     let Ok(report) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
         return Answer::Refused("the server's answer was malformed".to_owned());
     };
-    match report.get("config").and_then(|config| config.as_str()) {
-        Some(config) => Answer::Issued(config.to_owned()),
-        None => Answer::Refused("the server's answer had no config".to_owned()),
+    if report
+        .get("config")
+        .and_then(|config| config.as_str())
+        .is_none()
+    {
+        return Answer::Refused("the server's answer had no config".to_owned());
+    }
+    // The whole report travels: the client needs the config to write, and the
+    // server's tunnel address to prove the tunnel afterwards.
+    match serde_json::to_string(&report) {
+        Ok(json) => Answer::Issued(json),
+        Err(_) => Answer::Refused("the server's answer was malformed".to_owned()),
     }
 }
 

@@ -37,6 +37,171 @@ pub struct ServerArgs {
 pub enum ServerCommand {
     /// Generate the key, write the config, and start the service.
     Init(InitArgs),
+    /// Turn one-time token enrolment on or off, with its service and port.
+    Enroll(EnrollArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct EnrollArgs {
+    /// The configuration file to change.
+    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    pub config: PathBuf,
+
+    /// Allow devices to enrol with a one-time token.
+    #[arg(long, conflicts_with = "disable")]
+    pub enable: bool,
+
+    /// Stop answering enrolment requests, and try to close the port.
+    #[arg(long)]
+    pub disable: bool,
+
+    /// Show what would change, without changing it.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Flip `[enroll] enabled` and keep the unit and firewall in step with it.
+///
+/// Without this an operator has to know to edit the config, install the unit,
+/// and open a second UDP port — which is how a feature ends up documented but
+/// unused.
+pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
+    if !args.enable && !args.disable {
+        return Err(Error::Usage(
+            "say which: `--enable` or `--disable`".to_owned(),
+        ));
+    }
+    let text = std::fs::read_to_string(&args.config).map_err(|source| Error::IoPath {
+        action: "read the config",
+        path: args.config.clone(),
+        source,
+    })?;
+    let config = vallum_config::Config::load(&args.config)?;
+    let interface = config
+        .interface
+        .name
+        .clone()
+        .unwrap_or_else(|| "vallum0".to_owned());
+    let listen = config
+        .interface
+        .listen
+        .as_deref()
+        .and_then(|listen| listen_port(listen).ok())
+        .unwrap_or(51820);
+    let port: u16 = listen.saturating_add(1);
+
+    let updated = set_enroll_flag(&text, args.enable);
+    if args.dry_run {
+        say!(
+            "   would set [enroll] enabled = {} in {}",
+            args.enable,
+            args.config.display()
+        );
+        say!(
+            "   would {} vallum-enroll@{interface}",
+            if args.enable { "start" } else { "stop" }
+        );
+        say!(
+            "   would {} UDP {port}",
+            if args.enable { "open" } else { "try to close" }
+        );
+        return Ok(());
+    }
+    write_atomic(&args.config, &updated, 0o600)?;
+    // Parse it back: a config that no longer loads is worse than the toggle.
+    vallum_config::Config::load(&args.config)?;
+
+    if args.enable {
+        install_service(&interface, false)?;
+        let steps = hostnet::plan_firewall(&hostnet::inspect(), port, &interface);
+        let _ = hostnet::apply(&steps, false)?;
+        say!("token enrolment on for {interface}: UDP {port}");
+        say!("   invite a device with `vallum peer invite <name>`");
+        return Ok(());
+    }
+
+    let _ = systemctl(&["disable", "--now", &format!("vallum-enroll@{interface}")]);
+    // Closing the port is best effort across three backends; say what ran.
+    let attempts: [(&str, Vec<&str>); 3] = [
+        ("ufw", vec!["delete", "allow", "PORT/udp"]),
+        (
+            "iptables",
+            vec![
+                "-D", "INPUT", "-p", "udp", "--dport", "PORT", "-j", "ACCEPT",
+            ],
+        ),
+        (
+            "firewall-cmd",
+            vec!["--permanent", "--remove-port=PORT/udp"],
+        ),
+    ];
+    let mut closed = Vec::new();
+    for (program, args) in attempts {
+        let port_text = port.to_string();
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| {
+                arg.replace("PORT/udp", &format!("{port}/udp"))
+                    .replace("PORT", &port_text)
+            })
+            .collect();
+        if Command::new(program)
+            .args(&rendered)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            closed.push(program);
+        }
+    }
+    say!("token enrolment off for {interface}");
+    if closed.is_empty() {
+        say!("   the port rule was not found by ufw, iptables, or firewalld —");
+        say!("   check that UDP {port} is closed if you no longer want it open");
+    } else {
+        say!("   closed UDP {port} through {}", closed.join(", "));
+    }
+    Ok(())
+}
+
+/// Set `[enroll] enabled` in a config's text, adding the table if absent.
+fn set_enroll_flag(text: &str, enabled: bool) -> String {
+    let flag = format!("enabled = {enabled}");
+    let mut out: Vec<String> = Vec::new();
+    let mut in_enroll = false;
+    let mut seen_enroll = false;
+    let mut wrote_flag = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if in_enroll && !wrote_flag {
+                out.push(flag.clone());
+                wrote_flag = true;
+            }
+            in_enroll = trimmed == "[enroll]";
+            seen_enroll |= in_enroll;
+            out.push(line.to_owned());
+            continue;
+        }
+        if in_enroll && trimmed.starts_with("enabled") {
+            out.push(flag.clone());
+            wrote_flag = true;
+            continue;
+        }
+        out.push(line.to_owned());
+    }
+    if in_enroll && !wrote_flag {
+        out.push(flag.clone());
+    }
+    if !seen_enroll {
+        out.push(String::new());
+        out.push("[enroll]".to_owned());
+        out.push(flag);
+    }
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
 }
 
 #[derive(Debug, Args)]
@@ -64,6 +229,11 @@ pub struct InitArgs {
     /// The control socket path. Defaults to /run/vallum/<name>.sock.
     #[arg(long, value_name = "PATH")]
     pub control: Option<PathBuf>,
+
+    /// Allow devices to enrol with a one-time token, which opens UDP
+    /// `listen + 1` and enables the `vallum-enroll@` unit.
+    #[arg(long)]
+    pub enroll: bool,
 
     /// A DNS server to push to clients through `[quick]`. Repeatable.
     #[arg(long, value_name = "ADDR")]
@@ -131,6 +301,7 @@ struct Report {
 pub fn server(args: &ServerArgs) -> Result<(), Error> {
     match &args.command {
         ServerCommand::Init(init) => self::init(init),
+        ServerCommand::Enroll(args) => enroll(args),
     }
 }
 
@@ -218,6 +389,15 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
         }
         if !args.no_firewall {
             steps.extend(hostnet::plan_firewall(&host, port, &interface));
+            if args.enroll {
+                // The responder listens on the next port up; open it too, or the
+                // feature exists but nothing can reach it.
+                steps.extend(hostnet::plan_firewall(
+                    &host,
+                    port.saturating_add(1),
+                    &interface,
+                ));
+            }
         }
         if !args.no_nat {
             steps.extend(hostnet::plan_nat(&v4, &v6));
@@ -407,6 +587,9 @@ fn write_config(
         body.push_str(&format!("dns = [{list}]\n"));
     }
     body.push_str("table = \"auto\"\n");
+    if args.enroll {
+        body.push_str("\n[enroll]\nenabled = true\n");
+    }
 
     if args.dry_run {
         say!("   would write {} (0600):", args.config.display());
@@ -622,6 +805,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_enroll_toggle_adds_and_flips_the_table() {
+        let plain = "[interface]\nname = \"v0\"\n";
+        let added = set_enroll_flag(plain, true);
+        assert!(added.contains("[enroll]\nenabled = true"), "{added}");
+
+        let off = "[interface]\nname = \"v0\"\n\n[enroll]\nenabled = false\n";
+        let on = set_enroll_flag(off, true);
+        assert!(on.contains("enabled = true"), "{on}");
+        assert!(!on.contains("enabled = false"), "{on}");
+        assert!(set_enroll_flag(&on, false).contains("enabled = false"));
+
+        // A table that exists without the flag gets it, and the next table
+        // is not disturbed.
+        let partial = "[enroll]\nport = 51821\n\n[log]\nlevel = \"info\"\n";
+        let fixed = set_enroll_flag(partial, true);
+        assert!(fixed.contains("enabled = true"), "{fixed}");
+        assert!(fixed.contains("port = 51821"), "{fixed}");
+        assert!(fixed.contains("[log]"), "{fixed}");
+    }
+
+    #[test]
     fn a_listen_address_must_name_a_port() {
         assert_eq!(listen_port("0.0.0.0:51820").unwrap(), 51820);
         assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
@@ -669,6 +873,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let config = dir.join("vallum0.toml");
         let args = InitArgs {
+            enroll: false,
             config: config.clone(),
             name: None,
             addresses: vec!["10.7.0.1/24".to_owned()],
@@ -698,6 +903,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("vallum0.toml");
         let args = InitArgs {
+            enroll: false,
             config: config.clone(),
             name: Some("vallum9".to_owned()),
             addresses: vec!["10.7.0.1/24".to_owned(), "fd00:7::1/64".to_owned()],
