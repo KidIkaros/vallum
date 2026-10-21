@@ -315,7 +315,7 @@ install_binaries() {
 
 install_docs() {
     local unit
-    for unit in vallum@.service vallum-quick@.service vallum-enroll@.service \
+    for unit in vallum@.service vallum-quick@.service vallum-quick-watch@.service vallum-enroll@.service \
         vallum-metrics.service vallum-metrics.timer; do
         if [ -f "$SOURCE_DIR/$unit" ]; then
             run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
@@ -397,6 +397,7 @@ uninstall() {
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-quick@.service" \
+        "$UNIT_DIR/vallum-quick-watch@.service" \
         "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
         "$UNIT_DIR/vallum-metrics.timer"
     run rm -f /usr/share/man/man8/vallum.8 /usr/share/man/man8/vallum-quick.8 \

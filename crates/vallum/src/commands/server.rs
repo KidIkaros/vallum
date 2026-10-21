@@ -25,6 +25,7 @@ use crate::{control, entropy, hostnet, keys, Error};
 /// The two units a server needs: the daemon, and the host-networking one-shot.
 const DAEMON_UNIT: &str = include_str!("../../../../packaging/vallum@.service");
 const QUICK_UNIT: &str = include_str!("../../../../packaging/vallum-quick@.service");
+const WATCH_UNIT: &str = include_str!("../../../../packaging/vallum-quick-watch@.service");
 const ENROLL_UNIT: &str = include_str!("../../../../packaging/vallum-enroll@.service");
 
 #[derive(Debug, Args)]
@@ -848,14 +849,20 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     let unit_dir = Path::new("/etc/systemd/system");
     let daemon_unit = unit_dir.join("vallum@.service");
     let quick_unit = unit_dir.join("vallum-quick@.service");
+    let watch_unit = unit_dir.join("vallum-quick-watch@.service");
     if dry_run {
         say!("   would install {}", daemon_unit.display());
         say!("   would install {}", quick_unit.display());
-        say!("   would enable --now vallum@{instance} vallum-quick@{instance}");
+        say!("   would install {}", watch_unit.display());
+        say!(
+            "   would enable --now vallum@{instance} vallum-quick@{instance} \
+             vallum-quick-watch@{instance}"
+        );
         return Ok("would install and start".to_owned());
     }
     write_atomic(&daemon_unit, DAEMON_UNIT, 0o644)?;
     write_atomic(&quick_unit, QUICK_UNIT, 0o644)?;
+    write_atomic(&watch_unit, WATCH_UNIT, 0o644)?;
     let enroll_unit = unit_dir.join("vallum-enroll@.service");
     write_atomic(&enroll_unit, ENROLL_UNIT, 0o644)?;
     systemctl(&["daemon-reload"])?;
@@ -865,6 +872,7 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     for unit in [
         format!("vallum@{instance}"),
         format!("vallum-quick@{instance}"),
+        format!("vallum-quick-watch@{instance}"),
     ] {
         systemctl(&["enable", &unit])?;
         systemctl(&["restart", &unit])?;

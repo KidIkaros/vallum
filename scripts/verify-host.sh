@@ -57,8 +57,8 @@ cleanup() {
     ip netns del vallumtest-ns >/dev/null 2>&1
     ip link del veth-a >/dev/null 2>&1
     [ -f "$WORK/client/laptop.toml" ] && "$QUICK" detach "$WORK/client/laptop.toml" >/dev/null 2>&1
-    systemctl disable --now "vallum-quick@$IFACE" "vallum@$IFACE" >/dev/null 2>&1
-    rm -f "$UNIT_D/vallum@.service" "$UNIT_D/vallum-quick@.service"
+    systemctl disable --now "vallum-quick-watch@$IFACE" "vallum-quick@$IFACE" "vallum@$IFACE" >/dev/null 2>&1
+    rm -f "$UNIT_D/vallum@.service" "$UNIT_D/vallum-quick@.service" "$UNIT_D/vallum-quick-watch@.service"
     systemctl daemon-reload >/dev/null 2>&1
     nft delete table inet vallum >/dev/null 2>&1
     iptables -D FORWARD -i "$IFACE" -j ACCEPT >/dev/null 2>&1
@@ -166,11 +166,13 @@ fi
 
 # ── services ─────────────────────────────────────────────────────────────────
 say "systemd units"
-[ -f "$UNIT_D/vallum@.service" ] && [ -f "$UNIT_D/vallum-quick@.service" ] || bad "unit files were not installed"
+[ -f "$UNIT_D/vallum@.service" ] && [ -f "$UNIT_D/vallum-quick@.service" ] \
+    && [ -f "$UNIT_D/vallum-quick-watch@.service" ] || bad "unit files were not installed"
 sleep 2
 [ "$(systemctl is-active vallum@$IFACE)" = active ] || { journalctl -u vallum@$IFACE --no-pager -n 15; bad "vallum@$IFACE is not active"; }
 [ "$(systemctl is-active vallum-quick@$IFACE)" = active ] || { journalctl -u vallum-quick@$IFACE --no-pager -n 15; bad "vallum-quick@$IFACE is not active"; }
-ok "vallum@$IFACE and vallum-quick@$IFACE are active"
+[ "$(systemctl is-active vallum-quick-watch@$IFACE)" = active ] || { journalctl -u vallum-quick-watch@$IFACE --no-pager -n 15; bad "vallum-quick-watch@$IFACE is not active"; }
+ok "vallum@$IFACE, vallum-quick@$IFACE and vallum-quick-watch@$IFACE are active"
 [ -S /run/vallum/$IFACE.sock ] || bad "control socket missing"
 ok "control socket live"
 ip link show "$IFACE" >/dev/null 2>&1 || bad "TUN $IFACE does not exist"

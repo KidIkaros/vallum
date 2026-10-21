@@ -121,6 +121,7 @@ cleanup() {
             sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
             sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
             sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                       /etc/systemd/system/vallum-quick-watch@.service \
                        /etc/systemd/system/vallum-enroll@.service
             sudo systemctl daemon-reload >/dev/null 2>&1
             sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
@@ -162,6 +163,7 @@ if rsh "test -e /etc/vallum" 2>/dev/null; then
         sudo systemctl stop 'vallum@*' 'vallum-quick@*' 'vallum-enroll@*' >/dev/null 2>&1
         sudo rm -rf /etc/systemd/system/multi-user.target.wants/vallum*@*
         sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                   /etc/systemd/system/vallum-quick-watch@.service \
                    /etc/systemd/system/vallum-enroll@.service
         sudo systemctl daemon-reload >/dev/null 2>&1
         sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
@@ -249,6 +251,7 @@ if [ "$UPGRADE" = 1 ]; then
          done && sudo systemctl daemon-reload" || bad "install previous release"
     ok "previous release $prev installed"
     rscp packaging/vallum@.service packaging/vallum-quick@.service \
+        packaging/vallum-quick-watch@.service \
         packaging/vallum-enroll@.service "$TARGET:$REMOTE_DIR/" || bad "scp new units"
 fi
 
@@ -451,10 +454,10 @@ if [ "$UPGRADE" = 1 ]; then
     say "upgrading the remote to this tree"
     rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
          sudo install -m0755 $REMOTE_DIR/vallum-quick /usr/bin/vallum-quick && \
-         for u in vallum@.service vallum-quick@.service vallum-enroll@.service; do \
+         for u in vallum@.service vallum-quick@.service vallum-quick-watch@.service vallum-enroll@.service; do \
              sudo install -m0644 $REMOTE_DIR/\$u /etc/systemd/system/\$u; \
          done && sudo systemctl daemon-reload && \
-         sudo systemctl restart vallum@vallumrc vallum-quick@vallumrc" || bad "binary+unit upgrade"
+         sudo systemctl restart vallum@vallumrc vallum-quick@vallumrc vallum-quick-watch@vallumrc" || bad "binary+unit upgrade"
     # /run/vallum is 0750 root:root — an unprivileged stat never sees the
     # socket even when the daemon is healthy. Probe as root, and on failure
     # show the journal rather than a bare FAIL.

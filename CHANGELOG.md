@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The routes now follow the session.** A new `vallum-quick watch` runs as
+  `vallum-quick-watch@.service` and asks the control socket how old the newest
+  handshake is. A full tunnel whose peer stops answering has its policy rules
+  and default route withdrawn after 90 s, so the host gets its own gateway back
+  instead of routing everything into a tunnel with nothing behind it; they are
+  restored when a handshake returns (the daemon rekeys at 120 s, so recovery is
+  bounded by that). `attach` gated the way in; nothing gated the way out. A
+  split tunnel is left alone — a dead `/24` hurts only itself.
 - **Host routing teardown removes what was installed.** `vallum-quick` records
   the exact `ip` plan an attach executes under `/var/lib/vallum`, and teardown
   replays it in reverse. Teardown used to re-derive the plan from the config,

@@ -81,6 +81,23 @@ enum Action {
         #[arg(long)]
         allow_insecure_config: bool,
     },
+    /// Hold the routes only while the session is alive.
+    ///
+    /// `attach` refuses to install a full tunnel without a handshake. This is
+    /// the other half: it takes the routes back out when the peer stops
+    /// answering, because a dead server behind a live interface is a host with
+    /// no internet.
+    Watch {
+        /// The configuration file.
+        config: PathBuf,
+        /// Report each tick instead of changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Run hooks even though this config is not root-owned (they run as
+        /// root, so a config another user can edit is root execution).
+        #[arg(long)]
+        allow_insecure_config: bool,
+    },
     /// Print the config without its `[quick]` table.
     Strip {
         /// The configuration file.
@@ -125,6 +142,11 @@ fn main() -> std::process::ExitCode {
             dry_run,
             allow_insecure_config,
         } => detach(config, *dry_run, *allow_insecure_config),
+        Action::Watch {
+            config,
+            dry_run,
+            allow_insecure_config,
+        } => watch(config, *dry_run, *allow_insecure_config),
         Action::Strip { config } => strip(config),
         Action::Save {
             config,
@@ -1241,21 +1263,7 @@ fn wait_for_session(
     if !full_tunnel {
         return Ok(());
     }
-    let socket = config
-        .interface
-        .control
-        .clone()
-        .map(|path| {
-            if path.is_relative() {
-                config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("/"))
-                    .join(path)
-            } else {
-                path
-            }
-        })
-        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")));
+    let socket = control_socket(config, config_path, interface);
     let deadline = std::time::Instant::now() + SESSION_WAIT;
     while std::time::Instant::now() < deadline {
         if let Ok(reply) = uapi_get(&socket) {
@@ -1285,6 +1293,158 @@ fn uapi_get(socket: &Path) -> std::io::Result<String> {
     let mut reply = String::new();
     stream.read_to_string(&mut reply)?;
     Ok(reply)
+}
+
+/// The control socket a config's daemon listens on.
+fn control_socket(config: &Config, config_path: &Path, interface: &str) -> PathBuf {
+    config
+        .interface
+        .control
+        .clone()
+        .map(|path| {
+            if path.is_relative() {
+                config_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(path)
+            } else {
+                path
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")))
+}
+
+/// What the watchdog should do with the routes on one tick.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Hold,
+    Withdraw,
+    Restore,
+}
+
+/// Decide from the session's age and whether the routes are currently in.
+///
+/// Pure, so the rule "a full tunnel with a dead session must not own the host's
+/// default route" is testable without a kernel, a socket or a clock.
+fn verdict(attached: bool, session_age: Option<Duration>, dead_after: Duration) -> Verdict {
+    let live = session_age.is_some_and(|age| age < dead_after);
+    match (attached, live) {
+        (true, false) => Verdict::Withdraw,
+        (false, true) => Verdict::Restore,
+        _ => Verdict::Hold,
+    }
+}
+
+/// How stale the newest handshake may be before the tunnel counts as dead.
+///
+/// Three keepalive periods plus slack: long enough that a slow rekey is not a
+/// withdrawal, short enough that a dead server costs a minute of egress rather
+/// than a reboot. `VALLUM_DEAD_AFTER_SECS` exists for the test harness, not as
+/// an operator knob.
+const DEAD_AFTER: Duration = Duration::from_secs(90);
+
+/// How often the watchdog asks the daemon whether the session is alive.
+const WATCH_POLL: Duration = Duration::from_secs(5);
+
+fn dead_after() -> Duration {
+    std::env::var("VALLUM_DEAD_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEAD_AFTER)
+}
+
+/// How long ago the newest handshake happened, if there has been one.
+fn session_age(socket: &Path) -> Option<Duration> {
+    let reply = uapi_get(socket).ok()?;
+    let secs = reply
+        .lines()
+        .find_map(|line| line.strip_prefix("last_handshake_time_sec="))
+        .and_then(|value| value.trim().parse::<u64>().ok())?;
+    if secs == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(Duration::from_secs(now.saturating_sub(secs)))
+}
+
+/// Hold the routes only while the session is alive.
+///
+/// `attach` gates installation on a handshake, but nothing took the routes back
+/// out when the peer stopped answering: the daemon stays up, the interface
+/// stays up, and a full tunnel keeps the host's traffic pointed at a peer that
+/// is not there. A dead server then costs the host its internet until someone
+/// reboots it. This is the other half of that gate.
+fn watch(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_normalized(config_path)?;
+    check_config_ownership(config_path, &config, allow_insecure_config)?;
+    let interface = config
+        .interface
+        .name
+        .clone()
+        .unwrap_or_else(|| "vallum0".to_owned());
+    let table = config.quick.table.as_deref().unwrap_or("auto");
+    let full_tunnel = config.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
+    });
+    if !full_tunnel {
+        // A dead split tunnel hurts only its own prefixes, so there is nothing
+        // to withdraw and no reason to hold a process open.
+        eprintln!("vallum-quick: {interface}: split tunnel — nothing to withdraw");
+        return Ok(());
+    }
+
+    let socket = control_socket(&config, config_path, &interface);
+    let dead_after = dead_after();
+    let mut attached = read_plan(&state_path(&interface)).is_some();
+    loop {
+        match verdict(attached, session_age(&socket), dead_after) {
+            Verdict::Withdraw => {
+                if dry_run {
+                    println!(
+                        "would withdraw {interface}: no handshake within {}s",
+                        dead_after.as_secs()
+                    );
+                } else {
+                    remove_routes(&config, &interface, table, false);
+                    eprintln!(
+                        "vallum-quick: {interface}: no handshake for {}s — routes withdrawn, \
+                         this host keeps its own gateway",
+                        dead_after.as_secs()
+                    );
+                }
+                attached = false;
+            }
+            Verdict::Restore => {
+                if dry_run {
+                    println!("would restore {interface}: the session is back");
+                } else {
+                    match apply_routes(&config, &interface, table, false) {
+                        Ok(()) => {
+                            attached = true;
+                            eprintln!(
+                                "vallum-quick: {interface}: session is back — routes restored"
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("vallum-quick: {interface}: could not restore: {error}");
+                        }
+                    }
+                }
+            }
+            Verdict::Hold => {}
+        }
+        std::thread::sleep(WATCH_POLL);
+    }
 }
 
 fn wait_for_interface(interface: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1599,6 +1759,35 @@ mod tests {
             "vcli".to_owned(),
         ];
         assert_eq!(route_query(&v6).unwrap()[0], "-6");
+    }
+
+    #[test]
+    fn a_dead_session_withdraws_the_routes_and_a_live_one_restores_them() {
+        // The loop that was missing: `attach` gated on a handshake going in,
+        // and nothing took the routes back out when the peer stopped
+        // answering. A full tunnel then owned the host's default route with
+        // nothing behind it.
+        let dead_after = Duration::from_secs(90);
+
+        // A fresh session holds.
+        assert_eq!(
+            verdict(true, Some(Duration::from_secs(5)), dead_after),
+            Verdict::Hold
+        );
+        // The server stopped answering: withdraw, so the host keeps its gateway.
+        assert_eq!(
+            verdict(true, Some(Duration::from_secs(91)), dead_after),
+            Verdict::Withdraw
+        );
+        // Never handshaked at all is not a live session.
+        assert_eq!(verdict(true, None, dead_after), Verdict::Withdraw);
+        // The session came back: restore.
+        assert_eq!(
+            verdict(false, Some(Duration::from_secs(2)), dead_after),
+            Verdict::Restore
+        );
+        // Withdrawn and still dead: nothing to do.
+        assert_eq!(verdict(false, None, dead_after), Verdict::Hold);
     }
 
     #[test]

@@ -186,6 +186,7 @@ assemble() {
     cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
     cp packaging/vallum.bash packaging/vallum.zsh packaging/vallum.fish "dist/$name/"
     cp packaging/vallum@.service packaging/vallum-quick@.service \
+        packaging/vallum-quick-watch@.service \
         packaging/vallum-enroll@.service packaging/vallum-metrics.service \
         packaging/vallum-metrics.timer packaging/vallum-alerts.yml "dist/$name/"
     tar -C dist -czf "dist/$name.tar.gz" "$name"
@@ -197,6 +198,7 @@ assemble() {
     # match, tar would die on SIGPIPE, and pipefail would turn a present
     # member into a false failure.
     for member in vallum vallum-quick vallum@.service vallum-quick@.service \
+        vallum-quick-watch@.service \
         vallum-enroll@.service vallum-metrics.service vallum-metrics.timer \
         vallum-alerts.yml vallum.8 vallum-quick.8 vallum.toml.5; do
         [ "$(tar -tzf "dist/$name.tar.gz" | grep -xc "$name/$member")" -ge 1 ] \
