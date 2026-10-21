@@ -135,14 +135,20 @@ sudo vallum peer invite laptop
 #   → sudo vallum setup --join vpn.example.com:51821 --name laptop --token a1b2-…
 
 # client: exactly that one-liner; the key is generated locally again
-sudo vallum setup --join vpn.example.com:51821 --name laptop --token a1b2-…
+sudo vallum setup --join vpn.example.com:51821 --name laptop \
+     --invite-id <hex> --token a1b2-… --expect <fingerprint>
 ```
 
-The token transport needs `[enroll] enabled = true` in the server config and
-`sudo systemctl enable --now vallum-enroll@vallum0`. It rides one UDP port
-(`listen + 1`), is off by default, and the token proves the invite — so a bad
-token is dropped silently, while expiry, reuse and a second key get a sealed,
-honest refusal.
+The token transport is a switch, not a config edit: `vallum setup --server`
+offers it, and `vallum server enroll --enable|--disable` flips it together with
+its unit and firewall port. It rides one UDP port (`listen + 1`) and is off by
+default.
+
+The exchange has the shape of the tunnel handshake (ADR-0015): a cookie gate
+before any work, an opaque invite id instead of the device name, and an
+ephemeral KEM leg so the answer's key is `KDF(token ‖ ss)`. `--expect` checks
+the server's fingerprint; `--public-key` on the invite pins it to one device
+key, so a stolen token enrols nothing.
 
 `vallum setup` with no flags asks the question interactively; `--server` and
 `--client FILE` are the scriptable forms, and `--dry-run` prints the whole plan

@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased — enrolment v2
+
+Enrolment stops being a side door and takes the shape of the tunnel handshake
+(ADR-0015). It is a breaking change to the enrolment wire only; the tunnel
+protocol is unchanged.
+
+### Enrolment
+
+- **Two ways to enrol without a bundle.** `vallum setup --remote user@host`
+  (the client generates its key, only its public line travels over SSH) and
+  `vallum peer invite` → `vallum setup --join host:port` for machines that
+  cannot SSH in. Neither ever sends a private key.
+- **`peer invite`** mints a single-use token (15 minutes), prints the exact
+  client command, the invite id, and the server's fingerprint. `--public-key`
+  pins the invite to one device key, so a stolen token enrols nothing.
+- **`setup --join --expect <fingerprint>`** refuses a server whose fingerprint
+  does not match the invite — the answer is authenticated to the token, so this
+  is how a client checks *which* server answered. Nothing is written on a
+  mismatch.
+- **Enrolment v2 wire** (`VEN2`): cookie gate before any lookup or KEM work,
+  opaque invite id instead of the peer name, token-keyed admission tag, and an
+  ephemeral KEM leg so the reply key is `KDF(token ‖ ss)` — forward secrecy and
+  MEX resistance, as in PQ-WireGuard's Algorithm 2.
+- **Enrolment proves the tunnel.** After installing, `setup` waits for a real
+  handshake and pings the server's tunnel address, naming the cause when it
+  fails instead of reporting success on a dead network.
+
+### Server
+
+- `server init --enroll`, the `setup --server` question, and
+  `server enroll --enable|--disable` turn token enrolment on and off together
+  with its unit and firewall port.
+- `vallum-enroll@.service` hardened: empty capability set, syscall filter,
+  `MemoryDenyWriteExecute`, kernel/clock/hostname/cgroup protection.
+
+### Client and keys
+
+- `peer add` no longer generates the device's key by default: it takes a public
+  line, or an explicit `--ship-key` that warns and requires a bundle path.
+  `import-bundle` says the key it installed was generated on the server.
+- `setup --join` reports the tunnel's real endpoint and address, not the
+  enrolment port.
+- `vallum-quick` installs a full-tunnel default route the way WireGuard does —
+  its own table, `not fwmark` rules, `suppress_prefixlength 0` — instead of
+  hijacking the main table. Generated client configs carry `fwmark = 51820`.
+- The dashboard no longer runs `systemctl` as a normal user (which raised a
+  polkit dialog); it hands over the `sudo` command instead, and only treats a
+  unit as installed when the config is under `/etc/vallum`.
+- `doctor` reports a config the units cannot read (root without
+  `CAP_DAC_OVERRIDE` cannot read a `0600` file owned by someone else).
+
+### Fixes
+
+- `install.sh --local` installs and stops, instead of silently preparing the
+  host as a server.
+- `install.sh --from-release` works with `GH_TOKEN` on a private repository
+  (REST asset endpoint, not the web URL).
+- A config moved into `/etc/vallum` is chowned to root, so the capability-bound
+  units can read it.
+
 ## 1.5.0
 
 The release that makes Vallum deployable and explains itself: one command asks

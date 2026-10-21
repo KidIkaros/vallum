@@ -12,12 +12,18 @@ mutually authenticated key confirmation. It is configured by a TOML file; the
 daemon owns the tunnel, the TUN interface and the UDP socket, and nothing else.
 .SH COMMANDS
 .TP
-.B "setup [--server | --client FILE]"
+.B "setup [--server | --client FILE | --remote USER@HOST | --join HOST:PORT --invite-id HEX --token TOKEN]"
 The one entry point: asks what this machine is and runs only that role's
 steps. \fB--server\fR is \fBserver init\fR plus the offer to enrol a first
 client; \fB--client FILE\fR is \fBimport-bundle --install\fR. With no flags
-it prompts, and without a terminal it prints the two paths and changes
-nothing.
+it prompts, and without a terminal it prints the paths and changes nothing.
+.PP
+\fB--remote\fR and \fB--join\fR enrol without a bundle and without ever
+sending this machine's private key: \fB--remote\fR uses SSH, \fB--join\fR
+uses a single-use token. \fB--token -\fR reads the token from stdin so it
+stays out of shell history. \fB--expect FINGERPRINT\fR refuses a server whose
+fingerprint does not match the invite. Either way, enrolment finishes by
+waiting for a real handshake and pinging the server's tunnel address.
 .TP
 .B run --config FILE
 Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
@@ -67,7 +73,7 @@ and install and start the systemd units. Idempotent. `--dry-run` prints the
 plan; `--no-nat`, `--no-firewall`, `--no-forward`, `--no-host`, and
 `--no-service` disable individual steps; `--json` is the machine interface.
 .TP
-.B peer add NAME (--public-key LINE | --public-key-file FILE | --bundle-out FILE) [--address CIDR] [--allowed-ips LIST] [--endpoint HOST:PORT] [--keepalive SECS] [--psk] [--client-config-out FILE] [--forget-key] [--json]
+.B peer add NAME (--public-key LINE | --public-key-file FILE | --ship-key --bundle-out FILE) [--address CIDR] [--allowed-ips LIST] [--endpoint HOST:PORT] [--keepalive SECS] [--psk] [--client-config-out FILE] [--forget-key] [--json]
 .PP
 Enrol a peer. Allocates an address from the interface's subnets unless one is
 given, refuses an overlapping prefix, writes the config without reformatting it,
@@ -115,9 +121,11 @@ document is checked against its own key.
 .B identity show [--suite ID] --document FILE [--json]
 Print a document's label, key sizes, window and fingerprint without verifying it.
 .TP
-.B peer invite NAME [--config FILE] [--ttl MINUTES] [--json]
+.B peer invite NAME [--public-key LINE | --public-key-file FILE] [--config FILE] [--ttl MINUTES] [--json]
 Mint a single-use token so a device can enrol without SSH access. Prints the
-exact `vallum setup --join` line the client runs. Needs `[enroll] enabled =
+exact `vallum setup --join` line the client runs, including the invite id and
+the server's fingerprint. With `--public-key`, the invite is pinned to that
+device's key: a stolen token then enrols nothing. Needs `[enroll] enabled =
 true` and `vallum-enroll@<iface>` running.
 .PP
 .B peer enroll NAME --public-key LINE|--public-key-file FILE [--address CIDR] [--json]
