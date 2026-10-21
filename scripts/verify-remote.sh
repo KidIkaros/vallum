@@ -154,11 +154,24 @@ FORWARD_WAS=$(rsh "cat /proc/sys/net/ipv4/ip_forward" 2>/dev/null | tr -d '[:spa
 [ -n "$FORWARD_WAS" ] || bad "cannot read the remote's ip_forward"
 ok "passwordless sudo, no existing deployment, ip_forward=$FORWARD_WAS"
 
-# The target may be an ssh alias, so ask ssh what it would connect to.
-HOSTNAME=$(ssh -G "$TARGET" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+# The target may be an ssh alias, so ask ssh what it would connect to — as the
+# invoking user, because `ssh` reads `~/.ssh/config` from the passwd entry and
+# root's home has none of their aliases.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    HOSTNAME=$(sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh -G "$TARGET" 2>/dev/null \
+        | awk '/^hostname /{print $2; exit}')
+else
+    HOSTNAME=$(ssh -G "$TARGET" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+fi
 [ -n "$HOSTNAME" ] || HOSTNAME=${TARGET#*@}
 PUBLIC=$(getent hosts "$HOSTNAME" 2>/dev/null | awk '{print $1; exit}')
-[ -n "$PUBLIC" ] || bad "cannot resolve $HOSTNAME"
+if [ -z "$PUBLIC" ]; then
+    # `ssh -G` may already have given us an address.
+    case "$HOSTNAME" in
+        *[0-9].[0-9]*) PUBLIC=$HOSTNAME ;;
+    esac
+fi
+[ -n "$PUBLIC" ] || bad "cannot resolve $HOSTNAME (checked the invoking user's ssh config and DNS)"
 ok "the client will dial $PUBLIC:$PORT"
 
 say "copying the binaries"
