@@ -103,6 +103,7 @@ notes until the build moves to an older base.
 | Property | State |
 |---|---|
 | Crypto | tri-hybrid X25519 + sntrup761 + ML-KEM-768, handshake fragmentation managed |
+| Crypto dependency | `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`); classical X25519 mitigates single-point PQ failure |
 | Addressing | dual-stack by default — `10.7.0.1/24` and `fd00:7::1/64`; a peer gets one address per family |
 | Independent audit | **None.** Stated plainly in the README |
 | Fail-closed | **Implemented** — `vallum-guard@` blocks egress outside the tunnel, endpoint excepted (ADR-0018) |

@@ -125,7 +125,7 @@ property of the product.
 outage and a reboot; it backs off rather than hammering; and the suite in (1)
 covers recovery, not just steady state.
 
-### 6. Say what the crypto is
+### 6. Say what the crypto is (Closed)
 
 **Problem.** `origin-crypto-sdk` opens with `EXPERIMENTAL — NOT FOR PRODUCTION
 USE`. Vallum builds its handshake on it. The security model says "not
@@ -138,6 +138,11 @@ and then the tin has to match the decision.
 **Done means** either an audit, or the documentation and the `--version`/`--help`
 signifier say what the SDK says. Choosing the second is a legitimate outcome; it
 just has to be chosen and stated, not left for a reader to discover.
+
+**Resolved:** `--version` reports `experimental-pq`, `--help` explicitly states the
+dependency status (`origin-crypto-sdk` `EXPERIMENTAL — NOT FOR PRODUCTION USE`),
+and `README.md`, `docs/requirements.md`, and `docs/security-model.md` harmonize
+the exact tri-hybrid and unaudited PQ posture.
 
 ### 7. The operator finds out before the user does
 
@@ -185,8 +190,10 @@ separate approximation of it.
 
 ## Open questions that need a decision, not work
 
-1. **Interface-name collisions.** Two peers sharing the first eight characters map
-   to one interface. It warns; it does not prevent. Warn or refuse?
+1. **Interface-name collisions (Resolved: Refuse).** Two peers sharing the first eight
+   characters map to one 15-character Linux interface (`vallum-<peer>`). `peer add`
+   and `enroll` now proactively refuse collisions with an actionable message prompting
+   the operator to choose names differing within the first 8 characters.
 2. **The four `NOT VERIFIED` assertions in `verify-host.sh`.** Honestly labelled
    and covered elsewhere, but they are why the gate cannot be the sole evidence
    for traffic. Move them to `verify-remote.sh`, or delete them and let the gates

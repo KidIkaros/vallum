@@ -56,6 +56,13 @@ operator must guarantee. The proofs behind the claims live in
 - **Third-party audit** — the assessment in `docs/proof/pentest.md` is
   self-conducted. An external cryptographic audit is a roadmap item, not a
   completed one. Weight your deployment accordingly.
+- **Experimental post-quantum primitives** — the underlying
+  `origin-crypto-sdk` dependency states `EXPERIMENTAL — NOT FOR PRODUCTION USE`.
+  Vallum mitigates implementation risks by composing classical X25519 alongside
+  sntrup761 and ML-KEM-768 in a tri-hybrid design (breaking session confidentiality
+  requires compromising all three algorithms simultaneously), but the post-quantum
+  implementations have not undergone independent third-party audit. Weight your
+  deployment accordingly.
 - **Compromised-key revocation at scale** — removing a peer revokes it;
   there is no CRL broadcast. Key rotation is per-peer (`peer rotate` →
   `peer finalize`), not fleet-wide.

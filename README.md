@@ -156,6 +156,11 @@ scripts/
   verify-remote.sh                two-host acceptance harness (bundle, SSH, token v2)
 ```
 
+## Security & Cryptographic Posture
+
+- **Tri-hybrid KEM:** Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking session confidentiality requires compromising all three algorithms simultaneously.
+- **Dependency Status:** Post-quantum algorithms are implemented via `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`). The implementations have not undergone external third-party audit; deployments should weigh risk accordingly.
+
 ## Build & Verify
 
 Clone `vallum` and `origin-crypto-sdk` as siblings (or run `./scripts/bootstrap.sh`):

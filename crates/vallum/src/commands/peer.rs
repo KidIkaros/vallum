@@ -981,6 +981,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             args.name
         )));
     }
+    ensure_no_interface_collision(&file, &args.name)?;
     let server = load_server(&args.config)?;
 
     // 1. The peer's identity: a public line, a document, or a key generated here.
@@ -1837,6 +1838,25 @@ fn ensure_no_overlap(file: &ConfigFile, name: &str, allowed: &[String]) -> Resul
     Ok(())
 }
 
+fn ensure_no_interface_collision(file: &ConfigFile, name: &str) -> Result<(), Error> {
+    let (candidate_iface, _) = client_interface_name(name);
+    for peer in file.peers() {
+        if peer.name == name {
+            continue;
+        }
+        let (existing_iface, _) = client_interface_name(&peer.name);
+        if candidate_iface == existing_iface {
+            return Err(Error::Usage(format!(
+                "peer name `{name}` yields client interface `{candidate_iface}`, which collides \
+                 with existing peer `{}` (Linux interface names are limited to 15 characters); \
+                 choose a name that differs in the first 8 characters",
+                peer.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn listen_port_of(config_path: &Path) -> Result<u16, Error> {
     let config = Config::load(config_path)?;
     let listen = config
@@ -2150,5 +2170,32 @@ mod tests {
         assert_eq!(one, fingerprint("vallum1:0003:aa:-"));
         assert_eq!(one.len(), 12);
         assert_ne!(one, fingerprint("vallum1:0003:bb:-"));
+    }
+
+    #[test]
+    fn a_colliding_peer_interface_name_is_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-peer-iface-coll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vallum0.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"server.key\"\n\
+             address = \"10.7.0.1/24\"\n\n[[peer]]\nname = \"vpsclient-a\"\n\
+             public_key = \"vallum1:0003:aa:-\"\nallowed_ips = [\"10.7.0.2/32\"]\n",
+        )
+        .unwrap();
+        let file = ConfigFile::load(&path).unwrap();
+
+        // "vpsclient-b" truncated becomes "vallum-vpsclien", identical to "vpsclient-a".
+        let error = ensure_no_interface_collision(&file, "vpsclient-b").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("collides with existing peer `vpsclient-a`"));
+
+        // A distinct peer name succeeds.
+        ensure_no_interface_collision(&file, "laptop").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -31,12 +31,16 @@ use vallum::Error;
 #[derive(Parser)]
 #[command(
     name = "vallum",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (linux-only)"),
+    version = concat!(env!("CARGO_PKG_VERSION"), " (linux-only, experimental-pq)"),
     about = "Vallum — hybrid post-quantum layer-3 tunnel",
     long_about = "A hybrid post-quantum VPN. `vallum server init` prepares a server \
                   (key, config, forwarding, firewall, NAT, service), `vallum peer add` enrols \
                   a device, and `vallum import-bundle` sets up the client.\n\n\
-                  The daemon is Linux-only this release; see docs/deployment/server.md."
+                  The daemon is Linux-only this release; see docs/deployment/server.md.\n\n\
+                  Security Notice: Post-quantum primitives rely on origin-crypto-sdk \
+                  (EXPERIMENTAL — NOT FOR PRODUCTION USE). Vallum employs a tri-hybrid \
+                  design (X25519 + sntrup761 + ML-KEM-768); breaking session keys requires \
+                  breaking all three legs."
 )]
 struct Cli {
     /// Absent means "tell me what this machine can be", not an error.
