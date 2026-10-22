@@ -292,6 +292,8 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             last_handshake: last_handshake.map(|stamp| (stamp.unix_seconds(), stamp.nanos())),
             tx_bytes,
             rx_bytes,
+            window_sent: device.stats(id).map_or(0, |stats| stats.window_sent),
+            window_received: device.stats(id).map_or(0, |stats| stats.window_received),
             keepalive: config
                 .persistent_keepalive()
                 .map(|interval| u16::try_from(interval.as_secs()).unwrap_or(u16::MAX)),

@@ -92,6 +92,10 @@ pub mod field {
     /// Peer fields.
     pub const PERSISTENT_KEEPALIVE_INTERVAL: &str = "persistent_keepalive_interval";
     /// Peer fields.
+    pub const WINDOW_SENT: &str = "vallum_window_sent";
+    /// Peer fields.
+    pub const WINDOW_RECEIVED: &str = "vallum_window_received";
+    /// Peer fields.
     pub const ALLOWED_IP: &str = "allowed_ip";
     /// Peer fields.
     /// The unix second a peer's identity document expires, when it has one.
@@ -397,6 +401,10 @@ pub struct PeerState {
     pub tx_bytes: u64,
     /// Wire bytes received.
     pub rx_bytes: u64,
+    /// Datagrams sent in the most recent delivery window.
+    pub window_sent: u64,
+    /// Datagrams received and opened in the most recent delivery window.
+    pub window_received: u64,
     /// Persistent keepalive, in seconds.
     pub keepalive: Option<u16>,
     /// Allowed prefixes.
@@ -510,6 +518,14 @@ pub fn render_get(state: &DeviceState) -> String {
         }
         out.push_str(&format!("{}={}\n", field::TX_BYTES, peer.tx_bytes));
         out.push_str(&format!("{}={}\n", field::RX_BYTES, peer.rx_bytes));
+        // The only two numbers that say whether the tunnel is carrying traffic,
+        // as opposed to whether it has handshaked recently.
+        out.push_str(&format!("{}={}\n", field::WINDOW_SENT, peer.window_sent));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::WINDOW_RECEIVED,
+            peer.window_received
+        ));
         out.push_str(&format!(
             "{}={}\n",
             field::PERSISTENT_KEEPALIVE_INTERVAL,
@@ -884,7 +900,7 @@ mod tests {
             prop::option::of(prop::array::uniform32(any::<u8>())),
             prop::option::of(an_address()),
             prop::option::of((any::<u64>(), any::<u32>())),
-            (any::<u64>(), any::<u64>()),
+            (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>()),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
             prop::option::of((any::<u64>(), any::<bool>())),
@@ -899,7 +915,7 @@ mod tests {
                     preshared_key,
                     endpoint,
                     last_handshake,
-                    (tx_bytes, rx_bytes),
+                    (tx_bytes, rx_bytes, window_sent, window_received),
                     keepalive,
                     allowed_ips,
                     identity,
@@ -914,6 +930,8 @@ mod tests {
                     last_handshake,
                     tx_bytes,
                     rx_bytes,
+                    window_sent,
+                    window_received,
                     keepalive,
                     allowed_ips,
                     valid_until: identity.map(|(valid_until, _)| valid_until),
@@ -1151,6 +1169,8 @@ mod tests {
                 last_handshake: Some((1_700_000_000, 42)),
                 tx_bytes: 10,
                 rx_bytes: 20,
+                window_sent: 40,
+                window_received: 30,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
                 valid_until: Some(1_800_000_000),
@@ -1202,6 +1222,8 @@ mod tests {
                 last_handshake: None,
                 tx_bytes: 0,
                 rx_bytes: 0,
+                window_sent: 0,
+                window_received: 0,
                 keepalive: None,
                 allowed_ips: Vec::new(),
                 valid_until: None,

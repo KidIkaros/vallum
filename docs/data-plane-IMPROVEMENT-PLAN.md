@@ -25,6 +25,24 @@ Both numbers are already maintained in `device/data.rs`. What is missing is:
 Do **not** build a new probe. An end-to-end probe is a second mechanism for a
 signal the data plane already produces on its own traffic.
 
+**Implemented as `vallum_peer_delivery_ratio`** — datagrams received over
+datagrams sent, per peer, over a 60 s window, exposed in uapi
+(`vallum_window_sent`, `vallum_window_received`) and as a metric. An idle peer
+reports `1`, not `0`, because nothing sent is not the same as nothing delivered.
+
+### The limitation this metric has, stated up front
+
+A ratio compares two directions, so a genuinely one-way flow — bulk UDP upload,
+no return traffic — reads near zero while the tunnel is perfectly healthy. It
+detects "we are sending and the far side is not answering", which covers
+request/response traffic (most of it) but not pure egress.
+
+That is acceptable for an advisory signal and **not** acceptable as a sole
+trigger for withdrawing routes. Phase 2 must therefore keep the handshake-age
+floor and treat the ratio as one input, not the verdict. A metric that can
+produce a false outage is worse than one that misses a real one, because the
+first teaches operators to ignore it.
+
 Acceptance: a harness case that establishes a session, then drops packets at the
 far side, and reads a delivery ratio that falls below threshold — with the
 handshake age still fresh.

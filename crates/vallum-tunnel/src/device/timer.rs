@@ -35,6 +35,12 @@ impl Device {
     ) {
         let now = clock.monotonic_ms;
 
+        // (0) Turn the delivery window over, so the ratio describes recent
+        //     traffic rather than everything since the process started.
+        self.peers[index]
+            .window
+            .roll(now, crate::device::DELIVERY_WINDOW_MS);
+
         // (1) A shaping block whose window has closed releases its queue.
         let released = match self.peers[index].blocked_until {
             Some(deadline) if now >= deadline => {

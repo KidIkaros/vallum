@@ -115,11 +115,59 @@ pub(super) struct Peer {
     /// Wire bytes sent and received for this peer (G2 counters).
     pub(super) tx_bytes: u64,
     pub(super) rx_bytes: u64,
+    /// Datagram accounting for the current delivery window.
+    pub(super) window: DeliveryWindow,
     /// When the last handshake completed, for `show`.
     pub(super) last_handshake: Option<Tai64n>,
     /// A runtime `remove` marks the peer dead rather than shifting the table,
     /// so a `PeerId` never comes to mean a different peer.
     pub(super) removed: bool,
+}
+
+/// Datagram counts over a fixed window, for the delivery ratio.
+///
+/// Every other liveness signal in this device measures a proxy: key age,
+/// handshake age, keepalive cadence. None of them can distinguish a tunnel that
+/// carries traffic from one that handshakes perfectly and delivers one packet in
+/// a hundred — which is a failure that was observed on a real deployment, with
+/// `vallum status` reporting `up` throughout.
+///
+/// A count of "did we hear nothing" cannot see that either: 186 packets arriving
+/// against 14 626 sent is not silence. A ratio can, because it compares the two
+/// directions instead of asking whether one of them was zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct DeliveryWindow {
+    pub started_ms: u64,
+    pub sent: u64,
+    pub received: u64,
+    /// The window that closed most recently, so a ratio stays readable across a
+    /// rollover instead of dropping to zero every time the clock turns over.
+    pub last_sent: u64,
+    pub last_received: u64,
+}
+
+impl DeliveryWindow {
+    /// Start a new window if the current one has run its course.
+    pub(super) fn roll(&mut self, now: u64, window_ms: u64) {
+        if now.saturating_sub(self.started_ms) < window_ms {
+            return;
+        }
+        self.last_sent = self.sent;
+        self.last_received = self.received;
+        self.sent = 0;
+        self.received = 0;
+        self.started_ms = now;
+    }
+
+    /// Datagrams sent and received in the most recent window that has data.
+    #[must_use]
+    pub(super) fn settled(&self) -> (u64, u64) {
+        if self.sent > 0 || self.received > 0 {
+            (self.sent, self.received)
+        } else {
+            (self.last_sent, self.last_received)
+        }
+    }
 }
 
 impl Peer {
@@ -194,6 +242,7 @@ impl Peer {
             rejected: 0,
             tx_bytes: 0,
             rx_bytes: 0,
+            window: DeliveryWindow::default(),
             last_handshake: None,
             removed: false,
         }
@@ -213,4 +262,47 @@ pub(super) fn keepalive_millis(interval: Duration) -> u64 {
     u64::try_from(interval.as_millis())
         .unwrap_or(u64::MAX)
         .max(1)
+}
+
+#[cfg(test)]
+mod delivery_window_tests {
+    use super::DeliveryWindow;
+
+    fn window(sent: u64, received: u64) -> DeliveryWindow {
+        DeliveryWindow {
+            sent,
+            received,
+            ..DeliveryWindow::default()
+        }
+    }
+
+    #[test]
+    fn a_window_keeps_its_counts_until_it_closes() {
+        assert_eq!(window(100, 12).settled(), (100, 12));
+    }
+
+    #[test]
+    fn closing_a_window_keeps_the_last_one_readable() {
+        let mut open = window(100, 12);
+        open.roll(60_000, 60_000);
+
+        // The fresh window has nothing in it yet; the ratio must still describe
+        // the window that just closed rather than collapsing to zero.
+        assert_eq!(open.settled(), (100, 12));
+        assert_eq!((open.sent, open.received), (0, 0));
+
+        open.sent = 5;
+        assert_eq!(
+            open.settled(),
+            (5, 0),
+            "a live window wins once it has data"
+        );
+    }
+
+    #[test]
+    fn a_window_does_not_close_early() {
+        let mut open = window(7, 0);
+        open.roll(59_999, 60_000);
+        assert_eq!(open.sent, 7);
+    }
 }

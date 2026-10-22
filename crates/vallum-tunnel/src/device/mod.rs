@@ -289,9 +289,19 @@ pub struct PeerStats {
     pub tx_bytes: u64,
     /// Wire bytes received for this peer.
     pub rx_bytes: u64,
+    /// Datagrams sent in the most recent delivery window.
+    pub window_sent: u64,
+    /// Datagrams received and opened in the most recent delivery window.
+    pub window_received: u64,
     /// When the last handshake completed, if one has.
     pub last_handshake: Option<vallum_core::Tai64n>,
 }
+
+/// How long a delivery window lasts.
+///
+/// Long enough that an idle tunnel is not judged on three packets, short enough
+/// that a tunnel that stops carrying is visible well inside the rekey interval.
+pub const DELIVERY_WINDOW_MS: u64 = 60_000;
 
 // ── the device ───────────────────────────────────────────────────────
 
@@ -656,6 +666,8 @@ impl Device {
                 queued: peer.pending.len(),
                 tx_bytes: peer.tx_bytes,
                 rx_bytes: peer.rx_bytes,
+                window_sent: peer.window.settled().0,
+                window_received: peer.window.settled().1,
                 last_handshake: peer.last_handshake,
             })
         })

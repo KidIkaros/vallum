@@ -255,6 +255,13 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
         ),
         ("peer_tx_bytes_total", "counter", "Bytes sent to the peer."),
         (
+            "peer_delivery_ratio",
+            "gauge",
+            "Datagrams received over datagrams sent in the last window; 1 when \
+             nothing was sent. Below 1 means the tunnel is sending and not \
+             getting answers, which handshake age cannot show.",
+        ),
+        (
             "peer_last_handshake_seconds",
             "gauge",
             "Unix time of the peer's last handshake, or 0.",
@@ -293,6 +300,17 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             let value = match metric.0 {
                 "peer_rx_bytes_total" => number(response, index, uapi::field::RX_BYTES).to_string(),
                 "peer_tx_bytes_total" => number(response, index, uapi::field::TX_BYTES).to_string(),
+                "peer_delivery_ratio" => {
+                    let sent = number(response, index, uapi::field::WINDOW_SENT);
+                    let received = number(response, index, uapi::field::WINDOW_RECEIVED);
+                    if sent == 0 {
+                        // Nothing to judge: an idle tunnel is not a broken one.
+                        "1".to_owned()
+                    } else {
+                        let ratio = received as f64 / sent as f64;
+                        format!("{:.4}", ratio.min(1.0))
+                    }
+                }
                 "peer_last_handshake_seconds" => {
                     number(response, index, uapi::field::LAST_HANDSHAKE_TIME_SEC).to_string()
                 }
@@ -351,6 +369,8 @@ vallum_name=laptop\n\
 vallum_fingerprint=f1e20541fb69\n\
 rx_bytes=1234\n\
 tx_bytes=5678\n\
+vallum_window_sent=1000\n\
+vallum_window_received=12\n\
 last_handshake_time_sec=1792522000\n\
 vallum_epoch=3\n\
 errno=0\n\
@@ -360,6 +380,8 @@ vallum_name=phone\n\
 vallum_fingerprint=0ca326366885\n\
 rx_bytes=0\n\
 tx_bytes=10\n\
+vallum_window_sent=0\n\
+vallum_window_received=0\n\
 last_handshake_time_sec=0\n\
 vallum_epoch=0\n\
 errno=0\n";
@@ -386,6 +408,33 @@ errno=0\n";
         ));
         assert!(text.contains(
             "vallum_peer_handshaked{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} 0"
+        ));
+    }
+
+    #[test]
+    fn the_delivery_ratio_exposes_a_tunnel_that_is_sending_into_the_void() {
+        // The shape of the real failure: 12 datagrams back against 1000 sent,
+        // while the handshake is only 42 s old and looks perfectly healthy.
+        let text = render(&response(), "vallum", 1792522042);
+        assert!(
+            text.contains(
+                "vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 0.0120"
+            ),
+            "the ratio must show a tunnel that is sending and not being answered"
+        );
+        assert!(text.contains(
+            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 42"
+        ));
+    }
+
+    #[test]
+    fn an_idle_peer_reports_a_full_ratio_rather_than_zero() {
+        // Nothing sent is not the same as nothing delivered: an idle tunnel is
+        // not a broken one, and reporting 0 here would make every quiet peer
+        // look like an outage.
+        let text = render(&response(), "vallum", 1792522042);
+        assert!(text.contains(
+            "vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} 1"
         ));
     }
 
