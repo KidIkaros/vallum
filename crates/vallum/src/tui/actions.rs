@@ -635,6 +635,16 @@ fn restart_service(app: &mut App) {
         .status()
         .is_ok_and(|status| status.success())
     {
+        // A normal user cannot restart a system unit, and trying raises a
+        // polkit dialog in the middle of the dashboard — the same reason
+        // `service_plan` hands over the command instead of running it. The
+        // check has to come *before* the attempt: `systemctl` only fails once
+        // the operator has dismissed the dialog, which is the wrong moment to
+        // find out.
+        if !nix::unistd::geteuid().is_root() {
+            app.notify(format!("sudo systemctl restart {unit}"));
+            return;
+        }
         match Command::new("systemctl")
             .args(["--no-ask-password", "restart", &unit])
             .status()
