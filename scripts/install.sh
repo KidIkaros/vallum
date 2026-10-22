@@ -314,7 +314,6 @@ install_from_release() {
     A=$(arch)
     target="vallum-$tag-$A-linux.tar.gz"
     say "downloading $tag ($A)"
-    guard_downgrade "$tag"
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
@@ -347,7 +346,6 @@ install_package() {
     local tag=$1 work=$2 target
     target=$(package_asset_name "$tag")
     say "downloading $tag ($PACKAGE)"
-    guard_downgrade "$tag"
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
@@ -557,6 +555,9 @@ if [ "$MODE" = "release" ]; then
         VERSION=$(latest_version)
     fi
     [ -n "$VERSION" ] || { echo "could not determine the latest release" >&2; exit 1; }
+    # One call site, before anything is downloaded or printed: a dry run has to
+    # report the refusal too, or it is a plan the real run will not follow.
+    guard_downgrade "$VERSION"
     if [ "$DRY" -eq 1 ]; then
         if [ -n "$PACKAGE" ]; then
             say "would download $(package_asset_name "$VERSION"), verify the signature, and $PACKAGE-install it"
