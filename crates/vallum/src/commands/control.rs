@@ -352,6 +352,16 @@ fn peer_lines(peer: &vallum_tunnel::PeerConfig) -> String {
         "public_key={}\n",
         keys::hex_encode(peer.identity().kem().as_bytes())
     ));
+    // The name is the only human handle on a peer, and every surface that
+    // reports traffic — `show`, the metrics exporter, the TUI — reads it from
+    // the running daemon rather than from the config. Omitting it here made the
+    // daemon fall back to `peer-<key prefix>`, so per-peer telemetry identified
+    // traffic by an opaque hash and could not be mapped to a device.
+    out.push_str(&format!(
+        "{}={}\n",
+        crate::uapi::field::VALLUM_NAME,
+        peer.name()
+    ));
     if let Some(psk) = peer.preshared_key() {
         out.push_str(&format!(
             "preshared_key={}\n",
