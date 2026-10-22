@@ -25,14 +25,22 @@
   Verified in a throwaway netns: ICMP to the gateway is reachable before the
   guard and dropped after; UDP to the endpoint port is allowed, UDP to any other
   port is dropped.
-- **A client config no longer claims IPv6 the tunnel does not carry.** `peer add`
-  wrote `allowed_ips = ["0.0.0.0/0", "::/0"]` for every peer, whatever address it
-  had been given. Claiming `::/0` does not create a v6 route — it asserts that v6
-  belongs to the tunnel, and when that route cannot be installed the traffic falls
-  through to the real default route and leaves outside the tunnel. That is the
-  escape `verify-remote.sh` reports, and it is why a v4-only server leaked v6
-  egress. The generated config now claims the family of the address the peer was
-  actually given.
+- **IPv6 works instead of leaking.** `peer add` wrote
+  `allowed_ips = ["0.0.0.0/0", "::/0"]` for every peer while giving it a single
+  v4 tunnel address. Claiming `::/0` does not create a v6 route — it asserts that
+  v6 belongs to the tunnel, and with no v6 address on the interface the traffic
+  fell through to the real default route and left outside the tunnel. That is the
+  escape `verify-remote.sh` reports.
+
+  The fix is to carry the family rather than drop the claim. `server init` now
+  provisions a v6 tunnel subnet by default (`fd00:7::1/64`, unique-local and
+  routed, not NATed), `peer add` allocates **one address per family** from the
+  tunnel's own subnets, and the client config puts both on the interface and
+  claims both default routes. A `::/0` now has an address and a route behind it.
+
+  A v4-only server still yields a v4-only client config: the claim follows the
+  addresses the peer was actually given, so the leak cannot come back through a
+  hand-written config either.
 - **The outer path MTU is discovered instead of assumed.** `interface.outer_mtu`
   defaulted to 1500, so on a narrower link (PPPoE at 1492, DS-Lite at 1280) every
   datagram exceeded the path, the kernel dropped it rather than fragmenting, and

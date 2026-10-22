@@ -452,35 +452,62 @@ fn table_for(peer: &PeerRecord) -> Table {
 /// (through `IpNet::hosts`) the network and broadcast addresses.
 #[must_use]
 pub fn next_host_address(networks: &[IpNet], taken: &[IpNet], own: &[IpAddr]) -> Option<IpNet> {
-    for network in networks {
-        // `IpNet::hosts()` excludes the network and broadcast addresses for
-        // IPv4 but not the subnet-router address for IPv6, so it is skipped
-        // explicitly — unless the prefix has only that one address.
-        let max = match network {
-            IpNet::V4(_) => 32,
-            IpNet::V6(_) => 128,
-        };
-        let skip_network = network.prefix_len() < max;
-        let mut candidates = network.hosts();
-        for _ in 0..MAX_SCAN {
-            let Some(address) = candidates.next() else {
-                break;
-            };
-            if skip_network && address == network.network() {
-                continue;
-            }
-            if own.contains(&address) {
-                continue;
-            }
-            if taken.iter().any(|prefix| prefix.contains(&address)) {
-                continue;
-            }
-            let prefix = match address {
-                IpAddr::V4(_) => 32,
-                IpAddr::V6(_) => 128,
-            };
-            return IpNet::new(address, prefix).ok();
+    networks
+        .iter()
+        .find_map(|network| next_in_network(network, taken, own))
+}
+
+/// One free host address per family the tunnel has a subnet for.
+///
+/// A peer on a dual-stack tunnel needs an address in **both** families, or the
+/// tunnel carries v4 and the client has nothing to route v6 through — which is
+/// how a `::/0` claim became a leak instead of a feature. Networks are searched
+/// in the order they are configured, and the first free host in each family
+/// wins.
+#[must_use]
+pub fn next_host_addresses(networks: &[IpNet], taken: &[IpNet], own: &[IpAddr]) -> Vec<IpNet> {
+    let mut allocated = Vec::new();
+    for want_v6 in [false, true] {
+        let found = networks
+            .iter()
+            .filter(|network| matches!(network, IpNet::V6(_)) == want_v6)
+            .find_map(|network| next_in_network(network, taken, own));
+        if let Some(found) = found {
+            allocated.push(found);
         }
+    }
+    allocated
+}
+
+/// The next free host in one network.
+fn next_in_network(network: &IpNet, taken: &[IpNet], own: &[IpAddr]) -> Option<IpNet> {
+    // `IpNet::hosts()` excludes the network and broadcast addresses for IPv4
+    // but not the subnet-router address for IPv6, so it is skipped explicitly —
+    // unless the prefix has only that one address.
+    let max = match network {
+        IpNet::V4(_) => 32,
+        IpNet::V6(_) => 128,
+    };
+    let skip_network = network.prefix_len() < max;
+    let mut candidates = network.hosts();
+    for _ in 0..MAX_SCAN {
+        let Some(address) = candidates.next() else {
+            break;
+        };
+        if skip_network && address == network.network() {
+            continue;
+        }
+        if own.contains(&address) {
+            continue;
+        }
+        if taken.iter().any(|prefix| prefix.contains(&address)) {
+            continue;
+        }
+        let prefix = match address {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        return IpNet::new(address, prefix).ok();
     }
     None
 }
@@ -613,6 +640,32 @@ allowed_ips = [\"10.7.0.2/32\"]
         let own = vec!["fd00:7::1".parse().unwrap()];
         let next = next_host_address(&networks, &[], &own).unwrap();
         assert_eq!(next.to_string(), "fd00:7::2/128");
+    }
+
+    /// A dual-stack tunnel must give a peer an address in **both** families.
+    /// One address is not enough: a peer with only a v4 address has nothing to
+    /// route v6 through, so a client claiming `::/0` sends it around the tunnel
+    /// instead of through it — which is exactly how the IPv6 leak happened.
+    #[test]
+    fn a_dual_stack_tunnel_allocates_one_address_per_family() {
+        let networks: Vec<IpNet> = vec![
+            "10.7.0.1/24".parse().unwrap(),
+            "fd00:7::1/64".parse().unwrap(),
+        ];
+        let own = vec!["10.7.0.1".parse().unwrap(), "fd00:7::1".parse().unwrap()];
+        let allocated = next_host_addresses(&networks, &[], &own);
+        assert_eq!(allocated.len(), 2, "got {allocated:?}");
+        assert!(allocated.iter().any(|a| matches!(a, IpNet::V4(_))));
+        assert!(allocated.iter().any(|a| matches!(a, IpNet::V6(_))));
+    }
+
+    #[test]
+    fn a_v4_only_tunnel_allocates_one_address() {
+        let networks: Vec<IpNet> = vec!["10.7.0.1/24".parse().unwrap()];
+        let own = vec!["10.7.0.1".parse().unwrap()];
+        let allocated = next_host_addresses(&networks, &[], &own);
+        assert_eq!(allocated.len(), 1);
+        assert!(matches!(allocated[0], IpNet::V4(_)));
     }
 
     #[test]

@@ -448,7 +448,12 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
         .unwrap_or_else(|| vallum_config::socket_path(&interface));
 
     let addresses = if args.addresses.is_empty() {
-        vec!["10.7.0.1/24".to_owned()]
+        // Both families by default. A v4-only server gives every peer a v4
+        // address and nothing to route v6 through, so a client that claims
+        // `::/0` sends v6 around the tunnel instead of through it — which is
+        // how the IPv6 leak happened. A unique-local v6 prefix is routed, not
+        // NATed: the server already forwards, and no translation is involved.
+        vec!["10.7.0.1/24".to_owned(), "fd00:7::1/64".to_owned()]
     } else {
         args.addresses.clone()
     };

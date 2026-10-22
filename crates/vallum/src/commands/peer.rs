@@ -587,7 +587,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
 
     let mut file = ConfigFile::load(&args.config)?;
     let existing = file.peers().into_iter().find(|peer| peer.name == args.name);
-    let address = match &existing {
+    let addresses: Vec<String> = match &existing {
         Some(peer) => {
             let same = peer.public_key == canonical
                 || peer.identity.as_deref() == Some(canonical.as_str());
@@ -598,9 +598,13 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
                     args.name, args.name
                 )));
             }
-            peer.allowed_ips.first().cloned().ok_or_else(|| {
-                Error::Usage(format!("`{}` has no address to hand back", args.name))
-            })?
+            if peer.allowed_ips.is_empty() {
+                return Err(Error::Usage(format!(
+                    "`{}` has no address to hand back",
+                    args.name
+                )));
+            }
+            peer.allowed_ips.clone()
         }
         None => {
             add(&AddArgs {
@@ -627,20 +631,27 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
             })?;
             // `add` allocated the address; read it back rather than guessing.
             file = ConfigFile::load(&args.config)?;
-            file.peers()
+            let peer = file
+                .peers()
                 .into_iter()
                 .find(|peer| peer.name == args.name)
-                .and_then(|peer| peer.allowed_ips.first().cloned())
                 .ok_or_else(|| {
                     Error::Usage(format!("`{}` was added but has no address", args.name))
-                })?
+                })?;
+            if peer.allowed_ips.is_empty() {
+                return Err(Error::Usage(format!(
+                    "`{}` was added but has no address",
+                    args.name
+                )));
+            }
+            peer.allowed_ips.clone()
         }
     };
 
     let (endpoint, source) = bundle_endpoint(None, &server, &args.config)?;
     let config_text = client_config(
         &args.name,
-        &address,
+        &addresses,
         &server.public_line,
         &endpoint,
         &[],
@@ -650,7 +661,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     let _ = source;
     Ok(Enrolled {
         name: args.name.clone(),
-        address,
+        address: addresses.first().cloned().unwrap_or_default(),
         endpoint,
         server_address: file
             .interface_addresses()
@@ -990,9 +1001,12 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     let generated = built.generated.clone();
     let public_line = keys::encode_public(server.suite_id, &peer_identity);
 
-    // 2. The address, allocated from the tunnel's own subnets if not given.
-    let address = match &args.address {
-        Some(text) => parse_host_prefix(text)?,
+    // 2. The addresses, one per family, allocated from the tunnel's own subnets
+    //    if not given. A dual-stack tunnel gives a peer an address in each
+    //    family: a peer with only a v4 address has nothing to route v6 through,
+    //    which is how a `::/0` claim became a leak instead of a feature.
+    let addresses: Vec<IpNet> = match &args.address {
+        Some(text) => vec![parse_host_prefix(text)?],
         None => {
             let networks = file.interface_addresses();
             let own = file.own_addresses();
@@ -1002,20 +1016,24 @@ fn add(args: &AddArgs) -> Result<(), Error> {
                 .flat_map(|peer| peer.allowed_ips.iter())
                 .filter_map(|prefix| prefix.parse().ok())
                 .collect();
-            config_edit::next_host_address(&networks, &taken, &own).ok_or_else(|| {
-                Error::Usage(
+            let allocated = config_edit::next_host_addresses(&networks, &taken, &own);
+            if allocated.is_empty() {
+                return Err(Error::Usage(
                     "the tunnel has no free address left; pass --address with one from the \
                      tunnel's subnet, or widen the interface address"
                         .to_owned(),
-                )
-            })?
+                ));
+            }
+            allocated
         }
     };
+
+    let address_list: Vec<String> = addresses.iter().map(ToString::to_string).collect();
 
     // 3. What is routed to it.
     let allowed = match &args.allowed_ips {
         Some(list) => config_edit::parse_prefixes(list)?,
-        None => vec![address.to_string()],
+        None => addresses.iter().map(ToString::to_string).collect(),
     };
     ensure_no_overlap(&file, &args.name, &allowed)?;
 
@@ -1084,7 +1102,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
         let config_text = client_config(
             &args.name,
-            &address.to_string(),
+            &address_list,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1118,7 +1136,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
         let text = client_config(
             &args.name,
-            &address.to_string(),
+            &address_list,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1138,7 +1156,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
     if args.json {
         let report = Added {
             name: args.name.clone(),
-            address: address.to_string(),
+            address: address_list.first().cloned().unwrap_or_default(),
             allowed_ips: allowed,
             public_key: args.full.then(|| public_line.clone()),
             fingerprint: fingerprint(identity_text.as_deref().unwrap_or(&public_line)),
@@ -1168,7 +1186,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         return Ok(());
     }
     say!("added peer `{}`", args.name);
-    say!("   address    {}", address);
+    say!("   address    {}", address_list.join(", "));
     say!("   allowed    {}", allowed.join(", "));
     say!(
         "   fingerprint {}",
@@ -1265,16 +1283,18 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
             .into_iter()
             .find(|peer| peer.name == args.name)
             .ok_or_else(|| Error::Usage(format!("no peer named `{}`", args.name)))?;
-        let address = peer
-            .allowed_ips
-            .first()
-            .ok_or_else(|| Error::Usage("the peer has no address to put in a bundle".to_owned()))?;
+        if peer.allowed_ips.is_empty() {
+            return Err(Error::Usage(
+                "the peer has no address to put in a bundle".to_owned(),
+            ));
+        }
+        let addresses = peer.allowed_ips.clone();
         let (endpoint, source) = bundle_endpoint(args.endpoint.as_deref(), &server, &args.config)?;
         bundle_endpoint_result = Some((endpoint.clone(), source));
         let psk = read_psk(&peer, &file.directory())?;
         let config_text = client_config(
             &args.name,
-            address,
+            &addresses,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1910,7 +1930,7 @@ fn client_interface_name(peer: &str) -> (String, bool) {
 
 fn client_config(
     name: &str,
-    address: &str,
+    addresses: &[String],
     server_line: &str,
     endpoint: &str,
     dns: &[String],
@@ -1932,7 +1952,15 @@ fn client_config(
     }
     body.push_str(&format!("name = \"{interface}\"\n"));
     body.push_str(&format!("private_key = \"{name}.key\"\n"));
-    body.push_str(&format!("addresses = [\"{address}\"]\n"));
+    // Every address the peer was given, so a dual-stack tunnel puts both on the
+    // interface. With only the v4 address the client has no v6 source, and a
+    // `::/0` claim then routes v6 around the tunnel instead of through it.
+    let quoted = addresses
+        .iter()
+        .map(|address| format!("\"{address}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    body.push_str(&format!("addresses = [{quoted}]\n"));
     body.push_str("listen = \"0.0.0.0:0\"\n");
     body.push_str(&format!(
         "control = \"{}/{interface}.sock\"\n",
@@ -1965,10 +1993,12 @@ fn client_config(
     // `verify-remote.sh` reports. The address this peer was given is the
     // authority on what the tunnel carries; when allocation learns to hand out a
     // v6 address as well, this must take the whole set rather than the first.
-    let allowed = if address.contains(':') {
-        "[\"::/0\"]"
-    } else {
-        "[\"0.0.0.0/0\"]"
+    let v4 = addresses.iter().any(|address| !address.contains(':'));
+    let v6 = addresses.iter().any(|address| address.contains(':'));
+    let allowed = match (v4, v6) {
+        (true, true) => "[\"0.0.0.0/0\", \"::/0\"]",
+        (false, true) => "[\"::/0\"]",
+        _ => "[\"0.0.0.0/0\"]",
     };
     body.push_str(&format!("allowed_ips = {allowed}\n"));
     body.push_str("persistent_keepalive = 25\n");
@@ -2047,7 +2077,7 @@ mod tests {
     fn a_v6_tunnel_claims_the_v6_default_route() {
         let text = client_config(
             "laptop",
-            "fd00:8::2/128",
+            &["fd00:8::2/128".to_owned()],
             "vallum1:0003:aa:-",
             "vpn.example.com:51820",
             &[],
@@ -2064,7 +2094,7 @@ mod tests {
     fn the_client_config_names_the_server_and_routes_everything() {
         let text = client_config(
             "laptop",
-            "10.7.0.3/32",
+            &["10.7.0.3/32".to_owned()],
             "vallum1:0003:aa:-",
             "vpn.example.com:51820",
             &["1.1.1.1".to_owned()],

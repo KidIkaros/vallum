@@ -210,8 +210,9 @@ pub fn ruleset(config: &Config, interface: &str) -> Result<String, Error> {
     }
 
     // A family the tunnel does not carry must not leave. This is the packet-side
-    // half of the v6 leak; the config-side half is that `peer add` no longer
-    // claims a family the peer has no address in.
+    // half of the v6 leak. The config-side half is that `peer add` allocates one
+    // address per family, so a `::/0` claim has a route behind it; this rule is
+    // what stops a hand-written config from re-introducing the leak.
     if !v6 {
         rules.push_str("    meta nfproto ipv6 drop\n");
     }

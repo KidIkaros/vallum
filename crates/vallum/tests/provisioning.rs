@@ -122,14 +122,20 @@ fn a_client_generated_key_produces_a_client_config_the_daemon_accepts() {
 
     let parsed = vallum_config::Config::load(&client).unwrap();
     assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
-    assert_eq!(parsed.interface.addresses, vec!["10.7.0.2/32".to_owned()]);
+    assert_eq!(
+        parsed.interface.addresses,
+        vec!["10.7.0.2/32".to_owned(), "fd00:7::2/128".to_owned()],
+        "a dual-stack server gives the peer an address in each family"
+    );
     let peer = &parsed.peers[0];
     assert_eq!(peer.endpoint.as_deref(), Some("203.0.113.5:51820"));
-    // The peer was given a v4 tunnel address, so the tunnel carries v4 and the
-    // client claims only the v4 default route. Claiming `::/0` on a tunnel with
-    // no IPv6 does not create a v6 route — it makes v6 traffic fall through to
-    // the real default route and escape outside the tunnel.
-    assert_eq!(peer.allowed_ips, vec!["0.0.0.0/0".to_owned()]);
+    // The peer has an address in both families, so the tunnel carries both and
+    // the client claims both default routes. This is the claim that used to
+    // leak: it was made without a v6 address or route behind it.
+    assert_eq!(
+        peer.allowed_ips,
+        vec!["0.0.0.0/0".to_owned(), "::/0".to_owned()]
+    );
 
     // The server never saw a private key: only the peer entry exists.
     let server = vallum_config::Config::load(&config).unwrap();
