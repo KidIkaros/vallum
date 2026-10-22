@@ -25,7 +25,19 @@ claim is earned only when all seven hold, and each is checkable:
 6. **The crypto posture is stated in the same words the dependency uses.**
 7. **The operator finds out before the user does.**
 
-Everything in Now maps to one of those seven. Anything that does not is not a
+Everything in Now maps to one of those seven, and nothing in Now fails to map:
+
+| Condition | Item |
+|---|---|
+| 1 · a dead tunnel does not leak | 2 |
+| 2 · DNS cannot resolve outside | 3 |
+| 3 · recovers without a human | 5 |
+| 4 · MTU right for the link | 4 |
+| 5 · browser behaviour proven | 1 |
+| 6 · crypto posture stated | 6 |
+| 7 · operator finds out first | 7 |
+
+Seven conditions, seven items, no orphans. Anything that does not map is not a
 production-readiness task, however much it would be nice to have.
 
 ---
@@ -126,6 +138,27 @@ and then the tin has to match the decision.
 **Done means** either an audit, or the documentation and the `--version`/`--help`
 signifier say what the SDK says. Choosing the second is a legitimate outcome; it
 just has to be chosen and stated, not left for a reader to discover.
+
+### 7. The operator finds out before the user does
+
+**Problem.** Every alert in `packaging/vallum-alerts.yml` is a **server-side
+daemon counter** — `VallumDown`, `VallumPeerHandshakeStale`,
+`VallumHandshakesRefused`, `VallumFragmentsDropped`, `VallumSendFailures` — fed by
+`vallum_handshakes_established`, `vallum_handshakes_refused`,
+`vallum_fragments_dropped` and friends. Nothing reports from the client. On a
+laptop whose tunnel is attached but carrying nothing, the server may be perfectly
+happy while the user sees a dead browser, and the first person to notice is the
+user.
+
+The failures the rest of this list introduces make that worse rather than better:
+fail-closed turns a dead tunnel into a *blocked* tunnel, which is the correct
+behaviour and completely invisible from the server's counters.
+
+**Done means** a client exposes enough to tell "attached and carrying" from
+"attached and dead", an alert exists for each failure this list introduces
+(traffic blocked, DNS failing, reconnect looping), and the signal it pages on is
+the same one the suite in (1) asserts — so what pages is what was tested, not a
+separate approximation of it.
 
 ---
 
