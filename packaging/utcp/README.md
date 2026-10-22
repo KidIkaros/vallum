@@ -25,6 +25,11 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_bench` | `vallum bench --iterations <n> --bytes <n>` | Benchmark PQ data plane seal/open latency and throughput. |
 | `vallum_syncconf` | `vallum syncconf -c <file>` | Apply atomic peer configuration diffs to a running tunnel. |
 | `vallum_tui_snapshot` | `vallum tui --snapshot ...` | Capture a headless ASCII render of the cockpit dashboard. |
+| `vallum_status` | `vallum status --config <file> [--json]` | Answer "in the tunnel, blocked, or leaking?" by reading the host, so it works with the daemon dead. |
+| `vallum_policy` | `vallum policy on\|off\|status --config <file>` | Install, remove, or report the fail-closed egress block. |
+| `vallum_metrics` | `vallum metrics --config <file>` | Prometheus metrics, including `vallum_peer_delivery_ratio`. |
+| `vallum_peer_list` | `vallum peer list --config <file>` | Peers, prefixes, endpoints and fingerprints. |
+| `vallum_server_init` | `vallum server init --config <file> [--dry-run]` | Provision this host as a server: keys, units, port, forwarding, masquerade. |
 
 ## Agent Usage
 

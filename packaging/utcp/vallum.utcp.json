@@ -3,7 +3,7 @@
   "manual_version": "1.0.0",
   "utcp_version": "1.0.1",
   "name": "vallum",
-  "description": "Universal Tool Calling Protocol (UTCP) manual for Vallum — hybrid post-quantum layer-3 tunnel operations, diagnostics, key management, and runtime telemetry.",
+  "description": "Universal Tool Calling Protocol (UTCP) manual for Vallum \u2014 hybrid post-quantum layer-3 tunnel operations, diagnostics, key management, and runtime telemetry.",
   "tools": [
     {
       "name": "vallum_doctor",
@@ -26,13 +26,24 @@
             },
             "status": {
               "type": "string",
-              "enum": ["pass", "warn", "fail"]
+              "enum": [
+                "pass",
+                "warn",
+                "fail"
+              ]
             }
           },
-          "required": ["check", "detail", "status"]
+          "required": [
+            "check",
+            "detail",
+            "status"
+          ]
         }
       },
-      "tags": ["diagnostics", "readiness"],
+      "tags": [
+        "diagnostics",
+        "readiness"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -54,7 +65,9 @@
             "description": "Path to the .toml configuration file to validate."
           }
         },
-        "required": ["config_path"]
+        "required": [
+          "config_path"
+        ]
       },
       "outputs": {
         "type": "array",
@@ -69,13 +82,24 @@
             },
             "status": {
               "type": "string",
-              "enum": ["pass", "warn", "fail"]
+              "enum": [
+                "pass",
+                "warn",
+                "fail"
+              ]
             }
           },
-          "required": ["check", "detail", "status"]
+          "required": [
+            "check",
+            "detail",
+            "status"
+          ]
         }
       },
-      "tags": ["diagnostics", "config"],
+      "tags": [
+        "diagnostics",
+        "config"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -97,7 +121,9 @@
             "description": "Path to the .toml configuration file to inspect."
           }
         },
-        "required": ["config_path"]
+        "required": [
+          "config_path"
+        ]
       },
       "outputs": {
         "type": "object",
@@ -113,7 +139,9 @@
           },
           "addresses": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "fwmark": {
             "type": "integer"
@@ -123,19 +151,30 @@
             "items": {
               "type": "object",
               "properties": {
-                "name": { "type": "string" },
-                "endpoint": { "type": "string" },
+                "name": {
+                  "type": "string"
+                },
+                "endpoint": {
+                  "type": "string"
+                },
                 "allowed_ips": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": {
+                    "type": "string"
+                  }
                 },
-                "preshared_key": { "type": "boolean" }
+                "preshared_key": {
+                  "type": "boolean"
+                }
               }
             }
           }
         }
       },
-      "tags": ["config", "inspection"],
+      "tags": [
+        "config",
+        "inspection"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -157,13 +196,18 @@
             "description": "Path to the UNIX domain control socket (e.g., /run/vallum/vallum0.sock)."
           }
         },
-        "required": ["control_socket"]
+        "required": [
+          "control_socket"
+        ]
       },
       "outputs": {
         "type": "object",
         "description": "Real-time daemon and peer state."
       },
-      "tags": ["runtime", "telemetry"],
+      "tags": [
+        "runtime",
+        "telemetry"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -190,13 +234,18 @@
             "default": 3
           }
         },
-        "required": ["output_file"]
+        "required": [
+          "output_file"
+        ]
       },
       "outputs": {
         "type": "string",
         "description": "The public line formatted as 'vallum1:<suite_id>:<kem_public_key>:<signing_key|->'."
       },
-      "tags": ["keys", "crypto"],
+      "tags": [
+        "keys",
+        "crypto"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -218,13 +267,18 @@
             "description": "Path to the private key file."
           }
         },
-        "required": ["private_key_file"]
+        "required": [
+          "private_key_file"
+        ]
       },
       "outputs": {
         "type": "string",
         "description": "The public line formatted as 'vallum1:<suite_id>:<kem_public_key>:<signing_key|->'."
       },
-      "tags": ["keys", "crypto"],
+      "tags": [
+        "keys",
+        "crypto"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -246,7 +300,10 @@
         "type": "string",
         "description": "64 hex characters representing the 32-byte preshared key."
       },
-      "tags": ["keys", "crypto"],
+      "tags": [
+        "keys",
+        "crypto"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -279,7 +336,10 @@
         "type": "string",
         "description": "Benchmark throughput and latency results."
       },
-      "tags": ["benchmarking", "crypto"],
+      "tags": [
+        "benchmarking",
+        "crypto"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -301,13 +361,18 @@
             "description": "Path to the configuration file containing updated peer or interface settings."
           }
         },
-        "required": ["config_path"]
+        "required": [
+          "config_path"
+        ]
       },
       "outputs": {
         "type": "string",
         "description": "Confirmation of synchronization."
       },
-      "tags": ["runtime", "config"],
+      "tags": [
+        "runtime",
+        "config"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -327,7 +392,15 @@
           "view": {
             "type": "string",
             "description": "Snapshot view mode.",
-            "enum": ["dashboard", "logs", "help", "qr", "empty", "filter", "ping"],
+            "enum": [
+              "dashboard",
+              "logs",
+              "help",
+              "qr",
+              "empty",
+              "filter",
+              "ping"
+            ],
             "default": "dashboard"
           },
           "width": {
@@ -346,7 +419,11 @@
         "type": "string",
         "description": "ASCII / text frame render of the TUI view."
       },
-      "tags": ["tui", "snapshot", "diagnostics"],
+      "tags": [
+        "tui",
+        "snapshot",
+        "diagnostics"
+      ],
       "tool_call_template": {
         "call_template_type": "cli",
         "commands": [
@@ -356,6 +433,187 @@
           }
         ]
       }
+    },
+    {
+      "name": "vallum_status",
+      "description": "Answer \"is traffic in the tunnel, blocked, or leaking?\" by reading the host rather than the process, so it still works when the daemon is dead. Verdicts: up, degraded, starting, blocked, down, LEAKING, unknown. Only LEAKING exits non-zero.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "json": {
+            "type": "boolean",
+            "description": "Machine-readable output."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "up",
+              "degraded",
+              "starting",
+              "blocked",
+              "down",
+              "LEAKING",
+              "unknown"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "tags": [
+        "diagnostics",
+        "security"
+      ]
+    },
+    {
+      "name": "vallum_policy",
+      "description": "Install, remove, or report the fail-closed egress block. `on` blocks everything except loopback, the tunnel and the peer endpoint; `off` removes it and needs neither daemon nor network; `status` reports what the config asks for and what the host has. Requires CAP_NET_ADMIN.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off",
+              "status"
+            ]
+          },
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Print the nft ruleset instead of applying it."
+          }
+        },
+        "required": [
+          "action",
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "installed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tags": [
+        "security",
+        "networking"
+      ]
+    },
+    {
+      "name": "vallum_metrics",
+      "description": "Print the daemon's state as Prometheus metrics: per-peer bytes, handshake age, epoch, and vallum_peer_delivery_ratio \u2014 datagrams received over datagrams sent in the last 60 s window. A ratio near zero means the tunnel is sending and not being answered, which handshake age cannot show. An idle peer reports 1.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "control": {
+            "type": "string",
+            "description": "Control socket path, instead of a config."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Metric name prefix, default vallum."
+          },
+          "output": {
+            "type": "string",
+            "description": "Write atomically to this file instead of stdout."
+          }
+        },
+        "required": []
+      },
+      "outputs": {
+        "type": "string",
+        "description": "Prometheus text exposition format."
+      },
+      "tags": [
+        "telemetry",
+        "diagnostics"
+      ]
+    },
+    {
+      "name": "vallum_peer_list",
+      "description": "List peers with their allowed prefixes, endpoint, keepalive, and fingerprint. Use the fingerprint to map a peer to the label in vallum_metrics.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "tags": [
+        "configuration"
+      ]
+    },
+    {
+      "name": "vallum_server_init",
+      "description": "Provision this host as a server: generate keys, write the config, install and start the systemd units, open the listen port, and enable forwarding and masquerade. Handles a UFW deny (routed) default. Use --dry-run first; it prints every step without changing the host.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "address": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tunnel addresses; defaults to one per family (10.7.0.1/24 and fd00:7::1/64)."
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Rewrite an existing config."
+          }
+        },
+        "required": []
+      },
+      "outputs": {
+        "type": "object"
+      },
+      "tags": [
+        "provisioning"
+      ]
     }
   ]
 }
