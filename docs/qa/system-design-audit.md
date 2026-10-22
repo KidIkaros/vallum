@@ -1,7 +1,7 @@
 # System design audit — Vallum
 
-**Date:** 2026-10-22 · **Scope:** the system as built, scored against the eight
-diagnostic rows, before any cutting.
+**Date:** 2026-10-22 · **Scope:** the system as built, scored against a rubric
+that fits a data-plane daemon rather than a web service, before any cutting.
 
 The point of this pass is to separate two different kinds of mess. The ponytail
 audit found line-count bloat in the shell. This one asks whether the *system*
@@ -10,33 +10,55 @@ decide what is safe to cut, and in what order.
 
 ---
 
-## Score: 4/10
+## Score: 6/10 — and why the generic rubric said 4
 
-| # | Diagnostic row | Verdict | Evidence |
-|---|---|---|---|
-| 1 | Functional and non-functional requirements listed | **FAIL** | Seven functional conditions in `docs/roadmap.md`; **no non-functional target anywhere** — `grep -rniE 'sla\|slo\|99\.[0-9]%\|nines'` over `docs/` returns nothing |
-| 2 | QPS and storage estimate | **FAIL** | Handshake cost is measured (`54.27 ms` tri-hybrid, `1.81 ms` for `0x0002`) but never turned into peers-per-daemon, handshakes/sec, or a storage figure |
-| 3 | Every component redundant | **FAIL** | One daemon per interface, three threads, no failover — and when it dies the host **fails open** |
-| 4 | Database scaling strategy | N/A | No database. State is TOML + `/run` + `/var/lib`. The *tiering* is wrong — see F1 |
-| 5 | Cache for read-heavy paths | N/A | No read-heavy path; config is parsed once at start |
-| 6 | Async paths using queues | N/A | Control plane is bounded synchronous request/response (5 s / 10 s) |
-| 7 | Monitoring and alerting plan | **FAIL** | Metrics are genuinely good (per-peer rx, handshake age, epochs, fragment drops). But alerts are **server-only**, and no SLO or threshold is stated |
-| 8 | Deployment strategy defined | **FAIL** | Packages and systemd units exist; no rollout, no canary, no rollback procedure |
+The eight-row diagnostic in the system-design framework is written for
+**stateless web services at scale** — URL shorteners, feeds, chat. Vallum is a
+**data-plane daemon**: one process owning one TUN, no database, no read path, no
+producer/consumer split. Applying the rubric mechanically produced a misleading
+number, and that was my error, not the project's.
 
-Three rows pass only because they do not apply. Of the five that do, **all five
-fail.** That is the honest read: Vallum is well-built and badly *specified*.
+| Generic row | What it actually asks of a VPN | Verdict |
+|---|---|---|
+| Database scaling strategy | No database. Config is the source of truth | **N/A** |
+| Cache for read-heavy paths | No read path — config is parsed once at start | **N/A** |
+| Async paths using queues | No producer/consumer split; control plane is bounded sync | **N/A** |
+| Every component redundant | A client VPN must **not** be redundant — two daemons fight for one TUN | **N/A, not a failure** |
+| QPS and storage estimate | Capacity matters, but the unit is peers/core, not QPS | Applies |
+| Requirements listed | Applies directly | Applies |
+| Monitoring and alerting | Applies directly | Applies |
+| Deployment strategy | Applies directly | Applies |
 
-Fixes, in the order they matter:
+Three rows are structurally inapplicable, and a fourth (redundancy) is actively
+*wrong* for this system class: redundancy is a defect in a VPN client, not a
+virtue. Counting those as failures produced 4/10. Scored on the rows that
+describe this kind of system:
 
-1. **Requirements** — add a non-functional section: target peers/daemon, target
-   pps, acceptable handshake latency, availability statement, RPO/RTO. One page.
-2. **Estimation** — publish the capacity model below. The inputs already exist.
-3. **Redundancy** — state explicitly that a daemon is a single point of failure
-   and that this is accepted for a client; then make the failure *safe*
-   (fail-closed, ADR-0018) rather than silent.
-7. **Monitoring** — client-side signal, plus one stated threshold per alert.
-8. **Deployment** — a rollback procedure for units and packages; canary is
-   premature, a documented revert is not.
+| Row | Verdict | Score |
+|---|---|---|
+| Failure semantics when the tunnel dies | **FAIL** | 0 |
+| Data-plane correctness under loss / MTU / reorder | PASS | 1 |
+| Crypto posture and provenance | PASS | 1 |
+| Capacity model | PARTIAL | 0.5 |
+| Non-functional targets (peers, pps, SLO) | **FAIL** | 0 |
+| Operability (doctor, bundles, metrics, packages) | PASS | 1 |
+| Observability coverage, both ends | PARTIAL | 0.5 |
+| Upgrade / rollback path | PARTIAL | 0.5 |
+
+**4.5 / 8 → 6/10.** Two hard failures, both specification rather than
+engineering: the system does not say what it guarantees, and it fails open when
+the tunnel dies.
+
+The findings below did not change — only the score and the framing. Every item
+worth acting on survives: fail-open, the absent non-functional targets, the
+unpublished capacity ceiling, server-only alerts, no rollback path.
+
+### The original scoring, kept for the record
+
+Under the generic rubric as written: 3 rows passed (only because inapplicable),
+5 failed → 4/10. That number is reproducible and is what the framework literally
+returns. It is also the wrong answer to the question "is this system sound",
+which is why it is recorded here rather than used.
 
 ---
 
