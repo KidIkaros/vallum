@@ -4,6 +4,13 @@ Documentation=man:vallum(8) man:vallum.toml(5)
 After=network-online.target
 Wants=network-online.target
 
+# A unit whose config is gone fails forever otherwise: RestartSec=2s with the
+# default limit is close enough to the burst window that it can loop
+# indefinitely (measured at NRestarts=259). Stop after three attempts in a
+# minute and leave the failure where an operator will see it.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
 [Service]
 Type=notify
 ExecStart=/usr/bin/vallum run --config /etc/vallum/%i.toml
@@ -24,7 +31,11 @@ PrivateTmp=true
 # by every daemon on the machine, so it must not be a RuntimeDirectory: systemd
 # deletes those when a unit stops, which would take every other daemon's socket
 # with it. See ADR-0017. This unit only needs write access to it.
-ReadWritePaths=/run/vallum
+#
+# The `-` prefix matters: without it a missing directory is a hard start failure
+# with `226/NAMESPACE`, which names systemd's namespace setup rather than the
+# missing path. With it the daemon starts and says what it actually needs.
+ReadWritePaths=-/run/vallum
 
 [Install]
 WantedBy=multi-user.target

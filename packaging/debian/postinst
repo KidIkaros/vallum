@@ -8,7 +8,17 @@ if [ -d /run/systemd/system ]; then
     # ReadWritePaths to it, and a missing path is 226/NAMESPACE — so a host that
     # installs the package and starts a unit before rebooting would fail. See
     # ADR-0017.
-    systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf 2>/dev/null || true
+    #
+    # Deliberately not `|| true`: if this file is missing the package is broken,
+    # and what that produces is a unit crash-looping every two seconds with an
+    # error that names systemd's namespace setup rather than the missing path.
+    # Failing here is the cheapest place to catch it.
+    if [ ! -f /usr/lib/tmpfiles.d/vallum-tmpfiles.conf ]; then
+        echo "vallum: /usr/lib/tmpfiles.d/vallum-tmpfiles.conf is missing from the package" >&2
+        echo "vallum: /run/vallum will not exist, and every vallum@ unit will fail to start" >&2
+        exit 1
+    fi
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf
     systemctl daemon-reload 2>/dev/null || true
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true

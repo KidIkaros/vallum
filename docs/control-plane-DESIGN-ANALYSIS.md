@@ -145,6 +145,16 @@ plane is *wedged*, because a wedge is not a liveness failure of either.
 
 ---
 
+## Noted, not ranked
+
+- **`serve`'s accept loop checks the shutdown flag only after a connection.**
+  `JoinHandle` therefore never completes on its own; it needs one more connect to
+  notice. Harmless today because `run.rs` discards the handle and the process
+  exits anyway — recorded so the next person does not join it and hang. Found
+  while writing the drip test, which did exactly that and hung.
+
+---
+
 ## Discharged (checked, not findings)
 
 Recorded so the tally is honest and the next audit does not re-derive them.

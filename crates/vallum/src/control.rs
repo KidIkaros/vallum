@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vallum_core::identity::{PeerIdentity, StaticIdentity};
 use vallum_crypto::KemPublicKey;
@@ -39,6 +39,12 @@ use crate::uapi::{self, Request, Set};
 /// means an unbounded read is an unbounded outage: a client that connects and
 /// then says nothing holds the whole plane.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The largest request the control plane will read.
+///
+/// A request is a handful of short lines. Without a cap a client could stream
+/// bytes at the serial loop until the process ran out of memory.
+const MAX_REQUEST: usize = 64 * 1024;
 
 /// How long a client waits for a reply.
 ///
@@ -161,8 +167,32 @@ pub(crate) fn serve(
                 }
                 let mut text = String::new();
                 // The client writes the request and shuts its write half; the
-                // read ends at EOF.
-                let _ = stream.read_to_string(&mut text);
+                // read ends at EOF. The read timeout bounds each read, but a
+                // per-read timeout is not a deadline — a client that drips one
+                // byte every few seconds resets it forever, so the whole request
+                // is bounded here too.
+                let deadline = Instant::now() + REQUEST_TIMEOUT;
+                let mut buffer = [0u8; 512];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                            if Instant::now() >= deadline || text.len() >= MAX_REQUEST {
+                                break;
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            break
+                        }
+                        Err(_) => break,
+                    }
+                }
                 let reply = match uapi::parse(&text) {
                     Ok(request) => {
                         let (reply_tx, reply_rx) = mpsc::channel();
@@ -578,5 +608,64 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    /// A client that drips one byte at a time must not hold the plane.
+    ///
+    /// A per-read timeout is not a deadline: each byte resets it, so the first
+    /// attempt at this bound (read timeout only) was still bypassable. The whole
+    /// request has to be bounded, which is what this pins.
+    #[test]
+    fn a_dripping_client_does_not_hold_the_plane() {
+        let dir = std::env::temp_dir().join(format!("vallum-drip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        let (tx, rx) = mpsc::sync_channel(8);
+        let shutdown = Shutdown::new();
+        // Answer every request, so the server never waits on this test.
+        let responder = thread::spawn(move || {
+            while let Ok(Input::Control { reply, .. }) = rx.recv() {
+                if reply.send(uapi::render_ok()).is_err() {
+                    break;
+                }
+            }
+        });
+        let handle = serve(path.clone(), tx, shutdown.clone()).expect("serve");
+
+        // One byte every two seconds: always under the five-second read timeout.
+        let drip = {
+            let path = path.clone();
+            thread::spawn(move || {
+                if let Ok(mut stream) = UnixStream::connect(&path) {
+                    for _ in 0..3 {
+                        if stream.write_all(b"g").is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_secs(2));
+                    }
+                }
+            })
+        };
+        thread::sleep(Duration::from_millis(200));
+
+        // A second client must be answered inside the drip's lifetime.
+        let started = Instant::now();
+        let reply = request(&path, "get=1\n").expect("the plane must answer");
+        let waited = started.elapsed();
+        assert!(reply.contains("errno=0"), "got {reply:?}");
+        assert!(
+            waited < Duration::from_secs(9),
+            "the drip held the plane for {waited:?}"
+        );
+
+        shutdown.trigger();
+        // The accept loop only sees the flag after a connection, so unblock it.
+        let _ = UnixStream::connect(&path);
+        let _ = drip.join();
+        let _ = handle.join();
+        let _ = responder.join();
+        let _ = fs::remove_dir_all(&dir);
     }
 }

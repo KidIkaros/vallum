@@ -10,6 +10,46 @@ into "reports itself and recovers".
 
 ---
 
+## Status
+
+- **Phase 0 — done** (`1460fbe`). Read timeout, whole-request deadline, client
+  reply timeout, `up 0` on timeout, alert annotation.
+- **Phase 2 — done** (`134872b`). `claim_path` refuses a live socket;
+  the key name follows the config's stem.
+- **Phase 3 — done** (this commit). `ReadWritePaths=-`, `StartLimit*`, and a
+  `postinst` that fails instead of swallowing a missing tmpfiles conf.
+- **Phase 1 — deliberately not implemented.** See "Why Phase 1 is not built"
+  below.
+
+### The hole in the first Phase 0 attempt
+
+The first version bounded each `read`, not the request. `SO_RCVTIMEO` is
+per-call, so a client that dripped one byte every four seconds reset it forever.
+Measured: `show` still produced nothing after ten seconds — the client's own
+timeout fired, the server was still held. The accept loop now carries a deadline
+for the whole request and a size cap, and a test pins it.
+
+This is worth recording because the first fix *looked* complete and the probe
+that had motivated it — a client that sends nothing at all — still passed.
+
+### Why Phase 1 is not built
+
+The watchdog gate was planned as a backstop for the wedge. With Phase 0 in
+place there is no longer a way for a client to hold the control thread beyond
+five seconds, so a gate would have to distinguish "blocked in `accept()`, which
+is healthy" from "blocked anywhere else". Doing that needs either a
+non-blocking accept loop with a poll tick, or a heartbeat that goes stale
+whenever no request arrives — and the second kind restarts healthy daemons that
+simply had no traffic.
+
+Adding machinery whose failure mode is "restart a working daemon" to guard
+against a failure that is no longer reachable is a bad trade. What would change
+this: a second wedge path that Phase 0 does not cover. `tx.send` blocking on a
+full channel is the only remaining candidate, and the loop drains it every
+iteration.
+
+---
+
 ## Phase 0 — bound the connection, unshare the monitor  (F1, F2)
 
 The two highest-leverage changes and the two cheapest.
