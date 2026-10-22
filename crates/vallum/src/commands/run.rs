@@ -19,7 +19,7 @@ use crate::net::{DatagramSocket, SharedSocket, UdpTransport};
 use crate::privileges;
 use crate::run::{self, Shutdown};
 use crate::tun::{self, InterfaceSpec};
-use crate::{log_info, log_warn, Error};
+use crate::{log_debug, log_info, log_warn, Error};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -98,6 +98,34 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_info!(log, "dropped privileges to {}", privileges.describe());
     }
 
+    // The config can only guess the path MTU; the kernel knows it. A handshake
+    // cut to a budget the path cannot carry is dropped before it leaves, and the
+    // tunnel then never comes up at all — which is what `outer_mtu` exists to
+    // prevent, for operators who already knew the number. Take the smallest path
+    // to any peer so a narrow link is sized correctly from the first datagram;
+    // an explicit `outer_mtu` still wins when it is smaller.
+    let floor = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
+    let discovered = resolved
+        .peers
+        .iter()
+        .filter_map(|peer| peer.endpoint())
+        .filter_map(|endpoint| crate::net::path_mtu(endpoint).ok())
+        .min()
+        .map(|mtu| usize::from(mtu).saturating_sub(usize::from(config::OUTER_HEADER_LEN)))
+        .map(|budget| budget.max(floor));
+    let budget = match discovered {
+        Some(discovered) => {
+            log_debug!(
+                log,
+                "the path to the nearest peer carries {discovered} bytes of datagram budget \
+                 (config allows {})",
+                resolved.outer_budget
+            );
+            resolved.outer_budget.min(discovered)
+        }
+        None => resolved.outer_budget,
+    };
+
     let suite: Arc<dyn vallum_crypto::CryptoSuite> = Arc::new(suite);
 
     let device = Device::new(
@@ -130,7 +158,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             parts,
             socket: Arc::clone(&shared),
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
-            budget: resolved.outer_budget,
+            budget,
             control: resolved.control.clone().map(|path| control::ControlServer {
                 path,
                 context: control::ControlContext {

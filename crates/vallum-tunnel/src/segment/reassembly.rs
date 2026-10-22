@@ -131,6 +131,21 @@ impl Segments {
         self.budget
     }
 
+    /// Lower the budget after the path reported that a datagram did not fit.
+    ///
+    /// Only ever narrows. A budget is a ceiling, and raising it on the strength
+    /// of one observation is how a tunnel starts blackholing again; widening is
+    /// a separate decision that needs its own evidence. A value that cannot
+    /// carry an envelope is ignored rather than panicking, because this runs on
+    /// a live path where the alternative is killing the daemon.
+    pub fn narrow_budget(&mut self, budget: usize) {
+        if (super::FRAGMENT_HEADER_LEN + 1..=MAX_OUTER_DATAGRAM).contains(&budget)
+            && budget < self.budget
+        {
+            self.budget = budget;
+        }
+    }
+
     /// The largest datagram for a destination of this family.
     ///
     /// The configured budget assumes the IPv6 header (48 bytes). An IPv4
@@ -650,5 +665,27 @@ mod tests {
     #[should_panic(expected = "cannot carry an envelope")]
     fn a_budget_too_small_for_the_envelope_is_a_construction_bug() {
         let _ = Segments::with_budget(super::super::FRAGMENT_HEADER_LEN);
+    }
+
+    #[test]
+    fn narrowing_a_budget_takes_effect_and_never_widens() {
+        let mut segments = Segments::with_budget(1_448);
+        segments.narrow_budget(1_152);
+        assert_eq!(segments.budget(), 1_152, "a narrower path must be adopted");
+        // A later reading that looks wider must not undo it. A budget is a
+        // ceiling, and one observation is not evidence to raise it.
+        segments.narrow_budget(1_400);
+        assert_eq!(segments.budget(), 1_152);
+    }
+
+    #[test]
+    fn narrowing_to_a_value_that_cannot_carry_an_envelope_is_ignored() {
+        // This runs on a live path. Killing the daemon over a nonsensical
+        // reading would be worse than keeping the budget it already had.
+        let mut segments = Segments::with_budget(1_448);
+        segments.narrow_budget(super::super::FRAGMENT_HEADER_LEN);
+        assert_eq!(segments.budget(), 1_448);
+        segments.narrow_budget(MAX_OUTER_DATAGRAM + 1);
+        assert_eq!(segments.budget(), 1_448);
     }
 }

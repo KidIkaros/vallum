@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -438,6 +438,37 @@ fn poisoned<T>(_: T) -> io::Error {
     io::Error::other("memory network lock poisoned")
 }
 
+/// The path MTU the kernel currently believes leads to `endpoint`.
+///
+/// A connected UDP socket carries the route's MTU, so this reads the routing
+/// table rather than probing: no packet is sent and no state is disturbed.
+///
+/// The daemon sizes its datagrams before the first handshake, and a handshake
+/// cut to a budget the path cannot carry is dropped by the kernel — the tunnel
+/// then never comes up at all. `interface.outer_mtu` prevents that only for an
+/// operator who already knew the number, which is not the same as discovering
+/// it.
+#[cfg(target_os = "linux")]
+pub fn path_mtu(endpoint: SocketAddr) -> io::Result<u16> {
+    let any = SocketAddr::new(
+        if endpoint.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        },
+        0,
+    );
+    let socket = UdpSocket::bind(any)?;
+    socket.connect(endpoint)?;
+    let mtu = if endpoint.is_ipv4() {
+        rustix::net::sockopt::ip_mtu(&socket)
+    } else {
+        rustix::net::sockopt::ipv6_mtu(&socket)
+    }
+    .map_err(|e| io::Error::other(format!("path MTU: {e}")))?;
+    u16::try_from(mtu).map_err(|_| io::Error::other(format!("path MTU {mtu} does not fit in u16")))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -477,5 +508,15 @@ mod tests {
             rustix::net::sockopt::Ipv4PathMtuDiscovery::DO.as_raw(),
             "a v4 socket must report an oversize datagram, not fragment it"
         );
+    }
+
+    #[test]
+    fn the_path_mtu_of_loopback_is_the_loopback_mtu() {
+        // 65536 is what the kernel reports for `lo`; the point is that the
+        // function reads a real number out of the routing table rather than
+        // failing or guessing.
+        let mtu = path_mtu("127.0.0.1:9".parse().expect("a v4 address"))
+            .expect("loopback has a path MTU");
+        assert!(mtu >= 1500, "loopback reported an implausible MTU of {mtu}");
     }
 }

@@ -157,6 +157,26 @@ sleep 0.2
 
 in_ns() { nsenter -t "$(cat "$HOLDER_PIDFILE")" -n -- "$@"; }
 
+# Retry a crossing until a reply arrives. A lossy path drops individual packets,
+# and one lost ping is not the tunnel failing — a user's browser retries too.
+# `$1` is how many seconds to keep trying; the rest is passed to `ping`.
+crosses() {
+    local wait=$1; shift
+    local deadline=$((SECONDS + wait))
+    until ping -c1 -W2 -q "$@" >/dev/null 2>&1; do
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 0.2
+    done
+}
+crosses_in_ns() {
+    local wait=$1; shift
+    local deadline=$((SECONDS + wait))
+    until in_ns ping -c1 -W2 -q "$@" >/dev/null 2>&1; do
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 0.2
+    done
+}
+
 in_ns ip link set lo up
 ip link set veth-b netns "$(cat "$HOLDER_PIDFILE")"
 in_ns ip link set veth-b up
@@ -389,8 +409,8 @@ ok "both daemons are running with their interfaces up"
 
 # ── establishment ────────────────────────────────────────────────────
 
-say "carrying traffic: ping -c 3 $INNER_B"
-if ping -c3 -W5 -i0.3 -q "$INNER_B"; then
+say "carrying traffic: ping $INNER_B"
+if crosses 20 "$INNER_B"; then
     ok "an inner packet completed a round trip through the tunnel"
 else
     bad "ping across the tunnel failed; see $A_LOG and $B_LOG"
@@ -498,7 +518,7 @@ ok "the InitHello crossed as whole UDP datagrams and reassembled byte for byte"
 # ── the other direction, over the session A started ──────────────────
 
 say "carrying traffic the other way: from the second namespace"
-if in_ns ping -c2 -W5 -i0.3 -q "$INNER_A"; then
+if crosses_in_ns 20 "$INNER_A"; then
     ok "B -> A completed a round trip on A's session"
 else
     bad "the reverse direction failed"
@@ -507,7 +527,7 @@ fi
 # ── a large payload ──────────────────────────────────────────────────
 
 say "carrying a large payload: ping -s 1200 (1228 B on the wire)"
-if ping -c2 -W5 -i0.3 -q -s 1200 "$INNER_B"; then
+if crosses 20 -s 1200 "$INNER_B"; then
     ok "a 1228-byte inner packet fit the 1380-byte inner MTU"
 else
     bad "a large inner packet did not cross"
@@ -715,7 +735,7 @@ ok "a replayed InitHello drew no reply"
 for pidfile in "$A_PIDFILE" "$B_PIDFILE"; do
     kill -0 "$(cat "$pidfile")" 2>/dev/null || bad "$(basename "$pidfile" .pid) died under attack"
 done
-if ping -c1 -W5 -q "$INNER_B"; then
+if crosses 20 "$INNER_B"; then
     ok "the tunnel still carries traffic after the attack"
 else
     bad "the tunnel stopped carrying traffic after the attack"
@@ -734,7 +754,7 @@ sed -i 's/^listen = .*/listen = "10.99.0.1:51999"/' "$WORK/a.rebind.toml"
     || bad "show after the rebind failed"
 grep -q '^listen_port=51999$' "$WORK/rebind.dump" \
     || bad "the daemon did not rebind to 51999"
-if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+if crosses 20 "$INNER_B"; then
     ok "the tunnel survived a runtime listen-port change"
 else
     bad "the tunnel did not survive the rebind"
@@ -795,7 +815,7 @@ while :; do
     sleep 0.1
 done
 
-if ping -c2 -W5 -i0.3 -q -s 700 "$INNER_B"; then
+if crosses 20 -s 700 "$INNER_B"; then
     ok "a 728-byte inner packet crossed a 972-byte v4 budget"
 else
     bad "the narrow path did not carry traffic"
@@ -861,18 +881,26 @@ ok "the daemon assigned its IPv6 address and the kernel installed the route"
 # From A, for the same reason the IPv4 phase starts there: A has an endpoint to
 # dial, and B learns A's address from the authenticated handshake. A ping from B
 # first would queue forever — B has nothing to dial.
-if ping -6 -c2 -W5 -i0.3 -q fd00:7::2; then
-    ok "ping6 crossed the tunnel (fd00:7::1 -> fd00:7::2)"
-else
-    bad "IPv6 traffic did not cross the tunnel"
-fi
+# A lossy path can lose the first handshake, so give it the patience a user
+# would: retry until a reply comes back rather than failing on one attempt.
+DEADLINE=$((SECONDS + 20))
+until ping -6 -c1 -W2 -q fd00:7::2 >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "IPv6 traffic did not cross the tunnel"
+    fi
+    sleep 0.2
+done
+ok "ping6 crossed the tunnel (fd00:7::1 -> fd00:7::2)"
 
 # ...and the other way, over the session A started.
-if in_ns ping -6 -c2 -W5 -i0.3 -q fd00:7::1; then
-    ok "ping6 crossed back (fd00:7::2 -> fd00:7::1)"
-else
-    bad "the IPv6 reverse direction failed"
-fi
+DEADLINE=$((SECONDS + 20))
+until in_ns ping -6 -c1 -W2 -q fd00:7::1 >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "the IPv6 reverse direction failed"
+    fi
+    sleep 0.2
+done
+ok "ping6 crossed back (fd00:7::2 -> fd00:7::1)"
 
 say "shutting the IPv6-path daemons down"
 kill_pidfile "$A_PIDFILE"
@@ -945,17 +973,17 @@ ip -6 route add fd00:8::2/128 dev vallum0
 in_ns ip route add 10.8.0.1/32 dev vallum0
 in_ns ip -6 route add fd00:8::1/128 dev vallum0
 
-if ping -c2 -W5 -i0.3 -q 10.8.0.2; then
+if crosses 20 10.8.0.2; then
     ok "IPv4 crossed a dual-stack tunnel over a v6 outer path"
 else
     bad "IPv4 did not cross the dual-stack tunnel"
 fi
-if ping -6 -c2 -W5 -i0.3 -q fd00:8::2; then
+if crosses 20 -6 fd00:8::2; then
     ok "IPv6 crossed the same tunnel"
 else
     bad "IPv6 did not cross the dual-stack tunnel"
 fi
-if in_ns ping -c2 -W5 -i0.3 -q 10.8.0.1 && in_ns ping -6 -c2 -W5 -i0.3 -q fd00:8::1; then
+if crosses_in_ns 20 10.8.0.1 && crosses_in_ns 20 -6 "fd00:8::1"; then
     ok "both families crossed back"
 else
     bad "the reverse direction failed for at least one family"
@@ -968,17 +996,16 @@ wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the dual-stack path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the dual-stack path"
 ok "the dual-stack daemons exited on SIGTERM"
 
-# ── IPv4 DF: a path narrower than the knob is loud, not silent ───────
+# ── IPv4 DF: a path that narrows under a running tunnel ──────────────
 #
 # `IP_MTU_DISCOVER = DO` makes the kernel report EMSGSIZE instead of
-# fragmenting. A 1200-byte path with the default 1500-byte assumption must
-# therefore fail loudly; naming the real MTU must make the tunnel work. Without
-# DF the kernel would fragment silently and the misconfiguration would look like
-# a slow path.
+# fragmenting, so nothing is ever silently split. The daemons start on a wide
+# path and discover it; the link is then narrowed underneath them, which is the
+# case startup discovery cannot cover. The daemon must ask the kernel what the
+# path now carries, narrow its datagrams, and carry the handshake anyway.
+# Without DF the kernel would fragment silently and the misconfiguration would
+# look like a slow path.
 
-say "narrowing the outer path to 1200 bytes without telling the daemon"
-ip link set veth-a mtu 1200
-in_ns ip link set veth-b mtu 1200
 : > "$A_PIDFILE"
 : > "$B_PIDFILE"
 
@@ -1019,9 +1046,26 @@ while :; do
     sleep 0.1
 done
 
-# A packet from A is what starts the handshake. It cannot arrive, and that is
-# the point: the `InitHello` it triggers is too large for the path.
+# A packet from A starts the handshake on a wide path, and gives the daemon a
+# destination to measure — this is where the pre-send probe runs.
 ping -c1 -W2 -q 10.9.0.2 >/dev/null 2>&1 || true
+DEADLINE=$((SECONDS + 10))
+until ping -c1 -W1 -q 10.9.0.2 >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "the tunnel did not come up on the wide path; see $WORK"
+    fi
+    sleep 0.2
+done
+
+# Now narrow it underneath an already-measured destination. The probe will not
+# run again, so this is the case the kernel must report as EMSGSIZE rather than
+# fragment, and the daemon must react to.
+say "narrowing the outer path to 1200 bytes while the daemons are running"
+ip link set veth-a mtu 1200
+in_ns ip link set veth-b mtu 1200
+
+# A payload that no longer fits the path, to provoke the report.
+ping -c1 -W2 -s 1200 -q 10.9.0.2 >/dev/null 2>&1 || true
 
 DEADLINE=$((SECONDS + 8))
 while :; do
@@ -1048,12 +1092,27 @@ if [ "$((FRAG_A_DF - FRAG_A_DF_BEFORE))" -ne 0 ] \
 fi
 ok "nothing was fragmented"
 
+# The path narrowed under a running tunnel. The daemon must narrow its datagrams
+# and carry the handshake anyway, rather than dropping every datagram after it.
+# The window is generous because a post-quantum handshake is many fragments: at
+# 5% loss each attempt has a real chance of losing one, so recovery takes several
+# retries rather than one.
+DEADLINE=$((SECONDS + 25))
+while :; do
+    if ping -c1 -W1 -q 10.9.0.2 >/dev/null 2>&1; then
+        break
+    fi
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "the tunnel did not recover after the path narrowed to 1200 bytes; see $WORK"
+    fi
+    sleep 0.2
+done
+ok "the tunnel recovered and carried traffic on the narrower path"
+
 kill_pidfile "$A_PIDFILE"
 kill_pidfile "$B_PIDFILE"
 wait_gone "$A_PIDFILE" 5 || bad "A ignored SIGTERM on the DF path"
 wait_gone "$B_PIDFILE" 5 || bad "B ignored SIGTERM on the DF path"
-grep -q "0 handshakes" "$A_LOG" || bad "a handshake completed on an impossible path"
-ok "the handshake failed loudly rather than crossing in fragments"
 
 say "naming the real MTU (outer_mtu = 1200) makes the same path work"
 sed -i '/^listen = /a outer_mtu = 1200' "$WORK/a.toml" "$WORK/b.toml"
@@ -1083,7 +1142,7 @@ while :; do
     sleep 0.1
 done
 
-if ping -c2 -W5 -i0.3 -q 10.9.0.2; then
+if crosses 20 10.9.0.2; then
     ok "a 1200-byte path with outer_mtu = 1200 carries traffic"
 else
     bad "the corrected path did not carry traffic"
@@ -1189,7 +1248,7 @@ stop_prov() {
 start_prov
 ok "both provisioned daemons brought their interfaces up"
 
-if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+if crosses 20 "$INNER_B"; then
     ok "the provisioned tunnel carries traffic"
 else
     bad "the provisioned tunnel did not carry traffic; see $WORK/prov-a.log"
@@ -1216,7 +1275,7 @@ grep -q '^previous_public_key = ' "$PROV/b/vallum0.toml" \
 ok "peer rotate kept the old key as the previous identity"
 
 start_prov
-if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+if crosses 20 "$INNER_B"; then
     ok "the old key still works while the rotation is open"
 else
     bad "the old key stopped working during a rotation; see $WORK/prov-a.log"
@@ -1225,7 +1284,7 @@ stop_prov
 
 cp "$PROV/a-new.key" "$PROV/a/server.key"
 start_prov
-if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
+if crosses 20 "$INNER_B"; then
     ok "the new key works once the device has it"
 else
     bad "the new key did not work; see $WORK/prov-a.log"
@@ -1237,11 +1296,16 @@ stop_prov
 grep -q '^previous_public_key = ' "$PROV/b/vallum0.toml" \
     && bad "peer finalize left the previous key behind"
 start_prov
-if ping -c2 -W5 -i0.3 -q "$INNER_B"; then
-    ok "the tunnel still works after finalize"
-else
-    bad "the tunnel stopped working after finalize; see $WORK/prov-a.log"
-fi
+# A rotation forces a new handshake; on a lossy path that takes more than one
+# attempt, so retry rather than failing on the first.
+DEADLINE=$((SECONDS + 25))
+until ping -c1 -W2 -q "$INNER_B" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "the tunnel stopped working after finalize; see $WORK/prov-a.log"
+    fi
+    sleep 0.2
+done
+ok "the tunnel still works after finalize"
 stop_prov
 
 # The retired key must be refused, or finalize is only cosmetic.

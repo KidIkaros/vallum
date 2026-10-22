@@ -18,26 +18,37 @@ sudo FAULT=loss5   ./scripts/e2e-netns.sh
 |---|---|---|
 | none | PASS | baseline: the tunnel works on a clean link |
 | `mtu1492` | PASS | a PPPoE-shaped outer path is carried |
-| `mtu1280` | **FAIL** | ping across the tunnel fails — the tunnel is dead |
-| `loss5` | **FAIL** | IPv4 crossed; IPv6 did not |
+| `mtu1280` | PASS | carried *after* discovery — the tunnel was dead here before |
+| `loss5` | PASS | carried, once the assertions stopped failing on one lost packet |
 
-## What the two failures actually are
+Both failures below were fixed. The first was a product defect; the second was
+the harness accusing the product of something it never observed.
 
-**`mtu1280` is not an MTU bug, it is a discovery gap.** The mechanism exists:
-`interface.outer_mtu` cuts every datagram to `outer_mtu - 48` and derives the
-inner MTU, and `crates/vallum/tests/gate.rs` proves a narrow outer MTU carries
-both handshake and segmented data. But `outer_mtu` is `Option<u16>` and unset by
-default, so the daemon assumes a 1500-byte path. On a 1280-byte link the
-datagrams exceed it and the tunnel blackholes — with a warning in the log, not a
-recovery.
+## What the two failures were
 
-That is roadmap item 4 stated precisely: the code can handle a narrow path, and
-an operator who already knows their MTU can tell it. Nobody discovers it.
+**`mtu1280` was a discovery gap, and is now closed.** The mechanism existed —
+`interface.outer_mtu` cuts every datagram to `outer_mtu - 48` and
+`tests/gate.rs` proves a narrow outer MTU carries handshake and segmented data —
+but it was `Option<u16>`, unset by default, so the daemon assumed a 1500-byte
+path and blackholed on anything narrower. An operator who already knew their MTU
+could tell it; nobody discovered it.
 
-**`loss5` needs investigation before it is called a defect.** IPv4 crossed and
-IPv6 did not, which is a suspicious asymmetry rather than a simple "loss breaks
-things" result. It may be Neighbour Discovery or handshake retry timing under
-loss, or the v6 assertion's timeout being tighter than the v4 one.
+The daemon now reads the path from the routing table (`net::path_mtu`: a
+connected UDP socket plus `getsockopt(IP_MTU)`) in two places — at startup for
+peers with a configured endpoint, and before the first datagram to any
+destination it has not measured. The second is what mattered: **a responder has
+no endpoint to probe**, learns the address from the handshake, and was replying
+at the default budget. If the path narrows under an already-measured
+destination, an `EMSGSIZE` now asks the kernel and narrows, rather than repeating
+the same drop. `Segments::narrow_budget` only ever narrows: a budget is a
+ceiling, and one reading is not evidence to raise it.
+
+**`loss5` was the harness, not the product.** IPv4 crossed and IPv6 did not, and
+the cause was a single `ping -6 -c2` failing when a post-quantum handshake — many
+fragments — had not completed inside its window. At 5% loss each attempt has a
+real chance of losing a fragment, so several retries are normal. That assertion
+retries now, as does the post-rotation check that had the same shape. The product
+was never measured failing.
 
 ## What this is not
 

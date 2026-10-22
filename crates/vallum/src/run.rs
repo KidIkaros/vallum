@@ -58,6 +58,13 @@ pub const DEFAULT_TICK_MS: u64 = 100;
 /// Queued events past which the device is told it is under load.
 pub const DEFAULT_UNDER_LOAD_DEPTH: usize = 64;
 
+/// How many destinations have their path MTU read from the routing table.
+///
+/// One `connect` plus `getsockopt` per destination, once each, so the cost is
+/// bounded by this rather than by how many addresses the send path can be
+/// talked into using. Well above any realistic peer count.
+pub const PROBED_PATH_LIMIT: usize = 64;
+
 /// The largest datagram a UDP read will accept.
 ///
 /// One byte past [`vallum_core::wire::MAX_HANDSHAKE_MESSAGE`], not 65 535. No
@@ -282,6 +289,9 @@ pub fn run(
     // the device below only ever sees whole messages and nothing depends on IP
     // fragmentation to get a handshake across.
     let mut segments = Segments::with_budget(budget);
+    // The smallest budget that can still carry an envelope; a path narrower
+    // than this cannot run the protocol at all, so narrowing stops here.
+    let min_budget = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
 
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
@@ -327,6 +337,8 @@ pub fn run(
     // configuration mistake, not a per-packet event, and a log line per packet
     // would bury it.
     let mut mtu_warned: HashSet<SocketAddr> = HashSet::new();
+    // Destinations whose path MTU has already been read from the routing table.
+    let mut probed: HashSet<SocketAddr> = HashSet::new();
 
     loop {
         if shutdown.is_triggered() {
@@ -381,6 +393,22 @@ pub fn run(
         for action in actions {
             match action {
                 Action::Send { destination, bytes } => {
+                    // Size the path before the first datagram to a destination we
+                    // have not measured. A responder has no configured endpoint:
+                    // it learns the address from the handshake, and without this
+                    // it would send its reply at the default budget and lose it.
+                    if probed.len() < PROBED_PATH_LIMIT && probed.insert(destination) {
+                        if let Some(fits) = crate::net::path_mtu(destination)
+                            .ok()
+                            .map(|mtu| {
+                                usize::from(mtu)
+                                    .saturating_sub(usize::from(crate::config::OUTER_HEADER_LEN))
+                            })
+                            .filter(|fits| *fits >= min_budget)
+                        {
+                            segments.narrow_budget(fits);
+                        }
+                    }
                     for datagram in segments.outbound(bytes, destination, rng) {
                         outbound.push((destination, datagram));
                     }
@@ -424,12 +452,27 @@ pub fn run(
                     Err(error) => {
                         stats.datagrams_failed += 1;
                         if is_message_too_long(&error) {
+                            // The kernel knows what this path carries; ask it
+                            // rather than dropping every later datagram the same
+                            // way. A responder has no configured endpoint to
+                            // probe at startup, so this is where it learns.
+                            if let Some(fits) = crate::net::path_mtu(*destination)
+                                .ok()
+                                .map(|mtu| {
+                                    usize::from(mtu).saturating_sub(usize::from(
+                                        crate::config::OUTER_HEADER_LEN,
+                                    ))
+                                })
+                                .filter(|fits| *fits >= min_budget)
+                            {
+                                segments.narrow_budget(fits);
+                            }
                             if mtu_warned.insert(*destination) {
                                 log_warn!(
                                     log,
                                     "send to {destination} exceeded the path MTU; \
-                                     lower interface.outer_mtu (currently a \
-                                     {budget}-byte datagram budget)"
+                                     datagrams are now cut to a {}-byte budget",
+                                    segments.budget()
                                 );
                             }
                         } else {

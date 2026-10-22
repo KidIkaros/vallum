@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The outer path MTU is discovered instead of assumed.** `interface.outer_mtu`
+  defaulted to 1500, so on a narrower link (PPPoE at 1492, DS-Lite at 1280) every
+  datagram exceeded the path, the kernel dropped it rather than fragmenting, and
+  the tunnel never came up. The daemon now reads the path from the routing table
+  in two places: at startup for peers with a configured endpoint, and before the
+  first datagram to any destination it has not measured — which is what covers a
+  responder, whose endpoint is learned from the handshake rather than configured.
+  A path that narrows under a live destination is caught by `EMSGSIZE`, which now
+  asks the kernel and narrows the budget instead of repeating the same drop. The
+  budget only ever narrows: one reading is not evidence to raise it.
+- **The netns gate can degrade the outer link.** `FAULT=mtu1492|mtu1400|mtu1280`
+  or `FAULT=loss<N>|delay<N>|reorder<N>` applies the fault before the tunnel is
+  built, so every assertion runs under it. `docs/research/fault-lab.md` records
+  the results.
+
 - **`/run/vallum` is a machine resource, not a service's state.** It was created
   by `vallum@.service`'s `RuntimeDirectory`, so stopping the server deleted the
   directory — and with it every other daemon's control socket — and a start
