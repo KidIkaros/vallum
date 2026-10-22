@@ -51,7 +51,15 @@ if [ ! -x "$BIN" ]; then
     exit 2
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/vallum-e2e.XXXXXX")
+WORK=$(mktemp -d /tmp/vallum-e2e.XXXXXX)
+# Deliberately not $TMPDIR: the lab runs inside `unshare -Urn`, where this user's
+# uid is unmapped, so a path under the home directory — where $TMPDIR points on
+# this machine — is not traversable and every exec fails with EACCES.
+
+# The binary is normally under the home directory for the same reason, so stage
+# a copy where the namespace can reach it.
+install -m 0755 -- "$BIN" "$WORK/vallum"
+BIN="$WORK/vallum"
 if [ -n "${KEEP:-}" ]; then
     trap 'echo "kept: $WORK"' EXIT
 else
@@ -158,6 +166,35 @@ in_ns ip -6 addr add "$OUTER6_B/64" dev veth-b nodad
 ping -c1 -W3 -q "$OUTER_B" >/dev/null || bad "the outer network is not up"
 ping -6 -c1 -W3 -q "$OUTER6_B" >/dev/null || bad "the outer IPv6 network is not up"
 ok "outer network is up, over IPv4 and IPv6"
+
+# ── fault injection ──
+# FAULT degrades the outer link *before* the tunnel is built, so every later
+# assertion runs under it. This is how the behaviour data gets produced without
+# users: a clean veth proves the tunnel works, and a degraded one shows what it
+# does when the link does not. Values: mtu1492 mtu1400 mtu1280 loss<N>
+# delay<N> reorder<N>.
+case "${FAULT:-none}" in
+    none) ;;
+    mtu*)
+        mtu=${FAULT#mtu}
+        case "$mtu" in 1492|1400|1280) ;; *) bad "FAULT=$FAULT: unsupported MTU";; esac
+        ip link set veth-a mtu "$mtu"
+        in_ns ip link set veth-b mtu "$mtu"
+        ok "fault: outer MTU clamped to $mtu (PPPoE/DS-Lite shaped)" ;;
+    loss*|delay*|reorder*)
+        command -v tc >/dev/null 2>&1 || bad "FAULT=$FAULT needs tc (iproute2)"
+        arg=${FAULT#loss}; kind=loss
+        case "$FAULT" in delay*)   arg=${FAULT#delay};   kind=delay ;;
+                          reorder*) arg=${FAULT#reorder}; kind=reorder ;; esac
+        case "$arg" in ''|*[!0-9]*) bad "FAULT=$FAULT: expected a number";; esac
+        case "$kind" in
+            loss)    tc qdisc add dev veth-a root netem loss "${arg}%" ;;
+            delay)   tc qdisc add dev veth-a root netem delay "${arg}ms" ;;
+            reorder) tc qdisc add dev veth-a root netem delay 10ms reorder 25% "${arg}%" ;;
+        esac
+        ok "fault: ${kind} ${arg} on the outer link" ;;
+    *) bad "unknown FAULT=$FAULT" ;;
+esac
 
 # ── keys and configs ─────────────────────────────────────────────────
 
