@@ -174,6 +174,11 @@ else
 fi
 
 say "packaging"
+# Completions are generated from the binary, not committed: a stale copy
+# advertises flags the binary no longer has, and the manifest check compares
+# filenames so it cannot catch that. Generate before cargo-deb reads the asset
+# table.
+run scripts/gen-completions.sh
 run rm -rf target/debian crates/vallum/target/generate-rpm dist
 run cargo deb -p vallum --no-build
 run bash -c "cd crates/vallum && cargo generate-rpm"
