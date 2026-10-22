@@ -27,6 +27,11 @@ const DAEMON_UNIT: &str = include_str!("../../../../packaging/vallum@.service");
 const QUICK_UNIT: &str = include_str!("../../../../packaging/vallum-quick@.service");
 const WATCH_UNIT: &str = include_str!("../../../../packaging/vallum-quick-watch@.service");
 const ENROLL_UNIT: &str = include_str!("../../../../packaging/vallum-enroll@.service");
+/// `/run/vallum` holds every control socket on the machine. The units only get
+/// a writable window into it when it exists, so it must be created before the
+/// first unit starts — and by something that is not a unit, or it disappears
+/// when that unit stops. See ADR-0017.
+const TMPFILES: &str = include_str!("../../../../packaging/vallum-tmpfiles.conf");
 
 #[derive(Debug, Args)]
 pub struct ServerArgs {
@@ -879,6 +884,7 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
     let quick_unit = unit_dir.join("vallum-quick@.service");
     let watch_unit = unit_dir.join("vallum-quick-watch@.service");
     if dry_run {
+        say!("   would install /etc/tmpfiles.d/vallum.conf and create /run/vallum");
         say!("   would install {}", daemon_unit.display());
         say!("   would install {}", quick_unit.display());
         say!("   would install {}", watch_unit.display());
@@ -887,6 +893,27 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
              vallum-quick-watch@{instance}"
         );
         return Ok("would install and start".to_owned());
+    }
+    // Before the units: `/run/vallum` must exist or every daemon fails with
+    // EROFS under `ProtectSystem=strict`, because `ReadWritePaths=-` grants a
+    // window into a path it does not create. The package gets this from its
+    // tmpfiles.d entry; a host that installed the binary directly gets it here.
+    let tmpfiles = Path::new("/etc/tmpfiles.d/vallum.conf");
+    write_atomic(tmpfiles, TMPFILES, 0o644)?;
+    let created = Command::new("systemd-tmpfiles")
+        .args(["--create", "/etc/tmpfiles.d/vallum.conf"])
+        .status()
+        .map_err(|source| Error::IoPath {
+            action: "run",
+            path: PathBuf::from("systemd-tmpfiles"),
+            source,
+        })?;
+    if !created.success() {
+        return Err(Error::Usage(
+            "systemd-tmpfiles could not create /run/vallum; the daemon would fail to \
+             open its control socket"
+                .to_owned(),
+        ));
     }
     write_atomic(&daemon_unit, DAEMON_UNIT, 0o644)?;
     write_atomic(&quick_unit, QUICK_UNIT, 0o644)?;

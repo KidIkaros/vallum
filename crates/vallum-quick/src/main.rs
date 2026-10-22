@@ -1350,11 +1350,20 @@ fn verdict(attached: bool, session_age: Option<Duration>, dead_after: Duration) 
 
 /// How stale the newest handshake may be before the tunnel counts as dead.
 ///
-/// Three keepalive periods plus slack: long enough that a slow rekey is not a
-/// withdrawal, short enough that a dead server costs a minute of egress rather
-/// than a reboot. `VALLUM_DEAD_AFTER_SECS` exists for the test harness, not as
-/// an operator knob.
-const DEAD_AFTER: Duration = Duration::from_secs(90);
+/// This must be **longer than the protocol's own expiry**. `REJECT_AFTER_TIME_MS`
+/// in `vallum-core` is 180 s: until that point the daemon still considers the
+/// session valid and will accept data on it, so a shorter window withdraws the
+/// routes from a tunnel that is working.
+///
+/// Measured on a real deployment with the previous 90 s value: an idle full
+/// tunnel flapped every ~125 s — routes withdrawn, then restored ~35 s later
+/// when the next rekey landed — costing about a third of all connectivity in a
+/// steady state that looked perfectly healthy. The old comment justified 90 s as
+/// "three keepalive periods plus slack", which only holds if the peer sends
+/// keepalives; a client that does not sends nothing at all while idle.
+///
+/// 180 s plus 30 s of slack, so a rekey that lands late is not a withdrawal.
+const DEAD_AFTER: Duration = Duration::from_secs(210);
 
 /// How often the watchdog asks the daemon whether the session is alive.
 const WATCH_POLL: Duration = Duration::from_secs(5);
@@ -1366,6 +1375,23 @@ fn dead_after() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or(DEAD_AFTER);
     clamp_dead_after(configured)
+}
+
+#[cfg(test)]
+mod dead_after_tests {
+    use super::*;
+
+    /// The watchdog must outlive the protocol's own expiry. `REJECT_AFTER_TIME_MS`
+    /// lives in `vallum-core` (180 s); this crate does not depend on it, so the
+    /// number is asserted here rather than imported. If either moves, this fails.
+    #[test]
+    fn the_watchdog_window_outlives_the_protocol_expiry() {
+        assert!(
+            DEAD_AFTER.as_secs() > 180,
+            "DEAD_AFTER must exceed REJECT_AFTER_TIME_MS (180 s) or the watchdog \
+             withdraws routes from a live tunnel"
+        );
+    }
 }
 
 /// A window no longer than the poll interval can never be observed: every

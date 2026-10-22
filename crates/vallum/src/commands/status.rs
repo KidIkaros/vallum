@@ -109,7 +109,13 @@ fn field<'a>(reply: &'a str, key: &str) -> Option<&'a str> {
 pub fn verdict(live: Option<&str>, guard: GuardState, resolved: Mode) -> Verdict {
     match live {
         Some(reply) => {
-            if field(reply, "vallum_up") == Some("1") {
+            // `show` reports the handshake timestamp, not a boolean. Keying on
+            // `vallum_up` alone reported a working tunnel as `starting`, because
+            // that field is not in the reply at all.
+            let handshaked = field(reply, "last_handshake_time_sec")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|seconds| seconds > 0);
+            if handshaked || field(reply, "vallum_up") == Some("1") {
                 Verdict::Up
             } else {
                 Verdict::Starting
@@ -243,6 +249,26 @@ mod tests {
         assert_eq!(
             verdict(Some(reply), GuardState::Absent, Mode::On),
             Verdict::Up
+        );
+    }
+
+    #[test]
+    fn a_handshake_timestamp_alone_means_up() {
+        // What `show` actually returns on a working tunnel. The previous version
+        // keyed only on `vallum_up` and reported this as `starting`.
+        let reply = "endpoint=203.0.113.5:51820\nlast_handshake_time_sec=1792678349\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Up
+        );
+    }
+
+    #[test]
+    fn a_zero_handshake_timestamp_is_not_up() {
+        let reply = "last_handshake_time_sec=0\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Starting
         );
     }
 
