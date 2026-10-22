@@ -65,13 +65,13 @@ fn server_init_writes_a_config_and_a_0600_key() {
     let config = init(&dir);
 
     assert!(config.exists());
-    assert!(dir.join("server.key").exists());
+    assert!(dir.join("vallum0.key").exists());
     assert_eq!(mode(&config), 0o600, "the config can name a PSK file");
-    assert_eq!(mode(&dir.join("server.key")), 0o600);
+    assert_eq!(mode(&dir.join("vallum0.key")), 0o600);
 
     let parsed = vallum_config::Config::load(&config).unwrap();
     assert_eq!(parsed.interface.listen.as_deref(), Some("0.0.0.0:51820"));
-    assert_eq!(parsed.interface.private_key, PathBuf::from("server.key"));
+    assert_eq!(parsed.interface.private_key, PathBuf::from("vallum0.key"));
     assert!(parsed.interface.control.is_some());
 
     let (ok, stdout, _) = run(bin()
@@ -88,7 +88,7 @@ fn server_init_writes_a_config_and_a_0600_key() {
 fn server_init_never_regenerates_the_key() {
     let dir = scratch("idempotent");
     let config = init(&dir);
-    let before = std::fs::read(dir.join("server.key")).unwrap();
+    let before = std::fs::read(dir.join("vallum0.key")).unwrap();
 
     // A second run, with a different endpoint: the config is kept (no --force)
     // and the key must be byte-identical, or every client is invalidated.
@@ -97,7 +97,7 @@ fn server_init_never_regenerates_the_key() {
         .arg(&config)
         .args(["--endpoint", "198.51.100.9", "--no-host", "--no-service"]));
     assert!(ok, "{stderr}");
-    assert_eq!(before, std::fs::read(dir.join("server.key")).unwrap());
+    assert_eq!(before, std::fs::read(dir.join("vallum0.key")).unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

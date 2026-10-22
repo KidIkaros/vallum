@@ -87,6 +87,34 @@ pub struct ControlServer {
     pub context: ControlContext,
 }
 
+/// Refuse to take a control path that a live daemon is still answering on.
+///
+/// Connecting is what tells a stale socket from a live one: a listener accepts,
+/// a leftover inode refuses. Anything other than "nothing there" or "refused"
+/// means this process cannot tell, and in that case it must not delete a socket
+/// it has no business touching.
+fn claim_path(path: &Path) -> io::Result<()> {
+    match UnixStream::connect(path) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "`{}` is already answering; another daemon is using this control path",
+                path.display()
+            ),
+        )),
+        Err(error) => match error.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Ok(()),
+            _ => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "`{}`: cannot tell whether it is in use: {error}",
+                    path.display()
+                ),
+            )),
+        },
+    }
+}
+
 /// Bind the socket and serve requests until shutdown.
 ///
 /// # Errors
@@ -100,6 +128,11 @@ pub(crate) fn serve(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // A stale socket from a daemon that is gone should be replaced; a live one
+    // must not be stolen. Without this, a second daemon on the same `control`
+    // path unlinks the first daemon's socket and orphans a plane that is still
+    // serving — with no `EADDRINUSE` and no log line anywhere.
+    claim_path(&path)?;
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -520,6 +553,28 @@ mod tests {
             elapsed < REPLY_TIMEOUT + Duration::from_secs(5),
             "gave up after {elapsed:?}; the caller was not bounded"
         );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// A live daemon's socket must not be unlinked by a second daemon that
+    /// happens to use the same `control` path.
+    #[test]
+    fn a_live_control_socket_is_not_stolen() {
+        let dir = std::env::temp_dir().join(format!("vallum-claim-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("live.sock");
+        let _ = fs::remove_file(&path);
+
+        let listener = UnixListener::bind(&path).expect("bind");
+        let error = claim_path(&path).expect_err("a live socket must not be claimed");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+
+        // A crashed daemon leaves the inode behind with nobody listening. That
+        // one must stay reclaimable, or a restart could never recover.
+        drop(listener);
+        claim_path(&path).expect("a stale socket may be claimed");
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);

@@ -441,7 +441,7 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
             directory.display()
         )));
     }
-    let key_path = directory.join("server.key");
+    let key_path = key_path_for(&args.config, &directory);
     let control_path = args
         .control
         .clone()
@@ -627,6 +627,27 @@ fn ensure_key(path: &Path, dry_run: bool) -> Result<(String, bool), Error> {
     keys::save_secret(path, &file)?;
     let identity = keys::identity(&suite, &file)?;
     Ok((keys::encode_public(file.suite, &identity.to_peer()), true))
+}
+
+/// Where the key lives: the path an existing config already names, or a name
+/// derived from this config's own stem.
+///
+/// The stem matters because a fixed `server.key` made every config in one
+/// directory share a single identity — `--name beta` said "a separate tunnel"
+/// and the key silently disagreed. Honouring an existing config's declared path
+/// is what keeps hosts set up before that change working, including under
+/// `--force`, where a fresh name would orphan the key their peers already know.
+fn key_path_for(config: &Path, directory: &Path) -> PathBuf {
+    if config.exists() {
+        if let Ok(loaded) = Config::load(config) {
+            return crate::config::resolve_key_path(config, &loaded.interface.private_key);
+        }
+    }
+    let stem = config
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("server");
+    directory.join(format!("{stem}.key"))
 }
 
 fn write_config(
@@ -1074,19 +1095,54 @@ mod tests {
 
         // The key is 0600 and the config names it relatively.
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.join("server.key"))
+        let mode = std::fs::metadata(dir.join("vallum0.key"))
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(loaded.interface.private_key, PathBuf::from("server.key"));
+        assert_eq!(loaded.interface.private_key, PathBuf::from("vallum0.key"));
 
         // Re-running keeps the key: a second init must not invalidate clients.
-        let before = std::fs::read(dir.join("server.key")).unwrap();
+        let before = std::fs::read(dir.join("vallum0.key")).unwrap();
         self::init(&args).unwrap();
-        let after = std::fs::read(dir.join("server.key")).unwrap();
+        let after = std::fs::read(dir.join("vallum0.key")).unwrap();
         assert_eq!(before, after);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two configs in one directory must not share a key.
+    ///
+    /// A fixed `server.key` gave every config in a directory one identity:
+    /// `--name beta` said "a separate tunnel" and the key silently disagreed.
+    #[test]
+    fn a_second_config_gets_its_own_key() {
+        let dir = std::path::PathBuf::from("/tmp/vallum-key-test");
+        assert_eq!(
+            key_path_for(&dir.join("alpha.toml"), &dir),
+            dir.join("alpha.key")
+        );
+        assert_eq!(
+            key_path_for(&dir.join("beta.toml"), &dir),
+            dir.join("beta.key")
+        );
+    }
+
+    /// A config that already names a key keeps it, so a later `--force` cannot
+    /// orphan the key a peer already knows.
+    #[test]
+    fn an_existing_config_keeps_the_key_it_names() {
+        let dir = std::env::temp_dir().join(format!("vallum-key-decl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vallum0.toml");
+        std::fs::write(
+            &config,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"server.key\"\n\
+             listen = \"0.0.0.0:51820\"\n",
+        )
+        .unwrap();
+        assert_eq!(key_path_for(&config, &dir), dir.join("server.key"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
