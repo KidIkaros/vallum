@@ -364,7 +364,9 @@ pub struct InitArgs {
     #[arg(long)]
     pub no_service: bool,
 
-    /// Do not change anything about the host (implies the three `--no-*` above).
+    /// Do not change the host's network configuration: no NAT, no firewall
+    /// rule, no `ip_forward` (implies the three `--no-*` above). The systemd
+    /// units are still installed unless `--no-service` is also passed.
     #[arg(long)]
     pub no_host: bool,
 
