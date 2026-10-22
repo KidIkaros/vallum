@@ -15,6 +15,7 @@ pub mod policy;
 pub mod run;
 pub mod server;
 pub mod setup;
+pub mod status;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod uninstall;

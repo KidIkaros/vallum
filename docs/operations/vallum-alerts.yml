@@ -1,0 +1,85 @@
+# Alert rules for a Vallum server.
+#
+# Every rule carries exactly one threshold, and every threshold has a stated
+# basis — the audit's finding was not that thresholds were missing, it was that
+# any number would have done. These are derived from the daemon's own timers:
+# rekey at 120 s, reject at 180 s, watchdog at 90 s.
+#
+# Load with:
+#   prometheus --config.file=... --rule-file=vallum-alerts.yml
+#
+# The one thing NOT covered here is whether the *client* is leaking, because it
+# is not a metric — it is a property of the client host. Poll it instead:
+#   vallum status --config <path> --json   # exits 1 when verdict is LEAKING
+groups:
+  - name: vallum
+    rules:
+      # The daemon is answering the scrape but says the tunnel is down.
+      # 180 s is the reject window: before that a handshake may still land, so
+      # alerting earlier would page on a tunnel that is about to recover.
+      - alert: VallumTunnelDown
+        expr: vallum_up == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Vallum tunnel on {{ $labels.interface }} is down"
+          description: >-
+            No handshake for over 180 s, past the reject window. Clients are
+            either blocked (if the guard is installed) or leaking.
+
+      # A single peer whose last handshake is older than the reject point. This
+      # is the peer-level version of the alert above and catches one dead client
+      # on an otherwise healthy server.
+      - alert: VallumHandshakeStale
+        expr: vallum_peer_handshake_age_seconds > 180
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.name }} has not handshaked in 180 s"
+          description: >-
+            Rekey is every 120 s, so 180 s means at least one rekey was missed
+            and the session is past the reject point.
+
+      # A sustained refusal rate means something is actively rejecting
+      # handshakes — wrong key, wrong suite, or an epoch mismatch after a
+      # restart. 0.1/s is 6 per minute, well above background retry noise.
+      - alert: VallumHandshakeRefused
+        expr: rate(vallum_handshakes_refused[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum is refusing handshakes on {{ $labels.interface }}"
+          description: >-
+            Check the peer's suite and key. A restart without a config reload
+            also shows up here as an epoch mismatch.
+
+      # Dropped fragments mean the path MTU is smaller than what Vallum is
+      # sending. The fault lab reproduces this with FAULT=mtu1280; 1/s sustained
+      # is past what the reassembly window can absorb.
+      - alert: VallumFragmentsDropped
+        expr: rate(vallum_fragments_dropped[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum is dropping fragments on {{ $labels.interface }}"
+          description: >-
+            A narrowing path. Path-MTU discovery should narrow the budget; if
+            this fires continuously, discovery is not keeping up.
+
+      # The stated capacity target from docs/requirements.md: 2,000 peers per
+      # daemon on the default tri-hybrid suite, against a measured ceiling of
+      # 2,211. Past the target the data plane starts competing with rekey.
+      - alert: VallumAtCapacity
+        expr: vallum_peers_total > 2000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum on {{ $labels.interface }} is past its stated capacity"
+          description: >-
+            Above the 2,000-peer target. Move peers to another daemon, or switch
+            to the 0x0002 suite if the threat model allows it.

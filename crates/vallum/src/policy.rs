@@ -67,6 +67,19 @@ impl Mode {
     }
 }
 
+/// The interface name this config's tunnel uses.
+///
+/// Shared by the guard (which permits that interface) and by `vallum status`
+/// (which reports on it), so the two can never disagree about the name.
+#[must_use]
+pub fn interface_name(config: &Config) -> String {
+    config
+        .interface
+        .name
+        .clone()
+        .unwrap_or_else(|| "vallum0".to_owned())
+}
+
 /// Whether some peer routes a default route, making this a full tunnel.
 #[must_use]
 pub fn is_full_tunnel(config: &Config) -> bool {
@@ -258,15 +271,42 @@ pub fn unguard_steps() -> Vec<HostStep> {
     }]
 }
 
-/// Whether the table is currently installed.
+/// What the host says about the guard.
+///
+/// The distinction between [`GuardState::Absent`] and [`GuardState::Unknown`]
+/// is load-bearing. `nft list` needs `CAP_NET_ADMIN`, so an unprivileged
+/// `vallum status` cannot tell "no table" from "not allowed to look". Reporting
+/// the second as the first would tell a user their traffic is leaking while it
+/// is blocked — a false alarm is worse than no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardState {
+    /// The table exists: egress outside the tunnel is blocked.
+    Installed,
+    /// The table is genuinely not there.
+    Absent,
+    /// Could not determine — not root, or `nft` is missing.
+    Unknown,
+}
+
+/// Read the guard's state from the host.
 #[must_use]
-pub fn installed() -> bool {
-    std::process::Command::new("nft")
+pub fn guard_state() -> GuardState {
+    let Ok(output) = std::process::Command::new("nft")
         .args(["list", "table", "inet", TABLE])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+    else {
+        return GuardState::Unknown;
+    };
+    if output.status.success() {
+        return GuardState::Installed;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // nft's wording when the table simply is not there.
+    if stderr.contains("No such file or directory") {
+        GuardState::Absent
+    } else {
+        GuardState::Unknown
+    }
 }
 
 /// Install the guard. `dry_run` prints instead of applying.

@@ -45,14 +45,6 @@ fn load(path: &Path) -> Result<Config, Error> {
     })
 }
 
-fn interface_name(config: &Config) -> String {
-    config
-        .interface
-        .name
-        .clone()
-        .unwrap_or_else(|| "vallum0".to_owned())
-}
-
 /// Run the verb.
 ///
 /// # Errors
@@ -60,7 +52,7 @@ fn interface_name(config: &Config) -> String {
 /// would block the handshake), or a failed `nft`.
 pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
     let config = load(&args.config)?;
-    let interface = interface_name(&config);
+    let interface = policy::interface_name(&config);
     let wanted = policy::Mode::from_config(&config);
     let resolved = policy::resolve(&config);
 
@@ -89,11 +81,18 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
             }
         }
         PolicyAction::Status => {
-            let installed = policy::installed();
+            let guard = policy::guard_state();
             println!("interface  {interface}");
             println!("config     {}", describe(wanted));
             println!("resolved   {}", describe(resolved));
-            println!("installed  {}", if installed { "yes" } else { "no" });
+            println!(
+                "installed  {}",
+                match guard {
+                    policy::GuardState::Installed => "yes",
+                    policy::GuardState::Absent => "no",
+                    policy::GuardState::Unknown => "unknown (needs root)",
+                }
+            );
             let (v4, v6) = policy::carries(&config);
             println!(
                 "families   {}{}{}",
@@ -101,7 +100,7 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
                 if v4 && v6 { " + " } else { "" },
                 if v6 { "v6" } else { "" }
             );
-            if resolved == Mode::On && !installed {
+            if resolved == Mode::On && guard == policy::GuardState::Absent {
                 println!();
                 println!("   the config asks for a guard and none is installed:");
                 println!("   sudo systemctl start vallum-guard@{interface}");

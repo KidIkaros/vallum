@@ -66,7 +66,7 @@ would fight for the same TUN.
 | Requirement | State |
 |---|---|
 | A dead tunnel must not leak traffic | **Not met** — fails open. ADR-0018 |
-| A dead tunnel must be visible to the operator | **Not met** on the client |
+| A dead tunnel must be visible to the operator | Met — `vallum status`, and it works with the daemon dead |
 | The daemon must restart without human action | Met — `RestartSec`, watchdog, `StartLimitBurst=3` |
 | Recovery must complete without intervention | Met — proven in the fault lab under loss, MTU narrowing, reorder, delay |
 

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **`vallum status` answers "am I leaking?" — including when the daemon is
+  dead.** Every report Vallum produced needed the daemon alive, so the one case
+  that matters had no answer: the process died, the interface is gone, and
+  nobody could tell whether the host was now sending traffic in the clear.
+  `vallum status` reads the host instead of the process and names the state:
+  `up`, `starting`, `blocked`, `down`, `LEAKING` (exit 1), or `unknown`.
+
+  The distinction it exists to draw is `blocked` versus `LEAKING` — both mean
+  "the tunnel is down", only one is safe. `unknown` is deliberately not
+  `LEAKING`: `nft list` needs `CAP_NET_ADMIN`, so an unprivileged status cannot
+  tell "no table" from "not allowed to look", and reporting the second as the
+  first would tell a user their traffic is leaking while it is blocked.
+
+- **Operations documentation.** `docs/operations.md` covers install, upgrade,
+  rollback, and the incident path, plus `docs/operations/vallum-alerts.yml` —
+  five alerts, each with exactly one threshold derived from a daemon timer
+  (rekey 120 s, reject 180 s, watchdog 90 s) rather than picked for looking
+  round.
+
+  Two rules in it are load-bearing. **Remove the block before removing the
+  daemon**: the guard is deliberately not `PartOf=` the tunnel, so removing
+  `vallum@` first leaves the host blocked with nothing to carry traffic. And
+  **client leak state is not a metric** — it is a property of the client host,
+  so a monitoring system polls `vallum status --json` and reads the exit code.
+
 - **The tunnel fails closed.** Vallum had no egress policy at all: `hostnet.rs`
   built masquerade and a port opening and nothing else, so when the tunnel died
   the host silently reverted to the physical default route and traffic that was
