@@ -122,6 +122,12 @@ pub(super) struct Peer {
     /// and used to share one counter, which made an aggregate look like a
     /// diagnosis.
     pub(super) dropped_allowed_ips: u64,
+    /// The most recent inner source address rejected by the `allowed_ips`
+    /// check, or `None` if the packet did not parse as IP at all.
+    ///
+    /// A count says traffic is being refused; only the address says what is
+    /// being refused, and that is the whole diagnosis.
+    pub(super) last_rejected_source: Option<std::net::IpAddr>,
     /// Wire bytes sent and received for this peer (G2 counters).
     pub(super) tx_bytes: u64,
     pub(super) rx_bytes: u64,
@@ -251,6 +257,7 @@ impl Peer {
             dropped_no_session: 0,
             dropped_replay: 0,
             dropped_allowed_ips: 0,
+            last_rejected_source: None,
             dropped: 0,
             rejected: 0,
             tx_bytes: 0,

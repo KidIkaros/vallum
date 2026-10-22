@@ -75,6 +75,7 @@ impl Device {
         if !source_ip.is_some_and(|ip| self.peers[index].config.allowed_ips().contains(&ip)) {
             self.peers[index].rejected += 1;
             self.peers[index].dropped_allowed_ips += 1;
+            self.peers[index].last_rejected_source = source_ip;
             return;
         }
 

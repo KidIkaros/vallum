@@ -299,6 +299,8 @@ pub struct PeerStats {
     pub dropped_replay: u64,
     /// Datagrams that opened but whose inner source was outside `allowed_ips`.
     pub dropped_allowed_ips: u64,
+    /// The most recent inner source rejected by `allowed_ips`, if any.
+    pub last_rejected_source: Option<std::net::IpAddr>,
     /// When the last handshake completed, if one has.
     pub last_handshake: Option<vallum_core::Tai64n>,
 }
@@ -686,6 +688,7 @@ impl Device {
                 dropped_no_session: peer.dropped_no_session,
                 dropped_replay: peer.dropped_replay,
                 dropped_allowed_ips: peer.dropped_allowed_ips,
+                last_rejected_source: peer.last_rejected_source,
                 last_handshake: peer.last_handshake,
             })
         })
