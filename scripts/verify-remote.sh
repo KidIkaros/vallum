@@ -475,6 +475,18 @@ PY
     # resolution outside the tunnel only leaks once the tunnel is *down*, which
     # is what the fail-closed policy changes. See docs/roadmap.md items 2 and 3.
 
+    if [ "$kind" = "bundle" ]; then
+        say "rotation live across the network"
+        local new_key="$dir/new.key" new_pub="$dir/new.pub"
+        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file -" < "$new_pub" \
+            || bad "$name: remote peer rotate"
+        ping -c2 -W3 1.1.1.1 >/dev/null 2>&1 || bad "$name: rotation broke active tunnel egress"
+        ok "$name: tunnel survives rotation across the network"
+        rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
+        ok "$name: rotated and finalized on remote server"
+    fi
+
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     CLIENT_PID=""
     "$QUICK" detach "$config" >/dev/null 2>&1

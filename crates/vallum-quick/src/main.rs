@@ -570,15 +570,27 @@ impl RoutePlan {
         self.commands.push(command);
     }
 
-    /// `add` → `del`, last command first: installation order reversed.
+    fn blackhole(&mut self, prefix: &Prefix, table: &str) {
+        let mut command: Vec<String> = Vec::new();
+        if matches!(prefix.as_ipnet(), ipnet::IpNet::V6(_)) {
+            command.push("-6".to_owned());
+        }
+        command.extend(["route", "replace", "blackhole", &prefix.to_string()].map(str::to_owned));
+        if table != "auto" && table != "off" {
+            command.extend(["table".to_owned(), table.to_owned()]);
+        }
+        self.commands.push(command);
+    }
+
+    /// `add`/`replace` → `del`, last command first: installation order reversed.
     fn reversed(&self) -> Self {
         let mut commands: Vec<Vec<String>> = self.commands.iter().rev().cloned().collect();
         for command in &mut commands {
             if let Some(verb) = command
                 .iter_mut()
-                .find(|arg| *arg == "add" || *arg == "del")
+                .find(|arg| *arg == "add" || *arg == "del" || *arg == "replace")
             {
-                *verb = if *verb == "add" {
+                *verb = if *verb == "add" || *verb == "replace" {
                     "del".to_owned()
                 } else {
                     "add".to_owned()
@@ -627,6 +639,15 @@ impl RoutePlan {
                     if !dry_run && route_already_present(command) {
                         continue;
                     }
+                    if !dry_run && is_route_add(command) {
+                        let mut replace_cmd = command.clone();
+                        if let Some(pos) = replace_cmd.iter().position(|arg| arg == "add") {
+                            replace_cmd[pos] = "replace".to_owned();
+                            if ip(&replace_cmd, dry_run).is_ok() {
+                                continue;
+                            }
+                        }
+                    }
                     return Err(error);
                 }
             }
@@ -640,6 +661,10 @@ impl RoutePlan {
             let _ = ip(command, dry_run);
         }
     }
+}
+
+fn is_route_add(command: &[String]) -> bool {
+    command.iter().any(|arg| arg == "route") && command.iter().any(|arg| arg == "add")
 }
 
 /// Whether a failed `ip route add` is already satisfied by a route to the same
@@ -753,6 +778,35 @@ fn plan_routes(
     Ok(plan)
 }
 
+/// Blackhole routes installed on session failure (fail-closed).
+fn plan_blackhole_routes(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+) -> Result<RoutePlan, Box<dyn std::error::Error>> {
+    let routes = managed_routes(config, interface, table, dry_run)?;
+    let policy = policy_for(config, &routes, table)?;
+    let mut plan = RoutePlan::default();
+    for prefix in &routes {
+        let route_table = match &policy {
+            Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
+            _ => table,
+        };
+        plan.blackhole(prefix, route_table);
+    }
+    Ok(plan)
+}
+
+fn apply_blackhole_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
+    if table == "off" {
+        return;
+    }
+    if let Ok(plan) = plan_blackhole_routes(config, interface, table, dry_run) {
+        let _ = plan.run(dry_run);
+    }
+}
+
 /// Install the routes, and policy rules if a default route is among them.
 fn apply_routes(
     config: &Config,
@@ -846,6 +900,9 @@ fn remove_routes(config: &Config, interface: &str, table: &str, dry_run: bool) {
     let recorded = read_plan(&path);
     let plan = teardown_plan(recorded.as_ref(), config, interface, table, dry_run);
     plan.run_lenient(dry_run);
+    if let Ok(blackholes) = plan_blackhole_routes(config, interface, table, dry_run) {
+        blackholes.reversed().run_lenient(dry_run);
+    }
     if recorded.is_some() && !dry_run {
         let _ = fs::remove_file(&path);
     }
@@ -1342,6 +1399,39 @@ enum WithdrawReason {
     DeliveryDegraded,
 }
 
+/// What happens when the tunnel session fails: `block` (fail-closed) or `restore` (fail-open).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FailurePolicy {
+    /// Install blackhole routes for the tunnel's prefixes so traffic cannot escape.
+    Block,
+    /// Withdraw the tunnel routes so traffic returns to the host's physical gateway.
+    Restore,
+}
+
+impl FailurePolicy {
+    fn from_config(config: &Config) -> Self {
+        if let Ok(val) = std::env::var("VALLUM_FAILURE_POLICY") {
+            if let Some(policy) = Self::parse(&val) {
+                return policy;
+            }
+        }
+        config
+            .quick
+            .failure_policy
+            .as_deref()
+            .and_then(Self::parse)
+            .unwrap_or(Self::Block)
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "block" | "block-on-failure" | "closed" | "fail-closed" => Some(Self::Block),
+            "restore" | "open" | "fail-open" => Some(Self::Restore),
+            _ => None,
+        }
+    }
+}
+
 /// Datagrams below which a delivery ratio is not worth judging.
 ///
 /// Three keepalives and a stray packet are not evidence of anything.
@@ -1557,6 +1647,7 @@ fn watch(
     let socket = control_socket(&config, config_path, &interface);
     let dead_after = dead_after();
     let degraded_after = degraded_after();
+    let failure_policy = FailurePolicy::from_config(&config);
     // Guard exactly what attach installed. A config whose routes are all covered
     // by its own interface installs nothing, so there is nothing to withdraw —
     // but the process stays resident so the unit has one lifecycle either way.
@@ -1604,14 +1695,29 @@ fn watch(
                             )
                         }
                     };
-                    if dry_run {
-                        println!("would withdraw {interface}: {msg}");
-                    } else {
-                        remove_routes(&config, &interface, table, false);
-                        eprintln!(
-                            "vallum-quick: {interface}: {msg} — routes withdrawn, \
-                             this host keeps its own gateway"
-                        );
+                    match failure_policy {
+                        FailurePolicy::Block => {
+                            if dry_run {
+                                println!("would block {interface}: {msg} (fail-closed blackhole)");
+                            } else {
+                                apply_blackhole_routes(&config, &interface, table, false);
+                                eprintln!(
+                                    "vallum-quick: {interface}: {msg} — blackhole routes installed (fail-closed), \
+                                     traffic blocked"
+                                );
+                            }
+                        }
+                        FailurePolicy::Restore => {
+                            if dry_run {
+                                println!("would withdraw {interface}: {msg}");
+                            } else {
+                                remove_routes(&config, &interface, table, false);
+                                eprintln!(
+                                    "vallum-quick: {interface}: {msg} — routes withdrawn, \
+                                     this host keeps its own gateway"
+                                );
+                            }
+                        }
                     }
                     attached = false;
                 }
@@ -2282,5 +2388,77 @@ mod tests {
             "\n[quick]\ndns_domain = \"corp.example\"\n\n[[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
         );
         assert_eq!(dns_domain(&config).as_deref(), Some("corp.example"));
+    }
+
+    #[test]
+    fn failure_policy_defaults_to_block() {
+        let config = config_with("fp-def", "");
+        assert_eq!(FailurePolicy::from_config(&config), FailurePolicy::Block);
+    }
+
+    #[test]
+    fn failure_policy_parses_options() {
+        assert_eq!(FailurePolicy::parse("block"), Some(FailurePolicy::Block));
+        assert_eq!(
+            FailurePolicy::parse("block-on-failure"),
+            Some(FailurePolicy::Block)
+        );
+        assert_eq!(
+            FailurePolicy::parse("fail-closed"),
+            Some(FailurePolicy::Block)
+        );
+        assert_eq!(
+            FailurePolicy::parse("restore"),
+            Some(FailurePolicy::Restore)
+        );
+        assert_eq!(
+            FailurePolicy::parse("fail-open"),
+            Some(FailurePolicy::Restore)
+        );
+        assert_eq!(FailurePolicy::parse("invalid"), None);
+    }
+
+    #[test]
+    fn a_dead_session_with_block_policy_plans_blackhole_routes() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-bh-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let plan = plan_blackhole_routes(&config, "v0", "auto", true).unwrap();
+        assert_eq!(
+            plan.render(),
+            "route replace blackhole 0.0.0.0/0 table 51820\n\
+             -6 route replace blackhole ::/0 table 51820\n"
+        );
+        let reversed = plan.reversed();
+        assert_eq!(
+            reversed.render(),
+            "-6 route del blackhole ::/0 table 51820\n\
+             route del blackhole 0.0.0.0/0 table 51820\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_split_tunnel_blackholes_only_its_prefixes() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-bh-sp-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"10.9.0.0/24\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let plan = plan_blackhole_routes(&config, "v0", "auto", true).unwrap();
+        assert_eq!(plan.render(), "route replace blackhole 10.9.0.0/24\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

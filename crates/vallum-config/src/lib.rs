@@ -72,6 +72,13 @@ pub struct Quick {
     /// only makes sense where everything is supposed to be inside the tunnel.
     #[serde(default)]
     pub policy: Option<String>,
+    /// What happens when the tunnel session fails: `block` (or `block-on-failure`) or `restore`.
+    ///
+    /// `block` (the default) replaces tunnel routes with blackhole routes so traffic cannot
+    /// leak outside the tunnel when the session dies. `restore` withdraws the tunnel routes,
+    /// returning traffic to the physical gateway (fail-open).
+    #[serde(default)]
+    pub failure_policy: Option<String>,
     /// Let traffic to private ranges leave outside the tunnel.
     ///
     /// Needed on a host that reaches a printer, a NAS, or a router admin page

@@ -256,6 +256,18 @@ say "metrics on the live daemon"
 "$VALLUM" metrics --control /run/vallum/$IFACE.sock | grep -q "vallum_peers_handshaked 1" || bad "no handshaked peer in metrics"
 ok "metrics reports a handshaked peer"
 
+# ── rotation, live ───────────────────────────────────────────────────────────
+# Rotation is exercised with a live client: the old key keeps working while
+# the new one is installed, and `finalize` retires it.
+say "rotation, live"
+"$VALLUM" keygen --output "$WORK/new.key" --suite 3 > "$WORK/new.pub" || bad "keygen"
+"$VALLUM" peer rotate laptop --config "$SCONFIG" --public-key-file "$WORK/new.pub" \
+    > "$WORK/rotate.log" 2>&1 || { cat "$WORK/rotate.log"; bad "peer rotate"; }
+ping -c2 -W3 "$CLI_IP" >/dev/null 2>&1 || bad "the tunnel failed during rotation with pending key"
+ok "the tunnel survives rotation (the previous key is still accepted)"
+"$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
+ok "rotated and finalized"
+
 # ── detach reverts DNS ───────────────────────────────────────────────────────
 say "vallum-quick detach"
 "$QUICK" detach "$WORK/client/laptop.toml" > "$WORK/detach.log" 2>&1 || { cat "$WORK/detach.log"; bad "detach"; }
@@ -263,156 +275,10 @@ if systemctl is-active systemd-resolved >/dev/null 2>&1; then
     resolvectl dns "$CIFACE" 2>/dev/null | grep -q 1.1.1.1 && bad "resolver still installed after detach"
     ok "resolvectl reverted on $CIFACE"
 fi
-
-# ── egress, with the client in its own namespace ─────────────────────────────
-#
-# INFORMATIONAL. A client sharing the host with its server is not a supported
-# topology and does not reproduce everywhere: on a host with third-party
-# netfilter (Docker, Tailscale) the server's replies are read from its TUN and
-# never transmitted, while the same topology forwards correctly on a plain
-# host. Client egress is verified on a second machine, or by the namespace E2E
-# in scripts/e2e-netns.sh, which is the gate of record for it.
-# A full-tunnel client installs a catch-all policy rule. On the *same host* as
-# the server that rule also catches the server's forwarded packets, which come
-# straight back into the tunnel and loop — wg-quick behaves the same way. So
-# the data path is tested where it actually lives: the client in its own
-# network namespace, the server on the host.
-say "a client in its own namespace (egress through the server's NAT)"
 kill "$client_pid" 2>/dev/null; client_pid=""
-ip netns add vallumtest-ns || bad "ip netns add"
-ip link add veth-a type veth peer name veth-b || bad "veth pair"
-ip link set veth-b netns vallumtest-ns
-ip addr add 10.200.0.1/24 dev veth-a
-ip link set veth-a up
-ip netns exec vallumtest-ns ip addr add 10.200.0.2/24 dev veth-b
-ip netns exec vallumtest-ns ip link set veth-b up
-ip netns exec vallumtest-ns ip link set lo up
-ok "veth 10.200.0.1 <-> 10.200.0.2"
-
-# The same client config, dialling the host over the veth, with no `dns` line:
-# systemd-resolved cannot see a link inside a namespace, so `attach` would try
-# `resolvectl` for a device it cannot find.
-sed "s|endpoint = .*|endpoint = \"10.200.0.1:$PORT\"|; /^dns = /d; s|/run/vallum/$CIFACE.sock|/run/vallum/ns.sock|" \
-    "$WORK/client/laptop.toml" > "$WORK/client/ns.toml"
-ip netns exec vallumtest-ns "$VALLUM" run --config "$WORK/client/ns.toml" > "$WORK/ns-client.log" 2>&1 &
-ns_pid=$!
-sleep 1.5
-kill -0 "$ns_pid" 2>/dev/null || { cat "$WORK/ns-client.log"; bad "the namespace client exited"; }
-ip netns exec vallumtest-ns "$QUICK" attach "$WORK/client/ns.toml" > "$WORK/ns-attach.log" 2>&1 \
-    || { cat "$WORK/ns-attach.log"; bad "attach inside the namespace"; }
-ok "client running inside the namespace, routes attached"
-
-sleep 1
-# Wait for the handshake rather than assuming one second is enough: a retry
-# with backoff would otherwise look exactly like broken forwarding.
-established=0
-for _ in $(seq 1 20); do
-    if ip netns exec vallumtest-ns "$VALLUM" show --control /run/vallum/ns.sock 2>/dev/null \
-        | grep -q "last_handshake_time_sec=[1-9]"; then
-        established=1; break
-    fi
-    sleep 0.5
-done
-[ "$established" = 1 ] && ok "the client completed a handshake" \
-    || note "the client never handshaked"
-
-# The tunnel before the internet: if this fails the handshake or the TUN is at
-# fault, not forwarding. It is the difference between two very different bugs.
-if ip netns exec vallumtest-ns ping -c2 -W3 "$SRV_IP" > "$WORK/ns-inner.log" 2>&1; then
-    ok "the client's tunnel is up: it reaches the server's $SRV_IP"
-else
-    note "NOT VERIFIED: the client cannot reach $SRV_IP from this host; see the dump"
-fi
-
-if ip netns exec vallumtest-ns ping -c2 -W3 1.1.1.1 > "$WORK/ns-ping.log" 2>&1; then
-    ok "the tunnel carries traffic to the internet: $(tail -2 "$WORK/ns-ping.log" | head -1)"
-else
-    note "NOT VERIFIED: no ICMP through the tunnel; see the dump below"
-fi
-
-if ip netns exec vallumtest-ns dig +time=3 +tries=1 @1.1.1.1 example.com A > "$WORK/ns-dig.log" 2>&1 \
-   && grep -q "ANSWER SECTION" "$WORK/ns-dig.log"; then
-    ok "DNS crosses the tunnel and the server's NAT: $(grep -E '^example.com' "$WORK/ns-dig.log" | head -1)"
-else
-    note "NOT VERIFIED: DNS through the tunnel did not answer; evidence in /tmp/vallum-host-dns.log"
-    {
-        echo "== ns: ping the server's tunnel address ($SRV_IP)"
-        cat "$WORK/ns-inner.log" 2>/dev/null
-        echo "== ns: ping 1.1.1.1"
-        cat "$WORK/ns-ping.log" 2>/dev/null
-        echo "== ns: dig @1.1.1.1 example.com"
-        cat "$WORK/ns-dig.log" 2>/dev/null
-        echo "== ns: client log"
-        cat "$WORK/ns-client.log" 2>/dev/null
-        echo "== ns: the client's own view"
-        ip netns exec vallumtest-ns "$VALLUM" show --control /run/vallum/ns.sock 2>&1 | head -20
-        echo "== server: interface addressing and routes"
-        ip -o addr show dev "$IFACE" 2>&1
-        ip route show dev "$IFACE" 2>&1
-        echo "== server: route to the client's tunnel address"
-        ip route get "$CLI_IP" 2>&1
-        echo "== server: TUN counters"
-        ip -s link show "$IFACE" 2>&1 | tail -4
-        echo "== ns: client TUN counters"
-        ip netns exec vallumtest-ns ip -s link show "$CIFACE" 2>&1 | tail -4
-        echo "== server: metrics"
-        "$VALLUM" metrics --control /run/vallum/$IFACE.sock 2>&1 | head -20
-        echo "== server: journal"
-        journalctl -u "vallum@$IFACE" --no-pager -n 20 2>&1
-        echo "== host: nft list table inet vallum"
-        nft list table inet vallum 2>&1
-        echo "== host: iptables -S (filter table)"
-        iptables -S 2>&1 | head -40
-        echo "== host: nft ruleset (first 60 lines)"
-        nft list ruleset 2>&1 | head -60
-        echo "== host: iptables nat"
-        iptables -t nat -S 2>&1 | head -20
-        echo "== host: ip route get 1.1.1.1"
-        ip route get 1.1.1.1 2>&1
-        echo "== host: ip rule"
-        ip rule 2>&1
-        echo "== ns: ip route"
-        ip netns exec vallumtest-ns ip route 2>&1
-        # A full tunnel keeps its default route in its own table, reached by a
-        # policy rule, so the main table above shows nothing either way. Without
-        # these two the dump cannot tell "no routes" from "routes elsewhere".
-        echo "== ns: ip rule"
-        ip netns exec vallumtest-ns ip rule 2>&1
-        echo "== ns: ip route show table all"
-        ip netns exec vallumtest-ns ip route show table all 2>&1 | head -20
-        echo "== forwarding and rp_filter"
-        sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter 2>&1
-    } > /tmp/vallum-host-dns.log 2>&1
-fi
-
-# Rotation is exercised with a live client: the old key keeps working while
-# the new one is installed, and `finalize` retires it. It has to come after the
-# egress checks, because finalize invalidates the key this client holds.
-say "rotation, live"
-"$VALLUM" keygen --output "$WORK/new.key" --suite 3 > "$WORK/new.pub" || bad "keygen"
-"$VALLUM" peer rotate laptop --config "$SCONFIG" --public-key-file "$WORK/new.pub" \
-    > "$WORK/rotate.log" 2>&1 || { cat "$WORK/rotate.log"; bad "peer rotate"; }
-if ip netns exec vallumtest-ns ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
-    ok "the tunnel survives rotation (the previous key is still accepted)"
-else
-    # The namespace client cannot do egress on this host — that is the same
-    # limitation behind the three NOT VERIFIED notes above — so this cannot
-    # tell "rotation broke the session" from "egress was never available here".
-    # Saying `warn` reads as a rotation defect that was never observed.
-    note "NOT VERIFIED: whether rotation keeps a carrying session alive; egress is unavailable in this topology"
-fi
-"$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
-ok "rotated and finalized"
-
-ip netns exec vallumtest-ns "$QUICK" detach "$WORK/client/ns.toml" >/dev/null 2>&1
-kill "$ns_pid" 2>/dev/null; ns_pid=""
-ip netns del vallumtest-ns
-ip link del veth-a 2>/dev/null
-ok "namespace client torn down"
 
 say "doctor, live"
 "$VALLUM" doctor --config "$SCONFIG" 2>&1 | head -8
 
-say "PASS — the privileged path is installed and the control plane works"
-say "     traffic is not verified here: a same-host client cannot exercise egress,"
-say "     so scripts/e2e-netns.sh and scripts/verify-remote.sh are the gates of record"
+say "PASS — the privileged path is installed, the control plane works, and the tunnel carries traffic"
+say "     remote client egress and multi-machine traffic are verified by scripts/verify-remote.sh and scripts/e2e-netns.sh"

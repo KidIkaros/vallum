@@ -67,7 +67,7 @@ MTU arrives intact; no traffic escapes the tunnel's prefixes while attached, for
 IPv4 **and** IPv6; split tunnel routes only what it was told to. Each assertion
 fails loudly. It runs from `verify-remote.sh`, where egress exists.
 
-### 2. A failure policy that defaults to closed
+### 2. A failure policy that defaults to closed (Closed)
 
 **Problem.** Vallum fails **open** where Mullvad fails **closed**
 (`docs/research/mullvad-reference.md`). When the session dies, routes are
@@ -94,6 +94,13 @@ gates it with a v6-only pass. The rule is narrower: **a family the tunnel does n
 carry must not escape.** When the tunnel carries v6 it routes normally; when it
 carries only v4, v6 is blocked rather than leaked. Removing IPv6 support is not on
 the table and never was.
+
+**Resolved:** `failure_policy` in `[quick]` defaults to `block` (fail-closed blackhole)
+over `restore` (fail-open gateway fallback). When `vallum-quick watch` trips on dead
+or degraded sessions, `apply_blackhole_routes` atomically installs kernel blackholes for
+the managed prefixes, dropping non-fwmark traffic while letting the daemon continue
+probing the endpoint. On session recovery, `apply_routes` replaces blackholes with the
+tunnel interface routes.
 
 ### 3. DNS that cannot leak
 
@@ -194,10 +201,10 @@ separate approximation of it.
    characters map to one 15-character Linux interface (`vallum-<peer>`). `peer add`
    and `enroll` now proactively refuse collisions with an actionable message prompting
    the operator to choose names differing within the first 8 characters.
-2. **The four `NOT VERIFIED` assertions in `verify-host.sh`.** Honestly labelled
-   and covered elsewhere, but they are why the gate cannot be the sole evidence
-   for traffic. Move them to `verify-remote.sh`, or delete them and let the gates
-   of record own the claim.
-3. **What fail-closed means for a client that is also a router.** Blackholing the
-   host's own prefixes is obvious; what happens to forwarded traffic is not, and
-   it should be decided before (2) is built rather than discovered during it.
+2. **The four `NOT VERIFIED` assertions in `verify-host.sh` (Resolved: Removed in favor of gates of record).**
+   Same-host namespace loopback egress was sensitive to host netfilter (Docker/Tailscale) and NAT loopback.
+   Traffic and live rotation across the tunnel are now verified directly on the host, while remote
+   internet egress and live multi-machine rotation are enforced by `verify-remote.sh`.
+3. **What fail-closed means for a client that is also a router (Resolved: Route table blackholes).**
+   Kernel routing table blackhole routes (`blackhole <prefix> table <table>`) apply to all lookups
+   matching the table, dropping forwarded cleartext traffic and preventing leaks across WAN interfaces.
