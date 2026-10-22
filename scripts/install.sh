@@ -332,6 +332,12 @@ install_docs() {
     elif [ -f "packaging/vallum-tmpfiles.conf" ]; then
         run install -D -m 0644 "packaging/vallum-tmpfiles.conf" "$TMPFILES_DIR/vallum-tmpfiles.conf"
     fi
+    # Create the directory now rather than at the next boot: a unit started in
+    # between would fail with 226/NAMESPACE, because ReadWritePaths needs the
+    # path to already exist.
+    if [ -f "$TMPFILES_DIR/vallum-tmpfiles.conf" ]; then
+        run systemd-tmpfiles --create "$TMPFILES_DIR/vallum-tmpfiles.conf" || true
+    fi
     # The metrics timer is opt-in: it only earns an `enable` when this host
     # already runs node_exporter's textfile collector, which is what it feeds.
     if [ -d /var/lib/node_exporter/textfile_collector ]; then

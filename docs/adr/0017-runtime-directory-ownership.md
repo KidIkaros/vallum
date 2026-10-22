@@ -121,8 +121,12 @@ are cheap enough to do in the same pass.
 - `ApplyOutcome` is a slightly larger type than `bool` at four call sites.
 
 ### Risks
-- **The tmpfiles entry must be installed before the unit is enabled**, or the
-  first start races it. Mitigated by shipping it in the same package and by
-  item 3's warning.
+- **The tmpfiles entry must exist before the unit starts.** On a boot,
+  `systemd-tmpfiles-setup` guarantees that. On an *upgrade*, where the package
+  is installed onto a running host, it would not — the unit would start before
+  the next boot and fail at `226/NAMESPACE` because `ReadWritePaths` needs the
+  path to be there. Mitigated by every channel running
+  `systemd-tmpfiles --create` from its post-install hook (`debian/postinst`, the
+  rpm `%post`, and `install.sh`).
 - **Existing deployments** have `/run/vallum` owned by the unit; after upgrade
   the ownership changes silently. Mitigated by noting it in the changelog.

@@ -4,6 +4,11 @@
 # telemetry, never a default.
 set -e
 if [ -d /run/systemd/system ]; then
+    # Create the runtime directory now, not at the next boot. The unit binds
+    # ReadWritePaths to it, and a missing path is 226/NAMESPACE — so a host that
+    # installs the package and starts a unit before rebooting would fail. See
+    # ADR-0017.
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true

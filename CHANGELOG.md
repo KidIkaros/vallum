@@ -8,6 +8,11 @@
   against a missing directory failed with `226/NAMESPACE`. A tmpfiles.d entry
   now owns it, so any unit can start in any order and no unit's exit can break
   another's control plane. See ADR-0017.
+- **Installing the package creates the runtime directory at once.** tmpfiles.d
+  only runs it at boot, so a host that installed the package and started a unit
+  before rebooting still hit `226/NAMESPACE`, because `ReadWritePaths` needs the
+  path to exist. `debian/postinst`, the rpm `%post` and `install.sh` now run
+  `systemd-tmpfiles --create` as part of installing.
 - **`peer add`, `peer remove` and `peer rotate` no longer claim the daemon is
   not running.** They said so whenever the control socket was absent, which is
   also what happens when the daemon is up and its socket was removed. They now
