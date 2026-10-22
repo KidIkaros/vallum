@@ -1,71 +1,124 @@
-# Sample Prometheus alert rules for Vallum.
+# Alert rules for a Vallum server.
 #
-# Install: copy into a directory Prometheus reads with `rule_files`, or paste
-# the groups into your existing rules file. Thresholds are starting points —
-# tune `for:` durations to your environment before paging anyone on them.
-
+# Every rule carries exactly one threshold, and every threshold has a stated
+# basis — the audit's finding was not that thresholds were missing, it was that
+# any number would have done. These are derived from the daemon's own timers:
+# rekey at 120 s, reject at 180 s, watchdog at 90 s.
+#
+# Load with:
+#   prometheus --config.file=... --rule-file=vallum-alerts.yml
+#
+# The one thing NOT covered here is whether the *client* is leaking, because it
+# is not a metric — it is a property of the client host. Poll it instead:
+#   vallum status --config <path> --json   # exits 1 when verdict is LEAKING
 groups:
   - name: vallum
     rules:
-      # The scrape itself failed: the daemon is dead, the socket is gone, or
-      # the metrics timer stopped. This is the "is the tunnel up at all" alert.
-      # It also covers a WEDGED control plane, which is not the same thing as a
-      # dead daemon: the tunnel keeps carrying traffic while the socket accepts
-      # connections and answers none. The exporter now gives up and writes
-      # `up 0` rather than hanging, so this fires — start with `vallum show` and
-      # `ps`, not with a restart, because a restart throws away the evidence.
-      - alert: VallumDown
+      # The daemon is answering the scrape but says the tunnel is down.
+      # 180 s is the reject window: before that a handshake may still land, so
+      # alerting earlier would page on a tunnel that is about to recover.
+      - alert: VallumTunnelDown
         expr: vallum_up == 0
-        for: 2m
+        for: 3m
         labels:
           severity: critical
         annotations:
-          summary: "Vallum control socket not answering on {{ $labels.instance }}"
-          runbook: >-
-            `vallum show` to tell a dead daemon from a wedged one; if it times
-            out, the tunnel is still up but the control plane is held, and
-            `systemctl restart` is the recovery — capture the wedge first.
+          summary: "Vallum tunnel on {{ $labels.interface }} is down"
+          description: >-
+            No handshake for over 180 s, past the reject window. Clients are
+            either blocked (if the guard is installed) or leaking.
 
-      # A peer configured to carry traffic that has not handshaked recently is
-      # either dead, roaming to a dead path, or fighting the firewall. 4
-      # minutes covers two full rekey intervals before paging.
-      - alert: VallumPeerHandshakeStale
-        expr: vallum_peer_handshaked == 1 and vallum_peer_handshake_age_seconds > 240
+      # A single peer whose last handshake is older than the reject point. This
+      # is the peer-level version of the alert above and catches one dead client
+      # on an otherwise healthy server.
+      - alert: VallumHandshakeStale
+        expr: vallum_peer_handshake_age_seconds > 180
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.name }} has not handshaked in 180 s"
+          description: >-
+            Rekey is every 120 s, so 180 s means at least one rekey was missed
+            and the session is past the reject point.
+
+      # A sustained refusal rate means something is actively rejecting
+      # handshakes — wrong key, wrong suite, or an epoch mismatch after a
+      # restart. 0.1/s is 6 per minute, well above background retry noise.
+      - alert: VallumHandshakeRefused
+        expr: rate(vallum_handshakes_refused[5m]) > 0.1
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Peer {{ $labels.peer }} has not re-keyed in {{ $value }}s"
+          summary: "Vallum is refusing handshakes on {{ $labels.interface }}"
+          description: >-
+            Check the peer's suite and key. A restart without a config reload
+            also shows up here as an epoch mismatch.
 
-      # Handshakes being refused means something on the wire is asking and
-      # being told no — expired identities, pinned-endpoint mismatches, or a
-      # replay storm. Any sustained rate deserves a look at the journal.
-      - alert: VallumHandshakesRefused
-        expr: rate(vallum_loop_handshakes_refused_total[10m]) > 0
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Vallum refusing handshakes on {{ $labels.interface }} ({{ $value }}/s)"
-
-      # Fragments dropped is the segmentation layer saying a datagram was
-      # refused or a half-assembled message abandoned — path-MTU loss or an
-      # adversary spraying partial fragments, both worth knowing about.
+      # Dropped fragments mean the path MTU is smaller than what Vallum is
+      # sending. The fault lab reproduces this with FAULT=mtu1280; 1/s sustained
+      # is past what the reassembly window can absorb.
       - alert: VallumFragmentsDropped
-        expr: increase(vallum_loop_fragments_dropped_total[15m]) > 100
-        for: 15m
+        expr: rate(vallum_fragments_dropped[5m]) > 1
+        for: 5m
         labels:
-          severity: info
+          severity: warning
         annotations:
-          summary: "Vallum dropping fragments on {{ $labels.interface }} — check path MTU"
+          summary: "Vallum is dropping fragments on {{ $labels.interface }}"
+          description: >-
+            A narrowing path. Path-MTU discovery should narrow the budget; if
+            this fires continuously, discovery is not keeping up.
 
-      # Send failures: the kernel refused a datagram. Usually a dead route or
-      # an interface flap; a sustained rate means traffic is being lost, not
-      # just delayed.
-      - alert: VallumSendFailures
-        expr: rate(vallum_loop_datagrams_failed_total[10m]) > 1
+      # The stated capacity target from docs/requirements.md: 2,000 peers per
+      # daemon on the default tri-hybrid suite, against a measured ceiling of
+      # 2,211. Past the target the data plane starts competing with rekey.
+      - alert: VallumAtCapacity
+        expr: vallum_peers_total > 2000
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Vallum failing to send datagrams on {{ $labels.interface }}"
+          summary: "Vallum on {{ $labels.interface }} is past its stated capacity"
+          description: >-
+            Above the 2,000-peer target. Move peers to another daemon, or switch
+            to the 0x0002 suite if the threat model allows it.
+
+      # Delivery ratio below threshold (0.1) across the rolling window indicates
+      # the tunnel is sending packets that the far side is not receiving or answering.
+      - alert: VallumPeerDeliveryLow
+        expr: vallum_peer_delivery_ratio < 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} delivery ratio is degraded on {{ $labels.interface }}"
+          description: >-
+            Delivery ratio is below 10%, meaning traffic is being sent into the tunnel
+            without return traffic. Check for firewall blocks, dead far-side sessions,
+            or anti-spoofing allowed_ips drops.
+
+      # Traffic entering the tunnel is being rejected because its inner source IP
+      # is not in the peer's allowed_ips list (e.g. physical IP leaking into tunnel).
+      - alert: VallumPeerAllowedIpsRejected
+        expr: rate(vallum_peer_dropped_allowed_ips_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} has packets dropped by allowed_ips anti-spoofing"
+          description: >-
+            Datagrams are being rejected because inner source address does not match allowed_ips.
+            Check vallum_last_rejected_source on the daemon to identify the leaking address.
+
+      # Datagrams arriving with an unknown receiver index: typical after the receiving
+      # side restarted or lost its session table while peers continue sending.
+      - alert: VallumLoopDroppedUnknownIndex
+        expr: rate(vallum_loop_dropped_unknown_index_total[5m]) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum on {{ $labels.interface }} is dropping packets with unknown session index"
+          description: >-
+            Incoming packets reference sessions this daemon does not hold. Peers may need to re-initiate.

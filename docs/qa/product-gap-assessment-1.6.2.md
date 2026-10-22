@@ -170,3 +170,21 @@ Recorded because a gap assessment that only lists faults is not an assessment.
 
 **Rule:** tackle all, no cherry-picking. Each fix gets a test or a live
 verification, not a compile.
+
+---
+
+## Resolution status (Closed)
+
+All findings G1–G8 are addressed and verified:
+
+| Item | Status | Resolution | Verification |
+| --- | --- | --- | --- |
+| **G1** | Closed | `ReadWritePaths=-/run/vallum`, `StartLimitIntervalSec=60` / `StartLimitBurst=3` in `packaging/vallum@.service`; `postinst` loud failure check on `vallum-tmpfiles.conf`. | Packaging unit inspection and tmpfiles validation. |
+| **G2** | Closed | `run::run` and `control::serve` nonblocking accept loop with periodic tick check re-binding missing control socket and logging `log_warn!`. | Verified in `crates/vallum/tests/gate.rs:a_removed_control_socket_is_rebound_by_the_daemon`. |
+| **G3** | Closed | Clarified `--no-host` doc string to specify network configuration without implying `--no-service`, keeping dry-run output completely truthful. | Verified in CLI `--help` and `commands::server::tests`. |
+| **G4** | Closed | Implemented `config_edit::prune_backups` bounded to 1 backup on save and atomic write. | Verified in `config_edit::tests::prune_backups_keeps_only_requested_number_of_recent_backups`. |
+| **G5** | Closed | Added `--key` alias to `keygen` (`--output`) and `pubkey` (`--private-key`). | Verified in `commands::keys::tests`. |
+| **G6** | Closed | Plumbed `field::VALLUM_CONTROL` in UAPI and exported `control = ...` in `showconf`. | Verified round-trip through `doctor` without missing control warnings. |
+| **G7** | Closed | `syncconf` returns structured `SyncReport`; CLI prints summary of changes or `configuration already in sync with running daemon`. | Verified in interactive and non-interactive flows. |
+| **G8** | Closed | `doctor` reports offline default daemon as a warning rather than fatal error 1. | Verified in `commands::doctor::tests::doctor_reports_offline_daemon_as_warning_not_failure`. |
+

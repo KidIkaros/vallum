@@ -62,6 +62,8 @@ pub mod field {
     /// Device fields.
     pub const VALLUM_LISTEN: &str = "vallum_listen";
     /// Device fields.
+    pub const VALLUM_CONTROL: &str = "vallum_control";
+    /// Device fields.
     pub const VALLUM_OFFLOAD: &str = "vallum_offload";
     /// Device fields.
     pub const VALLUM_BATCHING: &str = "vallum_batching";
@@ -128,6 +130,10 @@ pub mod field {
     pub const VALLUM_REASSEMBLED: &str = "vallum_reassembled";
     /// Fragments refused or abandoned.
     pub const VALLUM_FRAGMENTS_DROPPED: &str = "vallum_fragments_dropped";
+    /// Datagrams dropped because they did not parse as a transport message.
+    pub const VALLUM_DROPPED_MALFORMED: &str = "vallum_dropped_malformed";
+    /// Datagrams dropped because the sender index matched no peer session.
+    pub const VALLUM_DROPPED_UNKNOWN_INDEX: &str = "vallum_dropped_unknown_index";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
     /// Request markers and flags.
@@ -359,6 +365,8 @@ pub struct DeviceState {
     pub fingerprint: [u8; 8],
     /// The bound UDP address.
     pub listen: SocketAddr,
+    /// The control socket path, if one is configured.
+    pub control: Option<String>,
     /// The socket mark.
     pub fwmark: u32,
     /// The suite id.
@@ -470,6 +478,9 @@ pub fn render_get(state: &DeviceState) -> String {
         hex_encode(&state.fingerprint)
     ));
     out.push_str(&format!("{}={}\n", field::VALLUM_LISTEN, state.listen));
+    if let Some(control) = &state.control {
+        out.push_str(&format!("{}={control}\n", field::VALLUM_CONTROL));
+    }
     out.push_str(&format!("{}={}\n", field::VALLUM_OFFLOAD, state.offload));
     out.push_str(&format!("{}={}\n", field::VALLUM_BATCHING, state.batching));
     for address in &state.addresses {
@@ -501,6 +512,11 @@ pub fn render_get(state: &DeviceState) -> String {
         (field::VALLUM_REFUSALS, stats.refusals),
         (field::VALLUM_REASSEMBLED, stats.reassembled),
         (field::VALLUM_FRAGMENTS_DROPPED, stats.fragments_dropped),
+        (field::VALLUM_DROPPED_MALFORMED, stats.dropped_malformed),
+        (
+            field::VALLUM_DROPPED_UNKNOWN_INDEX,
+            stats.dropped_unknown_index,
+        ),
     ] {
         out.push_str(&format!("{key}={value}\n"));
     }
@@ -718,6 +734,9 @@ pub fn render_config(response: &Response, include_secrets: bool) -> String {
         if fwmark != "0" {
             out.push_str(&format!("fwmark = {fwmark}\n"));
         }
+    }
+    if let Some(control) = response.field(field::VALLUM_CONTROL) {
+        out.push_str(&format!("control = \"{}\"\n", escape(control)));
     }
     let addresses: Vec<String> = response
         .device
@@ -1034,6 +1053,7 @@ mod tests {
                     public_line,
                     fingerprint,
                     listen,
+                    control: None,
                     fwmark,
                     suite,
                     addresses,
@@ -1206,6 +1226,7 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,
             addresses: vec!["10.7.0.1/24".parse().unwrap()],
@@ -1263,6 +1284,7 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,
             addresses: Vec::new(),
@@ -1313,6 +1335,10 @@ mod tests {
             device: vec![
                 ("vallum_interface".to_owned(), "vallum0".to_owned()),
                 (
+                    "vallum_control".to_owned(),
+                    "/run/vallum/vallum0.sock".to_owned(),
+                ),
+                (
                     "vallum_private_key_path".to_owned(),
                     "/etc/vallum/server.key".to_owned(),
                 ),
@@ -1328,6 +1354,7 @@ mod tests {
         };
         let text = render_config(&response, true);
         assert!(text.contains("private_key = \"/etc/vallum/server.key\""));
+        assert!(text.contains("control = \"/run/vallum/vallum0.sock\""));
         assert!(text.contains(&format!("preshared_key = \"{}\"", "cc".repeat(32))));
     }
 
@@ -1366,6 +1393,10 @@ mod tests {
             device: vec![
                 ("vallum_interface".to_owned(), "vallum0".to_owned()),
                 ("vallum_listen".to_owned(), "0.0.0.0:51820".to_owned()),
+                (
+                    "vallum_control".to_owned(),
+                    "/run/vallum/vallum0.sock".to_owned(),
+                ),
                 ("vallum_address".to_owned(), "10.7.0.1/24".to_owned()),
             ],
             peers: vec![vec![
@@ -1381,6 +1412,7 @@ mod tests {
         };
         let text = render_config(&response, false);
         assert!(text.contains("name = \"vallum0\""));
+        assert!(text.contains("control = \"/run/vallum/vallum0.sock\""));
         assert!(text.contains("public_key = \"vallum1:0003:ab:-\""));
         assert!(text.contains("allowed_ips = [\"10.7.0.2/32\"]"));
         assert!(!text.contains("cc".repeat(32).as_str()));

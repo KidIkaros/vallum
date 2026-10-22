@@ -731,6 +731,18 @@ impl Device {
         self.identity.public()
     }
 
+    /// Datagrams dropped because they did not parse as a transport message.
+    #[must_use]
+    pub fn dropped_malformed(&self) -> u64 {
+        self.dropped_malformed
+    }
+
+    /// Datagrams dropped because the sender index matched no peer session.
+    #[must_use]
+    pub fn dropped_unknown_index(&self) -> u64 {
+        self.dropped_unknown_index
+    }
+
     /// React to one event and run the timer pass.
     ///
     /// Always returns the actions to perform, in order. An empty vector is the

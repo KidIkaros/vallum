@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vallum_tunnel::{Action, Clock, Device, Event, Randomness, Segments};
 
@@ -161,6 +161,8 @@ pub struct SharedStats {
     refusals: AtomicU64,
     reassembled: AtomicU64,
     fragments_dropped: AtomicU64,
+    dropped_malformed: AtomicU64,
+    dropped_unknown_index: AtomicU64,
 }
 
 impl SharedStats {
@@ -179,6 +181,10 @@ impl SharedStats {
         self.reassembled.store(stats.reassembled, Ordering::Relaxed);
         self.fragments_dropped
             .store(stats.fragments_dropped, Ordering::Relaxed);
+        self.dropped_malformed
+            .store(stats.dropped_malformed, Ordering::Relaxed);
+        self.dropped_unknown_index
+            .store(stats.dropped_unknown_index, Ordering::Relaxed);
     }
 
     /// Read every counter as one [`LoopStats`].
@@ -193,6 +199,8 @@ impl SharedStats {
             refusals: self.refusals.load(Ordering::Relaxed),
             reassembled: self.reassembled.load(Ordering::Relaxed),
             fragments_dropped: self.fragments_dropped.load(Ordering::Relaxed),
+            dropped_malformed: self.dropped_malformed.load(Ordering::Relaxed),
+            dropped_unknown_index: self.dropped_unknown_index.load(Ordering::Relaxed),
         }
     }
 }
@@ -216,6 +224,10 @@ pub struct LoopStats {
     pub reassembled: u64,
     /// Fragments refused, and half-assembled messages abandoned.
     pub fragments_dropped: u64,
+    /// Datagrams dropped because they did not parse as a transport message.
+    pub dropped_malformed: u64,
+    /// Datagrams dropped because the sender index matched no session.
+    pub dropped_unknown_index: u64,
 }
 
 /// Everything the loop needs from the operating system.
@@ -305,8 +317,14 @@ pub fn run(
         |server| Arc::clone(&server.context.stats),
     );
     let control_path = control.as_ref().map(|server| server.path.clone());
-    if let Some(path) = &control_path {
-        control::serve(path.clone(), tx.clone(), shutdown.clone())?;
+    let control_tx = control_path.as_ref().map(|_| tx.clone());
+    let mut control_shutdown = Shutdown::new();
+    let mut _control_handle = if let Some(path) = &control_path {
+        Some(control::serve(
+            path.clone(),
+            tx.clone(),
+            control_shutdown.clone(),
+        )?)
     } else {
         // A daemon with no control socket cannot be reconfigured, inspected, or
         // asked for metrics. Say so once, at startup: silence here is what makes
@@ -316,7 +334,8 @@ pub fn run(
             "no control socket: this daemon cannot be reconfigured or inspected at \
              runtime; set `control` in the config to enable it"
         );
-    }
+        None
+    };
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
     spawn_udp_reader(&tx, Arc::clone(&queued), Arc::clone(&socket), &log)?;
@@ -339,6 +358,7 @@ pub fn run(
     let mut mtu_warned: HashSet<SocketAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
+    let mut last_control_check = Instant::now();
 
     loop {
         if shutdown.is_triggered() {
@@ -346,12 +366,41 @@ pub fn run(
         }
         notify.pet_watchdog();
 
+        if let (Some(path), Some(tx)) = (&control_path, &control_tx) {
+            if last_control_check.elapsed() >= tick {
+                last_control_check = Instant::now();
+                if !path.exists() {
+                    log_warn!(
+                        log,
+                        "control socket `{}` was removed; re-binding",
+                        path.display()
+                    );
+                    control_shutdown.trigger();
+                    control_shutdown = Shutdown::new();
+                    match control::serve(path.clone(), tx.clone(), control_shutdown.clone()) {
+                        Ok(handle) => {
+                            _control_handle = Some(handle);
+                        }
+                        Err(error) => {
+                            log_warn!(
+                                log,
+                                "failed to re-bind control socket `{}`: {error}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let event = match rx.recv_timeout(tick) {
             Ok(Input::Control { request, reply }) => {
                 // Reassembly counters live in `segments`, so fold them in before
                 // the request handler takes its snapshot.
                 stats.reassembled = segments.reassembled();
                 stats.fragments_dropped = segments.dropped();
+                stats.dropped_malformed = device.dropped_malformed();
+                stats.dropped_unknown_index = device.dropped_unknown_index();
                 shared_stats.publish(&stats);
                 let body = match control.as_mut() {
                     Some(server) => control::handle(&mut device, &mut server.context, request),
@@ -485,16 +534,19 @@ pub fn run(
     }
 
     notify.stopping();
+    control_shutdown.trigger();
     if let Some(path) = &control_path {
         let _ = std::fs::remove_file(path);
     }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();
+    stats.dropped_malformed = device.dropped_malformed();
+    stats.dropped_unknown_index = device.dropped_unknown_index();
 
     log_info!(
         log,
         "tunnel down: {} datagrams out ({} failed), {} packets delivered ({} failed), \
-         {} handshakes ({} refused), {} messages reassembled ({} fragment drops)",
+         {} handshakes ({} refused), {} messages reassembled ({} fragment drops, {} malformed, {} unknown index)",
         stats.datagrams_sent,
         stats.datagrams_failed,
         stats.packets_delivered,
@@ -503,6 +555,8 @@ pub fn run(
         stats.refusals,
         stats.reassembled,
         stats.fragments_dropped,
+        stats.dropped_malformed,
+        stats.dropped_unknown_index,
     );
     Ok(stats)
 }

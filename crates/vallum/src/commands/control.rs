@@ -432,10 +432,86 @@ pub fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {
     expect_ok(path.as_path(), &reply)
 }
 
-pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
+fn peer_entry_field<'a>(peer: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    peer.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+fn peer_differs(peer: &vallum_tunnel::PeerConfig, current: &[(String, String)]) -> bool {
+    let current_name = peer_entry_field(current, uapi_field::VALLUM_NAME).unwrap_or("");
+    if peer.name() != current_name {
+        return true;
+    }
+    let current_endpoint = peer_entry_field(current, uapi_field::ENDPOINT);
+    let desired_endpoint = peer.endpoint().map(|e| e.to_string());
+    if desired_endpoint.as_deref() != current_endpoint && current_endpoint != Some("(none)") {
+        return true;
+    }
+    if desired_endpoint.is_some() && current_endpoint == Some("(none)") {
+        return true;
+    }
+    let current_psk = peer_entry_field(current, uapi_field::PRESHARED_KEY);
+    let desired_psk = peer.preshared_key().map(|p| keys::hex_encode(p.as_bytes()));
+    if desired_psk.as_deref() != current_psk {
+        return true;
+    }
+    let current_keepalive = peer_entry_field(current, uapi_field::PERSISTENT_KEEPALIVE_INTERVAL)
+        .and_then(|v| v.parse::<u64>().ok());
+    let desired_keepalive = peer.persistent_keepalive().map(|d| d.as_secs());
+    if desired_keepalive != current_keepalive {
+        return true;
+    }
+    let current_ips: Vec<&str> = current
+        .iter()
+        .filter(|(k, _)| k == uapi_field::ALLOWED_IP)
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let desired_ips: Vec<String> = peer
+        .allowed_ips()
+        .nets()
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    if current_ips.len() != desired_ips.len()
+        || !desired_ips
+            .iter()
+            .all(|ip| current_ips.contains(&ip.as_str()))
+    {
+        return true;
+    }
+    false
+}
+
+/// The outcome of applying configuration differences to the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyncReport {
+    /// Peers in the config that were not yet in the daemon.
+    pub added_peers: usize,
+    /// Existing peers whose attributes differed and were refreshed.
+    pub updated_peers: usize,
+    /// Peers running in the daemon that were absent from the config.
+    pub removed_peers: usize,
+    /// Whether interface-level attributes (listen port, mark, key) changed.
+    pub device_changed: bool,
+}
+
+impl SyncReport {
+    /// Whether the config matches the running daemon exactly.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        !self.device_changed
+            && self.added_peers == 0
+            && self.updated_peers == 0
+            && self.removed_peers == 0
+    }
+}
+
+pub fn syncconf(args: &SetconfArgs) -> Result<SyncReport, Error> {
     let path = control_path(Some(args.config.as_path()), args.control.as_deref())?;
     let resolved = resolve_config(args.config.as_path())?;
     let current = control::request(&path, "get=1\n")?;
+    let parsed_current = crate::uapi::parse_response(&current);
 
     // The first `public_key` is the device's; every later one is a peer.
     let mut current_peers = Vec::new();
@@ -456,18 +532,43 @@ pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
         .collect();
 
     let mut body = String::from("set=1\n");
-    body.push_str(&device_lines(&resolved, &resolved.seed, &current));
+    let dev_diff = device_lines(&resolved, &resolved.seed, &current);
+    let device_changed = !dev_diff.is_empty();
+    body.push_str(&dev_diff);
+
+    let mut removed_peers = 0;
     for key in &current_peers {
         if !desired.contains(key) {
             body.push_str(&format!("public_key={key}\nremove=true\n"));
+            removed_peers += 1;
         }
     }
+
+    let mut added_peers = 0;
+    let mut updated_peers = 0;
     for peer in &resolved.peers {
+        let key_hex = keys::hex_encode(peer.identity().kem().as_bytes());
+        if let Some(curr) = parsed_current.peers.iter().find(|p| {
+            p.iter()
+                .any(|(k, v)| k == uapi_field::PUBLIC_KEY && v == &key_hex)
+        }) {
+            if peer_differs(peer, curr) {
+                updated_peers += 1;
+            }
+        } else {
+            added_peers += 1;
+        }
         body.push_str(&peer_lines(peer));
         body.push_str("replace_allowed_ips=true\n");
     }
     let reply = control::request(&path, &body)?;
-    expect_ok(path.as_path(), &reply)
+    expect_ok(path.as_path(), &reply)?;
+    Ok(SyncReport {
+        added_peers,
+        updated_peers,
+        removed_peers,
+        device_changed,
+    })
 }
 
 /// What an attempt to push a config to the running daemon did, and if it did

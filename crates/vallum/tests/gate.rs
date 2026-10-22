@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vallum::clock::{MockClock, TimeSource};
 use vallum::config::{Config, ResolveConfig, Resolved};
@@ -290,6 +290,25 @@ fn launch_from_text(
         tick_ms: 10,
         ..run::Loop::default()
     };
+    let control = resolved
+        .control
+        .clone()
+        .map(|path| vallum::control::ControlServer {
+            path: path.clone(),
+            context: vallum::control::ControlContext {
+                interface: name.clone(),
+                addresses: resolved.addresses.clone(),
+                private_key: resolved.seed.clone(),
+                private_key_path: dir.join(format!("{name}.key")),
+                control_path: Some(path),
+                listen,
+                fwmark: resolved.fwmark,
+                socket: Arc::clone(&shared),
+                suite: Arc::new(suite()),
+                stats: Arc::new(vallum::run::SharedStats::default()),
+            },
+        });
+
     let thread_clock = Arc::clone(&clock);
     let thread_shutdown = shutdown.clone();
     let thread_name = name.clone();
@@ -304,7 +323,7 @@ fn launch_from_text(
                     socket: shared,
                     clock: thread_clock as Arc<dyn TimeSource>,
                     budget: resolved.outer_budget,
-                    control: None,
+                    control,
                 },
                 &mut rng,
                 Logger::new(level),
@@ -879,4 +898,67 @@ fn the_suite_is_taken_from_the_key_not_from_a_flag() {
         .expect("the key and the suite agree");
     assert_eq!(resolved.peers.len(), 1);
     let _ = CryptoSuite::suite_id(&suite());
+}
+
+/// G2: when the control socket file is deleted underneath a running daemon, the
+/// loop notices on its tick, re-binds the socket at the configured path, and
+/// answers subsequent control requests without requiring a daemon restart.
+#[test]
+fn a_removed_control_socket_is_rebound_by_the_daemon() {
+    let dir = TempDir::new("ctlrebind");
+    let net = MemoryNetwork::new();
+    let prepared = prepare(dir.path(), "a", A_SEED);
+    let key_path = dir.path().join(format!("{}.key", prepared.name));
+    let ctl_path = dir.path().join("a.sock");
+
+    let text = format!(
+        "[interface]\n\
+         name = \"{}\"\n\
+         private_key = \"{}\"\n\
+         address = \"10.7.0.1/24\"\n\
+         listen = \"{}\"\n\
+         control = \"{}\"\n\
+         \n\
+         [log]\n\
+         level = \"info\"\n",
+        prepared.name,
+        key_path.display(),
+        socket_address(A_EP),
+        ctl_path.display(),
+    );
+
+    let mut host = launch_from_text(dir.path(), &net, &prepared, text, socket_address(A_EP));
+
+    // The control socket must exist and respond.
+    let start_deadline = Instant::now() + Duration::from_secs(2);
+    while !ctl_path.exists() && Instant::now() < start_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ctl_path.exists(), "control socket was created at launch");
+    let reply = vallum::control::request(&ctl_path, "get=1\n").expect("initial control request");
+    assert!(reply.contains("errno=0"), "expected errno=0, got {reply:?}");
+
+    // Delete the control socket underneath the running daemon.
+    fs::remove_file(&ctl_path).expect("delete socket");
+    assert!(!ctl_path.exists(), "socket file was removed");
+
+    // The daemon ticks at 10 ms (in gate tests) and checks if the socket was removed;
+    // within 500 ms it must notice and recreate the socket file.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !ctl_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        ctl_path.exists(),
+        "daemon failed to re-bind the deleted control socket"
+    );
+
+    // The recreated socket must answer requests.
+    let reply = vallum::control::request(&ctl_path, "get=1\n").expect("re-bound control request");
+    assert!(
+        reply.contains("errno=0"),
+        "expected errno=0 on rebound socket, got {reply:?}"
+    );
+
+    let _ = host.stop();
 }

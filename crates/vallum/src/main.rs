@@ -167,7 +167,23 @@ fn main() -> ExitCode {
         Command::Show(args) => control::show(&args),
         Command::Setconf(args) => control::setconf(&args, true),
         Command::Addconf(args) => control::setconf(&args, false),
-        Command::Syncconf(args) => control::syncconf(&args),
+        Command::Syncconf(args) => control::syncconf(&args).map(|report| {
+            if report.is_noop() {
+                vallum::say!("configuration already in sync with running daemon");
+            } else {
+                vallum::say!(
+                    "configuration synced: {} added, {} updated, {} removed{}",
+                    report.added_peers,
+                    report.updated_peers,
+                    report.removed_peers,
+                    if report.device_changed {
+                        " (device settings updated)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }),
         Command::Showconf(args) => control::showconf(&args),
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),

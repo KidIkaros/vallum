@@ -65,7 +65,7 @@ would fight for the same TUN.
 
 | Requirement | State |
 |---|---|
-| A dead tunnel must not leak traffic | **Not met** — fails open. ADR-0018 |
+| A dead tunnel must not leak traffic | **Met** — fail-closed egress via `vallum policy` / `vallum-guard@` (ADR-0018) |
 | A dead tunnel must be visible to the operator | Met — `vallum status`, and it works with the daemon dead |
 | The daemon must restart without human action | Met — `RestartSec`, watchdog, `StartLimitBurst=3` |
 | Recovery must complete without intervention | Met — proven in the fault lab under loss, MTU narrowing, reorder, delay |
@@ -111,6 +111,21 @@ notes until the build moves to an older base.
 
 ---
 
+## Delivery & Carrying (Data Plane)
+
+A tunnel is **carrying** if traffic transmitted across it is being acknowledged or returned by the remote peer:
+
+- **Window:** rolling 60-second window of transmitted and received packets per peer (`vallum_window_sent`, `vallum_window_received`).
+- **Delivery ratio:** `vallum_peer_delivery_ratio = window_received / window_sent`. An idle peer (0 sent) reports `1.0`.
+- **Degraded threshold:** ratio < `0.1` after at least 100 datagrams sent in the window. A ratio below 0.1 indicates the tunnel is sending into a void (e.g. far-side dropped sessions, routing blackhole, or anti-spoofing rejection).
+- **Verdict mapping in `vallum status`:**
+  - `up`: Daemon alive, guard installed (if active), latest handshake fresh (< 180s), delivery ratio >= 0.1 (or idle).
+  - `degraded`: Daemon alive, guard installed, handshake fresh, but delivery ratio < 0.1 across >= 100 packets.
+  - `blocked`: Guard installed, daemon stopped or handshake dead (> 180s). Egress is safely blocked.
+  - `leaking`: Daemon dead or handshake expired, guard NOT installed. Egress is escaping via gateway.
+
+---
+
 ## What this page changes
 
 Four of the audit's failures were "the system does not say". Two of them are now
@@ -119,6 +134,6 @@ statement (availability: no HA, failure behaviour instead), and one with a
 correction to the claim itself (recovery: RPO is zero because there is nothing to
 lose).
 
-The remaining honest gap is the one that matters most: **fail-closed is not
-built.** Everything on this page describes a system that is well-specified when
-it is working, and silent when it is not.
+Fail-closed egress is implemented via `vallum-guard@.service` and `vallum policy`,
+and delivery ratio provides operational visibility into carrying versus degraded
+state.

@@ -330,6 +330,7 @@ impl ConfigFile {
             path: self.path.clone(),
             source,
         })?;
+        prune_backups(&self.path, 1);
 
         let temporary = PathBuf::from(format!("{}.new", self.path.display()));
         let mut options = std::fs::OpenOptions::new();
@@ -352,6 +353,53 @@ impl ConfigFile {
             source,
         })?;
         Ok(backup)
+    }
+}
+
+/// Prune older `.bak.<timestamp>` files for `target`, keeping at most `keep` newest ones.
+pub(crate) fn prune_backups(target: &Path, keep: usize) {
+    let Some(parent) = target.parent() else {
+        return;
+    };
+    let Some(file_name) = target.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix = format!("{file_name}.bak.");
+
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut backups: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|entry| entry.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect();
+
+    backups.sort_by(|a, b| {
+        let stamp_a = a
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(&prefix))
+            .and_then(|s| s.parse::<u64>().ok());
+        let stamp_b = b
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(&prefix))
+            .and_then(|s| s.parse::<u64>().ok());
+        match (stamp_a, stamp_b) {
+            (Some(sa), Some(sb)) => sa.cmp(&sb),
+            _ => a.cmp(b),
+        }
+    });
+
+    if backups.len() > keep {
+        let to_remove = backups.len() - keep;
+        for old in &backups[..to_remove] {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 
@@ -675,5 +723,29 @@ allowed_ips = [\"10.7.0.2/32\"]
             2
         );
         assert!(parse_prefixes("not-a-prefix").is_err());
+    }
+
+    #[test]
+    fn prune_backups_keeps_only_requested_number_of_recent_backups() {
+        let dir = std::env::temp_dir().join(format!("vallum-prune-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("vallum0.service");
+        std::fs::write(&target, "target").unwrap();
+
+        let b1 = dir.join("vallum0.service.bak.100");
+        let b2 = dir.join("vallum0.service.bak.200");
+        let b3 = dir.join("vallum0.service.bak.300");
+        std::fs::write(&b1, "1").unwrap();
+        std::fs::write(&b2, "2").unwrap();
+        std::fs::write(&b3, "3").unwrap();
+
+        prune_backups(&target, 1);
+
+        assert!(!b1.exists(), "oldest backup b1 should be removed");
+        assert!(!b2.exists(), "middle backup b2 should be removed");
+        assert!(b3.exists(), "newest backup b3 should be kept");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

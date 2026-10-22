@@ -58,6 +58,8 @@ pub struct ControlContext {
     pub private_key: SharedSecret,
     /// The path the seed was read from, for a config export.
     pub private_key_path: PathBuf,
+    /// The path the control socket is served at, if configured.
+    pub control_path: Option<PathBuf>,
     /// The kernel interface name.
     pub interface: String,
     /// The interface addresses.
@@ -148,16 +150,25 @@ pub(crate) fn serve(
     // The socket is the same trust boundary as the private-key file: same user
     // only. A world-writable control socket would be a remote `set`.
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
 
     thread::Builder::new()
         .name("vallum-control".to_owned())
         .spawn(move || {
-            for stream in listener.incoming() {
+            loop {
                 if shutdown.is_triggered() {
                     break;
                 }
-                let Ok(mut stream) = stream else {
-                    continue;
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        stream
+                    }
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    Err(_) => break,
                 };
                 // Bound the request read. Without this a client that connects and
                 // sends nothing — a paused debugger, a `tui` that died mid-request
@@ -213,7 +224,6 @@ pub(crate) fn serve(
                 };
                 let _ = stream.write_all(reply.as_bytes());
             }
-            let _ = fs::remove_file(&path);
         })
 }
 
@@ -319,6 +329,10 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
         public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
         fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
         listen: context.listen,
+        control: context
+            .control_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         fwmark: context.fwmark,
         suite: device.suite_id(),
         addresses: context.addresses.clone(),
@@ -472,6 +486,7 @@ mod tests {
             addresses: Vec::new(),
             private_key: SharedSecret::new([9u8; 32]),
             private_key_path: PathBuf::from("test.key"),
+            control_path: None,
             listen,
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),

@@ -213,6 +213,16 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             "loop_fragments_dropped_total",
             "Fragments refused or half-assembled messages abandoned.",
         ),
+        (
+            uapi::field::VALLUM_DROPPED_MALFORMED,
+            "loop_dropped_malformed_total",
+            "Datagrams dropped because they did not parse as a transport message.",
+        ),
+        (
+            uapi::field::VALLUM_DROPPED_UNKNOWN_INDEX,
+            "loop_dropped_unknown_index_total",
+            "Datagrams dropped because the sender index matched no peer session.",
+        ),
     ] {
         let Some(value) = response.field(field) else {
             continue;
@@ -531,12 +541,16 @@ errno=0\n";
              vallum_handshakes_refused=0\n\
              vallum_reassembled=5\n\
              vallum_fragments_dropped=2\n\
+             vallum_dropped_malformed=1\n\
+             vallum_dropped_unknown_index=4\n\
              errno=0\n",
         );
         let text = render(&with, "vallum", 0);
         assert!(text.contains("# TYPE vallum_loop_datagrams_sent_total counter"));
         assert!(text.contains("vallum_loop_datagrams_sent_total{interface=\"vallum0\"} 42"));
         assert!(text.contains("vallum_loop_fragments_dropped_total{interface=\"vallum0\"} 2"));
+        assert!(text.contains("vallum_loop_dropped_malformed_total{interface=\"vallum0\"} 1"));
+        assert!(text.contains("vallum_loop_dropped_unknown_index_total{interface=\"vallum0\"} 4"));
         assert!(text.contains("# HELP vallum_loop_handshakes_refused_total"));
 
         // An older daemon without telemetry fields: the families are absent,

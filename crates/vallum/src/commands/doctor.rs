@@ -133,7 +133,27 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
                 // is the only check that says whether the tunnel is *live*.
                 checks.push(check_tunnel(&path));
             }
-            Err(error) => checks.push(Check::new("control", Status::Fail, error.to_string())),
+            Err(error) => {
+                let is_offline = match &error {
+                    Error::IoPath { source, .. } => matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ),
+                    _ => false,
+                };
+                if is_offline && args.control.is_none() {
+                    checks.push(Check::new(
+                        "control",
+                        Status::Warn,
+                        format!(
+                            "daemon is not running (socket `{}` not responding; start service to inspect live session)",
+                            path.display()
+                        ),
+                    ));
+                } else {
+                    checks.push(Check::new("control", Status::Fail, error.to_string()));
+                }
+            }
         },
         None => checks.push(Check::new(
             "control",
@@ -735,5 +755,44 @@ mod tests {
         });
         assert_eq!(found, Some(1200));
         assert!(probes <= 12, "{probes} probes is too many");
+    }
+
+    #[test]
+    fn doctor_reports_offline_daemon_as_warning_not_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("vallum-doctor-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key = dir.join("doctortest.key");
+        let file = crate::keys::new_secret(0x0003, false, [7u8; 32]);
+        crate::keys::save_secret(&key, &file).unwrap();
+
+        let config_path = dir.join("doctortest.toml");
+        let socket_path = dir.join("doctortest.sock");
+        let text = format!(
+            "[interface]\nname = \"doctortest\"\nprivate_key = \"{}\"\nlisten = \"127.0.0.1:0\"\ncontrol = \"{}\"\n",
+            key.display(),
+            socket_path.display()
+        );
+        std::fs::write(&config_path, text).unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let args = super::DoctorArgs {
+            config: Some(config_path),
+            control: None,
+            probe_mtu: None,
+            json: false,
+        };
+        // Ephemeral port 0 means no firewall/forwarding check; socket is offline so control warns.
+        // Overall result must be Ok(()), not Err(failure).
+        let outcome = super::doctor(&args);
+        assert!(
+            outcome.is_ok(),
+            "doctor on offline config should pass with warning, got: {outcome:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

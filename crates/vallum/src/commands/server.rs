@@ -768,6 +768,7 @@ fn write_atomic(path: &Path, contents: &str, mode: u32) -> Result<(), Error> {
             path: path.to_path_buf(),
             source,
         })?;
+        crate::config_edit::prune_backups(path, 1);
     }
     let temporary = PathBuf::from(format!("{}.new", path.display()));
     let mut options = std::fs::OpenOptions::new();

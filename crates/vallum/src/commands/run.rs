@@ -160,12 +160,13 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
             budget,
             control: resolved.control.clone().map(|path| control::ControlServer {
-                path,
+                path: path.clone(),
                 context: control::ControlContext {
                     interface: interface_name,
                     addresses: resolved.addresses.clone(),
                     private_key: resolved.seed.clone(),
                     private_key_path: key_path.clone(),
+                    control_path: Some(path),
                     listen: bound,
                     fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),

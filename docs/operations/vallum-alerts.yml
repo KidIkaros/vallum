@@ -83,3 +83,42 @@ groups:
           description: >-
             Above the 2,000-peer target. Move peers to another daemon, or switch
             to the 0x0002 suite if the threat model allows it.
+
+      # Delivery ratio below threshold (0.1) across the rolling window indicates
+      # the tunnel is sending packets that the far side is not receiving or answering.
+      - alert: VallumPeerDeliveryLow
+        expr: vallum_peer_delivery_ratio < 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} delivery ratio is degraded on {{ $labels.interface }}"
+          description: >-
+            Delivery ratio is below 10%, meaning traffic is being sent into the tunnel
+            without return traffic. Check for firewall blocks, dead far-side sessions,
+            or anti-spoofing allowed_ips drops.
+
+      # Traffic entering the tunnel is being rejected because its inner source IP
+      # is not in the peer's allowed_ips list (e.g. physical IP leaking into tunnel).
+      - alert: VallumPeerAllowedIpsRejected
+        expr: rate(vallum_peer_dropped_allowed_ips_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer {{ $labels.peer }} has packets dropped by allowed_ips anti-spoofing"
+          description: >-
+            Datagrams are being rejected because inner source address does not match allowed_ips.
+            Check vallum_last_rejected_source on the daemon to identify the leaking address.
+
+      # Datagrams arriving with an unknown receiver index: typical after the receiving
+      # side restarted or lost its session table while peers continue sending.
+      - alert: VallumLoopDroppedUnknownIndex
+        expr: rate(vallum_loop_dropped_unknown_index_total[5m]) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Vallum on {{ $labels.interface }} is dropping packets with unknown session index"
+          description: >-
+            Incoming packets reference sessions this daemon does not hold. Peers may need to re-initiate.
