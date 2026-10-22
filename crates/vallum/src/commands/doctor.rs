@@ -525,7 +525,7 @@ fn check_service(config: Option<&Path>) -> Check {
     // `systemctl is-active` exits non-zero for anything but `active`, so the
     // status is the text, not the exit code.
     let state = std::process::Command::new("systemctl")
-        .args(["is-active", &unit])
+        .args(["--no-ask-password", "is-active", &unit])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()

@@ -800,6 +800,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     } else if root && systemd {
         let active = std::process::Command::new("systemctl")
             .args([
+                "--no-ask-password",
                 "is-active",
                 "--quiet",
                 &format!("vallum-enroll@{interface}"),
@@ -808,7 +809,12 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
             .is_ok_and(|status| status.success());
         if !active {
             let _ = std::process::Command::new("systemctl")
-                .args(["enable", "--now", &format!("vallum-enroll@{interface}")])
+                .args([
+                    "--no-ask-password",
+                    "enable",
+                    "--now",
+                    &format!("vallum-enroll@{interface}"),
+                ])
                 .status();
         }
     }

@@ -914,6 +914,7 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
 
 pub(crate) fn systemctl(args: &[&str]) -> Result<(), Error> {
     let status = Command::new("systemctl")
+        .arg("--no-ask-password")
         .args(args)
         .status()
         .map_err(|source| Error::IoPath {

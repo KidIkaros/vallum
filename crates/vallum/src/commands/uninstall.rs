@@ -204,7 +204,14 @@ fn live_units() -> Vec<String> {
     let mut units = Vec::new();
     for flag in ["list-units", "list-unit-files"] {
         if let Ok(output) = Command::new("systemctl")
-            .args([flag, "--all", "--plain", "--no-legend", "vallum*@*"])
+            .args([
+                "--no-ask-password",
+                flag,
+                "--all",
+                "--plain",
+                "--no-legend",
+                "vallum*@*",
+            ])
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -225,7 +232,7 @@ fn live_units() -> Vec<String> {
 
 fn unit_known(name: &str) -> bool {
     Command::new("systemctl")
-        .args(["cat", name])
+        .args(["--no-ask-password", "cat", name])
         .output()
         .is_ok_and(|output| output.status.success())
 }

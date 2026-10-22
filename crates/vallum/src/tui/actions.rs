@@ -40,7 +40,7 @@ fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {
     let stem = config.file_stem()?.to_str()?;
     let unit = format!("vallum@{stem}.service");
     let output = Command::new("systemctl")
-        .args(["is-active", &unit])
+        .args(["--no-ask-password", "is-active", &unit])
         .output()
         .ok()?;
     ServiceState::parse(&String::from_utf8_lossy(&output.stdout))
@@ -631,11 +631,14 @@ fn restart_service(app: &mut App) {
         .unwrap_or("vallum0");
     let unit = format!("vallum@{stem}.service");
     if Command::new("systemctl")
-        .args(["cat", &unit])
+        .args(["--no-ask-password", "cat", &unit])
         .status()
         .is_ok_and(|status| status.success())
     {
-        match Command::new("systemctl").args(["restart", &unit]).status() {
+        match Command::new("systemctl")
+            .args(["--no-ask-password", "restart", &unit])
+            .status()
+        {
             Ok(status) if status.success() => {
                 app.notify(format!("systemctl restart {unit}"));
                 refresh_service_state(app);
