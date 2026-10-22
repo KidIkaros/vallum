@@ -45,6 +45,9 @@ Every release ships, per architecture (`x86_64`, `aarch64`):
 - `vallum-<tag>-x86_64-linux.deb` and `.rpm`;
 - `SHA256SUMS` + `SHA256SUMS.sig` + `allowed_signers` — the signature file
   `install.sh` verifies before trusting any checksum;
+- `release.json` — a hybrid Ed25519+Falcon-1024 attestation over the artifact
+  set, product, channel and release sequence (see below); it is itself listed
+  in `SHA256SUMS`, so the SSH signature covers it too;
 - `vallum-<tag>-sbom.spdx.json` — SPDX 2.3 SBOM of the crates.io graph (the
   SDK is a git dependency and appears as such).
 
@@ -65,6 +68,38 @@ Key custody is one person + offline storage; the fingerprint is printed in
 every release's notes. Losing the key means generating a new one, committing
 the new public half, and telling users — the same trust model WireGuard's
 minisign releases use.
+
+## The post-quantum attestation
+
+The SSH signature proves *who* built a release. It says nothing about *when*,
+which is why a replayed older release — signature intact, checksums intact —
+would install cleanly. Two things close that:
+
+- **`release.json`** is signed by `origin-provenance release-create` with a
+  hybrid Ed25519+Falcon-1024 key over the artifact digests, `product=vallum`,
+  `channel=stable`, a monotonic `sequence` derived from the version
+  (`1.6.2 → 1006002`) and an optional expiry. The seed lives at
+  `~/.config/vallum/release-attest.seed` (32 raw bytes, `$VALLUM_ATTEST_SEED`
+  to override). Its public fingerprint belongs in
+  `packaging/vallum-release-attest.fp`; until that file exists the release run
+  prints the fingerprint to commit and continues — after it exists, a
+  mismatched key is a refusal.
+- **`install.sh` refuses a downgrade.** It compares the target tag against
+  `/usr/bin/vallum --version` and stops if the target is older. The installed
+  binary *is* the floor: there is no state file to forget, corrupt, or point at
+  the wrong directory, and nothing an attacker could rewrite without already
+  owning the host. `--allow-downgrade` is the deliberate rollback switch.
+
+`install.sh` verifies `release.json` when `origin-provenance` is on `PATH`
+(`release-verify --artifact <the file being installed>`); without the tool it
+warns and relies on `SHA256SUMS.sig`, which still covers every byte.
+
+Verify a download by hand:
+
+```sh
+origin-provenance release-verify release.json --artifact-dir . \
+  --product vallum --channel stable
+```
 
 ## The two-host stamp
 

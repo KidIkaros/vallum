@@ -11,12 +11,20 @@
 #   scripts/release.sh --dry-run       # print what would be built and uploaded
 #   scripts/release.sh --skip-remote "why"   # release without a recent two-host run
 #   scripts/release.sh --skip-arm "why"      # release without an aarch64 artifact
+#   scripts/release.sh --skip-attestation "why"  # release without the signed release.json
 #
 # Releases are signed with an SSH key (`ssh-keygen -Y sign`, OpenSSH >= 8.0):
 # the private key lives at ~/.config/vallum/release-signing-key (or
 # $VALLUM_RELEASE_KEY) and the public half is committed at
 # packaging/vallum-release.pub — the repository is the trust anchor, and
 # install.sh verifies SHA256SUMS.sig before trusting any checksum.
+#
+# SHA256SUMS is additionally covered by a hybrid post-quantum attestation:
+# `origin-provenance release-create` writes dist/release.json (Ed25519 +
+# Falcon-1024 over the artifact set, product, channel, monotonic sequence and
+# expiry) and release.json is listed in SHA256SUMS, so the SSH signature
+# authenticates it too. install.sh verifies it with `origin-provenance
+# release-verify` where that tool is available.
 #
 # Nothing here is remembered, it is checked. A tag whose tree has the wrong
 # version, a changelog that does not mention the release, a tarball missing a
@@ -32,7 +40,10 @@ DRY=0
 UPLOAD=1
 SKIP_REMOTE=""
 SKIP_ARM=""
+SKIP_ATTEST=""
 SIGN_KEY="${VALLUM_RELEASE_KEY:-$HOME/.config/vallum/release-signing-key}"
+ATTEST_KEY="${VALLUM_ATTEST_SEED:-$HOME/.config/vallum/release-attest.seed}"
+ATTEST_FP_FILE="packaging/vallum-release-attest.fp"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1 ;;
@@ -47,7 +58,12 @@ while [ $# -gt 0 ]; do
             SKIP_ARM="${1:-}"
             [ -n "$SKIP_ARM" ] || { echo "--skip-arm needs a reason" >&2; exit 1; }
             ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --skip-attestation)
+            shift
+            SKIP_ATTEST="${1:-}"
+            [ -n "$SKIP_ATTEST" ] || { echo "--skip-attestation needs a reason" >&2; exit 1; }
+            ;;
+        -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -69,6 +85,16 @@ name="vallum-$tag-x86_64-linux"
 name_arm="vallum-$tag-aarch64-linux"
 
 say "release $tag"
+
+# Monotonic release sequence derived from semver: 1.6.2 -> 1006002. The
+# manifest carries it, the verifier compares it, so a replayed older release
+# is refused rather than installed. `10#` keeps a zero-padded component from
+# being read as octal.
+attest_sequence() {
+    local major minor patch
+    IFS=. read -r major minor patch <<<"$1"
+    echo $(( 10#${major:-0} * 1000000 + 10#${minor:-0} * 1000 + 10#${patch:-0} ))
+}
 
 # ── Preflight ────────────────────────────────────────────────────────────
 # Every check here exists because it has already gone wrong once.
@@ -127,6 +153,24 @@ if [ "$DRY" -eq 0 ]; then
     ok "signing key matches packaging/vallum-release.pub"
 else
     echo "   would verify the release signing key against packaging/vallum-release.pub"
+fi
+
+# The attestation seed (a raw 32-byte file) and the tool that signs with it.
+# Same trust-anchor shape as the SSH key: the public half is a committed
+# fingerprint, so a manifest signed by any other key is refused.
+if [ -n "$SKIP_ATTEST" ]; then
+    printf '   skip  release attestation: %s\n' "$SKIP_ATTEST"
+elif [ "$DRY" -eq 0 ]; then
+    [ -f "$ATTEST_KEY" ] || fail "no attestation seed at $ATTEST_KEY.
+   Generate one:  head -c 32 /dev/urandom > \"$ATTEST_KEY\" && chmod 600 \"$ATTEST_KEY\"
+   Then pin it:  release once, commit the fingerprint the run prints as $ATTEST_FP_FILE"
+    command -v origin-provenance >/dev/null \
+        || fail "origin-provenance is not on PATH.
+   Build it:  (cd ../origin-tools && cargo build --release -p origin-provenance)
+   Or release anyway with: --skip-attestation \"reason\""
+    ok "attestation seed present, origin-provenance on PATH"
+else
+    echo "   would check $ATTEST_KEY and origin-provenance"
 fi
 
 if [ "$DRY" -eq 1 ]; then
@@ -211,6 +255,51 @@ assemble() {
     done
 }
 
+# Hybrid post-quantum attestation of the artifact set. release.json is listed
+# in SHA256SUMS, so the SSH signature authenticates it too — and its Falcon
+# signature is what a verifier can check without trusting the transport at all.
+#
+# The verify step below is a round-trip health check on the REAL artifact set,
+# not a tamper detector: release-create re-signs whatever bytes are in dist/,
+# so a match is expected. What it proves is that `release-verify` accepts what
+# `release-create` just produced — a broken format, an unreadable artifact or a
+# tool/CLI drift fails here instead of on a user's host.
+attest_artifacts() {
+    local arts=() f fp pinned count=0
+    for f in dist/*.tar.gz dist/*.deb dist/*.rpm; do
+        if [ -f "$f" ]; then
+            arts+=(--artifact "$f")
+            count=$((count + 1))
+        fi
+    done
+    [ "$count" -gt 0 ] || fail "no artifacts to attest"
+
+    origin-provenance release-create \
+        --product vallum --channel stable \
+        --sequence "$(attest_sequence "$version")" \
+        "${arts[@]}" \
+        --seed-file "$ATTEST_KEY" \
+        --output dist/release.json \
+        || fail "origin-provenance release-create failed"
+
+    origin-provenance release-verify dist/release.json --artifact-dir dist \
+        --product vallum --channel stable \
+        || fail "release-verify rejected the manifest release-create just produced — fix the tool before signing"
+
+    fp=$(sed -n 's/.*"signer_fingerprint": *"\([0-9a-f]\{64\}\)".*/\1/p' dist/release.json | head -1)
+    [ -n "$fp" ] || fail "could not read the attestation fingerprint from dist/release.json"
+    if [ -f "$ATTEST_FP_FILE" ]; then
+        pinned=$(tr -d '[:space:]' < "$ATTEST_FP_FILE")
+        [ "$fp" = "$pinned" ] \
+            || fail "$ATTEST_KEY derives $fp but $ATTEST_FP_FILE pins $pinned — sign with the pinned key or update the trust anchor"
+        ok "attestation signer matches $ATTEST_FP_FILE"
+    else
+        printf '   warn  %s is missing; commit this fingerprint to pin the attestation key:\n' "$ATTEST_FP_FILE"
+        printf '         %s\n' "$fp"
+    fi
+    ok "release.json attests $count artifacts (sequence $(attest_sequence "$version"))"
+}
+
 say "assembling the tarballs"
 if [ "$DRY" -eq 0 ]; then
     assemble target/release "$name"
@@ -223,8 +312,26 @@ if [ "$DRY" -eq 0 ]; then
     cargo sbom --output-format spdx_json_2_3 > "dist/vallum-$tag-sbom.spdx.json"
     ok "SBOM: dist/vallum-$tag-sbom.spdx.json (crates.io graph; the SDK is a git dependency)"
 
+    say "attestation"
+    if [ -n "$SKIP_ATTEST" ]; then
+        printf '   skip  release attestation: %s\n' "$SKIP_ATTEST"
+    else
+        attest_artifacts
+    fi
+
     say "signing"
-    ( cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS )
+    # release.json is hashed when it exists, so the SSH signature covers the
+    # post-quantum attestation as well as the artifacts it lists. Written as an
+    # if, not `[ -f ] && set --`: a failed test would end the subshell and
+    # trip `set -e`.
+    (
+        cd dist
+        set -- *.deb *.rpm *.tar.gz
+        if [ -f release.json ]; then
+            set -- "$@" release.json
+        fi
+        sha256sum "$@" > SHA256SUMS
+    )
     cp packaging/allowed_signers dist/allowed_signers
     ssh-keygen -Y sign -f "$SIGN_KEY" -n file dist/SHA256SUMS
     ssh-keygen -Y verify -f dist/allowed_signers -n file \
@@ -235,7 +342,8 @@ if [ "$DRY" -eq 0 ]; then
     ls -l dist
 else
     echo "   would assemble dist/$name{,-aarch64}.tar.gz, the .deb, the .rpm,"
-    echo "   dist/vallum-$tag-sbom.spdx.json, SHA256SUMS + SHA256SUMS.sig + allowed_signers"
+    echo "   dist/vallum-$tag-sbom.spdx.json, dist/release.json (PQ attestation),"
+    echo "   SHA256SUMS + SHA256SUMS.sig + allowed_signers"
 fi
 
 if [ "$UPLOAD" -eq 0 ]; then
@@ -264,6 +372,9 @@ fingerprint=$(ssh-keygen -lf "$SIGN_KEY" 2>/dev/null | awk '{print $2}')
         f' CHANGELOG.md
     printf '\n## Install\n\n```sh\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sudo bash -s -- --from-release %s\n```\n' "$REPO" "$tag"
     printf '\nAssets are SSH-signed (`SHA256SUMS.sig` + `allowed_signers`); install.sh verifies them. Signing key fingerprint: `%s`\n' "$fingerprint"
+    if [ -z "$SKIP_ATTEST" ]; then
+        printf '\n`release.json` carries a hybrid Ed25519+Falcon-1024 attestation over the artifact set, product, channel and release sequence. Verify it yourself:\n\n```sh\norigin-provenance release-verify release.json --artifact-dir . --product vallum --channel stable\n```\n'
+    fi
 } > /tmp/vallum-release-notes.md
 
 if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then

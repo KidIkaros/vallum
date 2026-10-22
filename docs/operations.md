@@ -87,7 +87,9 @@ sudo systemctl enable --now vallum@vallum0
 ```
 
 There is no repository yet, so a rollback means keeping the previous `.deb`.
-Keep it.
+Keep it. Installing a kept package with `dpkg -i` is a local, deliberate act
+and bypasses `install.sh`'s downgrade guard by design; `install.sh
+--from-release <older>` refuses unless you pass `--allow-downgrade`.
 
 ---
 

@@ -14,6 +14,11 @@
 #   scripts/install.sh --from-release --no-verify-signature   # skip sig check
 #   scripts/install.sh --from-release --require-signature     # fail if unsigned
 #   scripts/install.sh --from-release --package deb|rpm       # verified dpkg/rpm install
+#   scripts/install.sh --from-release --allow-downgrade       # permit an older release
+#
+# A release older than the installed version is refused: a signature proves
+# who built a release, never when. `--allow-downgrade` is the deliberate
+# rollback switch.
 #
 # `--package` routes the package through the same signature check as the
 # tarball: `dpkg -i`/`rpm -i` verify nothing themselves, so install.sh
@@ -52,6 +57,7 @@ INSTALL_ONLY=0
 DRY=0
 NO_VERIFY_SIG=0
 REQUIRE_SIG=0
+ALLOW_DOWNGRADE=0
 ADD_CLIENT=""
 REMOVE_CLIENT=""
 PACKAGE=""
@@ -94,6 +100,7 @@ while [ $# -gt 0 ]; do
         --install-only) INSTALL_ONLY=1 ;;
         --no-verify-signature) NO_VERIFY_SIG=1 ;;
         --require-signature) REQUIRE_SIG=1 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
         --add-client) shift; ADD_CLIENT=${1:-} ;;
         --remove-client) shift; REMOVE_CLIENT=${1:-} ;;
         --endpoint) shift; ENDPOINT=${1:-}; PASSTHRU+=(--endpoint "$ENDPOINT") ;;
@@ -101,7 +108,7 @@ while [ $# -gt 0 ]; do
         --purge) UNINSTALL_ARGS+=(--purge) ;;
         --dry-run) DRY=1; PASSTHRU+=(--dry-run); UNINSTALL_ARGS+=(--dry-run) ;;
         --help|-h)
-            sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         --) shift; PASSTHRU+=("$@"); break ;;
@@ -162,6 +169,70 @@ verify_release_signature() {
         echo "   ok    release signature verified (vallum-release)"
     else
         echo "refusing: SHA256SUMS.sig does not verify against allowed_signers — do not trust this download" >&2
+        exit 1
+    fi
+}
+
+# ── release freshness ───────────────────────────────────────────────
+
+# Installed version, or empty when vallum is not installed yet.
+installed_version() {
+    local out
+    out=$("$BIN_DIR/vallum" --version 2>/dev/null) || return 0
+    # "vallum 1.6.2 (linux-only)"
+    echo "$out" | awk '{print $2}'
+}
+
+# Strictly newer? `sort -V` is coreutils and orders semver correctly.
+version_gt() {
+    [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+}
+
+# A release older than what is installed is refused. A signature proves who
+# built a release, never when: a replayed older release — validly signed,
+# checksums intact — is exactly what this catches, and it is the one thing the
+# signature chain cannot see. The installed binary IS the floor: no state file
+# to forget, corrupt, or point at the wrong directory, and no floor an attacker
+# could rewrite without already owning the host.
+guard_downgrade() {
+    local tag=$1 target installed
+    target=${tag#v}
+    installed=$(installed_version)
+    [ -n "$installed" ] || return 0
+    if version_gt "$installed" "$target"; then
+        if [ "$ALLOW_DOWNGRADE" -eq 1 ]; then
+            echo "   warn  downgrade: installed $installed -> installing $target (--allow-downgrade)"
+            return 0
+        fi
+        echo "refusing: $target is older than the installed $installed." >&2
+        echo "         A valid signature proves who built a release, not when it was built." >&2
+        echo "         Pass --allow-downgrade to roll back deliberately." >&2
+        exit 1
+    fi
+    echo "   ok    version: installed $installed, installing $target"
+}
+
+# The hybrid post-quantum attestation (release.json), when the release ships
+# one. release.json is listed in SHA256SUMS, so the SSH signature above already
+# authenticates it; this adds the Falcon check and binds product/channel/
+# sequence to the exact artifact being installed.
+verify_release_attestation() {
+    local tag=$1 work=$2 artifact=$3
+    if ! download_asset "$tag" "release.json" "$work/release.json" 2>/dev/null; then
+        echo "   warn  $tag ships no release.json (pre-attestation release)"
+        return 0
+    fi
+    if ! command -v origin-provenance >/dev/null 2>&1; then
+        echo "   warn  release.json present, but origin-provenance is not installed —"
+        echo "         the post-quantum attestation was NOT checked (SHA256SUMS.sig still covers it)"
+        return 0
+    fi
+    if origin-provenance release-verify "$work/release.json" \
+        --artifact-dir "$work" --artifact "$artifact" \
+        --product vallum --channel stable >/dev/null 2>&1; then
+        echo "   ok    release.json attests $artifact (Ed25519+Falcon-1024)"
+    else
+        echo "refusing: release.json does not attest $artifact — do not install this download" >&2
         exit 1
     fi
 }
@@ -243,10 +314,12 @@ install_from_release() {
     A=$(arch)
     target="vallum-$tag-$A-linux.tar.gz"
     say "downloading $tag ($A)"
+    guard_downgrade "$tag"
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    verify_release_attestation "$tag" "$work" "$target"
     tar -C "$work" -xzf "$work/$target"
     SOURCE_DIR="$work/vallum-$tag-$A-linux"
 }
@@ -274,10 +347,12 @@ install_package() {
     local tag=$1 work=$2 target
     target=$(package_asset_name "$tag")
     say "downloading $tag ($PACKAGE)"
+    guard_downgrade "$tag"
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    verify_release_attestation "$tag" "$work" "$target"
     case "$PACKAGE" in
         deb) run dpkg -i "$work/$target" ;;
         rpm)
