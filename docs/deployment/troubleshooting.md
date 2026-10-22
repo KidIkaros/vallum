@@ -39,9 +39,14 @@ deployment.
 `scripts/install.sh`, which writes both the unit and the binary to the same
 place.
 
-**`status=226/NAMESPACE` or a read-only `/run`** — the unit expects
-`RuntimeDirectory=vallum`. An old unit without it, plus `ProtectSystem=strict`,
-leaves `/run/vallum` unwritable. Reinstall the unit.
+**`status=226/NAMESPACE`** — the unit binds `ReadWritePaths=/run/vallum`, and a
+missing path is a namespace failure, not a permission problem. The directory is
+created by `/usr/lib/tmpfiles.d/vallum-tmpfiles.conf` (installed by the package,
+which runs `systemd-tmpfiles --create` from its post-install hook). If it is
+absent, run `systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf`.
+A unit from before 1.6.2 had `RuntimeDirectory=vallum`, which created the
+directory inside the service's own mount namespace — where the host, and every
+other daemon, could not see it. Reinstall the package to replace that unit.
 
 **`CAP_NET_ADMIN`** — the daemon needs it to create the interface. The unit grants
 it; running `vallum run` by hand does not. Use `sudo`, or `setcap` the binary.

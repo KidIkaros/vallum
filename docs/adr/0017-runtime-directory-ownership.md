@@ -1,6 +1,6 @@
 # ADR-0017: The runtime directory is a machine resource, not a service's private state
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** accepted · **Date:** 2026-10-21
 
 ---
 

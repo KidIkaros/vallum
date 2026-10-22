@@ -69,6 +69,9 @@ the explicit trade: the operator asked for a shell; a packet did not.
 - `packaging/vallum@.service`: a template unit, `ExecStart=/usr/bin/vallum run
   --config /etc/vallum/%i.toml`, with `CAP_NET_ADMIN`, `NoNewPrivileges`, and a
   writable `/run/vallum` only.
+- `packaging/vallum-tmpfiles.conf`: owns `/run/vallum` (`d /run/vallum 0750 root
+  root -`), so the directory exists before any unit starts and outlives any unit
+  stopping. It is not a unit's `RuntimeDirectory` — see ADR-0017.
 - `packaging/vallum.8`, `vallum-quick.8`, `vallum.toml.5`: man pages.
 - `packaging/vallum.bash`: completion for both binaries.
 - `[package.metadata.deb]`/`[package.metadata.rpm]` in `crates/vallum`: the

@@ -110,7 +110,8 @@ Guides: [server](docs/deployment/server.md) ·
 [monitoring](docs/deployment/monitoring.md) ·
 [backup](docs/deployment/backup.md) ·
 [troubleshooting](docs/deployment/troubleshooting.md) ·
-[security model](docs/security-model.md).
+[security model](docs/security-model.md) ·
+[roadmap](docs/roadmap.md).
 
 ## TUI (`vallum tui`)
 

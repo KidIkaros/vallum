@@ -47,8 +47,10 @@ in (supported / experimental).
   `cargo check --target x86_64-apple-darwin -p vallum-core -p vallum-tunnel -p vallum-crypto`.
 - The daemon cannot be cross-checked from Linux: the SDK's C dependencies
   (`blake3`, `zstd-sys`) invoke the host `cc` with `-arch`/Apple flags and fail
-  without an Apple toolchain. CI now has a `macos-inner` job (gating) and an
-  experimental `macos-daemon` job on a macOS runner, where Apple clang exists.
+  without an Apple toolchain. ADR-0011 removed the macOS CI jobs for v0.1 and
+  the `macos-experimental` workflow was deleted in `d793170`, so **nothing here
+  is checked in CI**: the cross-check above covers the pure-Rust crates only,
+  from this host, and the daemon on macOS is unverified.
 
 ## 4. The signifier
 

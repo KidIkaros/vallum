@@ -18,4 +18,4 @@
 | [0014](0014-wireguard-gaps.md) | Close the WireGuard gaps Vallum can win | accepted | 2026-10-20 |
 | [0015](0015-enrolment-v2.md) | Enrolment v2 — the PQ-WireGuard shape, applied to provisioning | accepted | 2026-10-21 |
 | [0016](0016-nat-traversal.md) | NAT traversal and relay — what we will and will not do | proposed | 2026-10-21 |
-| [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | proposed | 2026-10-21 |
+| [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | accepted | 2026-10-21 |

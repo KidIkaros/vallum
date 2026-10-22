@@ -31,6 +31,11 @@ What the restart changes and what it does not:
 
 - **Changed**: the daemon binary, the unit files (`install.sh` refreshes
   them — e.g. `Type=notify` + `WatchdogSec` landed in v1.6.1).
+- **Changed in 1.6.2**: the unit no longer carries `RuntimeDirectory=vallum`.
+  `/run/vallum` is created by `/usr/lib/tmpfiles.d/vallum-tmpfiles.conf`, and the
+  package's post-install hook runs `systemd-tmpfiles --create` so it exists
+  immediately rather than at the next boot. An upgraded host needs nothing done
+  by hand; the existing directory is kept. See ADR-0017.
 - **Unchanged**: `/etc/vallum/*.toml`, `/etc/vallum/*.key`, peer lists, invite
   files in `/run/vallum` (they are TTL-bounded anyway).
 - **Downtime**: one daemon restart per interface — a few seconds where peers
