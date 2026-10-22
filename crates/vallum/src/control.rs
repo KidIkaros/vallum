@@ -299,7 +299,9 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             dropped_allowed_ips: device
                 .stats(id)
                 .map_or(0, |stats| stats.dropped_allowed_ips),
-            last_rejected_source: device.stats(id).and_then(|stats| stats.last_rejected_source),
+            last_rejected_source: device
+                .stats(id)
+                .and_then(|stats| stats.last_rejected_source),
             keepalive: config
                 .persistent_keepalive()
                 .map(|interval| u16::try_from(interval.as_secs()).unwrap_or(u16::MAX)),
