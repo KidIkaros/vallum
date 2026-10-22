@@ -63,11 +63,25 @@ withdrawn and traffic returns to the gateway. That is the right default for a VP
 you switch on for ten minutes. It is the wrong default for one you depend on, and
 it is the difference between a leak and an outage.
 
+**A second instance of the same failure, already measured.** `peer add` writes
+`allowed_ips = ["0.0.0.0/0", "::/0"]` unconditionally, so a client is promised a v6
+tunnel even when the server was configured with `--address` as IPv4 only. The
+route plan correctly declines to install a v6 route (there is no v6 address to
+route from), and nothing blocks v6, so it escapes by the physical link while the
+tunnel is up. `verify-remote.sh` fails on exactly this today.
+
 **Done means** `block-on-failure` installs a blackhole for the tunnel's prefixes
 instead of reversing to the gateway, `restore` keeps today's behaviour, the choice
 is recorded and reversed exactly the way the route plan is, and the suite in (1)
 proves traffic is blocked rather than leaked. The verdict is already computed in
 one place, so this is a policy switch, not a second mechanism.
+
+**This is not a statement about IPv6.** Dual-stack is implemented and proven —
+`docs/proof/ipv6.md` (H7), `docs/proof/dual-stack.md` (H9), and `e2e-netns.sh`
+gates it with a v6-only pass. The rule is narrower: **a family the tunnel does not
+carry must not escape.** When the tunnel carries v6 it routes normally; when it
+carries only v4, v6 is blocked rather than leaked. Removing IPv6 support is not on
+the table and never was.
 
 ### 3. DNS that cannot leak
 
