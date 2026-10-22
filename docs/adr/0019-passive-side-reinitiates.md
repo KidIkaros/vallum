@@ -1,6 +1,6 @@
 # 19. The passive side must re-initiate, or a restart costs every client 120 s
 
-**Status:** proposed · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
+**Status:** proposed — blocked on the finding below · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
 
 ## Context
 
@@ -59,6 +59,35 @@ recovery needs and far less than an amplifier is worth.
 - Until this lands, the operational answer is in `docs/operations.md`: restarting
   a server disconnects every client for up to 120 s, so do it during a window
   and tell users, or detach clients first.
+
+## Attempted, and it did not fix it
+
+A client-side liveness rule was implemented and tested: count keepalives that go
+unanswered, and re-handshake after three instead of waiting for the rekey. Unit
+and protocol tests passed and the gate was green.
+
+On the live deployment it **never fired**. Handshakes continued to land exactly
+120 s apart, so the rekey timer still drove everything. The client is not silent
+during an outage — it receives a small number of packets (186 delivered against
+14 626 sent), and each one resets an unanswered counter. A rule built on "we
+heard nothing" cannot see a path that is mostly, but not entirely, dead.
+
+That attempt was reverted rather than shipped. It was correct in isolation and
+useless for the failure it was written for, and committing it would have claimed
+more than was measured.
+
+## What the live test actually showed
+
+Restarting the server produced a **386 s** outage in one run — but the server was
+restarted twice inside that window (once by hand, once by the harness), so the
+figure spans two outages and should not be quoted as a single number.
+
+The finding that does survive is more serious than the original one: **the client
+re-establishes successfully every 120 s and traffic still does not return.** Both
+ends log `established`, the server counts packets delivered, and the client still
+cannot reach the internet. So the recovery problem is not only "how fast does a
+handshake happen" — a completed handshake is not sufficient. That has to be
+understood before anything is built on top of it.
 
 ## Not decided here
 
