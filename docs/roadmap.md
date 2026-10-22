@@ -111,6 +111,11 @@ tunnel and resolves through whatever the host has — outside the tunnel.
 while attached; the "kept the tunnel, warned about DNS" fallback is gone rather
 than tolerated, and the suite in (1) proves resolution does not leave the tunnel.
 
+**Resolved:**
+- `policy.rs` drops UDP and TCP port 53 egress in the killswitch filter table before any LAN/custom allow rules, preventing rogue or local resolvers outside the tunnel from answering queries.
+- `vallum-quick` adds direct `/etc/resolv.conf` fallback (`DnsBackend::ResolvFile`) with symlink-aware backup and restoration at `/run/vallum/{interface}.resolv.conf.bak` when neither `systemd-resolved` nor `resolvconf` is available.
+- `attach` and `up` fail-closed and abort/rollback if DNS servers are configured but cannot be installed, removing the silent fallback to physical link resolvers.
+
 ### 4. Path MTU detection
 
 **Problem.** MTU is fixed at 1500. On PPPoE and DS-Lite that black-holes, and the

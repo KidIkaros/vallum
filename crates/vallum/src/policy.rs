@@ -206,6 +206,10 @@ pub fn ruleset(config: &Config, interface: &str) -> Result<String, Error> {
     rules.push_str("    udp sport 68 udp dport 67 accept\n");
     rules.push_str("    ip6 nexthdr udp udp sport 546 udp dport 547 accept\n");
 
+    // DNS: Port 53 outside the tunnel must not leak, even under LAN or allow rules.
+    rules.push_str("    udp dport 53 drop\n");
+    rules.push_str("    tcp dport 53 drop\n");
+
     if quick.allow_lan {
         rules.push_str(&format!("    ip daddr {{ {LAN_V4} }} accept\n"));
         rules.push_str(&format!("    ip6 daddr {{ {LAN_V6} }} accept\n"));
@@ -418,6 +422,23 @@ allowed_ips = ["0.0.0.0/0"]
         )
         .unwrap();
         assert!(with.contains("192.168.0.0/16"));
+    }
+
+    #[test]
+    fn dns_outside_the_tunnel_is_dropped_even_with_lan_exceptions() {
+        let with_lan = ruleset(
+            &config(&FULL_V4.replace("policy = \"on\"", "policy = \"on\"\nallow_lan = true")),
+            "vallum-laptop",
+        )
+        .unwrap();
+        assert!(with_lan.contains("udp dport 53 drop"));
+        assert!(with_lan.contains("tcp dport 53 drop"));
+        let dns_drop = with_lan.find("udp dport 53 drop").unwrap();
+        let lan_allow = with_lan.find("192.168.0.0/16").unwrap();
+        assert!(
+            dns_drop < lan_allow,
+            "port 53 drop must precede LAN allow rules to prevent DNS leaking to local routers"
+        );
     }
 
     #[test]
