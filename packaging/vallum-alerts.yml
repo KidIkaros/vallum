@@ -9,6 +9,11 @@ groups:
     rules:
       # The scrape itself failed: the daemon is dead, the socket is gone, or
       # the metrics timer stopped. This is the "is the tunnel up at all" alert.
+      # It also covers a WEDGED control plane, which is not the same thing as a
+      # dead daemon: the tunnel keeps carrying traffic while the socket accepts
+      # connections and answers none. The exporter now gives up and writes
+      # `up 0` rather than hanging, so this fires — start with `vallum show` and
+      # `ps`, not with a restart, because a restart throws away the evidence.
       - alert: VallumDown
         expr: vallum_up == 0
         for: 2m
@@ -16,6 +21,10 @@ groups:
           severity: critical
         annotations:
           summary: "Vallum control socket not answering on {{ $labels.instance }}"
+          runbook: >-
+            `vallum show` to tell a dead daemon from a wedged one; if it times
+            out, the tunnel is still up but the control plane is held, and
+            `systemctl restart` is the recovery — capture the wedge first.
 
       # A peer configured to carry traffic that has not handshaked recently is
       # either dead, roaming to a dead path, or fighting the firewall. 4

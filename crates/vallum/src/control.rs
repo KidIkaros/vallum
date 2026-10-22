@@ -31,6 +31,21 @@ use crate::run::{Input, Shutdown};
 use crate::uapi::errno::{EADDRINUSE, EADDRNOTAVAIL, EEXIST, EINVAL, ENOENT, EPERM, ETIMEDOUT};
 use crate::uapi::{self, Request, Set};
 
+/// How long a client may take to send its request before the connection is
+/// dropped.
+///
+/// The accept loop is serial — one connection at a time, so that every mutation
+/// happens on the thread that owns the device. That invariant is sound, but it
+/// means an unbounded read is an unbounded outage: a client that connects and
+/// then says nothing holds the whole plane.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a client waits for a reply.
+///
+/// Longer than the daemon's own reply budget (5 s, below), so a slow but healthy
+/// daemon still answers and the timeout means what it says.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the control plane needs to describe the device.
 pub struct ControlContext {
     /// The private-key seed, as the daemon holds it.
@@ -105,6 +120,12 @@ pub(crate) fn serve(
                 let Ok(mut stream) = stream else {
                     continue;
                 };
+                // Bound the request read. Without this a client that connects and
+                // sends nothing — a paused debugger, a `tui` that died mid-request
+                // — holds the serial loop forever and every other command hangs.
+                if stream.set_read_timeout(Some(REQUEST_TIMEOUT)).is_err() {
+                    continue;
+                }
                 let mut text = String::new();
                 // The client writes the request and shuts its write half; the
                 // read ends at EOF.
@@ -145,10 +166,37 @@ pub fn request(path: &Path, body: &str) -> Result<String, crate::error::Error> {
         source,
     };
     let mut stream = UnixStream::connect(path).map_err(io_path)?;
+    // A socket that accepts but never answers must not hang the caller. A hung
+    // scrape is worse than a failed one: node_exporter keeps serving the last
+    // textfile, so `up 1` outlives the daemon that produced it and the alert
+    // that exists to catch this cannot fire.
+    stream
+        .set_read_timeout(Some(REPLY_TIMEOUT))
+        .map_err(io_path)?;
+    stream
+        .set_write_timeout(Some(REPLY_TIMEOUT))
+        .map_err(io_path)?;
     stream.write_all(body.as_bytes()).map_err(io_path)?;
     stream.shutdown(NetShutdown::Write).map_err(io_path)?;
     let mut reply = String::new();
-    stream.read_to_string(&mut reply).map_err(io_path)?;
+    stream.read_to_string(&mut reply).map_err(|source| {
+        if matches!(
+            source.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) {
+            // Name the real condition: the socket exists and accepted, so
+            // "connection refused" would send the operator to the wrong place.
+            io_path(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "no reply within {}s; the socket accepted the connection but did not answer",
+                    REPLY_TIMEOUT.as_secs()
+                ),
+            ))
+        } else {
+            io_path(source)
+        }
+    })?;
     Ok(reply)
 }
 
@@ -435,5 +483,45 @@ mod tests {
         );
         let request = uapi::parse(&body).expect("a legal set");
         assert!(handle(&mut device, &mut context, request).contains("errno=2"));
+    }
+
+    /// A socket that accepts and then says nothing must not hang the caller.
+    ///
+    /// This is the failure that made `VallumDown` unable to fire: the exporter
+    /// hung instead of returning, so node_exporter kept serving the previous
+    /// `up 1` and the one alert covering the control plane could never trigger.
+    /// The bound is what lets the "did not answer" path run at all.
+    #[test]
+    fn a_socket_that_never_answers_is_given_up_on() {
+        let dir = std::env::temp_dir().join(format!("vallum-ctl-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("silent.sock");
+        let _ = fs::remove_file(&path);
+
+        let listener = UnixListener::bind(&path).expect("bind");
+        // Accept, then hold the connection open without ever replying. Detached
+        // on purpose: joining it would make this test wait out the hold.
+        let _silent_server = thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                thread::sleep(REPLY_TIMEOUT + Duration::from_secs(2));
+                drop(stream);
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let result = request(&path, "get=1\n");
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a silent socket must not be read as a successful reply"
+        );
+        assert!(
+            elapsed < REPLY_TIMEOUT + Duration::from_secs(5),
+            "gave up after {elapsed:?}; the caller was not bounded"
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
     }
 }
