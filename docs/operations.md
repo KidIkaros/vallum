@@ -139,6 +139,20 @@ sudo ip link set <uplink> down
 
 ## Restart behaviour
 
+## Restarting a server disconnects every client
+
+A client only re-establishes when its own rekey timer expires, because the server
+never initiates a handshake — it is always the responder (ADR-0019). Measured on
+a live deployment: a client whose server restarted recovered only at its next
+rekey, **120 s later**, and a 45 s observation window after the restart saw no
+successful traffic at all.
+
+So a server restart is a 120-second outage for every attached client, and a
+full-tunnel client is blackholed for all of it. Plan it: detach clients first, or
+restart during a window and tell people. `persistent_keepalive = 25` does not
+help — a keepalive is a data packet on an existing session, not a probe that can
+discover the session is gone.
+
 `vallum@` carries `StartLimitBurst=3` in `StartLimitIntervalSec=60`, so a config
 that cannot start fails after three attempts instead of the 259 restarts a
 missing `/run/vallum` used to produce. If a unit is in `failed`:

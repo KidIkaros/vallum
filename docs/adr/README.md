@@ -20,3 +20,4 @@
 | [0016](0016-nat-traversal.md) | NAT traversal and relay — what we will and will not do | proposed | 2026-10-21 |
 | [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | accepted | 2026-10-21 |
 | [0018](0018-fail-closed-egress.md) | A packet leaves only through the tunnel, or to the endpoint | accepted | 2026-10-22 |
+| [0019](0019-passive-side-reinitiates.md) | The passive side re-initiates, so a restart costs seconds not 120 s | proposed | 2026-10-22 |
