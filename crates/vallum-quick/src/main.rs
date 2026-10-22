@@ -14,7 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
@@ -1328,23 +1328,94 @@ fn control_socket(config: &Config, config_path: &Path, interface: &str) -> PathB
 }
 
 /// What the watchdog should do with the routes on one tick.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Verdict {
     Hold,
-    Withdraw,
+    Withdraw(WithdrawReason),
     Restore,
 }
 
-/// Decide from the session's age and whether the routes are currently in.
+/// Why routes were withdrawn by the watchdog.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum WithdrawReason {
+    NoHandshake,
+    DeliveryDegraded,
+}
+
+/// Datagrams below which a delivery ratio is not worth judging.
 ///
-/// Pure, so the rule "a full tunnel with a dead session must not own the host's
-/// default route" is testable without a kernel, a socket or a clock.
+/// Three keepalives and a stray packet are not evidence of anything.
+const DELIVERY_MIN_SAMPLE: u64 = 100;
+
+/// Delivery below this is not carrying.
+///
+/// A ratio under 0.1 indicates the tunnel is sending into a void (e.g. far-side
+/// dropped session or routing blackhole).
+const DELIVERY_FLOOR: f64 = 0.1;
+
+/// How long delivery must stay below threshold before routes are withdrawn.
+///
+/// Defaults to the protocol's rekey interval (120 s). A momentary dip or transient
+/// loss must not flap the routes; but once a full rekey cycle elapses with no
+/// traffic carrying, the tunnel is sending into a void.
+const DEGRADED_AFTER: Duration = Duration::from_secs(120);
+
+fn degraded_after() -> Duration {
+    std::env::var("VALLUM_DEGRADED_AFTER_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEGRADED_AFTER)
+}
+
+/// Decide from the session's age and whether the routes are currently in (legacy handshake-only check).
+#[cfg(test)]
 fn verdict(attached: bool, session_age: Option<Duration>, dead_after: Duration) -> Verdict {
-    let live = session_age.is_some_and(|age| age < dead_after);
-    match (attached, live) {
-        (true, false) => Verdict::Withdraw,
-        (false, true) => Verdict::Restore,
-        _ => Verdict::Hold,
+    verdict_carrying(
+        attached,
+        session_age,
+        dead_after,
+        None,
+        Duration::ZERO,
+        DEGRADED_AFTER,
+    )
+}
+
+/// Decide route status from handshake age, delivery ratio, and degraded duration.
+///
+/// Pure, so the rule "a full tunnel with a dead session or non-carrying delivery
+/// must not own the host's default route" is testable without a kernel, a socket or a clock.
+fn verdict_carrying(
+    attached: bool,
+    session_age: Option<Duration>,
+    dead_after: Duration,
+    worst_delivery: Option<f64>,
+    degraded_for: Duration,
+    degraded_after: Duration,
+) -> Verdict {
+    let handshake_live = session_age.is_some_and(|age| age < dead_after);
+    if !handshake_live {
+        return match attached {
+            true => Verdict::Withdraw(WithdrawReason::NoHandshake),
+            false => Verdict::Hold,
+        };
+    }
+
+    let delivery_degraded = worst_delivery.is_some_and(|ratio| ratio < DELIVERY_FLOOR);
+    if delivery_degraded && degraded_for >= degraded_after {
+        return match attached {
+            true => Verdict::Withdraw(WithdrawReason::DeliveryDegraded),
+            false => Verdict::Hold,
+        };
+    }
+
+    if delivery_degraded {
+        return Verdict::Hold;
+    }
+
+    match attached {
+        true => Verdict::Hold,
+        false => Verdict::Restore,
     }
 }
 
@@ -1401,24 +1472,68 @@ fn clamp_dead_after(configured: Duration) -> Duration {
     configured.max(WATCH_POLL * 2)
 }
 
-/// How long ago the newest handshake happened, if there has been one.
-fn session_age(socket: &Path) -> Option<Duration> {
-    let reply = uapi_get(socket).ok()?;
-    let secs = reply
-        .lines()
-        .find_map(|line| line.strip_prefix("last_handshake_time_sec="))
-        .and_then(|value| value.trim().parse::<u64>().ok())?;
-    if secs == 0 {
-        return None;
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    Some(Duration::from_secs(now.saturating_sub(secs)))
+/// Health metrics parsed from the daemon's UAPI reply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SessionHealth {
+    age: Option<Duration>,
+    worst_delivery: Option<f64>,
 }
 
-/// Hold the routes only while the session is alive.
+fn parse_session_health(reply: &str) -> SessionHealth {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    parse_session_health_at(reply, now)
+}
+
+fn parse_session_health_at(reply: &str, now_unix_secs: u64) -> SessionHealth {
+    let mut newest_handshake: Option<u64> = None;
+    let mut worst_ratio: Option<f64> = None;
+
+    for block in reply.split("\n\n") {
+        for line in block.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("last_handshake_time_sec=") {
+                if let Ok(secs) = rest.trim().parse::<u64>() {
+                    if secs > 0 {
+                        newest_handshake = Some(newest_handshake.map_or(secs, |e| e.max(secs)));
+                    }
+                }
+            }
+        }
+
+        let sent = block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("vallum_window_sent="))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+
+        if sent >= DELIVERY_MIN_SAMPLE {
+            let received = block
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("vallum_window_received="))
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let ratio = received as f64 / sent as f64;
+            worst_ratio = Some(worst_ratio.map_or(ratio, |e| e.min(ratio)));
+        }
+    }
+
+    let age = newest_handshake.map(|secs| Duration::from_secs(now_unix_secs.saturating_sub(secs)));
+    SessionHealth {
+        age,
+        worst_delivery: worst_ratio,
+    }
+}
+
+fn session_health(socket: &Path) -> Option<SessionHealth> {
+    let reply = uapi_get(socket).ok()?;
+    Some(parse_session_health(&reply))
+}
+
+/// Hold the routes only while the session is alive and carrying.
 ///
 /// `attach` gates installation on a handshake, but nothing took the routes back
 /// out when the peer stopped answering: the daemon stays up, the interface
@@ -1441,6 +1556,7 @@ fn watch(
 
     let socket = control_socket(&config, config_path, &interface);
     let dead_after = dead_after();
+    let degraded_after = degraded_after();
     // Guard exactly what attach installed. A config whose routes are all covered
     // by its own interface installs nothing, so there is nothing to withdraw —
     // but the process stays resident so the unit has one lifecycle either way.
@@ -1451,34 +1567,64 @@ fn watch(
         eprintln!("vallum-quick: {interface}: no routes of its own to guard");
     }
     let mut attached = read_plan(&state_path(&interface)).is_some();
+    let mut degraded_since: Option<Instant> = None;
+
     loop {
         if guarded {
-            match verdict(attached, session_age(&socket), dead_after) {
-                Verdict::Withdraw => {
+            let health = session_health(&socket);
+            let age = health.as_ref().and_then(|h| h.age);
+            let delivery = health.as_ref().and_then(|h| h.worst_delivery);
+
+            let is_degraded = delivery.is_some_and(|ratio| ratio < DELIVERY_FLOOR);
+            let degraded_for = if is_degraded {
+                let start = degraded_since.get_or_insert_with(Instant::now);
+                start.elapsed()
+            } else {
+                degraded_since = None;
+                Duration::ZERO
+            };
+
+            match verdict_carrying(
+                attached,
+                age,
+                dead_after,
+                delivery,
+                degraded_for,
+                degraded_after,
+            ) {
+                Verdict::Withdraw(reason) => {
+                    let msg = match reason {
+                        WithdrawReason::NoHandshake => {
+                            format!("no handshake within {}s", dead_after.as_secs())
+                        }
+                        WithdrawReason::DeliveryDegraded => {
+                            format!(
+                                "delivery below threshold (10%) for {}s",
+                                degraded_after.as_secs()
+                            )
+                        }
+                    };
                     if dry_run {
-                        println!(
-                            "would withdraw {interface}: no handshake within {}s",
-                            dead_after.as_secs()
-                        );
+                        println!("would withdraw {interface}: {msg}");
                     } else {
                         remove_routes(&config, &interface, table, false);
                         eprintln!(
-                            "vallum-quick: {interface}: no handshake for {}s — routes withdrawn, \
-                             this host keeps its own gateway",
-                            dead_after.as_secs()
+                            "vallum-quick: {interface}: {msg} — routes withdrawn, \
+                             this host keeps its own gateway"
                         );
                     }
                     attached = false;
                 }
                 Verdict::Restore => {
+                    degraded_since = None;
                     if dry_run {
-                        println!("would restore {interface}: the session is back");
+                        println!("would restore {interface}: the session is back and carrying");
                     } else {
                         match apply_routes(&config, &interface, table, false) {
                             Ok(()) => {
                                 attached = true;
                                 eprintln!(
-                                    "vallum-quick: {interface}: session is back — routes restored"
+                                    "vallum-quick: {interface}: session is back and carrying — routes restored"
                                 );
                             }
                             Err(error) => {
@@ -1835,10 +1981,13 @@ mod tests {
         // The server stopped answering: withdraw, so the host keeps its gateway.
         assert_eq!(
             verdict(true, Some(Duration::from_secs(91)), dead_after),
-            Verdict::Withdraw
+            Verdict::Withdraw(WithdrawReason::NoHandshake)
         );
         // Never handshaked at all is not a live session.
-        assert_eq!(verdict(true, None, dead_after), Verdict::Withdraw);
+        assert_eq!(
+            verdict(true, None, dead_after),
+            Verdict::Withdraw(WithdrawReason::NoHandshake)
+        );
         // The session came back: restore.
         assert_eq!(
             verdict(false, Some(Duration::from_secs(2)), dead_after),
@@ -1846,6 +1995,106 @@ mod tests {
         );
         // Withdrawn and still dead: nothing to do.
         assert_eq!(verdict(false, None, dead_after), Verdict::Hold);
+    }
+
+    #[test]
+    fn a_degraded_session_withdraws_routes_after_the_rekey_interval() {
+        let dead_after = Duration::from_secs(210);
+        let degraded_after = Duration::from_secs(120);
+        let fresh_handshake = Some(Duration::from_secs(10));
+        let bad_ratio = Some(0.013); // 13 back against 1000 sent
+
+        // Attached, fresh handshake, degraded delivery, but only degraded for 30s:
+        // do not flap yet; hold the routes.
+        assert_eq!(
+            verdict_carrying(
+                true,
+                fresh_handshake,
+                dead_after,
+                bad_ratio,
+                Duration::from_secs(30),
+                degraded_after,
+            ),
+            Verdict::Hold
+        );
+
+        // Degraded for 120s (full rekey interval): withdraw routes!
+        assert_eq!(
+            verdict_carrying(
+                true,
+                fresh_handshake,
+                dead_after,
+                bad_ratio,
+                Duration::from_secs(120),
+                degraded_after,
+            ),
+            Verdict::Withdraw(WithdrawReason::DeliveryDegraded)
+        );
+
+        // While withdrawn and still degraded: hold withdrawn.
+        assert_eq!(
+            verdict_carrying(
+                false,
+                fresh_handshake,
+                dead_after,
+                bad_ratio,
+                Duration::from_secs(130),
+                degraded_after,
+            ),
+            Verdict::Hold
+        );
+
+        // Delivery recovers (healthy ratio 0.90): restore routes!
+        assert_eq!(
+            verdict_carrying(
+                false,
+                fresh_handshake,
+                dead_after,
+                Some(0.90),
+                Duration::ZERO,
+                degraded_after,
+            ),
+            Verdict::Restore
+        );
+    }
+
+    #[test]
+    fn an_idle_session_does_not_withdraw_routes_on_delivery() {
+        let dead_after = Duration::from_secs(210);
+        let degraded_after = Duration::from_secs(120);
+        let fresh_handshake = Some(Duration::from_secs(10));
+
+        // Idle session has no ratio (sample < 100 or 0 sent): must hold.
+        assert_eq!(
+            verdict_carrying(
+                true,
+                fresh_handshake,
+                dead_after,
+                None,
+                Duration::from_secs(300),
+                degraded_after,
+            ),
+            Verdict::Hold
+        );
+    }
+
+    #[test]
+    fn session_health_parses_delivery_and_handshake() {
+        let now = 1792678500;
+        let reply = "last_handshake_time_sec=1792678450\n\
+                     vallum_window_sent=1000\n\
+                     vallum_window_received=50\n";
+        let health = parse_session_health_at(reply, now);
+        assert_eq!(health.age, Some(Duration::from_secs(50)));
+        assert_eq!(health.worst_delivery, Some(0.05));
+
+        // Insufficient sample (< 100 sent): ratio is None.
+        let idle_reply = "last_handshake_time_sec=1792678450\n\
+                          vallum_window_sent=20\n\
+                          vallum_window_received=0\n";
+        let idle_health = parse_session_health_at(idle_reply, now);
+        assert_eq!(idle_health.age, Some(Duration::from_secs(50)));
+        assert_eq!(idle_health.worst_delivery, None);
     }
 
     #[test]

@@ -59,6 +59,14 @@ handshakes, no traffic.
 Acceptance: the Phase 1 harness case withdraws routes without waiting for a
 handshake to go stale, and restores them when delivery recovers.
 
+**Implemented in `vallum-quick watch`** via `verdict_carrying` consuming
+`vallum_window_sent` and `vallum_window_received` from UAPI. When the delivery
+ratio drops below 0.10 across >= 100 packets for longer than the rekey interval
+(`DEGRADED_AFTER`, 120 s), routes are withdrawn with reason `DeliveryDegraded`.
+When delivery recovers (ratio >= 0.10 or idle), routes are restored. Tested in
+`a_degraded_session_withdraws_routes_after_the_rekey_interval` and
+`session_health_parses_delivery_and_handshake`.
+
 ## Phase 3 — Make `status` unable to lie (F3)
 
 `vallum status` reads the host rather than the process, which is right. It reads
