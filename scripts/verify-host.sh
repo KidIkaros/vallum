@@ -177,9 +177,22 @@ sleep 2
 [ "$(systemctl is-active vallum-quick@$IFACE)" = active ] || { journalctl -u vallum-quick@$IFACE --no-pager -n 15; bad "vallum-quick@$IFACE is not active"; }
 [ "$(systemctl is-active vallum-quick-watch@$IFACE)" = active ] || { journalctl -u vallum-quick-watch@$IFACE --no-pager -n 15; bad "vallum-quick-watch@$IFACE is not active"; }
 ok "vallum@$IFACE, vallum-quick@$IFACE and vallum-quick-watch@$IFACE are active"
-[ -S /run/vallum/$IFACE.sock ] || bad "control socket missing"
+# `is-active` turns true the moment systemd has forked the unit; the socket and
+# the TUN appear a moment later. Sampling once here fails intermittently on a
+# loaded machine, so poll for both.
+sock=0
+for _ in $(seq 1 40); do
+    [ -S /run/vallum/$IFACE.sock ] && { sock=1; break; }
+    sleep 0.25
+done
+[ "$sock" = 1 ] || { journalctl -u vallum@$IFACE --no-pager -n 15; bad "control socket never appeared"; }
 ok "control socket live"
-ip link show "$IFACE" >/dev/null 2>&1 || bad "TUN $IFACE does not exist"
+tun=0
+for _ in $(seq 1 40); do
+    ip link show "$IFACE" >/dev/null 2>&1 && { tun=1; break; }
+    sleep 0.25
+done
+[ "$tun" = 1 ] || bad "TUN $IFACE never appeared"
 ok "TUN $IFACE exists"
 
 # ── a client through the product path ────────────────────────────────────────
