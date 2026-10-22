@@ -2,22 +2,16 @@
 
 ## Unreleased
 
-- **Releases carry a post-quantum attestation, and installs refuse a
-  downgrade.** The SSH signature over `SHA256SUMS` proves who built a release,
-  never when — so a replayed older release, signature and checksums intact,
-  installed cleanly. Two changes close that: `scripts/release.sh` now signs
-  `dist/release.json` with `origin-provenance release-create` (hybrid
-  Ed25519+Falcon-1024 over the artifact digests, `product=vallum`,
-  `channel=stable`, monotonic sequence `1.6.2 → 1006002`), lists it in
-  `SHA256SUMS` so the SSH signature covers it too, and prints the attestation
-  fingerprint to pin in `packaging/vallum-release-attest.fp`; `scripts/install.sh`
-  compares the target tag against the installed `vallum --version` and refuses
-  an older one unless `--allow-downgrade` is passed, and verifies `release.json`
-  when `origin-provenance` is on `PATH`.
+- **`install.sh` refuses a downgrade.** The SSH signature over `SHA256SUMS`
+  proves who built a release, never when — so a replayed older release,
+  signature and checksums intact, installed cleanly over a newer one.
+  `install.sh` now compares the target tag against the installed
+  `vallum --version` and stops if the target is older; `--allow-downgrade` is
+  the deliberate rollback switch.
 
-  The installed binary is the floor — no state file to forget, corrupt, or point
-  at the wrong directory. Releases with no `release.json` (every release before
-  this one) still install, with a warning.
+  The installed binary IS the floor: no state file to forget, corrupt, or point
+  at the wrong directory, and nothing an attacker could rewrite without already
+  owning the host. `dpkg -i` on a kept package still bypasses it by design.
 
 - **`vallum status` answers "am I leaking?" — including when the daemon is
   dead.** Every report Vallum produced needed the daemon alive, so the one case

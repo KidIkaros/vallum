@@ -212,31 +212,6 @@ guard_downgrade() {
     echo "   ok    version: installed $installed, installing $target"
 }
 
-# The hybrid post-quantum attestation (release.json), when the release ships
-# one. release.json is listed in SHA256SUMS, so the SSH signature above already
-# authenticates it; this adds the Falcon check and binds product/channel/
-# sequence to the exact artifact being installed.
-verify_release_attestation() {
-    local tag=$1 work=$2 artifact=$3
-    if ! download_asset "$tag" "release.json" "$work/release.json" 2>/dev/null; then
-        echo "   warn  $tag ships no release.json (pre-attestation release)"
-        return 0
-    fi
-    if ! command -v origin-provenance >/dev/null 2>&1; then
-        echo "   warn  release.json present, but origin-provenance is not installed —"
-        echo "         the post-quantum attestation was NOT checked (SHA256SUMS.sig still covers it)"
-        return 0
-    fi
-    if origin-provenance release-verify "$work/release.json" \
-        --artifact-dir "$work" --artifact "$artifact" \
-        --product vallum --channel stable >/dev/null 2>&1; then
-        echo "   ok    release.json attests $artifact (Ed25519+Falcon-1024)"
-    else
-        echo "refusing: release.json does not attest $artifact — do not install this download" >&2
-        exit 1
-    fi
-}
-
 auth_header() {
     local token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
     if [ -n "$token" ]; then
@@ -318,7 +293,6 @@ install_from_release() {
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
-    verify_release_attestation "$tag" "$work" "$target"
     tar -C "$work" -xzf "$work/$target"
     SOURCE_DIR="$work/vallum-$tag-$A-linux"
 }
@@ -350,7 +324,6 @@ install_package() {
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
     ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
-    verify_release_attestation "$tag" "$work" "$target"
     case "$PACKAGE" in
         deb) run dpkg -i "$work/$target" ;;
         rpm)
