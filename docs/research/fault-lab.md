@@ -12,6 +12,11 @@ sudo FAULT=loss5   ./scripts/e2e-netns.sh
 `FAULT` accepts `mtu1492`, `mtu1400`, `mtu1280`, `loss<N>`, `delay<N>`,
 `reorder<N>`. Unset means no fault, which is the baseline.
 
+A run that is killed rather than allowed to finish — a CI timeout, `kill -9` —
+leaves its daemons and its scratch directory behind, because the `EXIT` trap
+never runs. After an interrupted run, check `ps -eo args | grep 'vallum ru[n]'`
+and remove `/tmp/vallum-e2e.*`.
+
 ## Results
 
 | Fault | Verdict | What it means |
