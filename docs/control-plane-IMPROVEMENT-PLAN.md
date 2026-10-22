@@ -16,10 +16,34 @@ into "reports itself and recovers".
   reply timeout, `up 0` on timeout, alert annotation.
 - **Phase 2 — done** (`134872b`). `claim_path` refuses a live socket;
   the key name follows the config's stem.
-- **Phase 3 — done** (this commit). `ReadWritePaths=-`, `StartLimit*`, and a
-  `postinst` that fails instead of swallowing a missing tmpfiles conf.
+- **Phase 3 — done and proven end-to-end.** `ReadWritePaths=-`, `StartLimit*`,
+  and a `postinst` that fails instead of swallowing a missing tmpfiles conf.
 - **Phase 1 — deliberately not implemented.** See "Why Phase 1 is not built"
   below.
+
+### Phase 3 verification (what was actually run)
+
+Built `vallum_1.6.2-1_amd64.deb` with `cargo deb`, then installed it in a
+throwaway systemd container (`jrei/systemd-ubuntu:24.04`, `--privileged`) so the
+host's package set was untouched. All five claims held:
+
+| Claim | Result |
+|---|---|
+| `postinst` creates `/run/vallum` at install, no reboot | `drwxr-x--- root root 750` |
+| Unit starts under `ProtectSystem=strict` | `active`, `Result=success`, `NRestarts=0` — no `226/NAMESPACE` |
+| Control plane answers inside the hardened unit | `vallum show` returned the interface |
+| Key naming follows the config stem (F6) | `vallum_private_key_path=/etc/vallum/vallum0.key` |
+| `StartLimit` stops a broken unit | `NRestarts=3` then `failed`, not 259 |
+| `postinst` guard fires on a missing conf | exit 1 with both messages; exit 0 once restored |
+
+**Packaging constraint found:** the `.deb` declares `libc6 (>= 2.39)` because
+cargo-deb takes the floor from the build host's glibc. It installs on Ubuntu
+24.04 and later; it **refuses on Debian 12 / Ubuntu 22.04** (`libc6 2.36`).
+That is a release decision, not a bug: either state the floor in the release
+notes or build on the oldest supported base. Debian 12 was the first container
+tried, and it failed on exactly this.
+
+---
 
 ### The hole in the first Phase 0 attempt
 

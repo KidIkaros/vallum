@@ -1952,7 +1952,19 @@ fn client_config(
     body.push_str("name = \"server\"\n");
     body.push_str(&format!("public_key = \"{server_line}\"\n"));
     body.push_str(&format!("endpoint = \"{endpoint}\"\n"));
-    body.push_str("allowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n");
+    // Claim only the families the tunnel carries. `::/0` on a tunnel with no
+    // IPv6 does not create a v6 route — it asserts that v6 belongs to the
+    // tunnel, and when that route cannot be installed the traffic falls through
+    // to the real default route and escapes outside the tunnel. That is the leak
+    // `verify-remote.sh` reports. The address this peer was given is the
+    // authority on what the tunnel carries; when allocation learns to hand out a
+    // v6 address as well, this must take the whole set rather than the first.
+    let allowed = if address.contains(':') {
+        "[\"::/0\"]"
+    } else {
+        "[\"0.0.0.0/0\"]"
+    };
+    body.push_str(&format!("allowed_ips = {allowed}\n"));
     body.push_str("persistent_keepalive = 25\n");
     if let Some(psk) = psk {
         body.push_str(&format!("preshared_key = \"{psk}\"\n"));
@@ -2022,6 +2034,26 @@ mod tests {
         assert!(a.len() <= 15);
     }
 
+    /// A tunnel that carries IPv6 claims the v6 default route — and only that,
+    /// for the same reason in reverse: a v6 tunnel that claims `0.0.0.0/0`
+    /// would send v4 traffic somewhere it cannot go.
+    #[test]
+    fn a_v6_tunnel_claims_the_v6_default_route() {
+        let text = client_config(
+            "laptop",
+            "fd00:8::2/128",
+            "vallum1:0003:aa:-",
+            "vpn.example.com:51820",
+            &[],
+            None,
+        );
+        assert!(text.contains("allowed_ips = [\"::/0\"]"));
+        assert!(
+            !text.contains("0.0.0.0/0"),
+            "a v6-only tunnel must not claim the v4 default route"
+        );
+    }
+
     #[test]
     fn the_client_config_names_the_server_and_routes_everything() {
         let text = client_config(
@@ -2035,7 +2067,14 @@ mod tests {
         assert!(text.contains("private_key = \"laptop.key\""));
         assert!(text.contains("public_key = \"vallum1:0003:aa:-\""));
         assert!(text.contains("endpoint = \"vpn.example.com:51820\""));
-        assert!(text.contains("allowed_ips = [\"0.0.0.0/0\", \"::/0\"]"));
+        assert!(text.contains("allowed_ips = [\"0.0.0.0/0\"]"));
+        // A v4 tunnel must not claim the v6 default route. Claiming it does not
+        // create a v6 route; it makes v6 traffic fall through to the real
+        // default route and escape outside the tunnel.
+        assert!(
+            !text.contains("::/0"),
+            "a v4-only tunnel must not claim ::/0"
+        );
         assert!(text.contains("preshared_key = \"0011\""));
         // A full tunnel needs a socket mark, or `vallum-quick` refuses to
         // install the default route and the daemon's own packets would be
