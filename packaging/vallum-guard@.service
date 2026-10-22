@@ -1,0 +1,32 @@
+[Unit]
+Description=Vallum egress guard for %i
+Documentation=man:vallum(8) man:vallum.toml(5)
+# The guard exists so a dead tunnel cannot leak (ADR-0018). Two lines do the
+# work and both matter:
+#
+#   Before=  the block must be in place *before* the tunnel comes up, or the
+#            window between "starting" and "up" is fail-open.
+#   Requires= if the guard cannot install — no resolvable endpoint, no nft —
+#            the tunnel is not started at all. A tunnel that runs without the
+#            protection it promised is worse than no tunnel.
+#
+# It deliberately does NOT carry `PartOf=vallum@%i.service`. Stopping the tunnel
+# must not remove the block: that is the exact moment the block is needed, and
+# the tunnel's own detach path is what used to leave the host fail-open.
+Before=vallum@%i.service
+Requires=vallum@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/vallum policy on --config /etc/vallum/%i.toml
+ExecStop=/usr/bin/vallum policy off --config /etc/vallum/%i.toml
+TimeoutStartSec=30s
+# The policy lives in a table this unit owns; no other capability is needed.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

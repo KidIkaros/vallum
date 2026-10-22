@@ -14,6 +14,7 @@ use vallum::commands::import::ImportArgs;
 use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
 use vallum::commands::metrics::MetricsArgs;
 use vallum::commands::peer::PeerArgs;
+use vallum::commands::policy::PolicyArgs;
 use vallum::commands::run::RunArgs;
 use vallum::commands::server::ServerArgs;
 use vallum::commands::setup::SetupArgs;
@@ -21,8 +22,8 @@ use vallum::commands::setup::SetupArgs;
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::uninstall::UninstallArgs;
 use vallum::commands::{
-    bench, client, control, doctor, identity, import, keys, metrics, peer, run, server, setup,
-    uninstall,
+    bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run, server,
+    setup, uninstall,
 };
 use vallum::Error;
 
@@ -77,6 +78,8 @@ enum Command {
     Bench(BenchArgs),
     /// Check the platform, config, control socket, and helper tools.
     Doctor(DoctorArgs),
+    /// Block egress outside a tunnel, or report and remove the block.
+    Policy(PolicyArgs),
     /// Prepare this host to be a tunnel server.
     Server(ServerArgs),
     /// Disconnect and remove a client tunnel installed by `vallum setup`.
@@ -165,6 +168,7 @@ fn main() -> ExitCode {
         Command::Showconf(args) => control::showconf(&args),
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),
+        Command::Policy(args) => policy::policy(&args),
         Command::Server(args) => server::server(&args),
         Command::Client(args) => client::client(&args),
         Command::Join(args) => setup::setup(&SetupArgs {

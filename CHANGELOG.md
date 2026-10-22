@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **The tunnel fails closed.** Vallum had no egress policy at all: `hostnet.rs`
+  built masquerade and a port opening and nothing else, so when the tunnel died
+  the host silently reverted to the physical default route and traffic that was
+  in the tunnel left outside it. `vallum-guard@<if>.service` now installs an
+  nftables table that permits loopback, the tunnel interface, the endpoint that
+  carries the handshake, and DHCP — and drops the rest, including any family the
+  tunnel has no address in. That last rule is the packet-side half of the IPv6
+  leak; the config-side half is that `peer add` no longer claims a family the
+  peer has no address in.
+
+  The guard is a separate unit, ordered `Before=` the tunnel and deliberately
+  not `PartOf=` it: stopping the tunnel must not remove the block, because that
+  is the moment it is needed. `Requires=` means a guard that cannot install —
+  no resolvable endpoint, no `nft` — stops the tunnel from starting rather than
+  letting it run without the protection it promised.
+
+  `[quick] policy` defaults to `auto`: on for a full tunnel, off for a split
+  one. `vallum policy on|off|status --config <path>` is the manual path, and
+  `off` is the escape hatch that works with no daemon and no network.
+
+  Verified in a throwaway netns: ICMP to the gateway is reachable before the
+  guard and dropped after; UDP to the endpoint port is allowed, UDP to any other
+  port is dropped.
 - **A client config no longer claims IPv6 the tunnel does not carry.** `peer add`
   wrote `allowed_ips = ["0.0.0.0/0", "::/0"]` for every peer, whatever address it
   had been given. Claiming `::/0` does not create a v6 route — it asserts that v6

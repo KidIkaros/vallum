@@ -65,6 +65,23 @@ pub struct Quick {
     /// See [`Quick::pre_up`].
     #[serde(default)]
     pub post_down: Vec<String>,
+    /// What the egress guard enforces: `off`, `on`, or `auto`.
+    ///
+    /// `auto` turns the guard on for a full tunnel and off for a split tunnel.
+    /// See ADR-0018: the guard exists so that a dead tunnel cannot leak, and it
+    /// only makes sense where everything is supposed to be inside the tunnel.
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// Let traffic to private ranges leave outside the tunnel.
+    ///
+    /// Needed on a host that reaches a printer, a NAS, or a router admin page
+    /// directly. Off by default: a LAN exception is still an exception.
+    #[serde(default)]
+    pub allow_lan: bool,
+    /// Extra destinations that may leave outside the tunnel, as addresses or
+    /// CIDR prefixes.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 /// The `[enroll]` table: the optional token-gated enrolment responder.

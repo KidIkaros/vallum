@@ -53,6 +53,7 @@ pub mod keys;
 pub mod logging;
 pub mod net;
 pub mod notify;
+pub mod policy;
 pub mod privileges;
 pub mod run;
 pub mod style;

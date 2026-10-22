@@ -1,6 +1,6 @@
 # ADR-0018: A packet leaves only through the tunnel, or to the endpoint
 
-**Status:** proposed · **Date:** 2026-10-22
+**Status:** accepted · **Date:** 2026-10-22 · **Implemented:** `vallum policy`, `vallum-guard@`
 
 ---
 
@@ -164,13 +164,35 @@ Extend `e2e-netns.sh` with a `policy` phase, which needs no VPS:
 
 ## Decision
 
-The mechanism is settled. The default is not:
+**Accepted.** `policy` defaults to `auto`: on for a full tunnel, off for a split
+tunnel. A split tunnel exists to send some traffic elsewhere, so blocking egress
+there would defeat the config that asked for it.
 
-- **`policy = "off"` in 1.6.x, `"on"` at the alpha cut**, with `doctor` warning
-  when a full tunnel has it off. *(recommended)*
-- `"on"` for every full tunnel immediately.
-- `"auto"` as the default and no announcement.
+Implemented as:
 
-The first is recommended because a surprise total loss of connectivity on a first
-install is the review Vallum cannot afford, while shipping an alpha with a
-fail-open VPN is the one it deserves.
+- `crates/vallum/src/policy.rs` — the ruleset, the mode resolution, and the
+  refusal described below.
+- `vallum policy on|off|status --config <path>` — the operator surface, and the
+  escape hatch that works with no daemon and no network.
+- `packaging/vallum-guard@.service` — `Before=` and `Requires=` the tunnel, and
+  deliberately not `PartOf=` it.
+
+### One refusal worth naming
+
+`ruleset` returns an error when no peer endpoint resolves. A guard that permits
+no destination blocks the handshake it exists to protect, and `Requires=` then
+stops the tunnel from starting. That is the correct fail-closed outcome: a
+machine with no VPN is safe, a machine that believes it has one is not.
+
+### Verified
+
+In a throwaway netns with a veth pair, not on a live host:
+
+| Check | Result |
+|---|---|
+| `nft -c -f` accepts the generated ruleset | ok |
+| ICMP to the gateway, no guard | reachable |
+| ICMP to the gateway, guard installed | **dropped** |
+| UDP to the endpoint port (51820) | **allowed** |
+| UDP to any other port (9999) | **dropped** |
+| `nft list table inet vallum_policy` | present inside the namespace |

@@ -23,8 +23,9 @@ use crate::say;
 
 const BINARIES: [&str; 2] = ["/usr/bin/vallum", "/usr/bin/vallum-quick"];
 
-const UNITS: [&str; 6] = [
+const UNITS: [&str; 7] = [
     "/etc/systemd/system/vallum@.service",
+    "/etc/systemd/system/vallum-guard@.service",
     "/etc/systemd/system/vallum-quick@.service",
     "/etc/systemd/system/vallum-quick-watch@.service",
     "/etc/systemd/system/vallum-enroll@.service",

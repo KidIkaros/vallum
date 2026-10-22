@@ -104,7 +104,7 @@ notes until the build moves to an older base.
 |---|---|
 | Crypto | tri-hybrid X25519 + sntrup761 + ML-KEM-768, handshake fragmentation managed |
 | Independent audit | **None.** Stated plainly in the README |
-| Fail-closed | **Not implemented.** ADR-0018, in progress |
+| Fail-closed | **Implemented** — `vallum-guard@` blocks egress outside the tunnel, endpoint excepted (ADR-0018) |
 | Privilege | control socket `0600 root`; daemon drops to the configured user where possible |
 | Secret storage | keys `0600`; invites `0600` in tmpfs with a 15-minute TTL |
 
