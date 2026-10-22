@@ -112,6 +112,16 @@ pub(super) struct Peer {
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     pub(super) rejected: u64,
+    /// Authenticated datagrams dropped because the peer has no live session.
+    pub(super) dropped_no_session: u64,
+    /// Datagrams that failed to open: replay window, or authentication.
+    pub(super) dropped_replay: u64,
+    /// Datagrams that opened but whose inner source was outside `allowed_ips`.
+    ///
+    /// Kept apart from `dropped_replay` because the two have different causes
+    /// and used to share one counter, which made an aggregate look like a
+    /// diagnosis.
+    pub(super) dropped_allowed_ips: u64,
     /// Wire bytes sent and received for this peer (G2 counters).
     pub(super) tx_bytes: u64,
     pub(super) rx_bytes: u64,
@@ -238,6 +248,9 @@ impl Peer {
             indices: Vec::new(),
             sent: 0,
             delivered: 0,
+            dropped_no_session: 0,
+            dropped_replay: 0,
+            dropped_allowed_ips: 0,
             dropped: 0,
             rejected: 0,
             tx_bytes: 0,

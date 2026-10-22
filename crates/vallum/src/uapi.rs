@@ -95,6 +95,11 @@ pub mod field {
     pub const WINDOW_SENT: &str = "vallum_window_sent";
     /// Peer fields.
     pub const WINDOW_RECEIVED: &str = "vallum_window_received";
+    /// Peer drop reasons, counted separately because they have different causes
+    /// and an aggregate reads as a diagnosis when it is not one.
+    pub const DROPPED_NO_SESSION: &str = "vallum_dropped_no_session";
+    pub const DROPPED_REPLAY: &str = "vallum_dropped_replay";
+    pub const DROPPED_ALLOWED_IPS: &str = "vallum_dropped_allowed_ips";
     /// Peer fields.
     pub const ALLOWED_IP: &str = "allowed_ip";
     /// Peer fields.
@@ -405,6 +410,12 @@ pub struct PeerState {
     pub window_sent: u64,
     /// Datagrams received and opened in the most recent delivery window.
     pub window_received: u64,
+    /// Datagrams dropped because this peer had no live session.
+    pub dropped_no_session: u64,
+    /// Datagrams that failed to open.
+    pub dropped_replay: u64,
+    /// Datagrams dropped by the `allowed_ips` check.
+    pub dropped_allowed_ips: u64,
     /// Persistent keepalive, in seconds.
     pub keepalive: Option<u16>,
     /// Allowed prefixes.
@@ -525,6 +536,22 @@ pub fn render_get(state: &DeviceState) -> String {
             "{}={}\n",
             field::WINDOW_RECEIVED,
             peer.window_received
+        ));
+        // Split drop reasons: "accepted nothing" is a symptom, not a cause.
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_NO_SESSION,
+            peer.dropped_no_session
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_REPLAY,
+            peer.dropped_replay
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_ALLOWED_IPS,
+            peer.dropped_allowed_ips
         ));
         out.push_str(&format!(
             "{}={}\n",
@@ -900,7 +927,15 @@ mod tests {
             prop::option::of(prop::array::uniform32(any::<u8>())),
             prop::option::of(an_address()),
             prop::option::of((any::<u64>(), any::<u32>())),
-            (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>()),
+            (
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+            ),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
             prop::option::of((any::<u64>(), any::<bool>())),
@@ -915,7 +950,15 @@ mod tests {
                     preshared_key,
                     endpoint,
                     last_handshake,
-                    (tx_bytes, rx_bytes, window_sent, window_received),
+                    (
+                        tx_bytes,
+                        rx_bytes,
+                        window_sent,
+                        window_received,
+                        dropped_no_session,
+                        dropped_replay,
+                        dropped_allowed_ips,
+                    ),
                     keepalive,
                     allowed_ips,
                     identity,
@@ -932,6 +975,9 @@ mod tests {
                     rx_bytes,
                     window_sent,
                     window_received,
+                    dropped_no_session,
+                    dropped_replay,
+                    dropped_allowed_ips,
                     keepalive,
                     allowed_ips,
                     valid_until: identity.map(|(valid_until, _)| valid_until),
@@ -1171,6 +1217,9 @@ mod tests {
                 rx_bytes: 20,
                 window_sent: 40,
                 window_received: 30,
+                dropped_no_session: 1,
+                dropped_replay: 2,
+                dropped_allowed_ips: 3,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
                 valid_until: Some(1_800_000_000),
@@ -1224,6 +1273,9 @@ mod tests {
                 rx_bytes: 0,
                 window_sent: 0,
                 window_received: 0,
+                dropped_no_session: 0,
+                dropped_replay: 0,
+                dropped_allowed_ips: 0,
                 keepalive: None,
                 allowed_ips: Vec::new(),
                 valid_until: None,

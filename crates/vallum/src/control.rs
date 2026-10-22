@@ -294,6 +294,11 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             rx_bytes,
             window_sent: device.stats(id).map_or(0, |stats| stats.window_sent),
             window_received: device.stats(id).map_or(0, |stats| stats.window_received),
+            dropped_no_session: device.stats(id).map_or(0, |stats| stats.dropped_no_session),
+            dropped_replay: device.stats(id).map_or(0, |stats| stats.dropped_replay),
+            dropped_allowed_ips: device
+                .stats(id)
+                .map_or(0, |stats| stats.dropped_allowed_ips),
             keepalive: config
                 .persistent_keepalive()
                 .map(|interval| u16::try_from(interval.as_secs()).unwrap_or(u16::MAX)),

@@ -293,6 +293,12 @@ pub struct PeerStats {
     pub window_sent: u64,
     /// Datagrams received and opened in the most recent delivery window.
     pub window_received: u64,
+    /// Datagrams dropped because this peer had no live session.
+    pub dropped_no_session: u64,
+    /// Datagrams that failed to open: replay window, or authentication.
+    pub dropped_replay: u64,
+    /// Datagrams that opened but whose inner source was outside `allowed_ips`.
+    pub dropped_allowed_ips: u64,
     /// When the last handshake completed, if one has.
     pub last_handshake: Option<vallum_core::Tai64n>,
 }
@@ -318,6 +324,13 @@ pub struct Device {
     cookie_rotated_ms: u64,
     under_load: bool,
     now_ms: u64,
+    /// Datagrams that did not parse as a transport message. Device-level: there
+    /// is no peer to attribute them to.
+    dropped_malformed: u64,
+    /// Datagrams whose sender index resolves to no peer. Device-level for the
+    /// same reason, and the most diagnostic counter here: it is what a stale
+    /// session looks like from the receiving side.
+    dropped_unknown_index: u64,
 }
 
 impl core::fmt::Debug for Device {
@@ -367,6 +380,8 @@ impl Device {
             cookie_secret: CookieSecret::new(&seed),
             cookie_rotated_ms: now_ms,
             under_load: false,
+            dropped_malformed: 0,
+            dropped_unknown_index: 0,
             now_ms,
         };
         for config in configs {
@@ -668,6 +683,9 @@ impl Device {
                 rx_bytes: peer.rx_bytes,
                 window_sent: peer.window.settled().0,
                 window_received: peer.window.settled().1,
+                dropped_no_session: peer.dropped_no_session,
+                dropped_replay: peer.dropped_replay,
+                dropped_allowed_ips: peer.dropped_allowed_ips,
                 last_handshake: peer.last_handshake,
             })
         })

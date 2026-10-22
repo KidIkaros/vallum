@@ -28,19 +28,28 @@ impl Device {
     ) {
         let suite = Arc::clone(&self.suite);
         let Ok(message) = Message::parse(bytes) else {
+            self.dropped_malformed = self.dropped_malformed.saturating_add(1);
             return;
         };
         let Some(peer_id) = self.index.get(&message.sender_index()).copied() else {
+            // The session this datagram belongs to is not in our table. After a
+            // restart this is what every packet from a still-running peer looks
+            // like, and it was previously indistinguishable from silence.
+            self.dropped_unknown_index = self.dropped_unknown_index.saturating_add(1);
             return;
         };
         let index = peer_id.index();
 
         let opened = match self.peers[index].session.as_mut() {
             Some(session) => session.open(&*suite, bytes),
-            None => return,
+            None => {
+                self.peers[index].dropped_no_session += 1;
+                return;
+            }
         };
         let Ok(plaintext) = opened else {
             self.peers[index].rejected += 1;
+            self.peers[index].dropped_replay += 1;
             return;
         };
 
@@ -65,6 +74,7 @@ impl Device {
         let source_ip = packet_source(&plaintext);
         if !source_ip.is_some_and(|ip| self.peers[index].config.allowed_ips().contains(&ip)) {
             self.peers[index].rejected += 1;
+            self.peers[index].dropped_allowed_ips += 1;
             return;
         }
 

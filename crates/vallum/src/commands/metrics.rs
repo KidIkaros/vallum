@@ -255,6 +255,21 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
         ),
         ("peer_tx_bytes_total", "counter", "Bytes sent to the peer."),
         (
+            "peer_dropped_no_session_total",
+            "counter",
+            "Datagrams dropped because the peer had no live session.",
+        ),
+        (
+            "peer_dropped_replay_total",
+            "counter",
+            "Datagrams that failed to open: replay window or authentication.",
+        ),
+        (
+            "peer_dropped_allowed_ips_total",
+            "counter",
+            "Datagrams that opened but whose inner source was outside allowed_ips.",
+        ),
+        (
             "peer_delivery_ratio",
             "gauge",
             "Datagrams received over datagrams sent in the last window; 1 when \
@@ -300,6 +315,15 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             let value = match metric.0 {
                 "peer_rx_bytes_total" => number(response, index, uapi::field::RX_BYTES).to_string(),
                 "peer_tx_bytes_total" => number(response, index, uapi::field::TX_BYTES).to_string(),
+                "peer_dropped_no_session_total" => {
+                    number(response, index, uapi::field::DROPPED_NO_SESSION).to_string()
+                }
+                "peer_dropped_replay_total" => {
+                    number(response, index, uapi::field::DROPPED_REPLAY).to_string()
+                }
+                "peer_dropped_allowed_ips_total" => {
+                    number(response, index, uapi::field::DROPPED_ALLOWED_IPS).to_string()
+                }
                 "peer_delivery_ratio" => {
                     let sent = number(response, index, uapi::field::WINDOW_SENT);
                     let received = number(response, index, uapi::field::WINDOW_RECEIVED);
