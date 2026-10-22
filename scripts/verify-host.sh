@@ -67,6 +67,8 @@ cleanup() {
     command -v ufw >/dev/null 2>&1 && ufw delete allow "$PORT/udp" >/dev/null 2>&1
     rm -f "$SYSCTL_FILE"
     sysctl -p >/dev/null 2>&1
+    rm -f /etc/tmpfiles.d/vallum-tmpfiles.conf
+    rmdir /run/vallum 2>/dev/null
     rm -rf /etc/vallum "$WORK"
     [ "$installed_bins" = 1 ] && rm -f /usr/bin/vallum /usr/bin/vallum-quick
     ok "host state restored"
@@ -118,6 +120,16 @@ install -m0755 "$VALLUM" /usr/bin/vallum
 install -m0755 "$QUICK" /usr/bin/vallum-quick
 installed_bins=1
 ok "/usr/bin/vallum{,-quick}"
+
+# The unit binds ReadWritePaths=/run/vallum, so the directory has to exist
+# before it starts — a missing path is 226/NAMESPACE. The package creates it
+# from a tmpfiles.d entry in its post-install hook, so the gate does the same
+# instead of depending on a reboot to have run it.
+say "runtime directory"
+install -D -m0644 packaging/vallum-tmpfiles.conf /etc/tmpfiles.d/vallum-tmpfiles.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/vallum-tmpfiles.conf
+[ -d /run/vallum ] || bad "tmpfiles did not create /run/vallum"
+ok "/run/vallum exists"
 
 # ── server init, everything on ───────────────────────────────────────────────
 say "vallum server init"
@@ -383,7 +395,11 @@ say "rotation, live"
 if ip netns exec vallumtest-ns ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
     ok "the tunnel survives rotation (the previous key is still accepted)"
 else
-    warn "traffic stopped after rotation"
+    # The namespace client cannot do egress on this host — that is the same
+    # limitation behind the three NOT VERIFIED notes above — so this cannot
+    # tell "rotation broke the session" from "egress was never available here".
+    # Saying `warn` reads as a rotation defect that was never observed.
+    note "NOT VERIFIED: whether rotation keeps a carrying session alive; egress is unavailable in this topology"
 fi
 "$VALLUM" peer finalize laptop --config "$SCONFIG" > "$WORK/finalize.log" 2>&1 || { cat "$WORK/finalize.log"; bad "peer finalize"; }
 ok "rotated and finalized"
