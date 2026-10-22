@@ -686,7 +686,7 @@ fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
     let socket = vallum_config::Config::load(config)
         .ok()
         .and_then(|cfg| cfg.interface.control)
-        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{name}.sock")));
+        .unwrap_or_else(|| vallum_config::socket_path(name));
     say!();
     say!("proving the tunnel…");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);

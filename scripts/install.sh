@@ -41,6 +41,7 @@ BIN_DIR="/usr/bin"
 CONFIG_DIR="/etc/vallum"
 RUNTIME_DIR="/run/vallum"
 UNIT_DIR="/etc/systemd/system"
+TMPFILES_DIR="/etc/tmpfiles.d"
 SYSCTL_FILE="/etc/sysctl.d/90-vallum.conf"
 
 MODE="local"
@@ -323,6 +324,14 @@ install_docs() {
             run install -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
         fi
     done
+    # /run/vallum is a machine resource, not a unit's RuntimeDirectory: it must
+    # exist before any unit starts and outlive any unit stopping, because every
+    # daemon's control socket lives in it. See ADR-0017.
+    if [ -f "$SOURCE_DIR/vallum-tmpfiles.conf" ]; then
+        run install -D -m 0644 "$SOURCE_DIR/vallum-tmpfiles.conf" "$TMPFILES_DIR/vallum-tmpfiles.conf"
+    elif [ -f "packaging/vallum-tmpfiles.conf" ]; then
+        run install -D -m 0644 "packaging/vallum-tmpfiles.conf" "$TMPFILES_DIR/vallum-tmpfiles.conf"
+    fi
     # The metrics timer is opt-in: it only earns an `enable` when this host
     # already runs node_exporter's textfile collector, which is what it feeds.
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
@@ -400,6 +409,9 @@ uninstall() {
         "$UNIT_DIR/vallum-quick-watch@.service" \
         "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
         "$UNIT_DIR/vallum-metrics.timer"
+    # The tmpfiles entry goes with the package; the directory it creates is
+    # /run, which is cleared at boot, so there is nothing else to remove.
+    run rm -f "$TMPFILES_DIR/vallum-tmpfiles.conf"
     run rm -f /usr/share/man/man8/vallum.8 /usr/share/man/man8/vallum-quick.8 \
         /usr/share/man/man5/vallum.toml.5 \
         /usr/share/bash-completion/completions/vallum \

@@ -45,8 +45,14 @@ const COMPLETIONS: [&str; 3] = [
 ];
 
 const SYSCTL: &str = "/etc/sysctl.d/90-vallum.conf";
-const RUNTIME_DIR: &str = "/run/vallum";
 const CONFIG_DIR: &str = "/etc/vallum";
+/// The tmpfiles entry that creates the runtime directory. Both locations are
+/// removed: the package channels install to `/usr/lib`, `install.sh` to
+/// `/etc`, and tmpfiles.d merges them, so either may be present.
+const TMPFILES: [&str; 2] = [
+    "/usr/lib/tmpfiles.d/vallum-tmpfiles.conf",
+    "/etc/tmpfiles.d/vallum-tmpfiles.conf",
+];
 /// Where `vallum-quick` records the routing plan each attach executed.
 const STATE_DIR: &str = "/var/lib/vallum";
 
@@ -154,13 +160,20 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
     }
 
     // ── files the installer wrote ──
-    for path in UNITS.iter().chain(&MAN_PAGES).chain(&COMPLETIONS) {
+    for path in UNITS
+        .iter()
+        .chain(&MAN_PAGES)
+        .chain(&COMPLETIONS)
+        .chain(&TMPFILES)
+    {
         remove_file(dry, Path::new(path));
     }
     step(dry, "systemctl daemon-reload", || {
         let _ = systemctl(&["daemon-reload"]);
     });
-    remove_dir(dry, Path::new(RUNTIME_DIR));
+    // `/run/vallum` is left alone: it is a machine resource created by
+    // tmpfiles.d, not this package's state, and another daemon's socket may be
+    // in it. It disappears at the next boot with the rest of /run. See ADR-0017.
 
     // ── secrets: kept unless purged ──
     if args.purge {

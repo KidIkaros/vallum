@@ -386,6 +386,28 @@ impl std::error::Error for ConfigError {
 /// server has no business dictating it — so it has a fixed default.
 pub const DEFAULT_FWMARK: u32 = 51820;
 
+/// The directory every control socket lives in.
+///
+/// A machine resource, not any one service's private state: created by
+/// `tmpfiles.d` (`/usr/lib/tmpfiles.d/vallum.conf`) so that it exists before any
+/// unit starts and survives any unit stopping. One daemon's exit must never
+/// remove another's socket — see ADR-0017. The path is spelled here once
+/// because the daemon, `vallum-quick`, the TUI and `uninstall` all need to
+/// agree on it.
+pub const RUNTIME_DIR: &str = "/run/vallum";
+
+/// The runtime directory, for callers that need a `&Path`.
+#[must_use]
+pub fn runtime_dir() -> &'static Path {
+    Path::new(RUNTIME_DIR)
+}
+
+/// The control socket for `interface`, e.g. `/run/vallum/vallum0.sock`.
+#[must_use]
+pub fn socket_path(interface: &str) -> PathBuf {
+    runtime_dir().join(format!("{interface}.sock"))
+}
+
 /// Complete a full-tunnel client config for this machine: if a peer's
 /// `allowed_ips` covers `0.0.0.0/0` or `::/0`, `vallum-quick` requires
 /// `[interface] fwmark` or it refuses to attach (an unmarked full tunnel

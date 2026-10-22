@@ -331,7 +331,7 @@ pub struct InitArgs {
     #[arg(long, value_name = "HOST:PORT")]
     pub endpoint: Option<String>,
 
-    /// The control socket path. Defaults to /run/vallum/<name>.sock.
+    /// The control socket path. Defaults to `/run/vallum/<name>.sock`.
     #[arg(long, value_name = "PATH")]
     pub control: Option<PathBuf>,
 
@@ -443,7 +443,7 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
     let control_path = args
         .control
         .clone()
-        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")));
+        .unwrap_or_else(|| vallum_config::socket_path(&interface));
 
     let addresses = if args.addresses.is_empty() {
         vec!["10.7.0.1/24".to_owned()]

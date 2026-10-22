@@ -27,7 +27,7 @@ use vallum_crypto_sdk::SdkSuite;
 use vallum_tunnel::Prefix;
 
 use crate::bundle::Bundle;
-use crate::commands::control::syncconf_running;
+use crate::commands::control::{syncconf_running, ApplyOutcome};
 use crate::commands::server::{detected_endpoint, listen_port, normalise_endpoint};
 use crate::config::{self, Config};
 use crate::config_edit::{self, ConfigFile, IdentityFields, PeerRecord};
@@ -1123,8 +1123,8 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         bundle_endpoint_result = Some((endpoint, source));
     }
 
-    let applied = if args.no_apply {
-        false
+    let apply = if args.no_apply {
+        ApplyOutcome::Skipped
     } else {
         syncconf_running(&args.config)?
     };
@@ -1148,7 +1148,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             client_config: client_config_path.clone(),
             config: args.config.clone(),
             backup,
-            applied,
+            applied: apply.applied(),
         };
         say!(
             "{}",
@@ -1179,14 +1179,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         args.config.display(),
         backup.display()
     );
-    say!(
-        "   applied    {}",
-        if applied {
-            "yes"
-        } else {
-            "no — the daemon is not running; start it to apply"
-        }
-    );
+    say!("   applied    {}", apply.describe());
     if let Some(path) = &client_config_path {
         say!("   client     {}", path.display());
         if let Some((endpoint, source)) = &bundle_endpoint_result {
@@ -1301,8 +1294,8 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
         bundle_path = Some(path.clone());
     }
 
-    let applied = if args.no_apply {
-        false
+    let apply = if args.no_apply {
+        ApplyOutcome::Skipped
     } else {
         syncconf_running(&args.config)?
     };
@@ -1317,7 +1310,7 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
                 .map(|(endpoint, _)| endpoint.clone()),
             config: args.config.clone(),
             backup,
-            applied,
+            applied: apply.applied(),
         };
         say!(
             "{}",
@@ -1350,14 +1343,7 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
         args.config.display(),
         backup.display()
     );
-    say!(
-        "   applied    {}",
-        if applied {
-            "yes"
-        } else {
-            "no — the daemon is not running; start it to apply"
-        }
-    );
+    say!("   applied    {}", apply.describe());
     Ok(())
 }
 
@@ -1367,8 +1353,8 @@ fn finalize(args: &FinalizeArgs) -> Result<(), Error> {
     let retired = file.finalize_peer(&args.name)?;
     file.validate()?;
     let backup = file.save()?;
-    let applied = if args.no_apply {
-        false
+    let apply = if args.no_apply {
+        ApplyOutcome::Skipped
     } else {
         syncconf_running(&args.config)?
     };
@@ -1379,7 +1365,7 @@ fn finalize(args: &FinalizeArgs) -> Result<(), Error> {
             retired,
             config: args.config.clone(),
             backup,
-            applied,
+            applied: apply.applied(),
         };
         say!(
             "{}",
@@ -1403,14 +1389,7 @@ fn finalize(args: &FinalizeArgs) -> Result<(), Error> {
         args.config.display(),
         backup.display()
     );
-    say!(
-        "   applied    {}",
-        if applied {
-            "yes"
-        } else {
-            "no — the daemon is not running; start it to apply"
-        }
-    );
+    say!("   applied    {}", apply.describe());
     Ok(())
 }
 
@@ -1614,8 +1593,8 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
     let removed = file.remove_peer(&args.name)?;
     file.validate()?;
     let backup = file.save()?;
-    let applied = if args.no_apply {
-        false
+    let apply = if args.no_apply {
+        ApplyOutcome::Skipped
     } else {
         syncconf_running(&args.config)?
     };
@@ -1625,7 +1604,7 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
             allowed_ips: removed.allowed_ips,
             config: args.config.clone(),
             backup,
-            applied,
+            applied: apply.applied(),
         };
         say!(
             "{}",
@@ -1640,14 +1619,7 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
         args.config.display(),
         backup.display()
     );
-    say!(
-        "   applied  {}",
-        if applied {
-            "yes"
-        } else {
-            "no — the daemon is not running; start it to apply"
-        }
-    );
+    say!("   applied  {}", apply.describe());
     say!("   client key files are left in place; delete them by hand if the device is gone");
     Ok(())
 }
@@ -1956,7 +1928,10 @@ fn client_config(
     body.push_str(&format!("private_key = \"{name}.key\"\n"));
     body.push_str(&format!("addresses = [\"{address}\"]\n"));
     body.push_str("listen = \"0.0.0.0:0\"\n");
-    body.push_str(&format!("control = \"/run/vallum/{interface}.sock\"\n"));
+    body.push_str(&format!(
+        "control = \"{}/{interface}.sock\"\n",
+        vallum_config::RUNTIME_DIR
+    ));
     // This is a full-tunnel config (allowed_ips is 0.0.0.0/0 below), so the
     // default route moves to a policy table. The mark is what lets the daemon's
     // own packets escape to the real gateway; without it `vallum-quick` refuses

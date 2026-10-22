@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **`/run/vallum` is a machine resource, not a service's state.** It was created
+  by `vallum@.service`'s `RuntimeDirectory`, so stopping the server deleted the
+  directory — and with it every other daemon's control socket — and a start
+  against a missing directory failed with `226/NAMESPACE`. A tmpfiles.d entry
+  now owns it, so any unit can start in any order and no unit's exit can break
+  another's control plane. See ADR-0017.
+- **`peer add`, `peer remove` and `peer rotate` no longer claim the daemon is
+  not running.** They said so whenever the control socket was absent, which is
+  also what happens when the daemon is up and its socket was removed. They now
+  report what was observed — `no control socket at <path>` — instead of naming a
+  cause they cannot know.
+- **A daemon with no control socket says so.** It used to start, log `tunnel up`
+  and run unreachable and unmanageable in silence.
+- **The socket path has one definition.** It was spelled three ways across 34
+  sites; `vallum_config::socket_path` and `RUNTIME_DIR` are now the only ones.
+- **`vallum-quick attach` reports progress while it waits.** The twenty-second
+  wait for a handshake printed nothing, which is indistinguishable from a hang.
 - **`verify-host.sh` no longer destroys a deployment it refused to touch.** The
   cleanup trap was armed before the precondition checks, and cleanup removes
   `/etc/vallum`, the units, the nft table and the sysctl drop-in unconditionally

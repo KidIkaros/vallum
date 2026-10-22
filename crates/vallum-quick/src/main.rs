@@ -500,9 +500,9 @@ fn policy_for(
 
 /// Where an attach records the plan it executed.
 ///
-/// Not `/run/vallum`: that is the daemon's `RuntimeDirectory`, and systemd
-/// deletes it when the daemon stops — exactly when teardown needs the record.
-/// Not `/etc/vallum` either: this is state, not configuration.
+/// Not `/run/vallum`: that directory is cleared at boot, and a teardown that
+/// runs after a reboot still needs the record to know what to remove. Not
+/// `/etc/vallum` either: this is state, not configuration.
 const STATE_DIR: &str = "/var/lib/vallum";
 
 fn state_dir() -> PathBuf {
@@ -1264,7 +1264,9 @@ fn wait_for_session(
         return Ok(());
     }
     let socket = control_socket(config, config_path, interface);
-    let deadline = std::time::Instant::now() + SESSION_WAIT;
+    let started = std::time::Instant::now();
+    let deadline = started + SESSION_WAIT;
+    let mut reported = 0u64;
     while std::time::Instant::now() < deadline {
         if let Ok(reply) = uapi_get(&socket) {
             let established = reply
@@ -1273,6 +1275,17 @@ fn wait_for_session(
             if established {
                 return Ok(());
             }
+        }
+        // A silent wait is indistinguishable from a hang, and this one can last
+        // twenty seconds. Say we are still waiting, and for how long, so the
+        // user can tell "working" from "wedged" without watching a clock.
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= 2 && elapsed - reported >= 2 {
+            reported = elapsed;
+            eprintln!(
+                "vallum-quick: waiting for a handshake… ({elapsed}s of {}s)",
+                SESSION_WAIT.as_secs()
+            );
         }
         sleep(Duration::from_millis(200));
     }
@@ -1311,7 +1324,7 @@ fn control_socket(config: &Config, config_path: &Path, interface: &str) -> PathB
                 path
             }
         })
-        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")))
+        .unwrap_or_else(|| vallum_config::socket_path(interface))
 }
 
 /// What the watchdog should do with the routes on one tick.

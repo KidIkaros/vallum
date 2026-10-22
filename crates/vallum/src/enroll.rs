@@ -260,7 +260,7 @@ impl Invite {
 fn run_dir() -> PathBuf {
     std::env::var("VALLUM_RUN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/run/vallum"))
+        .unwrap_or_else(|_| vallum_config::runtime_dir().to_path_buf())
 }
 
 pub fn invite_path(interface: &str, id: &str) -> PathBuf {

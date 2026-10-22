@@ -297,6 +297,15 @@ pub fn run(
     let control_path = control.as_ref().map(|server| server.path.clone());
     if let Some(path) = &control_path {
         control::serve(path.clone(), tx.clone(), shutdown.clone())?;
+    } else {
+        // A daemon with no control socket cannot be reconfigured, inspected, or
+        // asked for metrics. Say so once, at startup: silence here is what makes
+        // `vallum peer add` look like it worked when it did not. See ADR-0017.
+        log_warn!(
+            log,
+            "no control socket: this daemon cannot be reconfigured or inspected at \
+             runtime; set `control` in the config to enable it"
+        );
     }
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;

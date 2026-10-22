@@ -85,7 +85,7 @@ pub fn teardown(args: &TeardownArgs) -> Result<(), Error> {
     let socket = config
         .as_ref()
         .and_then(|cfg| cfg.interface.control.clone())
-        .unwrap_or_else(|| PathBuf::from(format!("/run/vallum/{interface}.sock")));
+        .unwrap_or_else(|| vallum_config::socket_path(&interface));
 
     for unit in [
         format!("vallum-quick@{instance}"),

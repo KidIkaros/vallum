@@ -57,12 +57,15 @@ here because the review pass requires naming why no pattern applies.
 ## Decision
 
 1. **`/run/vallum` becomes a machine resource.** Ship
-   `packaging/vallum-tmpfiles.conf` (`d /run/vallum 0750 root vallum -`) and
-   install it to `/usr/lib/tmpfiles.d/vallum.conf`. Drop `RuntimeDirectory` and
-   `RuntimeDirectoryMode` from `vallum@.service`, and drop
-   `ReadWritePaths=/run/vallum` from both `vallum@.service` and
-   `vallum-enroll@.service` — the directory now exists before any unit starts,
-   so nothing has to create it and nothing can delete it on the way out.
+   `packaging/vallum-tmpfiles.conf` (`d /run/vallum 0750 root root -`) and
+   install it to `/usr/lib/tmpfiles.d/vallum-tmpfiles.conf` (packages) or
+   `/etc/tmpfiles.d/` (install.sh). Drop `RuntimeDirectory` and
+   `RuntimeDirectoryMode` from `vallum@.service` — nothing creates the directory
+   on a unit's lifecycle any more, and nothing deletes it on the way out.
+   `ReadWritePaths=/run/vallum` **stays**: under `ProtectSystem=strict` the
+   daemon needs explicit write access to bind its socket, and now that
+   tmpfiles.d guarantees the path exists, that line can no longer fail the way
+   it did at `226/NAMESPACE`.
 2. **`syncconf_running` returns a reason, not a bool.** `ApplyOutcome {
    Applied, NoControlSocket, NoControlDeclared }`; the four call sites print the
    observation (`no control socket at <path>`) instead of a diagnosis.

@@ -19,10 +19,11 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 
-# The control socket's directory. Created and owned by the service, so a
-# `vallum tui` run by the same user can reach it without a manual `install -d`.
-RuntimeDirectory=vallum
-RuntimeDirectoryMode=0750
+# The control socket's directory is created by tmpfiles.d
+# (/usr/lib/tmpfiles.d/vallum-tmpfiles.conf), not by this service. It is shared
+# by every daemon on the machine, so it must not be a RuntimeDirectory: systemd
+# deletes those when a unit stops, which would take every other daemon's socket
+# with it. See ADR-0017. This unit only needs write access to it.
 ReadWritePaths=/run/vallum
 
 [Install]

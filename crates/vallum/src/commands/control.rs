@@ -460,26 +460,68 @@ pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
     expect_ok(path.as_path(), &reply)
 }
 
+/// What an attempt to push a config to the running daemon did, and if it did
+/// nothing, why.
+///
+/// The distinction is the point: a missing socket has at least three causes —
+/// the daemon is down, it is up and its socket was removed, or it is up in a
+/// mount namespace this process cannot see — and the caller must not pick one.
+/// See ADR-0017.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The running daemon accepted the configuration.
+    Applied,
+    /// `--no-apply`: the config was written and nothing was pushed.
+    Skipped,
+    /// The config declares no `control` path, so there is nothing to reach.
+    NoControlDeclared,
+    /// A `control` path is declared but no socket exists there.
+    NoControlSocket(PathBuf),
+}
+
+impl ApplyOutcome {
+    /// Whether the running daemon accepted the configuration.
+    #[must_use]
+    pub fn applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    /// The text to print after `applied`: what was observed, not what it is
+    /// assumed to mean.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Applied => "yes".to_owned(),
+            Self::Skipped => "no — --no-apply was given".to_owned(),
+            Self::NoControlDeclared => "no — the config declares no control socket".to_owned(),
+            Self::NoControlSocket(path) => {
+                format!("no — no control socket at {}", path.display())
+            }
+        }
+    }
+}
+
 /// Apply a config to the daemon its own `control` field names.
 ///
 /// This is the `vallum peer` path: the config was just edited, and the running
 /// daemon should learn about it without a restart. A socket that is not there
 /// is not an error — the config is written, and the service will read it when it
-/// starts.
-pub fn syncconf_running(config: &Path) -> Result<bool, Error> {
+/// starts. The returned outcome says which of those happened, so the caller can
+/// report it without inventing a cause.
+pub fn syncconf_running(config: &Path) -> Result<ApplyOutcome, Error> {
     let loaded = Config::load(config)?;
     let Some(declared) = loaded.interface.control.as_ref() else {
-        return Ok(false);
+        return Ok(ApplyOutcome::NoControlDeclared);
     };
     let socket = config::resolve_key_path(config, declared);
     if !socket.exists() {
-        return Ok(false);
+        return Ok(ApplyOutcome::NoControlSocket(socket));
     }
     syncconf(&SetconfArgs {
         config: config.to_path_buf(),
         control: Some(socket),
     })?;
-    Ok(true)
+    Ok(ApplyOutcome::Applied)
 }
 
 fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {

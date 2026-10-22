@@ -10,14 +10,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# install.sh's canonical list: the `for x in A B C` loops in install_docs().
+# install.sh's canonical list: the `for x in A B C` loops in install_docs(),
+# plus the tmpfiles entry, which is installed by an if-block rather than a loop.
 # Completions install as "vallum.$shell", so expand the shell loop's words
 # into the filenames it produces.
 install_list=$(
     {
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
             | tr ' \\' '\n\n' \
-            | grep -oE 'vallum[a-z0-9@._-]*\.(service|timer|[0-9])'
+            | grep -oE 'vallum[a-z0-9@._-]*\.(service|timer|conf|[0-9])'
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
             | grep -oE 'for shell in.*' | tr -s ' ;' '\n\n' \
             | grep -vxE 'for|shell|in|do' | sed 's/^/vallum./'
