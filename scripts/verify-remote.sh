@@ -431,6 +431,50 @@ PY
     fi
     ok "$name: handshake, tunnel, egress$(command -v dig >/dev/null 2>&1 && printf ', DNS')"
 
+    # ── what a browser would notice ──
+    # A 1 MiB HTTPS response exercises the path MTU end to end. A wrong MTU is
+    # reported by users as "the VPN is up but some sites hang", so the size that
+    # arrived matters more than the fact that something did.
+    if command -v curl >/dev/null 2>&1; then
+        local got
+        got=$(curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+            "https://speed.cloudflare.com/__down?bytes=1000000" 2>"$dir/curl.log" || true)
+        if [ "${got:-0}" -ge 900000 ]; then
+            ok "$name: a 1 MiB HTTPS response arrives intact"
+        else
+            [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
+            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+        fi
+    else
+        note "curl absent: the large-response check was skipped"
+    fi
+
+    # A leak is a routing decision: with a full tunnel attached, the lookup for
+    # an outside address must land on the tunnel, not on the physical link.
+    local v4dev
+    v4dev=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+    case "$v4dev" in
+        vallum*) ok "$name: IPv4 egress routes into the tunnel ($v4dev)" ;;
+        "")      note "could not determine the IPv4 route" ;;
+        *)       bad "$name: IPv4 egress escapes via $v4dev, not the tunnel" ;;
+    esac
+
+    if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+        local v6dev
+        v6dev=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null \
+            | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+        case "$v6dev" in
+            vallum*) ok "$name: IPv6 egress routes into the tunnel ($v6dev)" ;;
+            "")      note "could not determine the IPv6 route" ;;
+            *)       bad "$name: IPv6 egress escapes via $v6dev, not the tunnel" ;;
+        esac
+    else
+        note "no global IPv6 on this host: the IPv6 leak check does not apply"
+    fi
+    # DNS "nowhere else" is the remaining half, and it cannot be asserted yet:
+    # resolution outside the tunnel only leaks once the tunnel is *down*, which
+    # is what the fail-closed policy changes. See docs/roadmap.md items 2 and 3.
+
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     CLIENT_PID=""
     "$QUICK" detach "$config" >/dev/null 2>&1
