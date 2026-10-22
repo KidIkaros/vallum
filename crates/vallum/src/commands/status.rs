@@ -32,8 +32,11 @@ pub struct StatusArgs {
 /// What the host is doing, in one word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// The daemon answers and has completed a handshake.
+    /// The daemon answers, has handshaked, and is carrying traffic.
     Up,
+    /// The daemon answers and has handshaked, but the tunnel is sending and not
+    /// being answered. Handshake age cannot show this, which is why it exists.
+    Degraded,
     /// The daemon answers but has not handshaken yet.
     Starting,
     /// The daemon is gone and the guard holds: blocked, not leaking.
@@ -53,6 +56,7 @@ impl Verdict {
     pub fn word(self) -> &'static str {
         match self {
             Self::Up => "up",
+            Self::Degraded => "degraded",
             Self::Starting => "starting",
             Self::Blocked => "blocked",
             Self::Leaking => "LEAKING",
@@ -66,6 +70,10 @@ impl Verdict {
     pub fn detail(self) -> &'static str {
         match self {
             Self::Up => "the tunnel is up and carrying traffic",
+            Self::Degraded => {
+                "the tunnel handshakes, but it is sending datagrams and not being \
+                 answered — traffic is not getting through"
+            }
             Self::Starting => "the daemon is running but no handshake has completed yet",
             Self::Blocked => "the daemon is not running; egress is blocked, so nothing leaks",
             Self::Leaking => {
@@ -104,6 +112,39 @@ fn field<'a>(reply: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Datagrams below which a delivery ratio is not worth judging.
+///
+/// Three keepalives and a stray packet are not evidence of anything.
+const DELIVERY_MIN_SAMPLE: u64 = 100;
+
+/// Delivery below this is not carrying.
+///
+/// The observed failure was 0.013. A TCP bulk upload sits around 0.5 because the
+/// ACKs come back, so the floor is set well under that.
+const DELIVERY_FLOOR: f64 = 0.1;
+
+/// The worst delivery ratio across peers that have sent enough to judge.
+///
+/// Returns `None` when no peer has a large enough sample, which is the right
+/// answer for an idle tunnel: nothing sent is not the same as nothing delivered.
+fn worst_delivery(reply: &str) -> Option<f64> {
+    let mut worst: Option<f64> = None;
+    for block in reply.split("\n\n") {
+        let sent = field(block, "vallum_window_sent")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if sent < DELIVERY_MIN_SAMPLE {
+            continue;
+        }
+        let received = field(block, "vallum_window_received")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let ratio = received as f64 / sent as f64;
+        worst = Some(worst.map_or(ratio, |current: f64| current.min(ratio)));
+    }
+    worst
+}
+
 /// Decide the verdict from what is observable.
 #[must_use]
 pub fn verdict(live: Option<&str>, guard: GuardState, resolved: Mode) -> Verdict {
@@ -115,10 +156,15 @@ pub fn verdict(live: Option<&str>, guard: GuardState, resolved: Mode) -> Verdict
             let handshaked = field(reply, "last_handshake_time_sec")
                 .and_then(|value| value.parse::<u64>().ok())
                 .is_some_and(|seconds| seconds > 0);
-            if handshaked || field(reply, "vallum_up") == Some("1") {
-                Verdict::Up
-            } else {
-                Verdict::Starting
+            if !(handshaked || field(reply, "vallum_up") == Some("1")) {
+                return Verdict::Starting;
+            }
+            // A fresh handshake is not proof the tunnel carries anything. This
+            // is the state a live deployment sat in while delivering 1 % of its
+            // datagrams and reporting `up`.
+            match worst_delivery(reply) {
+                Some(ratio) if ratio < DELIVERY_FLOOR => Verdict::Degraded,
+                _ => Verdict::Up,
             }
         }
         None => match guard {
@@ -249,6 +295,46 @@ mod tests {
         assert_eq!(
             verdict(Some(reply), GuardState::Absent, Mode::On),
             Verdict::Up
+        );
+    }
+
+    #[test]
+    fn a_fresh_handshake_with_no_delivery_is_degraded() {
+        // The exact shape of the live failure: handshake 42 s old, 13 datagrams
+        // back against 1000 sent. The old verdict said `up` throughout.
+        let reply = "last_handshake_time_sec=1792678349\nvallum_window_sent=1000\nvallum_window_received=13\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Degraded
+        );
+    }
+
+    #[test]
+    fn a_fresh_handshake_with_delivery_is_up() {
+        let reply = "last_handshake_time_sec=1792678349\nvallum_window_sent=1000\nvallum_window_received=850\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Up
+        );
+    }
+
+    #[test]
+    fn a_sample_too_small_to_judge_is_not_degraded() {
+        // Three keepalives and no answer is an idle tunnel, not a broken one.
+        let reply =
+            "last_handshake_time_sec=1792678349\nvallum_window_sent=3\nvallum_window_received=0\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Up
+        );
+    }
+
+    #[test]
+    fn the_worst_peer_decides() {
+        let reply = "last_handshake_time_sec=1792678349\nvallum_window_sent=1000\nvallum_window_received=900\n\nlast_handshake_time_sec=1792678349\nvallum_window_sent=1000\nvallum_window_received=5\n";
+        assert_eq!(
+            verdict(Some(reply), GuardState::Absent, Mode::On),
+            Verdict::Degraded
         );
     }
 

@@ -18,6 +18,7 @@ exactly when you need it.
 | Verdict | Meaning | Exit |
 |---|---|---|
 | `up` | tunnel carrying traffic | 0 |
+| `degraded` | handshaking, but sending datagrams and not being answered | 0 |
 | `starting` | daemon running, no handshake yet | 0 |
 | `blocked` | **daemon dead, guard holds — nothing leaks** | 0 |
 | `down` | daemon dead, split tunnel, nothing to block | 0 |
