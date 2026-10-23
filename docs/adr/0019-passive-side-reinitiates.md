@@ -1,6 +1,6 @@
 # 19. The passive side must re-initiate, or a restart costs every client 120 s
 
-**Status:** proposed — blocked on the finding below · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
+**Status:** accepted — unblocked, see "The blocker is resolved" below · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
 
 ## Context
 
@@ -88,6 +88,28 @@ ends log `established`, the server counts packets delivered, and the client stil
 cannot reach the internet. So the recovery problem is not only "how fast does a
 handshake happen" — a completed handshake is not sufficient. That has to be
 understood before anything is built on top of it.
+
+## The blocker is resolved
+
+The finding above — established every 120 s and traffic still not returning —
+is explained, and it was not a recovery problem at all.
+
+The client was sealing packets whose inner source the interface does not own:
+its physical global IPv6, and link-local. The peer's `allowed_ips` check
+correctly discarded them, silently, so the session was healthy while roughly
+half the datagrams were unacceptable on arrival. Measured on a tunnel carrying
+successful pings: 48 delivered against 43 rejected by that check, with the
+rejected source named as the client's physical address. Browsing is
+IPv6-capable, so most of what a browser sent went into that hole.
+
+Fixed by making the sender decline what the receiver must reject, one hop
+earlier (`7aa9ab8`), with the refused address logged so the cause is visible at
+origin rather than inferred from a counter at the far end.
+
+This does not remove the need for this ADR. It removes the reason it was
+blocked: a completed handshake *is* sufficient now, so re-establishing quickly
+is worth building. The 120 s rekey is still the only thing that re-establishes
+after a server restart, and this ADR is still how that becomes seconds.
 
 ## Not decided here
 
