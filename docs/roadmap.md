@@ -179,6 +179,26 @@ Half of "always-on" is being supervised, and this host was not. It now runs as
 `vallum.service` with `Restart=always`, which is what made the measurement above
 possible: every earlier attempt was void because no restart ever happened.
 
+**Resolved, protocol half (commits `40a76a8`, `064949c`).** The recovery path is
+ADR-0019 end to end, pinned by protocol tests in the gate:
+- The epoch is agreed on the wire (`40a76a8`): a peer that restarted claims its
+  fresh count in `InitHello`, the responder agrees an epoch no lower than its own
+  next, and both ends derive data keys at the same epoch — the measured
+  "re-established every 120 s and still carried nothing" divergence cannot recur.
+- The passive side re-initiates (`064949c`): a data message naming a session this
+  side no longer holds offers a re-handshake, rate-limited to one offer per peer
+  and one device-wide per 15 s, dialling the observed source without committing
+  it as the peer's endpoint. The probe drives ten stale datagrams into a
+  restarted server and pins exactly one offer granted with the tunnel back in
+  the same process turn, no clock advanced and no client rekey involved.
+- Both restart directions are pinned: server restarts while the client holds its
+  session, and client restarts while the server holds its. Backoff/hammering is
+  the existing rekey give-up budget on the active side plus the reinit budget on
+  the passive side.
+
+What remains here is only the (1) dependency: recovery exercised as part of the
+browsing-impact suite, on a real link, rather than in-process.
+
 ### 6. Say what the crypto is (Closed)
 
 **Problem.** `origin-crypto-sdk` opens with `EXPERIMENTAL — NOT FOR PRODUCTION
