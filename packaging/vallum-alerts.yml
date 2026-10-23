@@ -122,3 +122,85 @@ groups:
           summary: "Vallum on {{ $labels.interface }} is dropping packets with unknown session index"
           description: >-
             Incoming packets reference sessions this daemon does not hold. Peers may need to re-initiate.
+
+  # ── client-side rules ──────────────────────────────────────────────
+  #
+# A client needs its own group because the failures that matter to it are
+# invisible from the server's counters: a fail-closed client whose tunnel is
+# dead reports a perfectly healthy peer on the server. The signal is
+# `vallum_client_verdict`,
+  # the same verdict `vallum status` reports, scraped from the client host every
+  # 15 s by the shipped `vallum-metrics.timer` with a `--config` argument (a
+  # `--control`-only scrape cannot see guard state, so it emits none).
+  #
+  # DNS failing is not a separate alert on purpose: a client cannot resolve
+  # outside the tunnel (the policy drops :53 egress and the resolver install is
+  # fail-closed), so "DNS broke" manifests as one of the three states below —
+  # degraded, blocked, or leaking. Paging on the verdict family pages on the
+  # same signal the browsing suite asserts, not a parallel approximation.
+  - name: vallum-client
+    rules:
+      # The guard is down and nothing is blocking: traffic — DNS included — is
+      # leaving the host in the clear. This is the one condition that is always
+      # actionable right now, so it pages with no grace period.
+      - alert: VallumClientLeaking
+        expr: vallum_client_verdict{verdict="LEAKING"}
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Client {{ $labels.interface }} is attached to nothing and blocking nothing"
+          description: >-
+            The daemon is gone and no guard holds. Everything on this host —
+            browser, DNS, everything — is leaving outside the tunnel. Install
+            the block first (`vallum policy on`), then restart the daemon.
+
+      # The guard holds and traffic is being dropped: the intended failure
+      # mode of a fail-closed client, which is *safer*, but it still means the
+      # user has no network. 15 minutes of it is not a planned maintenance
+      # window; a tunnel that recovers itself does so inside ADR-0019's budget.
+      - alert: VallumClientBlocked
+        expr: vallum_client_verdict{verdict="blocked"}
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client {{ $labels.interface }} has egress blocked for 15 minutes"
+          description: >-
+            The daemon is gone and the guard holds, so traffic is blocked, not
+            leaked — DNS included. Check why the daemon is not running
+            (`systemctl status vallum` / `journalctl -u vallum`).
+
+      # Attached, handshaked, and carrying nothing: the state a live
+      # deployment sat in while delivering 1% of datagrams and reporting up.
+      # The browser is dead even though every counter on the client looks
+      # healthy. Same signal the recovery probes measure.
+      - alert: VallumClientDegraded
+        expr: vallum_client_verdict{verdict="degraded"}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client {{ $labels.interface }} is attached but not carrying"
+          description: >-
+            The tunnel handshakes but its delivery ratio dropped below the
+            floor (0.1 over a window with >= 100 sent). The client re-keyed and
+            traffic did not come back: check the server side's peer delivery,
+            and localhost MTU if it is a narrowed path.
+
+      # A client handshakes on rekey, about one every 120 s — 0.008/s per
+      # peer. One every 10 s sustained means recovery is looping: reconnect,
+      # establish, lose it, repeat. Above steady state by 12x regardless of
+      # how many peers a client carries, so the basis holds per host.
+      - alert: VallumClientReconnectLoop
+        expr: rate(vallum_loop_handshakes_established_total[10m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client {{ $labels.interface }} is handshaking in a loop"
+          description: >-
+            Handshakes complete far faster than rekey cadence, which means the
+            session keeps being lost and rebuilt — the "always-on with backoff"
+            recovery is working, but something is repeatedly killing it. Look
+            for MTU renegotiation, an unstable path, or a server cycling.

@@ -11,6 +11,22 @@ Every scrape carries `vallum_up` (did the control socket answer) and
 `vallum_interface_info{interface,suite,version}` — the build version rides in
 the labels so a fleet dashboard can show which hosts run which release.
 
+A scrape started with `--config` also carries `vallum_client_verdict` — the
+verdict `vallum status` reports for that host (`up`, `degraded`, `starting`,
+`blocked`, `LEAKING`, `down`), computed by the same code path, every scrape:
+
+| Metric | Meaning |
+|---|---|
+| `vallum_client_verdict{interface,verdict}` | one series naming the host's current state |
+
+This is the client-side signal: a client whose tunnel is dead but whose guard
+holds is invisible on the server's counters, and only this metric — or an
+operator running `vallum status` by hand — distinguishes carrying, blocked and
+leaking. The shipped timer (below) runs with `--config`, so scrapes on both
+servers and clients carry it; a `--control`-only scrape deliberately omits it,
+because guard state and policy mode are properties of the host + config, not of
+a bare socket.
+
 Interface counters (absent on daemons older than the telemetry work — absent
 means unknown, never a false zero):
 
@@ -53,10 +69,28 @@ vallum metrics --prefix site_a                         # rename every family
 
 ## Alert rules
 
-`packaging/vallum-alerts.yml` ships starting-point rules: `VallumDown`
-(`vallum_up == 0`), `VallumPeerHandshakeStale` (peer past two rekey
-intervals), `VallumHandshakesRefused`, `VallumFragmentsDropped`, and
-`VallumSendFailures`. Load it via `rule_files` and tune `for:` before paging.
+`packaging/vallum-alerts.yml` ships starting-point rules in two groups. The
+`vallum` group is server-side: `VallumDown` (`vallum_up == 0`),
+`VallumPeerHandshakeStale` (peer past two rekey intervals),
+`VallumHandshakesRefused`, `VallumFragmentsDropped`, `VallumPeerDeliveryLow`,
+`VallumPeerAllowedIpsRejected`, `VallumLoopDroppedUnknownIndex`. The
+`vallum-client` group is where a *client* failure is seen — from its own
+scrape, since a fail-closed client whose tunnel is dead reports a perfectly
+healthy peer on the server:
+
+- `VallumClientLeaking` (`verdict="LEAKING"`, no grace) — traffic is leaving
+  the host in the clear.
+- `VallumClientBlocked` (`verdict="blocked"`, 15 min) — the guard holds, DNS
+  included, and it has outlasted any self-recovery window.
+- `VallumClientDegraded` (`verdict="degraded"`, 10 min) — attached, handshaked,
+  carrying nothing: the browser-dead state that a fresh handshake does not show.
+- `VallumClientReconnectLoop` (handshake rate > 0.1/s for 10 min) — recovery
+  is looping rather than converging; steady state rekey is ~0.008/s per peer.
+
+Load it via `rule_files` and tune `for:` before paging. DNS failing is not a
+separate alert on purpose: the policy drops `:53` egress outside the tunnel and
+the resolver install is fail-closed, so "DNS broke" manifests as one of the
+three verdict states above — the same states the browsing suite asserts.
 
 ## Operational tooling
 

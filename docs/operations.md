@@ -176,8 +176,11 @@ across restarts by design.
 
 Stated here so it is not discovered during an incident:
 
-- **No client-side exporter.** A client's guard state is only visible by running
-  `vallum status` on it.
+- **No push-based client telemetry.** A client's `vallum_client_verdict` is
+  scraped by its own `vallum-metrics.timer` into whatever collector collects it
+  (see `docs/deployment/monitoring.md`), but nothing pushes from a host that
+  cannot reach the collector — a client with no network connection to the
+  monitoring system at all is dark from there.
 - **No package repository.** Upgrades and rollbacks are manual `.deb` handling.
 - **No independent crypto audit.** Recorded in the README.
 - **No HA.** One daemon owns one interface. There is no failover, and two

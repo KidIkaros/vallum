@@ -15,7 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 
+use crate::commands::status::verdict as status_verdict;
 use crate::config::{self, Config};
+use crate::policy;
 use crate::uapi::{self, Response};
 use crate::{control, say, Error};
 
@@ -67,13 +69,38 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
             )))
         }
     });
+    // The client verdict rides the same scrape as the counters, computed by the
+    // same logic `vallum status` runs: it is the host-and-daemon state operators
+    // check by hand, and the alert rules page on its metric form. What pages
+    // and what a human checks therefore cannot drift apart. It is only
+    // computable when a config was named — `--control` alone has no policy to
+    // resolve or guard state that means anything against a bare socket.
+    let client_verdict = args
+        .config
+        .as_deref()
+        .and_then(|path| client_verdict_word(path, reply.as_deref().ok()));
+    let verdict_text = match (&client_verdict, reply.as_ref()) {
+        (Some(word), Ok(reply)) => verdict_family(&args.prefix, &interface_name(reply), word),
+        (Some(word), Err(_)) => {
+            // A dead daemon is exactly when the verdict matters most, and the
+            // guard state is a property of the host — still readable.
+            let interface = args
+                .config
+                .as_deref()
+                .and_then(config_from)
+                .map(|c| policy::interface_name(&c))
+                .unwrap_or_else(|| "unknown".to_owned());
+            verdict_family(&args.prefix, &interface, word)
+        }
+        _ => String::new(),
+    };
     let text = match &reply {
         Ok(reply) => {
             let response = uapi::parse_response(reply);
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_secs());
-            render(&response, &args.prefix, now)
+            format!("{}\n{}", verdict_text, render(&response, &args.prefix, now))
         }
         Err(_) => {
             // A scrape should see `up 0`, not silence: staleness hides a dead
@@ -83,7 +110,7 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
                  # TYPE {0}_up gauge\n\
                  {0}_up 0\n",
                 args.prefix
-            )
+            ) + &verdict_text
         }
     };
     // One trailing newline: the textfile collector tolerates it missing but
@@ -112,6 +139,50 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), Error> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// The verdict `vallum status` would print right now, as its one word.
+///
+/// `reply` is what the control socket answered — `None` means the daemon is
+/// gone, and the verdict then comes from the host's guard state, the branch of
+/// [`status_verdict`] that answers when nothing else does.
+///
+/// A config that cannot be read or resolved degrades to `None` rather than
+/// blocking the scrape; `status` reports the unreadable config as an error, so
+/// the scrape staying up is not hiding anything it has not already surfaced.
+fn client_verdict_word(config: &Path, reply: Option<&str>) -> Option<String> {
+    let loaded = config_from(config)?;
+    let guard = policy::guard_state();
+    let resolved = policy::resolve(&loaded);
+    Some(status_verdict(reply, guard, resolved).word().to_owned())
+}
+
+/// A loaded config, or `None` if it cannot be read.
+fn config_from(path: &Path) -> Option<Config> {
+    Config::load(path).ok()
+}
+
+/// The interface name in a scrape reply, for the label of the verdict family.
+fn interface_name(reply: &str) -> String {
+    uapi::parse_response(reply)
+        .field(uapi::field::VALLUM_INTERFACE)
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// One verdict family, `…_client_verdict{interface="…",verdict="…"} 1`.
+///
+/// A single series, not one numeric per state: the alert matches the label, and
+/// a stale value from the last scrape that now names a different state is the
+/// state the collector recorded last, which the renamer overwrites atomically.
+fn verdict_family(prefix: &str, interface: &str, word: &str) -> String {
+    format!(
+        "# HELP {prefix}_client_verdict The verdict `vallum status` reports for this host.\n\
+         # TYPE {prefix}_client_verdict gauge\n\
+         {prefix}_client_verdict{{interface=\"{}\",verdict=\"{}\"}} 1\n",
+        escape(interface),
+        escape(word)
+    )
 }
 
 fn socket_path(config: Option<&Path>, control: Option<&Path>) -> Result<PathBuf, Error> {
@@ -511,6 +582,41 @@ errno=0\n";
     fn interface_info_carries_the_build_version() {
         let text = render(&response(), "vallum", 0);
         assert!(text.contains(&format!("version=\"{}\"", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn the_verdict_family_names_one_state() {
+        let text = verdict_family("vallum", "vallum0", "degraded");
+        assert!(text.contains("# HELP vallum_client_verdict "));
+        assert!(text.contains("# TYPE vallum_client_verdict gauge"));
+        assert!(
+            text.contains("vallum_client_verdict{interface=\"vallum0\",verdict=\"degraded\"} 1")
+        );
+        // One series only — the alert matches the label, so a second numeric
+        // state would be a second series implying the first is still held.
+        let active = text
+            .lines()
+            .filter(|line| line.starts_with("vallum_client_verdict{"))
+            .count();
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn the_scraped_verdict_comes_from_the_same_logic_status_runs() {
+        use crate::policy::{GuardState, Mode};
+
+        // The live-failure reply from the fixture above: handshaked and
+        // delivering 1.2%. `status` says `degraded` for exactly that, and the
+        // scrape must agree — both surfaces call one function.
+        let live_failure = status_verdict(Some(GET), GuardState::Absent, Mode::Off);
+        assert_eq!(live_failure.word(), "degraded");
+        assert!(verdict_family("vallum", "vallum0", live_failure.word())
+            .contains("verdict=\"degraded\""));
+
+        // Daemon gone, guard holding: blocked, not leaking — the state that
+        // makes the dead-daemon scrape page instead of going quiet.
+        let blocked = status_verdict(None, GuardState::Installed, Mode::Off);
+        assert_eq!(blocked.word(), "blocked");
     }
 
     #[test]

@@ -127,7 +127,7 @@ const DELIVERY_FLOOR: f64 = 0.1;
 ///
 /// Returns `None` when no peer has a large enough sample, which is the right
 /// answer for an idle tunnel: nothing sent is not the same as nothing delivered.
-fn worst_delivery(reply: &str) -> Option<f64> {
+pub(crate) fn worst_delivery(reply: &str) -> Option<f64> {
     let mut worst: Option<f64> = None;
     for block in reply.split("\n\n") {
         let sent = field(block, "vallum_window_sent")
