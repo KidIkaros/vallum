@@ -185,6 +185,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             socket: Arc::clone(&shared),
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
             budget,
+            addresses: resolved.addresses.clone(),
             control: resolved.control.clone().map(|path| control::ControlServer {
                 path: path.clone(),
                 context: control::ControlContext {

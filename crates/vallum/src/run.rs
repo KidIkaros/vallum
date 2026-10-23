@@ -246,6 +246,10 @@ pub struct Attached {
     pub budget: usize,
     /// The control socket, if configured.
     pub control: Option<ControlServer>,
+    /// The addresses this interface owns. A packet leaving it may only carry
+    /// one of these: anything else is refused by the peer's `allowed_ips`
+    /// check, so sending it converts a local mistake into silent far-side loss.
+    pub addresses: Vec<vallum_tunnel::Prefix>,
 }
 
 impl std::fmt::Debug for Attached {
@@ -279,6 +283,70 @@ pub(crate) enum Input {
 /// running is logged and counted, not fatal: a tunnel does not exit because one
 /// datagram did not go.
 #[must_use = "the run loop returns only when the tunnel has stopped"]
+/// Whether a packet's inner source is an address this interface owns.
+///
+/// The peer refuses traffic whose source is outside its `allowed_ips`, and it is
+/// right to: that check is what stops one peer claiming another's address. The
+/// consequence is that a packet with a foreign source is not merely misrouted,
+/// it is *unacceptable*, so the sender should decline it where the reason is
+/// still visible instead of sealing it and losing it at the far end.
+///
+/// A packet that does not parse as IP is not ours either: a tunnel has no
+/// business inventing an interpretation for bytes it cannot classify.
+fn source_is_ours(source: Option<std::net::IpAddr>, addresses: &[vallum_tunnel::Prefix]) -> bool {
+    source.is_some_and(|ip| addresses.iter().any(|prefix| prefix.contains(&ip)))
+}
+
+#[cfg(test)]
+mod source_is_ours_tests {
+    use super::source_is_ours;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    use vallum_tunnel::Prefix;
+
+    #[allow(clippy::expect_used)]
+    fn addrs() -> Vec<Prefix> {
+        vec![
+            Prefix::from_str("10.7.0.2/32").expect("valid prefix literal"),
+            Prefix::from_str("fd00:7::2/128").expect("valid prefix literal"),
+        ]
+    }
+
+    fn ip(text: &str) -> Option<IpAddr> {
+        text.parse::<IpAddr>().ok()
+    }
+
+    #[test]
+    fn the_tunnel_address_is_ours() {
+        assert!(source_is_ours(ip("10.7.0.2"), &addrs()));
+        assert!(source_is_ours(ip("fd00:7::2"), &addrs()));
+    }
+
+    #[test]
+    fn a_physical_address_is_not_ours() {
+        // The address observed leaking on the live deployment: a socket bound
+        // before the tunnel came up keeps using the physical interface's
+        // global IPv6, and the peer rejects every packet it sends.
+        assert!(!source_is_ours(
+            ip("2600:4041:542b:7800:6781:d74:5e93:4f62"),
+            &addrs()
+        ));
+    }
+
+    #[test]
+    fn a_link_local_source_is_not_ours() {
+        // Also observed rejected on the live deployment. A link-local address
+        // has no meaning beyond its own link, so it can never be a valid
+        // payload for a tunnel that crosses one.
+        assert!(!source_is_ours(ip("fe80::6d93:636d:98a0:a51a"), &addrs()));
+    }
+
+    #[test]
+    fn an_unparseable_packet_is_not_ours() {
+        assert!(!source_is_ours(None, &addrs()));
+    }
+}
+
 pub fn run(
     device: Device,
     attached: Attached,
@@ -293,6 +361,7 @@ pub fn run(
         clock,
         budget,
         control,
+        addresses,
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
@@ -356,6 +425,10 @@ pub fn run(
     // configuration mistake, not a per-packet event, and a log line per packet
     // would bury it.
     let mut mtu_warned: HashSet<SocketAddr> = HashSet::new();
+    // Sources already reported as not belonging to this interface: one line per
+    // source, because the condition is a local misconfiguration rather than a
+    // per-packet event.
+    let mut foreign_source_warned: HashSet<std::net::IpAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
     let mut last_control_check = Instant::now();
@@ -411,7 +484,27 @@ pub fn run(
             }
             Ok(Input::Ip(packet)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
-                Some(Event::OutboundIp { packet })
+                // A packet may only leave this interface carrying an address it
+                // owns. Anything else — a link-local source, or a physical
+                // address a socket was bound to before the tunnel came up — is
+                // discarded by the peer's `allowed_ips` check with no counter,
+                // no ICMP and no log. Declining it here turns a silent far-side
+                // loss into a local cause that names its address.
+                let source = vallum_tunnel::packet_source(&packet);
+                if source_is_ours(source, &addresses) {
+                    Some(Event::OutboundIp { packet })
+                } else {
+                    if let Some(ip) = source {
+                        if foreign_source_warned.insert(ip) {
+                            log_warn!(
+                                log,
+                                "dropping outbound packet from {ip}: this interface does not \
+                                 own that address, so the peer would reject it"
+                            );
+                        }
+                    }
+                    None
+                }
             }
             Ok(Input::Datagram(source, bytes)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);

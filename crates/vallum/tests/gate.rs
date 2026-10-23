@@ -324,6 +324,7 @@ fn launch_from_text(
                     clock: thread_clock as Arc<dyn TimeSource>,
                     budget: resolved.outer_budget,
                     control,
+                    addresses: resolved.addresses.clone(),
                 },
                 &mut rng,
                 Logger::new(level),
