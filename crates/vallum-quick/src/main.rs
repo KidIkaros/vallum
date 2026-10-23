@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
-use vallum_tunnel::Prefix;
+use vallum_core::Prefix;
 
 #[derive(Parser)]
 #[command(version, about = "Bring a Vallum config up with its routes and DNS")]

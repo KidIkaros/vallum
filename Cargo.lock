@@ -3495,6 +3495,7 @@ dependencies = [
 name = "vallum-core"
 version = "1.6.2"
 dependencies = [
+ "ipnet",
  "vallum-crypto",
 ]
 
@@ -3537,7 +3538,7 @@ dependencies = [
  "clap 4.6.7",
  "ipnet",
  "vallum-config",
- "vallum-tunnel",
+ "vallum-core",
 ]
 
 [[package]]
