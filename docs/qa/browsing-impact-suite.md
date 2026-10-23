@@ -26,6 +26,15 @@ So this is not a from-scratch build. It is three gaps in an existing harness.
 
 ### A1 — The system resolver uses the tunnel, and nowhere else
 
+**Where this runs, corrected.** Not in `verify-remote.sh`. That harness
+deliberately never touches the invoking machine's default route or resolver
+(line 381), so a killswitch test there would block egress on the developer's own
+laptop — the one thing the script exists not to do. The assertion belongs in
+`scripts/e2e-netns.sh`, which already runs two real daemons in joined network
+namespaces, and which today has **no** policy, DNS or fail-closed coverage at
+all (no match for `policy`, `blocked`, `53` or `dns` in 1,327 lines). That gap
+is itself the finding.
+
 Two distinct claims, and only the second is new:
 
 1. A lookup succeeds through the tunnel. *Already covered* by `dig @1.1.1.1`.
@@ -81,6 +90,15 @@ has no global IPv6 (see `docs/roadmap.md` item 1). The suite therefore asserts:
 An assertion that can only fail is worse than a documented gap, and an assertion
 that silently skips is worse than both.
 
+## Where each assertion lives
+
+| Assertion | Harness | Why |
+|---|---|---|
+| A3, no foreign source | `verify-remote.sh` | needs a real client whose log can be read; no host state touched |
+| A1, DNS closed | `e2e-netns.sh` | a killswitch test would block the machine running `verify-remote.sh` |
+| A2, full tunnel | `e2e-netns.sh` | a full tunnel would replace the invoking host's default route |
+| Existing MTU / egress-device checks | `verify-remote.sh` | already there and passing |
+
 ## Rule for every assertion
 
 Each assertion ships with a positive control that proves it can go red. A suite
@@ -92,7 +110,7 @@ is how a tunnel dropping half its datagrams reported healthy for a whole session
 | # | Ticket | Blocked by | Done means |
 |---|---|---|---|
 | T1 | A3: foreign-source assertion + positive control | — | injecting a foreign source fails the suite; the clean run passes |
-| T2 | A1: DNS closed with the tunnel down, plus the policy-off control | — | both directions observed; each fails when its condition is removed |
+| T2 | A1: DNS closed with the tunnel down, plus the policy-off control | — | runs in `e2e-netns.sh`, not `verify-remote.sh`; both directions observed, each failing when its condition is removed |
 | T3 | A2: run the leak assertions under a full tunnel in a netns | T1, T2 | full-tunnel leak checks pass, host routing untouched |
 | T4 | Correct item 1's problem statement in `docs/roadmap.md` | T1–T3 | the roadmap describes the suite that exists |
 
