@@ -258,6 +258,11 @@ write_config() { # $1 name  $2 inner CIDR  $3 listen  $4 peer endpoint  $5 peer 
 # real port rather than the configured `0`.
 write_config a "$INNER_A/24" "$OUTER_A:0" "$OUTER_B:$PORT" "$INNER_B/32" "$PUB_B" ""
 write_config b "$INNER_B/24" "$OUTER_B:$PORT" ""                 "$INNER_A/32" "$PUB_A" 1
+# The fail-closed guard only applies when the config asks for it: a split
+# tunnel defaults to `auto`, which leaves egress alone by design. Stated
+# explicitly so the policy phase tests the guard rather than the default.
+sed -i '/^\[log\]/i [quick]\npolicy = "on"\n' "$WORK/a.toml"
+
 # G2: A serves the control UAPI on a socket beside its config.
 sed -i '/^listen = /a control = "control.sock"' "$WORK/a.toml"
 # G3: a socket mark, applied before the privilege drop.
@@ -540,19 +545,26 @@ fi
 # applying the policy there would block the machine running the test.
 say "fail-closed egress: policy on must block, policy off must not"
 
+# Resolved here, not inside the namespace: `nft` is not on PATH under nsenter.
+NFT=$(command -v nft || echo /usr/sbin/nft)
+
 # B reaches A's outer address over the veth, outside any tunnel. That is the
 # leak path — what a browser would use if the tunnel died.
 crosses_in_ns 5 "$OUTER_A" || bad "ns2 cannot reach the outer network before any policy is applied"
 ok "ns2 reaches the outer network with no policy applied"
 
-in_ns "$BIN" policy on --config "$WORK/b.toml" > "$WORK/policy-on.log" 2>&1 \
+in_ns "$BIN" policy on --config "$WORK/a.toml" > "$WORK/policy-on.log" 2>&1 \
     || { cat "$WORK/policy-on.log"; bad "policy on failed inside ns2"; }
+# A declining guard also exits 0, so the applied case must be identified from
+# the ruleset rather than from the exit status.
+in_ns "$NFT" list ruleset 2>/dev/null | grep -q 'table inet vallum_policy' \
+    || { cat "$WORK/policy-on.log"; bad "policy on exited 0 but installed no ruleset"; }
 if in_ns ping -c1 -W2 -q "$OUTER_A" >/dev/null 2>&1; then
     bad "egress escaped with the policy on: the killswitch did not block"
 fi
 ok "policy on blocks egress outside the tunnel"
 
-in_ns "$BIN" policy off --config "$WORK/b.toml" > "$WORK/policy-off.log" 2>&1 \
+in_ns "$BIN" policy off --config "$WORK/a.toml" > "$WORK/policy-off.log" 2>&1 \
     || { cat "$WORK/policy-off.log"; bad "policy off failed inside ns2"; }
 # The control. Without it, "blocked" could just as well mean the harness broke.
 crosses_in_ns 5 "$OUTER_A" || bad "egress stayed blocked after policy off: the block was not the policy"
