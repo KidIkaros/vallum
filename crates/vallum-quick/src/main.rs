@@ -369,31 +369,12 @@ fn attach(
     }
 
     if !dry_run {
-        // Nothing in this function starts a daemon: `attach` runs the config's
-        // `pre_up` hooks and then waits for an interface those hooks were
-        // supposed to create. When there are no hooks the wait can only time
-        // out, and "did not come up" then describes the symptom while hiding
-        // the only fact that matters — that nothing was ever going to create it.
-        wait_for_interface(&interface).map_err(|_| -> Box<dyn std::error::Error> {
-            if config.quick.pre_up.is_empty() {
-                let unit = config_path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("vallum0");
-                format!(
-                    "interface `{interface}` did not appear, and no `pre_up` hook is \
-                     configured, so nothing started the daemon. Start it first \
-                     (`systemctl start vallum@{unit}`), or add a `pre_up` hook to [quick]."
-                )
-                .into()
-            } else {
-                format!(
-                    "interface `{interface}` did not appear within 5s of running {} `pre_up` \
-                     hook(s); check the daemon's log for why it exited",
-                    config.quick.pre_up.len()
-                )
-                .into()
-            }
+        wait_for_interface(&interface).map_err(|_| {
+            interface_missing(
+                &interface,
+                config.quick.pre_up.len(),
+                config_path.file_stem().and_then(|stem| stem.to_str()),
+            )
         })?;
         wait_for_session(&config, config_path, &interface)?;
     }
@@ -1897,8 +1878,25 @@ fn watch(
     }
 }
 
+/// How long `attach` waits for a `pre_up` hook to create the interface.
+///
+/// The timeout is one constant because the failure message quotes it: two
+/// copies of "5 seconds" would drift, and the message would then describe a
+/// wait that no longer happens.
+const INTERFACE_WAIT: Duration = Duration::from_secs(5);
+
+/// How often to look, while waiting.
+const INTERFACE_POLL: Duration = Duration::from_millis(100);
+
+/// Wait for an interface that something else is expected to create.
+///
+/// This function never creates one. `attach` runs the config's `pre_up` hooks
+/// and calls this to wait for their result, so a timeout means the hooks did
+/// not do their job — which is why the caller explains it rather than this
+/// function guessing.
 fn wait_for_interface(interface: &str) -> Result<(), Box<dyn std::error::Error>> {
-    for _ in 0..50 {
+    let deadline = Instant::now() + INTERFACE_WAIT;
+    while Instant::now() < deadline {
         let status = Command::new("ip")
             .args(["link", "show", interface])
             .stdout(Stdio::null())
@@ -1907,9 +1905,88 @@ fn wait_for_interface(interface: &str) -> Result<(), Box<dyn std::error::Error>>
         if status.success() {
             return Ok(());
         }
-        sleep(Duration::from_millis(100));
+        sleep(INTERFACE_POLL);
     }
     Err(format!("interface `{interface}` did not come up").into())
+}
+
+/// Explain an interface that never appeared, in terms the operator can act on.
+///
+/// Takes the facts it needs rather than the config, so the two remedies stay
+/// distinguishable without this function knowing anything about `Config`.
+fn interface_missing(
+    interface: &str,
+    pre_up_count: usize,
+    unit: Option<&str>,
+) -> Box<dyn std::error::Error> {
+    let waited = INTERFACE_WAIT.as_secs();
+    if pre_up_count == 0 {
+        // No unit name means the config's stem could not be read, and naming a
+        // guessed `vallum@` instance would send the operator to a unit that
+        // does not exist.
+        return match unit {
+            Some(unit) => format!(
+                "interface `{interface}` did not appear within {waited}s, and no `pre_up` \
+                 hook is configured, so nothing started the daemon. Start it first \
+                 (`systemctl start vallum@{unit}`), or add a `pre_up` hook to [quick]."
+            )
+            .into(),
+            None => format!(
+                "interface `{interface}` did not appear within {waited}s, and no `pre_up` \
+                 hook is configured, so nothing started the daemon. Start it first, or \
+                 add a `pre_up` hook to [quick]."
+            )
+            .into(),
+        };
+    }
+    format!(
+        "interface `{interface}` did not appear within {waited}s of running {pre_up_count} \
+         `pre_up` hook(s); check the daemon's log for why it exited"
+    )
+    .into()
+}
+
+#[cfg(test)]
+mod interface_missing_tests {
+    use super::{interface_missing, INTERFACE_WAIT};
+
+    #[test]
+    fn no_hooks_names_the_unit_to_start() {
+        let message = interface_missing("vallum-laptop", 0, Some("laptop")).to_string();
+        assert!(
+            message.contains("systemctl start vallum@laptop"),
+            "{message}"
+        );
+        assert!(message.contains("no `pre_up` hook"), "{message}");
+    }
+
+    #[test]
+    fn an_unknown_unit_is_never_guessed() {
+        // The config's stem was unreadable, so there is no unit name to give.
+        // Suggesting `vallum@vallum0` would send the operator to a unit that
+        // does not exist, which is worse than saying nothing.
+        let message = interface_missing("vallum-laptop", 0, None).to_string();
+        assert!(!message.contains("systemctl start vallum@"), "{message}");
+        assert!(message.contains("Start it first"), "{message}");
+    }
+
+    #[test]
+    fn hooks_are_blamed_rather_than_missing_configuration() {
+        let message = interface_missing("vallum-laptop", 2, Some("laptop")).to_string();
+        assert!(message.contains("2 `pre_up` hook(s)"), "{message}");
+        assert!(!message.contains("no `pre_up` hook"), "{message}");
+    }
+
+    #[test]
+    fn the_quoted_wait_is_the_constant() {
+        // The whole point of INTERFACE_WAIT is that the message cannot drift
+        // from the behaviour; this fails the moment someone changes one only.
+        let message = interface_missing("v", 1, None).to_string();
+        assert!(
+            message.contains(&format!("{}s", INTERFACE_WAIT.as_secs())),
+            "{message}"
+        );
+    }
 }
 
 fn which(program: &str) -> Option<PathBuf> {
