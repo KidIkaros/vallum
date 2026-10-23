@@ -533,6 +533,31 @@ else
     bad "a large inner packet did not cross"
 fi
 
+# ── fail-closed egress ───────────────────────────────────────────────
+# The killswitch shipped in items 2 and 3 had never been exercised against a
+# kernel by any harness. It runs here, in ns2, because ns2 is a real disposable
+# namespace: this script's *primary* namespace is the invoking host's, and
+# applying the policy there would block the machine running the test.
+say "fail-closed egress: policy on must block, policy off must not"
+
+# B reaches A's outer address over the veth, outside any tunnel. That is the
+# leak path — what a browser would use if the tunnel died.
+crosses_in_ns 5 "$OUTER_A" || bad "ns2 cannot reach the outer network before any policy is applied"
+ok "ns2 reaches the outer network with no policy applied"
+
+in_ns "$BIN" policy on --config "$WORK/b.toml" > "$WORK/policy-on.log" 2>&1 \
+    || { cat "$WORK/policy-on.log"; bad "policy on failed inside ns2"; }
+if in_ns ping -c1 -W2 -q "$OUTER_A" >/dev/null 2>&1; then
+    bad "egress escaped with the policy on: the killswitch did not block"
+fi
+ok "policy on blocks egress outside the tunnel"
+
+in_ns "$BIN" policy off --config "$WORK/b.toml" > "$WORK/policy-off.log" 2>&1 \
+    || { cat "$WORK/policy-off.log"; bad "policy off failed inside ns2"; }
+# The control. Without it, "blocked" could just as well mean the harness broke.
+crosses_in_ns 5 "$OUTER_A" || bad "egress stayed blocked after policy off: the block was not the policy"
+ok "policy off restores egress (control)"
+
 # ── what the outer network actually saw ──────────────────────────────
 
 FRAG_A=$(snmp_here FragCreates)
