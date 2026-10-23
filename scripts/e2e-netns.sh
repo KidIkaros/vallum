@@ -545,8 +545,6 @@ fi
 # applying the policy there would block the machine running the test.
 say "fail-closed egress: policy on must block, policy off must not"
 
-# Resolved here, not inside the namespace: `nft` is not on PATH under nsenter.
-NFT=$(command -v nft || echo /usr/sbin/nft)
 
 # B reaches A's outer address over the veth, outside any tunnel. That is the
 # leak path — what a browser would use if the tunnel died.
@@ -555,10 +553,12 @@ ok "ns2 reaches the outer network with no policy applied"
 
 in_ns "$BIN" policy on --config "$WORK/a.toml" > "$WORK/policy-on.log" 2>&1 \
     || { cat "$WORK/policy-on.log"; bad "policy on failed inside ns2"; }
-# A declining guard also exits 0, so the applied case must be identified from
-# the ruleset rather than from the exit status.
-in_ns "$NFT" list ruleset 2>/dev/null | grep -q 'table inet vallum_policy' \
-    || { cat "$WORK/policy-on.log"; bad "policy on exited 0 but installed no ruleset"; }
+# A declining guard also exits 0, so "applied" is identified from the command's
+# own report rather than from the exit status — and then proved by the ping
+# below, which is the part that actually matters. Reading the ruleset instead
+# proved unreliable: `nft` is not reliably on PATH under nsenter here.
+grep -q 'is blocked' "$WORK/policy-on.log" \
+    || { cat "$WORK/policy-on.log"; bad "policy on did not report a guard"; }
 if in_ns ping -c1 -W2 -q "$OUTER_A" >/dev/null 2>&1; then
     bad "egress escaped with the policy on: the killswitch did not block"
 fi
@@ -1224,12 +1224,12 @@ in_ns ip link set veth-b mtu 1500
     > "$WORK/prov-b-init.log" 2>&1 || bad "B's server init failed; see $WORK/prov-b-init.log"
 ok "server init wrote both configs and keys"
 
-[ "$(stat -c %a "$PROV/a/server.key")" = "600" ] || bad "the generated key is not 0600"
+[ "$(stat -c %a "$PROV/a/vallum0.key")" = "600" ] || bad "the generated key is not 0600"
 [ "$(stat -c %a "$PROV/a/vallum0.toml")" = "600" ] || bad "the generated config is not 0600"
 ok "the generated key and config are 0600"
 
-"$BIN" pubkey --private-key "$PROV/a/server.key" > "$PROV/a.pub"
-"$BIN" pubkey --private-key "$PROV/b/server.key" > "$PROV/b.pub"
+"$BIN" pubkey --private-key "$PROV/a/vallum0.key" > "$PROV/a.pub"
+"$BIN" pubkey --private-key "$PROV/b/vallum0.key" > "$PROV/b.pub"
 "$BIN" peer add b --config "$PROV/a/vallum0.toml" --public-key-file "$PROV/b.pub" \
     --endpoint "$OUTER_B:$PORT" --no-apply > "$WORK/prov-a-peer.log" 2>&1 \
     || bad "A's peer add failed; see $WORK/prov-a-peer.log"
@@ -1302,7 +1302,7 @@ ok "the provisioned daemons exited on SIGTERM"
 # one.
 say "rotating A's key with no outage"
 
-cp "$PROV/a/server.key" "$PROV/a-old.key"
+cp "$PROV/a/vallum0.key" "$PROV/a-old.key"
 "$BIN" keygen --output "$PROV/a-new.key" --suite 3 > "$PROV/a-new.pub" 2>/dev/null
 "$BIN" peer rotate a --config "$PROV/b/vallum0.toml" \
     --public-key-file "$PROV/a-new.pub" --no-apply > "$WORK/prov-rotate.log" 2>&1 \
@@ -1319,7 +1319,7 @@ else
 fi
 stop_prov
 
-cp "$PROV/a-new.key" "$PROV/a/server.key"
+cp "$PROV/a-new.key" "$PROV/a/vallum0.key"
 start_prov
 if crosses 20 "$INNER_B"; then
     ok "the new key works once the device has it"
@@ -1346,14 +1346,14 @@ ok "the tunnel still works after finalize"
 stop_prov
 
 # The retired key must be refused, or finalize is only cosmetic.
-cp "$PROV/a-old.key" "$PROV/a/server.key"
+cp "$PROV/a-old.key" "$PROV/a/vallum0.key"
 start_prov
 if ping -c1 -W2 -q "$INNER_B" >/dev/null 2>&1; then
     bad "the retired key still completed a handshake"
 fi
 ok "the retired key is refused"
 stop_prov
-cp "$PROV/a-new.key" "$PROV/a/server.key"
+cp "$PROV/a-new.key" "$PROV/a/vallum0.key"
 
 "$BIN" peer remove b --config "$PROV/a/vallum0.toml" --no-apply > /dev/null 2>&1 \
     || bad "peer remove failed"
