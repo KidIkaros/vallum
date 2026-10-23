@@ -136,6 +136,15 @@ impl Device {
         let own_index = self.alloc_index();
         let mut seed = [0u8; 32];
         rng.fill(&mut seed);
+        // ADR-0019: agree the epoch now, while the live session is visible.
+        // The rule: at least the initiator's claim, and at least our own next —
+        // an initiator that restarted claims its fresh (low) count and must
+        // still reconnect, while our own counter never regresses.
+        let own_next = self.peers[index]
+            .session
+            .as_ref()
+            .map_or(0, |session| session.epoch() + 1);
+        let agreed = info.claim().map(|claim| claim.max(own_next));
         let accepted = responder_accept_with_psk(
             &*suite,
             &self.identity,
@@ -144,6 +153,7 @@ impl Device {
             own_index,
             &seed,
             self.peers[index].config.preshared_key(),
+            agreed,
         );
         let Ok((resp_hello, state)) = accepted else {
             return;
@@ -280,6 +290,7 @@ impl Device {
             *init.timestamp.as_bytes(),
             &init.seed,
             self.peers[index].config.preshared_key(),
+            Some(init.epoch),
         );
         let Ok((_, state)) = rebuilt else {
             self.peers[index].handshake = Handshake::Initiating(init);
@@ -437,6 +448,14 @@ impl Device {
         let mut seed = [0u8; 32];
         rng.fill(&mut seed);
         let timestamp = clock.wall;
+        // ADR-0019: the claimed epoch is the live session's successor, `0` for
+        // a first handshake. Claiming the successor — not the live epoch — is
+        // what makes a restarted peer re-establish at an agreed step instead of
+        // two counters that have drifted apart.
+        let epoch = self.peers[index]
+            .session
+            .as_ref()
+            .map_or(0, |session| session.epoch() + 1);
 
         let built = initiator_hello_with_psk(
             &*suite,
@@ -446,6 +465,7 @@ impl Device {
             *timestamp.as_bytes(),
             &seed,
             self.peers[index].config.preshared_key(),
+            Some(epoch),
         );
         let Ok((init_hello, state)) = built else {
             return;
@@ -476,6 +496,7 @@ impl Device {
 
         self.peers[index].handshake = Handshake::Initiating(Box::new(Initiating {
             sender_index,
+            epoch,
             seed,
             timestamp,
             mac1,

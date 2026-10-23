@@ -161,6 +161,7 @@ pub fn bench(args: &BenchArgs) -> Result<(), Error> {
         confirm_responder: SharedSecret::new([0x44; 32]),
         own_index: 1,
         peer_index: 2,
+        epoch: None,
     };
     let mut initiator = base.clone();
     initiator.own_index = 1;

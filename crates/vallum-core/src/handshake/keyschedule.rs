@@ -76,6 +76,10 @@ pub(super) fn mex_randomness(
 }
 
 /// Transcript stage 1 — binds the initiator's `InitHello` fields.
+///
+/// `epoch` is the initiator's epoch claim (ADR-0019), hashed **iff present**:
+/// a message without the claim hashes exactly as it always did, which is what
+/// keeps the frozen interop vectors and old-peer deployments byte-identical.
 pub(super) fn transcript_init(
     suite: &dyn CryptoSuite,
     suite_id: u16,
@@ -83,18 +87,15 @@ pub(super) fn transcript_init(
     ephemeral_pk: &[u8],
     static_ct: &[u8],
     timestamp: &[u8],
+    epoch: Option<u64>,
 ) -> [u8; 32] {
-    transcript_hash(
-        suite,
-        suite_id,
-        &[
-            TR_INIT_DOMAIN,
-            &sender_index.to_be_bytes(),
-            ephemeral_pk,
-            static_ct,
-            timestamp,
-        ],
-    )
+    let epoch = epoch.map(|e| e.to_be_bytes());
+    let index = sender_index.to_be_bytes();
+    let mut fields: Vec<&[u8]> = vec![TR_INIT_DOMAIN, &index, ephemeral_pk, static_ct, timestamp];
+    if let Some(bytes) = &epoch {
+        fields.push(&bytes[..]);
+    }
+    transcript_hash(suite, suite_id, &fields)
 }
 
 /// Transcript stage 2 — binds the responder's `RespHello` core fields onto
@@ -109,18 +110,21 @@ pub(super) fn transcript_resp(
     sender_index: u32,
     ephemeral_ct: &[u8],
     static_ct: &[u8],
+    epoch: Option<u64>,
 ) -> [u8; 32] {
-    transcript_hash(
-        suite,
-        suite_id,
-        &[
-            TR_RESP_DOMAIN,
-            &transcript_init[..],
-            &sender_index.to_be_bytes(),
-            ephemeral_ct,
-            static_ct,
-        ],
-    )
+    let epoch = epoch.map(|e| e.to_be_bytes());
+    let index = sender_index.to_be_bytes();
+    let mut fields: Vec<&[u8]> = vec![
+        TR_RESP_DOMAIN,
+        &transcript_init[..],
+        &index,
+        ephemeral_ct,
+        static_ct,
+    ];
+    if let Some(bytes) = &epoch {
+        fields.push(&bytes[..]);
+    }
+    transcript_hash(suite, suite_id, &fields)
 }
 
 /// Transcript stage 3 — binds the responder's confirmation onto stage 2.

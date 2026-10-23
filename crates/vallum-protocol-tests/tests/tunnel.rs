@@ -1542,10 +1542,9 @@ fn a_peer_that_gave_up_recovers_when_the_path_comes_back() {
 /// This is the shape of ADR-0019's measured symptom: the client re-establishes
 /// successfully every 120 s and traffic still does not return.
 ///
-/// #[ignore] until ADR-0019 lands: the test pins the *bug*, so the gate must
-/// stay green while the fix is built. Un-ignore in the same commit as the fix.
+/// The fix (epoch negotiation on the wire, ADR-0019) is in, so this runs in
+/// the gate: it fails again if a change reintroduces the divergence.
 #[test]
-#[ignore = "ADR-0019: pins the epoch-divergence; un-ignore with the fix"]
 fn a_server_that_restarts_and_loses_its_session_still_carries_traffic() {
     let suite = suite();
     let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
@@ -1623,6 +1622,109 @@ fn a_server_that_restarts_and_loses_its_session_still_carries_traffic() {
     assert_eq!(
         link.hosts[1].delivered,
         vec![ipv4(A_IP, B_IP, b"after")],
+        "the tunnel re-established but carries no traffic"
+    );
+}
+
+/// The restart the other way round: the **client** restarts while the server
+/// keeps its live session.
+///
+/// The restarted client has no session and claims epoch `0`; the server's
+/// counter is already past it. The agreement rule ADR-0019 fixed exists for
+/// exactly this case: the responder agrees an epoch at least as high as its
+/// own next, so the two ends meet at `1` rather than deriving at `0` and `1` —
+/// the same divergence the server-restart test pins, mirrored.
+#[test]
+fn a_client_that_restarts_reconnects_while_the_server_keeps_its_session() {
+    let suite = suite();
+    let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
+    let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("b key");
+
+    let a_peer = PeerConfig::new("b", b_identity.to_peer())
+        .with_allowed_ips([net("10.0.0.2/32")])
+        .with_endpoint(endpoint(B_EP));
+    let b_peer = PeerConfig::new("a", a_identity.to_peer()).with_allowed_ips([net("10.0.0.1/32")]);
+
+    let b_peer_identity = b_identity.to_peer();
+    let a = Device::new(
+        suite.clone(),
+        a_identity,
+        vec![a_peer],
+        &mut TestRng(0x1111),
+        0,
+    )
+    .expect("A's configuration is consistent");
+    let b = Device::new(
+        suite.clone(),
+        b_identity,
+        vec![b_peer],
+        &mut TestRng(0x2222),
+        0,
+    )
+    .expect("B's configuration is consistent");
+
+    let mut link = Net {
+        clock_ms: 0,
+        wall_s: 1_700_000_000,
+        hosts: vec![
+            Host::new(a, endpoint(A_EP), 0xAAAA),
+            Host::new(b, endpoint(B_EP), 0xBBBB),
+        ],
+        drop_types: Vec::new(),
+    };
+
+    // First handshake: both ends establish at epoch 0 and traffic flows.
+    link.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    link.settle();
+    assert_eq!(link.hosts[1].delivered, vec![ipv4(A_IP, B_IP, b"before")]);
+
+    // The client restarts: fresh identity cache, no session, counter at zero.
+    // The server keeps everything. The wall clock moves first, so the restarted
+    // client's `InitHello` timestamp is fresh under the server's anti-replay
+    // guard — in a real restart, wall time moved too.
+    link.advance(2_000);
+    link.pump(4);
+
+    let restarted_a_identity =
+        StaticIdentity::generate(&*suite, &A_SEED).expect("the restarted client's key");
+    let restarted_a = Device::new(
+        suite,
+        restarted_a_identity,
+        vec![PeerConfig::new("b", b_peer_identity)
+            .with_allowed_ips([net("10.0.0.2/32")])
+            .with_endpoint(endpoint(B_EP))],
+        &mut TestRng(0x1111),
+        0,
+    )
+    .expect("the restarted client's configuration is consistent");
+    link.hosts[0].device = restarted_a;
+    link.hosts[0].established.clear();
+
+    // The first packet the restarted client sends drives a fresh handshake.
+    // Both ends must agree on the epoch and traffic must flow.
+    link.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    link.settle();
+
+    let epoch_a = link.hosts[0].device.epoch(link.hosts[0].peer_id());
+    let epoch_b = link.hosts[1].device.epoch(link.hosts[1].peer_id());
+    assert_eq!(
+        epoch_a, epoch_b,
+        "the ends did not agree on an epoch after the client restarted"
+    );
+    assert!(
+        epoch_a.is_some(),
+        "the tunnel did not re-establish: A={epoch_a:?} B={epoch_b:?}"
+    );
+
+    link.outbound(0, ipv4(A_IP, B_IP, b"second"));
+    link.settle();
+    assert_eq!(
+        link.hosts[1].delivered,
+        vec![
+            ipv4(A_IP, B_IP, b"before"),
+            ipv4(A_IP, B_IP, b"after"),
+            ipv4(A_IP, B_IP, b"second"),
+        ],
         "the tunnel re-established but carries no traffic"
     );
 }

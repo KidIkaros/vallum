@@ -17,6 +17,12 @@ use vallum_core::identity::{PeerIdentity, Validity};
 #[derive(Debug)]
 pub(super) struct Initiating {
     pub(super) sender_index: u32,
+    /// The epoch this handshake claims (ADR-0019): the current session's
+    /// successor, or `0` when there is no session. Stored so the state can be
+    /// rebuilt byte-identically — including the transcript binding — after a
+    /// failed `RespHello`, and so the eventual `SessionKeys` install at the
+    /// same value the `InitHello` committed to.
+    pub(super) epoch: u64,
     pub(super) seed: [u8; 32],
     pub(super) timestamp: Tai64n,
     /// The `mac1` of the `InitHello` we sent. A cookie reply is keyed by it, so it

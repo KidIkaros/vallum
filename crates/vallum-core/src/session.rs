@@ -119,7 +119,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// Install epoch 0 from a completed handshake.
+    /// Install the handshake's first epoch from a completed handshake.
+    ///
+    /// The epoch is the **agreed** one (ADR-0019) when the peer negotiated on
+    /// the wire, and `0` otherwise — which is the pre-ADR behaviour and what a
+    /// first handshake without the negotiation still derives at.
     ///
     /// # Errors
     ///
@@ -131,11 +135,12 @@ impl Session {
         role: Role,
     ) -> Result<Self, DataError> {
         let suite_id = suite.suite_id();
+        let epoch = keys.epoch.unwrap_or(0);
         let (sender, receiver) = establish_epoch(
             suite,
             &keys.key,
             &keys.transcript,
-            0,
+            epoch,
             role,
             keys.own_index,
             keys.peer_index,
@@ -143,13 +148,20 @@ impl Session {
 
         Ok(Self {
             suite_id,
-            epoch: 0,
+            epoch,
             current: Epoch { sender, receiver },
             previous: None,
         })
     }
 
     /// Install the next epoch from a **fresh** handshake's result.
+    ///
+    /// The epoch is the handshake's **agreed** epoch (ADR-0019) when one was
+    /// negotiated, and the local counter's successor otherwise. In both cases it
+    /// must be strictly above the epoch in force: a replayed handshake can never
+    /// drag the session back onto a spent counter, which is what keeps
+    /// "the same handshake at two epochs yields different traffic keys" true
+    /// now that the epoch number travels.
     ///
     /// `keys` must come from a new handshake, not from the previous epoch: that
     /// independence is the ratchet's entire security argument (module docs). The
@@ -167,7 +179,10 @@ impl Session {
     /// # Errors
     ///
     /// - [`DataError::SuiteChanged`] if `suite` is not the session's suite.
-    /// - [`DataError::EpochExhausted`] at `u64::MAX`.
+    /// - [`DataError::EpochExhausted`] if the agreed epoch is `u64::MAX`.
+    /// - [`DataError::EpochStale`] if the epoch is not above the one in force —
+    ///   the negotiation can only fail this way on a peer whose counter is
+    ///   somehow ahead of the handshake's own claim.
     /// - [`DataError::Kdf`] as [`Self::establish`].
     pub fn advance<S: CryptoSuite + ?Sized>(
         &mut self,
@@ -184,10 +199,21 @@ impl Session {
             });
         }
 
-        let epoch = self
-            .epoch
-            .checked_add(1)
-            .ok_or(DataError::EpochExhausted { epoch: self.epoch })?;
+        let epoch = match keys.epoch {
+            Some(agreed) => {
+                if agreed <= self.epoch {
+                    return Err(DataError::EpochStale {
+                        have: self.epoch,
+                        got: agreed,
+                    });
+                }
+                agreed
+            }
+            None => self
+                .epoch
+                .checked_add(1)
+                .ok_or(DataError::EpochExhausted { epoch: self.epoch })?,
+        };
 
         let (sender, receiver) = establish_epoch(
             suite,

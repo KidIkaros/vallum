@@ -153,6 +153,7 @@ fn run(
         TIMESTAMP,
         &[0x33; 32],
         initiator_psk,
+        None,
     )?;
     let (resp_hello, r_state) = responder_process_init_with_psk(
         suite,
@@ -262,6 +263,7 @@ fn a_bad_tag_is_rejected_before_responder_encapsulation() {
         TIMESTAMP,
         &[0x33; 32],
         Some(&psk(0x01)),
+        None,
     )
     .expect("initiator hello");
 

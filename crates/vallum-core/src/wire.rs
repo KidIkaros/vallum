@@ -181,6 +181,22 @@ pub mod tag {
     pub const PRE_TAG: u16 = 0x0008;
     /// A configured-PSK admission tag on `InitHello` (G1/DoS).
     pub const PSK_TAG: u16 = 0x0009;
+    /// The epoch a session's data-plane keys are derived at (ADR-0019).
+    ///
+    /// On an `InitHello` it is the initiator's claim — the epoch it proposes to
+    /// derive this handshake's session at, normally its own counter plus one.
+    /// On a `RespHello` it is the **agreed** epoch both ends derive at: the
+    /// maximum of the claim and the responder's own next. Without these fields
+    /// each side counted its own epochs, so a peer that restarted — session
+    /// table gone, counter back to zero — re-established successfully at a
+    /// divergent epoch and derived a different data-plane root: a handshake
+    /// that completes and a tunnel that still carries nothing.
+    ///
+    /// Both fields are bound into the transcript stages, so an active attacker
+    /// cannot rewrite them without breaking confirmation. Absent tags keep the
+    /// pre-ADR behaviour byte-identical, which is what makes a mixed-version
+    /// deployment degrade to the old failure instead of failing to talk.
+    pub const EPOCH: u16 = 0x000A;
     /// A key-confirmation value ([`super::CONFIRMATION_SIZE`] bytes).
     pub const CONFIRMATION: u16 = 0x0010;
     /// A hybrid identity signature (P3).

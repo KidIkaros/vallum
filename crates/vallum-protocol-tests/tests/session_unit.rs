@@ -13,6 +13,8 @@ fn keys(tag: u8) -> SessionKeys {
         confirm_responder: SharedSecret::new([2u8; 32]),
         own_index: u32::from(tag) + 0x1000,
         peer_index: u32::from(tag) + 0x2000,
+        // No negotiated epoch: this helper walks the pre-ADR path.
+        epoch: None,
     }
 }
 

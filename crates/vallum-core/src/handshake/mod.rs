@@ -194,6 +194,16 @@ pub struct SessionKeys {
     pub own_index: u32,
     /// The 32-bit index the peer announced.
     pub peer_index: u32,
+    /// The **agreed epoch** this session's data-plane keys are derived at
+    /// (ADR-0019).
+    ///
+    /// `Some` when both ends negotiated the epoch on the wire: the initiator's
+    /// `InitHello` claim answered by the responder's `RespHello` agreement. Both
+    /// ends derive the data-plane root at exactly this value, which is why a
+    /// restarted peer's counter — back to zero — no longer diverges the keys.
+    /// `None` keeps the pre-ADR behaviour: each end derives at its own session
+    /// counter (0 for the first handshake), diverging after a restart.
+    pub epoch: Option<u64>,
 }
 
 // ── state ────────────────────────────────────────────────────────────
@@ -219,6 +229,8 @@ pub struct InitiatorState {
     static_legs: Vec<SharedSecret>,
     /// The configured PSK this handshake was started with, if any (G1).
     psk: Option<SharedSecret>,
+    /// The epoch claim this `InitHello` carried (ADR-0019), iff any.
+    claim: Option<u64>,
 }
 
 impl InitiatorState {
@@ -339,6 +351,9 @@ pub fn initiator_hello(
     timestamp: [u8; TIMESTAMP_SIZE],
     handshake_seed: &[u8; 32],
 ) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
+    // The plain path sends no claim: it is the pre-ADR wire and stays frozen
+    // for the interop vectors. The daemon's device calls the `_with_psk` form
+    // with its negotiated claim.
     initiator_hello_with_psk(
         suite,
         identity,
@@ -346,6 +361,7 @@ pub fn initiator_hello(
         sender_index,
         timestamp,
         handshake_seed,
+        None,
         None,
     )
 }
@@ -355,6 +371,12 @@ pub fn initiator_hello(
 /// The PSK is a peer secret, not part of the peer's public identity; keeping it
 /// out of [`PeerIdentity`] means equality and public-key encoding cannot
 /// accidentally include it.
+///
+/// `epoch_claim` is ADR-0019's negotiation: `Some(e)` puts an `EPOCH` field in
+/// `InitHello` and binds the claim into transcript stage 1; `None` sends
+/// nothing and every derived key is byte-identical to the pre-ADR schedule —
+/// the frozen vectors and a mixed-version peer walk that path.
+#[allow(clippy::too_many_arguments)] // the wire shape names each input
 pub fn initiator_hello_with_psk(
     suite: &dyn CryptoSuite,
     identity: &StaticIdentity,
@@ -363,6 +385,7 @@ pub fn initiator_hello_with_psk(
     timestamp: [u8; TIMESTAMP_SIZE],
     handshake_seed: &[u8; 32],
     psk: Option<&SharedSecret>,
+    epoch_claim: Option<u64>,
 ) -> Result<(Vec<u8>, InitiatorState), HandshakeError> {
     let suite_id = suite.suite_id();
     let peer_public = peer.kem();
@@ -406,6 +429,14 @@ pub fn initiator_hello_with_psk(
     builder.field(tag::EPHEMERAL_PK, ephemeral_public.as_bytes())?;
     builder.field(tag::TIMESTAMP, &timestamp)?;
     builder.field(tag::PEER_HINT, &sealed_hint)?;
+    // ADR-0019: the epoch this session's data keys will be derived at, as seen
+    // from this end. The responder agrees an epoch at least as high in
+    // `RespHello`, and both values are bound into the transcript stages. `None`
+    // sends nothing and every derived key is byte-identical to the pre-ADR
+    // schedule — the frozen vectors and a mixed-version peer walk that path.
+    if let Some(claim) = epoch_claim {
+        builder.field(tag::EPOCH, &claim.to_be_bytes())?;
+    }
     let init_hello = if let Some(psk) = psk {
         let tag = psk_tag::compute_psk_tag(suite, psk, &builder.psk_tag_input())?;
         builder.field(tag::PSK_TAG, &tag)?;
@@ -427,6 +458,7 @@ pub fn initiator_hello_with_psk(
         init_hello: init_hello.clone(),
         static_legs: encapsulation.shared_secrets,
         psk: psk.cloned(),
+        claim: epoch_claim,
     };
     Ok((init_hello, state))
 }
@@ -454,6 +486,8 @@ pub struct InitHelloInfo {
     psk_tag_input: Vec<u8>,
     /// Op A's per-leg secrets, recovered by decapsulation.
     static_legs: Vec<SharedSecret>,
+    /// The epoch claim the message carried (ADR-0019), iff any.
+    claim: Option<u64>,
 }
 
 impl InitHelloInfo {
@@ -485,6 +519,17 @@ impl InitHelloInfo {
     #[must_use]
     pub fn peer_hint(&self) -> &[u8; PEER_HINT_SIZE] {
         &self.peer_hint
+    }
+
+    /// The epoch claim the message carried (ADR-0019), iff any.
+    ///
+    /// Confidential to the same degree the hint is — bound into the transcript,
+    /// so a tamper breaks confirmation — but a *proposal*, not a conclusion:
+    /// the responder agrees an epoch no lower than its own next, and only a
+    /// session installed after `InitConf` verifies commits to it.
+    #[must_use]
+    pub fn claim(&self) -> Option<u64> {
+        self.claim
     }
 }
 
@@ -557,6 +602,15 @@ pub fn responder_identify(
     let peer_hint = <[u8; PEER_HINT_SIZE]>::try_from(plain.as_slice()).map_err(|_| {
         HandshakeError::Wire(format!("unsealed peer hint is {} bytes", plain.len()))
     })?;
+    // ADR-0019: the epoch claim is an optional 8-byte field; an absent tag
+    // (or one that is not exactly 8 bytes) is the pre-ADR wire, not an error —
+    // the length check only stops a malformed value from being misread.
+    let claim = message
+        .get(tag::EPOCH)
+        .map(<[u8; 8]>::try_from)
+        .transpose()
+        .map_err(|_| HandshakeError::Wire("EPOCH has the wrong length".to_owned()))?
+        .map(u64::from_be_bytes);
 
     Ok(InitHelloInfo {
         suite_id,
@@ -568,6 +622,7 @@ pub fn responder_identify(
         psk_tag,
         psk_tag_input,
         static_legs,
+        claim,
     })
 }
 
@@ -604,10 +659,18 @@ pub fn responder_accept(
         sender_index,
         handshake_seed,
         None,
+        None,
     )
 }
 
 /// As [`responder_accept`], with an optional configured PSK.
+///
+/// `agreed_epoch` is ADR-0019's negotiation result, computed by the transport
+/// (which owns the session state): the maximum of the initiator's claim and our
+/// own next epoch. `Some` puts it in `RespHello` and into transcript stage 2;
+/// `None` — the pre-ADR path, taken whenever the initiator sent no claim —
+/// keeps every byte identical to the old schedule.
+#[allow(clippy::too_many_arguments)] // the wire shape names each input
 pub fn responder_accept_with_psk(
     suite: &dyn CryptoSuite,
     identity: &StaticIdentity,
@@ -616,6 +679,7 @@ pub fn responder_accept_with_psk(
     sender_index: u32,
     handshake_seed: &[u8; 32],
     psk: Option<&SharedSecret>,
+    agreed_epoch: Option<u64>,
 ) -> Result<(Vec<u8>, ResponderState), HandshakeError> {
     let suite_id = suite.suite_id();
     let peer_public = peer.kem();
@@ -671,6 +735,7 @@ pub fn responder_accept_with_psk(
         info.ephemeral_public.as_bytes(),
         &info.static_ct,
         &info.timestamp,
+        info.claim,
     );
     let transcript_resp = transcript_resp(
         suite,
@@ -679,6 +744,7 @@ pub fn responder_accept_with_psk(
         sender_index,
         b.ciphertext.as_bytes(),
         c.ciphertext.as_bytes(),
+        agreed_epoch,
     );
 
     // Op order in the combiner is A ‖ B ‖ C on both sides.
@@ -698,6 +764,12 @@ pub fn responder_accept_with_psk(
     builder.field(tag::STATIC_CT, c.ciphertext.as_bytes())?;
     builder.field(tag::RECEIVER_INDEX, &info.sender_index.to_be_bytes())?;
     builder.field(tag::CONFIRMATION, confirm_responder.as_bytes())?;
+    // ADR-0019: the agreed epoch, iff the negotiation happened at all. Bound
+    // into transcript stage 2 above, so a `RespHello` whose epoch was rewritten
+    // dies at the confirmation check.
+    if let Some(agreed) = agreed_epoch {
+        builder.field(tag::EPOCH, &agreed.to_be_bytes())?;
+    }
     // P3: our hybrid identity signature over TR. Present exactly when we hold a
     // signing identity — a peer that requires one rejects its absence.
     if let Some(signing) = identity.signing() {
@@ -734,6 +806,7 @@ pub fn responder_accept_with_psk(
         confirm_responder,
         own_index: sender_index,
         peer_index: info.sender_index,
+        epoch: agreed_epoch,
     };
 
     let state = ResponderState {
@@ -798,6 +871,11 @@ pub fn responder_process_init_with_psk(
         sender_index,
         handshake_seed,
         psk,
+        // The single-call convenience path has no session state to agree an
+        // epoch against, so it walks the pre-ADR wire. Callers that negotiate
+        // (the daemon's device does) resolve the hint and call the two-phase
+        // API with the agreed epoch themselves.
+        None,
     )
 }
 
@@ -828,6 +906,33 @@ pub fn initiator_process_resp(
     let ephemeral_ct = message.require(tag::EPHEMERAL_CT)?;
     let static_ct = message.require(tag::STATIC_CT)?;
     let peer_confirmation = message.require_array::<CONFIRMATION_SIZE>(tag::CONFIRMATION)?;
+
+    // ADR-0019: the responder may have agreed an epoch higher than our claim
+    // (its own counter was ahead, e.g. we restarted). An absent tag — or one
+    // present while we sent no claim — is the pre-ADR wire: fall back to each
+    // end counting its own epochs, and do not bind anything to the transcript.
+    // A claim without an agreement would leave the two ends deriving at
+    // different numbers, so it is refused rather than accepted silently.
+    let agreed_epoch = match (state.claim, message.get(tag::EPOCH)) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(HandshakeError::Wire(
+                "epoch negotiation is half-present: claim and agreement must travel together"
+                    .to_owned(),
+            ))
+        }
+        (Some(claim), Some(bytes)) => {
+            let bytes = <[u8; 8]>::try_from(bytes)
+                .map_err(|_| HandshakeError::Wire("EPOCH has the wrong length".to_owned()))?;
+            let agreed = u64::from_be_bytes(bytes);
+            if agreed < claim {
+                return Err(HandshakeError::Wire(format!(
+                    "responder agreed epoch {agreed} below the claim {claim}"
+                )));
+            }
+            Some(agreed)
+        }
+        (None, None) => None,
+    };
 
     // P6.8: the admission tag, checked *before* any decapsulation. Deriving op
     // A's key required the responder to decapsulate our `InitHello`, so only a
@@ -864,6 +969,7 @@ pub fn initiator_process_resp(
         state.ephemeral_public.as_bytes(),
         &state.static_ct,
         &state.timestamp,
+        state.claim,
     );
     let transcript_resp = transcript_resp(
         suite,
@@ -872,6 +978,7 @@ pub fn initiator_process_resp(
         message.sender_index(),
         ephemeral_ct,
         static_ct,
+        agreed_epoch,
     );
 
     let (key, confirm_responder) = schedule(
@@ -918,6 +1025,7 @@ pub fn initiator_process_resp(
         confirm_responder,
         own_index: state.sender_index,
         peer_index: message.sender_index(),
+        epoch: agreed_epoch,
     };
 
     let header = MessageHeader {
