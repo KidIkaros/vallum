@@ -59,11 +59,16 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
     match args.action {
         PolicyAction::On => {
             if !policy::is_full_tunnel(&config) && wanted != Mode::On {
-                eprintln!(
-                    "vallum: this is a split tunnel, so `auto` leaves egress alone. \
-                     Pass `policy = \"on\"` in [quick] to block anyway."
-                );
-                return Ok(());
+                // Declining is the right call — blocking a split tunnel would cut
+                // the user off from everything the tunnel does not carry — but
+                // exiting 0 made "guarded" and "not guarded" indistinguishable to
+                // anything reading the status, including the operator. A refusal
+                // that reports success is worse than either outcome.
+                return Err(Error::Precondition(
+                    "this is a split tunnel and [quick] policy is `auto`, so nothing was \
+                     blocked. Pass `policy = \"on\"` in [quick] to block anyway."
+                        .to_owned(),
+                ));
             }
             if args.dry_run {
                 println!("   would install this ruleset:");
