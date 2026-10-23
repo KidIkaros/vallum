@@ -23,3 +23,4 @@
 | [0019](0019-passive-side-reinitiates.md) | The passive side re-initiates, so a restart costs seconds not 120 s | implemented | 2026-10-22 |
 | [0020](0020-gateway-forwarding-source-policy.md) | Forwarded replies mix sources; the egress check must not eat them | accepted | 2026-10-22 |
 | [0021](0021-live-rotation-syncconf.md) | A live `set` names the rotation window, not a replacement peer | accepted | 2026-10-23 |
+| [0022](0022-shaping-policy-in-core.md) | Traffic shaping is a passive policy machine in `vallum-core`; the `Device` is its single driver | accepted | 2026-10-23 |
