@@ -67,6 +67,19 @@ MTU arrives intact; no traffic escapes the tunnel's prefixes while attached, for
 IPv4 **and** IPv6; split tunnel routes only what it was told to. Each assertion
 fails loudly. It runs from `verify-remote.sh`, where egress exists.
 
+**Blocked on infrastructure — IPv6 internet egress.** The `IPv6` half of the
+escape assertion cannot be written yet. `wingman-vps` has no global IPv6: the
+kernel is enabled (`disable_ipv6=0`) but netplan sets `dhcp6: false` with no v6
+address or route, and neither delivery mechanism answers on the link — 12 s of
+`accept_ra=2` produced no address and no default route, and `dhcpcd -6 -T`
+solicited a DHCPv6 server and timed out. The provider must assign an address or
+prefix before this is testable.
+
+What *is* testable today is peer-to-peer IPv6: `fd00:7::2` to `fd00:7::1`
+round-trips at ~64 ms. The suite should assert that, and assert **no foreign
+source enters the tunnel** — which `run` now enforces and logs — while internet
+IPv6 stays explicitly marked blocked rather than silently omitted.
+
 ### 2. A failure policy that defaults to closed (Closed)
 
 **Problem.** Vallum fails **open** where Mullvad fails **closed**
@@ -102,7 +115,7 @@ the managed prefixes, dropping non-fwmark traffic while letting the daemon conti
 probing the endpoint. On session recovery, `apply_routes` replaces blackholes with the
 tunnel interface routes.
 
-### 3. DNS that cannot leak
+### 3. DNS that cannot leak (Closed)
 
 **Problem.** DNS is best-effort. A host with no working resolver manager keeps the
 tunnel and resolves through whatever the host has — outside the tunnel.
