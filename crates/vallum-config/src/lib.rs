@@ -146,6 +146,23 @@ pub struct Interface {
     /// The UDP address to listen on.
     #[serde(default)]
     pub listen: Option<String>,
+    /// Whether this node relays flows for others — the gateway role.
+    ///
+    /// A server behind the forwarding rules `vallum server init` installs
+    /// receives a packet destined to a peer, and the reply that comes back
+    /// through conntrack re-enters the tunnel with a source that belongs to
+    /// nobody here: an internet address. With forwarding off, the egress
+    /// source check refuses such a reply and every forwarded TCP and UDP flow
+    /// dies while ping still works — measured live, `verify-remote.sh`, where
+    /// a relayed reply from 1.1.1.1 was dropped before it was ever sealed.
+    /// With forwarding on, such a packet is relayed; the far side still
+    /// decides by *its* `allowed_ips` whether to accept the source, so this
+    /// does not let a host claim another's address — it only moves the
+    /// refusal from a place where a relay looks like a claim to one where it
+    /// is. A link-local source is refused either way: it means nothing across
+    /// a link. See ADR-0020.
+    #[serde(default)]
+    pub forward: Option<bool>,
     /// A Unix socket to serve the control UAPI on.
     ///
     /// Absent means no control plane. The socket is `0600`; a relative path is

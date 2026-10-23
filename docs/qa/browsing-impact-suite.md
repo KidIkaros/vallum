@@ -110,6 +110,22 @@ has no global IPv6 (see `docs/roadmap.md` item 1). The suite therefore asserts:
 An assertion that can only fail is worse than a documented gap, and an assertion
 that silently skips is worse than both.
 
+That principle resolved the last v6 failure the remote gate produced (`ADR-0020`'s
+proof run): the remote-gate client is rewritten to a v4-only split tunnel by
+construction, so "IPv6 egress must route into the tunnel" there is an assertion
+that can only fail. The gate now decides by config: a tunnel that carries IPv6
+keeps the strict route assertion; a v4-only one on a dual-stack host gets an
+explicit note that IPv6 staying on the physical link is split-tunnel semantics,
+and that the fail-closed guard (`vallum policy on`, ADR-0018) is the control for
+a full-tunnel posture. The gate never installs that guard itself — on the
+invoking machine it would block every other v4 destination's browsing for the
+run's duration, which is not a risk a verification gate may take.
+
+ADR-0020 complements this from the product side: a gateway (`forward = true`)
+relays egress whose source belongs to nobody local, which is what made the
+first egress ping answer at all; without it the v4 assertions below would not
+have reached the v6 check.
+
 ## Where each assertion lives
 
 | Assertion | Harness | Why |

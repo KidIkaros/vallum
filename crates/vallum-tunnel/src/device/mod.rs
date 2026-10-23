@@ -123,6 +123,8 @@ use vallum_crypto::KemPublicKey;
 use vallum_crypto::SharedSecret;
 
 use crate::error::ConfigError;
+use vallum_core::identity::PeerIdentity;
+
 use crate::peer::{PeerConfig, PeerId};
 use crate::rng::Randomness;
 use crate::routing::{packet_destination, packet_source, AllowedIps, Prefix};
@@ -489,6 +491,64 @@ impl Device {
                 peer.config.set_name(name);
             }
         }
+    }
+
+    /// Rotate a peer onto a new identity, keeping the replaced one accepted
+    /// until [`Self::finalize_identity`].
+    ///
+    /// The live session is untouched: its transport keys predate the swap, and
+    /// the replaced identity answers handshakes until the peer adopts its own
+    /// new key (ADR-0019). Re-applying an installed rotation does nothing.
+    /// Returns whether the configuration changed.
+    pub fn rotate_identity(&mut self, id: PeerId, identity: PeerIdentity) -> bool {
+        let Some(peer) = self.peers.get_mut(id.index()) else {
+            return false;
+        };
+        if peer.removed {
+            return false;
+        }
+        if !peer.config.rotate_identity(identity) {
+            return false;
+        }
+        // The hint table is a projection of the accepted identities, built
+        // once at `Peer::new`; rebuild it so an inbound handshake matches
+        // either key. The session and its index entries are untouched: their
+        // keys predate the swap, and the replaced identity carries them until
+        // the peer adopts its own new one (ADR-0019).
+        let suite = self.suite.clone();
+        peer.previous = peer
+            .config
+            .previous_identities()
+            .iter()
+            .map(|accepted| {
+                (
+                    vallum_core::peer_hint(&*suite, accepted.identity().kem()),
+                    accepted.identity().clone(),
+                    accepted.validity(),
+                )
+            })
+            .collect();
+        true
+    }
+
+    /// Retire a peer's rotation window: the replaced identity is refused.
+    /// Returns whether a window was open.
+    pub fn finalize_identity(&mut self, id: PeerId) -> bool {
+        let Some(peer) = self.peers.get_mut(id.index()) else {
+            return false;
+        };
+        if peer.removed {
+            return false;
+        }
+        if !peer.config.clear_previous() {
+            return false;
+        }
+        // Retire the runtime accepted table too: the replaced identity must
+        // stop answering handshakes immediately, and the hint table is a
+        // projection of what is still accepted. Nothing else is touched — the
+        // live session keeps its own keys, which predate the swap entirely.
+        peer.previous.clear();
+        true
     }
 
     /// Remove a peer at runtime.

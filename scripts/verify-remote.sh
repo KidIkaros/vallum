@@ -8,17 +8,38 @@
 # forwards traffic to the internet through the server's NAT, and resolves DNS
 # through the tunnel.
 #
-#   sudo ./scripts/verify-remote.sh user@vps.example.com
-#   sudo ./scripts/verify-remote.sh --product user@vps.example.com
-#   sudo ./scripts/verify-remote.sh --product --keep user@vps.example.com
-#   sudo ./scripts/verify-remote.sh --upgrade user@vps.example.com
-#   sudo ./scripts/verify-remote.sh --transports token user@vps.example.com
-#   sudo ./scripts/verify-remote.sh --clean-remote user@vps.example.com
+#   ./scripts/verify-remote.sh user@vps.example.com            # client in a remote namespace (default)
+#   ./scripts/verify-remote.sh --host-direct user@vps.example.com   # client on this machine (needs local root)
+#   ./scripts/verify-remote.sh --product --keep user@vps.example.com
+#   ./scripts/verify-remote.sh --upgrade user@vps.example.com
+#   ./scripts/verify-remote.sh --transports token user@vps.example.com
+#   ./scripts/verify-remote.sh --clean-remote user@vps.example.com
 #
 # A host that already runs Vallum is refused, because the test installs its own
 # deployment and would otherwise delete a working one. `--clean-remote` is the
 # explicit override: it removes an existing Vallum deployment (listed below) and
 # then proceeds. It removes *Vallum's* files, never anyone else's.
+#
+# Two modes, by where the client half runs:
+#
+#   --namespaced (the default) runs the client daemon inside a network
+#     namespace on the *SSH target*: a veth pair bridges the namespace to the
+#     host's own routing, so the client dials the server's public endpoint the
+#     same way a laptop would. Nothing on the invoking machine is touched —
+#     no local TUN, no local routes, no local sudo — which is what makes this
+#     a contract any contributor can reproduce against any disposable root
+#     Linux host they can SSH into, rather than the maintainer's laptop.
+#
+#   --host-direct runs the client daemon on the invoking machine against its
+#     real interfaces, which exercises a true second host but rewrites this
+#     machine's routing for the run and needs local root. Keep it for a
+#     release-day pass after protocol-affecting changes; never let it become
+#     the only way the tree can be proved.
+#
+# The remote half runs as root over SSH (the invoking user's key is used),
+# so the local half needs only the built binaries:
+#
+#   ./scripts/verify-remote.sh user@vps.example.com
 #
 # It enrols one client per enrolment transport — bundle, ssh (`setup --remote`),
 # token (`peer invite` + `setup --join`) — and proves each carries traffic. A
@@ -61,10 +82,17 @@ PREFIX=${PREFIX:-24}
 REMOTE_DIR=/tmp/vallum-remote-test
 LOCAL_DIR=/tmp/vallum-remote-client
 CIFACE=vallumrc0
+# The remote client namespace (--namespaced) and its host-side veth.
+CLI_NS=vallum-cli
+CLI_VETH=vallum-cli-h
+# Every client-side action happens on the target, inside the namespace.
+# Arguments are joined because they are all literals this script controls.
+cli_put(){ rsh "sudo ip netns exec $CLI_NS $*"; }
 PRODUCT=0
 KEEP=0
 CLEAN=0
 UPGRADE=0
+NAMESPACED=1
 TRANSPORTS="bundle ssh token"
 TARGET=""
 
@@ -82,6 +110,11 @@ while [ $# -gt 0 ]; do
         # across every release's CLI.
         --upgrade) UPGRADE=1; PRODUCT=1; TRANSPORTS="bundle" ;;
         --keep) KEEP=1 ;;
+        # Where the client half runs. Default is a remote namespace (no local
+        # root, no local routes touched); --host-direct keeps the old behaviour
+        # of installing the client on the invoking machine.
+        --namespaced) NAMESPACED=1 ;;
+        --host-direct) NAMESPACED=0 ;;
         --clean-remote) CLEAN=1 ;;
         --transports) shift; TRANSPORTS=$1 ;;
         --port) shift; PORT=$1 ;;
@@ -98,7 +131,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 [ -n "$TARGET" ] || { echo "usage: $0 [--product] user@host" >&2; exit 1; }
-[ "$(id -u)" = 0 ] || { echo "run with sudo: the client needs a TUN"; exit 1; }
+# Namespaced mode touches nothing on this machine: the client daemon runs on
+# the SSH target inside a network namespace, so no local TUN is needed.
+# --host-direct installs the client on this machine, which needs root.
+if [ "$NAMESPACED" != 1 ] && [ "$(id -u)" != 0 ]; then
+    echo "run with sudo: --host-direct runs the client on this machine and needs a TUN" >&2
+    exit 1
+fi
 
 # The remote half must run as the invoking user: root's SSH keys are not theirs.
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
@@ -138,7 +177,13 @@ cleanup() {
             sudo nft delete table inet vallum 2>/dev/null
             sudo nft delete table inet vallumtest 2>/dev/null
             sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick
-            sudo rm -rf $REMOTE_DIR" >/dev/null 2>&1
+            sudo rm -rf $REMOTE_DIR
+            # The client namespace (--namespaced) and its veth. The veth is
+            # deleted by name on the host first: deleting the namespace alone
+            # would orphan the host-side peer.
+            sudo ip netns pids $CLI_NS 2>/dev/null | xargs -r kill 2>/dev/null
+            sudo ip netns del $CLI_NS 2>/dev/null
+            sudo ip link del $CLI_VETH 2>/dev/null" >/dev/null 2>&1
         if [ -n "$FORWARD_WAS" ]; then
             rsh "sudo sysctl -q -w net.ipv4.ip_forward=$FORWARD_WAS" >/dev/null 2>&1
         fi
@@ -152,6 +197,7 @@ kept() {
     echo "   remote files    $REMOTE_DIR and /usr/bin/vallum{,-quick}"
     echo "   stop it         ssh $TARGET \"sudo pkill -f '^$REMOTE_DIR/vallum run'\""
     echo "   local client    $LOCAL_DIR"
+    echo "   remote client   still inside ns $CLI_NS — ssh $TARGET \"sudo ip netns del $CLI_NS; sudo ip link del $CLI_VETH\" when done"
 }
 [ "$KEEP" = 1 ] && trap kept EXIT || trap cleanup EXIT
 
@@ -210,9 +256,33 @@ fi
 ok "the client will dial $PUBLIC:$PORT"
 
 say "copying the binaries"
-rsh "mkdir -p $REMOTE_DIR && rm -rf $REMOTE_DIR/*" || bad "mkdir on the remote"
+rsh "sudo rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR" || bad "mkdir on the remote"
 rscp "$VALLUM" "$QUICK" "$TARGET:$REMOTE_DIR/" || bad "scp"
 ok "binaries on the remote"
+
+if [ "$NAMESPACED" = 1 ]; then
+    say "client namespace on the target (nothing changes on this machine)"
+    # A stale namespace from a previous killed run would poison every later
+    # `ip netns exec`, so remove it first — its veth is deleted with it.
+    rsh "sudo ip netns del $CLI_NS 2>/dev/null; sudo ip link del $CLI_VETH 2>/dev/null; true"
+    rsh "sudo ip netns add $CLI_NS" || bad "cannot create netns $CLI_NS on the target"
+    rsh "set -e
+         sudo ip link add $CLI_VETH type veth peer name vallum-cli-n
+         sudo ip link set vallum-cli-n netns $CLI_NS
+         sudo ip addr add 10.99.91.1/24 dev $CLI_VETH
+         sudo ip link set $CLI_VETH up
+         sudo ip netns exec $CLI_NS ip link set lo up
+         sudo ip netns exec $CLI_NS ip link set vallum-cli-n up
+         sudo ip netns exec $CLI_NS ip addr add 10.99.91.2/24 dev vallum-cli-n
+         sudo ip netns exec $CLI_NS ip route add default via 10.99.91.1" \
+        || bad "the veth bridge into $CLI_NS did not come up"
+    # Prove the namespace can reach the host's public endpoint before anything
+    # depends on it: a veth misconfigured here would surface as 'no handshake'
+    # minutes from now, pointing at the tunnel instead of the bridge.
+    rsh "sudo ip netns exec $CLI_NS ping -c1 -W2 $PUBLIC" >/dev/null 2>&1 \
+        || bad "$CLI_NS cannot reach $PUBLIC — the veth bridge is wrong"
+    ok "$CLI_NS bridges to the host and can reach $PUBLIC:$PORT"
+fi
 
 REMOTE_STARTED=1
 
@@ -291,8 +361,14 @@ else
     rsh "sudo $REMOTE_DIR/vallum server init --config $REMOTE_DIR/server.toml --name vallumrc \
             --no-host --no-service --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT \
             --endpoint $PUBLIC --control $REMOTE_DIR/server.sock" >/dev/null || bad "server init"
-    rsh "sudo sysctl -q -w net.ipv4.ip_forward=1
-         sudo ufw allow $PORT/udp >/dev/null 2>&1
+    # Every host step fails loudly. These were once run with 2>/dev/null and a
+    # final `sleep 2`, so one killed step — the masquerade rule, say — still
+    # printed `ok`, and the lost symptom showed up minutes later as a
+    # 100%-loss egress ping that points at the wrong layer.
+    rsh "set -e
+         sudo nft delete table inet vallumtest 2>/dev/null || true
+         sudo sysctl -q -w net.ipv4.ip_forward=1
+         sudo ufw allow $PORT/udp >/dev/null
          # Forwarding acceptance is not optional. ufw's before-forward chain
          # accepts ICMP echo, so a tunnel with no FORWARD rule pings happily
          # and drops every TCP and UDP packet — the trap in
@@ -300,11 +376,18 @@ else
          # script ran a DNS query through the tunnel.
          sudo iptables -I FORWARD 1 -i vallumrc -j ACCEPT
          sudo iptables -I FORWARD 1 -o vallumrc -j ACCEPT
-         sudo nft add table inet vallumtest 2>/dev/null
-         sudo nft 'add chain inet vallumtest postrouting { type nat hook postrouting priority srcnat; }' 2>/dev/null
-         sudo nft add rule inet vallumtest postrouting ip saddr $SUBNET masquerade 2>/dev/null
+         sudo nft add table inet vallumtest
+         sudo nft 'add chain inet vallumtest postrouting { type nat hook postrouting priority srcnat; }'
+         sudo nft add rule inet vallumtest postrouting ip saddr $SUBNET masquerade
          sudo nohup $REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml > $REMOTE_DIR/server.log 2>&1 &
          sleep 2" || bad "remote host setup"
+    # Assert the forwarding plane took the state, not just that no step
+    # reported an error: a masquerade table with zero rules or an nft binary
+    # that silently dropped the rule would pass the block above.
+    rsh "sudo nft list table inet vallumtest | grep -q masquerade &&
+         sudo iptables -C FORWARD -i vallumrc -j ACCEPT &&
+         sudo iptables -C FORWARD -o vallumrc -j ACCEPT" \
+        || bad "the forwarding-plane rules did not take"
     rsh "test -S $REMOTE_DIR/server.sock" || { rsh "sudo tail -5 $REMOTE_DIR/server.log"; bad "the remote daemon did not start"; }
     ok "forwarding, NAT, one UDP port, daemon up"
     SERVER_CMD="sudo $REMOTE_DIR/vallum"
@@ -345,7 +428,12 @@ as_owner() {
 
 enrol_bundle() {
     local name=$1 dir=$2
-    rsh "$SERVER_CMD peer add $name --config $CONFIG --endpoint $PUBLIC \
+    # No --endpoint here: this is the SERVER-side peer entry, whose connect
+    # address must be learned from datagrams, like any responder side. The
+    # server's own public_endpoint only names where the CLIENT dials (it is
+    # baked into the bundle below); passing it as the peer's endpoint made
+    # rotation's passive re-initiation dial the server itself.
+    rsh "$SERVER_CMD peer add $name --config $CONFIG \
             --ship-key --bundle-out $REMOTE_DIR/$name.bundle" >/dev/null || bad "peer add ($name)"
     rsh "sudo chmod 644 $REMOTE_DIR/$name.bundle" || bad "chmod bundle"
     rscp "$TARGET:$REMOTE_DIR/$name.bundle" "$dir/$name.vallum-bundle" || bad "fetch bundle"
@@ -380,7 +468,229 @@ enrol_token() {
 
 # A client config from any transport, rewritten to a split tunnel so this
 # machine's default route and resolver are never touched, then run and proved.
+# A client config from any transport, proved in whichever mode the run uses:
+# prove_client_ns consumes the config on the SSH target inside $CLI_NS;
+# prove_client_host consumes it on this machine. What they prove is the same
+# set of assertions; only the address space differs.
 prove_client() {
+    if [ "$NAMESPACED" = 1 ]; then prove_client_ns "$@"; else prove_client_host "$@"; fi
+}
+
+# ── the namespaced proof ─────────────────────────────────────────────────
+# The caller's machine is never touched: the config is rewritten for the
+# remote directory while it is still here, then scp'd over, and the daemon,
+# vallum-quick and every assertion run inside the namespace via `ip netns
+# exec`. Egress is still real: the namespace's veth hangs off the host's own
+# routing, so the client dials the server's public endpoint exactly as a
+# laptop would.
+prove_client_ns() {
+    local name=$1 dir=$2 iface=$CIFACE rdir="$REMOTE_DIR/cli/$1" config
+    local vallum_r="$REMOTE_DIR/vallum" quick_r="$REMOTE_DIR/vallum-quick"
+
+    config=$(ls "$dir"/*.toml | head -1)
+    [ -n "$config" ] || bad "$name: no client config was produced"
+
+    # Same split-tunnel rewrite as --host-direct — but "control" already points
+    # at the remote directory, because the config is consumed over there.
+    # The large-response target must not need to be resolved inside the
+    # namespace, which has no working resolver — and pinning it also keeps
+    # the flow tunnel-carried in --host-direct, where an unpinned name would
+    # silently ride the physical link instead of proving the tunnel works.
+    # Resolved here, on the invoking machine, over its ordinary DNS, before
+    # anything is touched; empty means the size check below is skipped.
+    local edge
+    edge=$(getent ahostsv4 speed.cloudflare.com 2>/dev/null | awk '{print $1; exit}')
+    python3 - "$config" "$iface" "$SRV_IP" "$rdir" "$edge" <<'PY'
+import re, sys
+path, iface, srv, workdir, edge = sys.argv[1:6]
+text = open(path).read()
+text = re.sub(r'^name = ".*?"', f'name = "{iface}"', text, count=1, flags=re.M)
+text = re.sub(r'^control = .*$', f'control = "{workdir}/c.sock"', text, flags=re.M)
+allowed = [f'"{srv}/32"', '"1.1.1.1/32"']
+if edge:
+    allowed.append(f'"{edge}/32"')  # pin the large-response target so the flow is tunnel-carried
+text = re.sub(r'allowed_ips = \[.*?\]', 'allowed_ips = [' + ', '.join(allowed) + ']', text)
+text = re.sub(r'^dns = .*\n', '', text, flags=re.M)
+open(path, 'w').write(text)
+PY
+
+    # Fresh dir, not `mkdir -p`: a dir left behind by a sudo-run step (the
+    # server's bundle-out, for instance) is root-owned, and `mkdir -p` would
+    # silently keep it — then the scp below fails on an open it cannot own.
+    rsh "sudo rm -rf $rdir && mkdir -p $rdir" || bad "$name: no scratch dir on the target"
+    rscp "$config" "$TARGET:$rdir/client.toml" || bad "$name: scp the config"
+    # The config references its private key by relative name (the daemon
+    # resolves it against the config's directory), and every transport bundles
+    # a key with the config — on the local dir it sat next to the .toml and the
+    # reference just worked; over here it has to travel too or the daemon dies
+    # with a No such file on its key.
+    for key in "$dir"/*.key; do
+        [ -e "$key" ] || continue
+        rscp "$key" "$TARGET:$rdir/" || bad "$name: scp $(basename "$key")"
+    done
+
+    # Before running it, check the config as the server produced it:
+    # `attach --dry-run` prints the plan and refuses a config it could not
+    # install — the same gate --host-direct runs, but inside the namespace
+    # where it will actually attach.
+    cli_put "$quick_r attach $rdir/client.toml --dry-run" > "$dir/attach-dry.log" 2>&1 \
+        || { cat "$dir/attach-dry.log"; bad "$name: the config as produced cannot be attached"; }
+
+    # The daemon lives in the namespace for the whole proof; `nohup` keeps it
+    # past the ssh session, and the pkill below reaps it per transport.
+    # Start the daemon within this session and verify it by *effect*: the TUN
+    # appearing inside the namespace, not by pgrep. pgrep -f matches any
+    # process whose command line contains the pattern — and the remote shell
+    # running this very command contains it too, so a plain spelling matches
+    # that shell, not the daemon, and a dead daemon sails under a green check
+    # straight into attach's timeout. `[v]allum` breaks the literal match.
+    cli_put "nohup $vallum_r run --config $rdir/client.toml > $rdir/client.log 2>&1 &"
+    local iface_up=0
+    for _ in $(seq 1 20); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 && { iface_up=1; break; }
+        sleep 0.5
+    done
+    if [ "$iface_up" != 1 ]; then
+        rsh "cat $rdir/client.log 2>/dev/null" >&2
+        bad "$name: the client daemon did not create $iface"
+    fi
+    cli_put "$quick_r attach $rdir/client.toml" > "$dir/attach.log" 2>&1 \
+        || { cat "$dir/attach.log"; rsh "cat $rdir/client.log 2>/dev/null" >&2; bad "$name: attach"; }
+
+    local established=0
+    for _ in $(seq 1 20); do
+        # Traffic drives the handshake — the daemon does not dial an idle peer
+        # on its own, exactly as WireGuard does not. The ping is what starts it.
+        cli_put "ping -c1 -W1 $SRV_IP" >/dev/null 2>&1
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    [ "$established" = 1 ] || bad "$name: no handshake (is UDP $PORT reachable?)"
+
+    cli_put "ping -c2 -W3 $SRV_IP" > "$dir/tunnel.log" 2>&1 || { cat "$dir/tunnel.log"; bad "$name: the tunnel does not ping"; }
+    cli_put "ping -c3 -W4 1.1.1.1" > "$dir/egress.log" 2>&1 || {
+        cat "$dir/egress.log"
+        say "server forwarding state at the moment of the egress failure"
+        rsh "sudo iptables -L FORWARD -n -v | head -8
+             sudo nft list table inet vallumtest 2>/dev/null
+             sudo tail -n 8 $REMOTE_DIR/server.log" || true
+        bad "$name: no egress through the server"
+    }
+    local dig_r curl_r
+    dig_r=$(rsh "command -v dig >/dev/null 2>&1 && echo 1")
+    if [ "${dig_r:-0}" = 1 ]; then
+        cli_put "dig +time=3 +tries=1 @1.1.1.1 example.com A" > "$dir/dig.log" 2>&1
+        if ! grep -q "ANSWER SECTION" "$dir/dig.log"; then
+            cat "$dir/dig.log"
+            note "ICMP crossed but UDP did not, which is the signature of a"
+            note "FORWARD policy that drops everything except echo — see"
+            note "docs/deployment/troubleshooting.md, \"ping works, nothing else\""
+            bad "$name: DNS through the tunnel did not answer"
+        fi
+    fi
+    ok "$name: handshake, tunnel, egress$([ "${dig_r:-0}" = 1 ] && printf ', DNS')"
+
+    # A 1 MiB HTTPS response exercises the path MTU end to end, as in
+    # --host-direct: a wrong MTU is reported by users as "the VPN is up but
+    # some sites hang", so the size that arrived matters.
+    curl_r=$(rsh "command -v curl >/dev/null 2>&1 && echo 1")
+    if [ "${curl_r:-0}" = 1 ] && [ -n "$edge" ]; then
+        local got
+        got=$(cli_put "curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+            --resolve speed.cloudflare.com:443:$edge \
+            'https://speed.cloudflare.com/__down?bytes=1000000'" 2>"$dir/curl.log" || true)
+        if [ "${got:-0}" -ge 900000 ]; then
+            ok "$name: a 1 MiB HTTPS response arrives intact"
+        else
+            [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
+            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+        fi
+    else
+        note "curl absent on the target, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
+    fi
+
+    # A leak is a routing decision, and inside the namespace it is readable the
+    # same way: the lookup for an outside address must land on the tunnel.
+    local v4dev
+    v4dev=$(cli_put "ip route get 1.1.1.1" 2>/dev/null | sed -n 's/.*dev \\([^ ]*\\).*/\\1/p' | head -1)
+    case "$v4dev" in
+        vallum*) ok "$name: IPv4 egress routes into the tunnel ($v4dev)" ;;
+        "")      note "could not determine the IPv4 route" ;;
+        *)       bad "$name: IPv4 egress escapes via $v4dev, not the tunnel" ;;
+    esac
+
+    # The namespace is IPv4-only by construction: it has no global v6 address
+    # (the veth carries no v6), so the strict v6 assertion cannot apply — same
+    # decide-not-assert rule as --host-direct, stated for the same reason.
+    note "$name: this client is IPv4-only, so the IPv6 route assertion does not apply"
+    note "   on a dual-stack host a v4-only split tunnel leaves IPv6 on the physical"
+    note "   link — that is split-tunnel semantics. For a full-tunnel posture the"
+    note "   fail-closed guard blocks it: vallum policy on (see ADR-0018/ADR-0020)"
+
+    # ── no foreign source may enter the tunnel ──
+    # Both directions as in --host-direct: nothing foreign during normal
+    # traffic, then a foreign source attempted on purpose, which must be
+    # refused and named. Link-local traffic is excluded — a link-local source
+    # means nothing across a link boundary.
+    refusals() {
+        rsh "grep 'does not own that address' $rdir/client.log 2>/dev/null" | grep -v 'from fe80:'
+    }
+    if [ -n "$(refusals | head -1)" ]; then
+        refusals | head -3
+        bad "$name: ordinary traffic was refused for a routable foreign source"
+    else
+        ok "$name: no routable foreign source during normal traffic"
+    fi
+
+    # The positive control, inside the namespace: an address the config does
+    # not declare is added to the tunnel interface and a packet is sourced from
+    # it; the daemon must refuse it.
+    local foreign=192.0.2.99
+    if cli_put "ip addr add $foreign/32 dev $iface" 2>/dev/null; then
+        cli_put "ping -I $foreign -c1 -W1 $SRV_IP" >/dev/null 2>&1
+        sleep 1
+        if rsh "grep 'does not own that address' $rdir/client.log 2>/dev/null" | grep -q "from $foreign"; then
+            ok "$name: a foreign source is refused locally and named"
+        else
+            bad "$name: a packet sourced from $foreign was sealed, not refused"
+        fi
+        cli_put "ip addr del $foreign/32 dev $iface" 2>/dev/null
+    else
+        note "could not add $foreign to $iface: foreign-source control skipped"
+    fi
+
+    if [ "$kind" = "bundle" ]; then
+        say "rotation live across the network"
+        local new_key="$dir/new.key" new_pub="$dir/new.pub"
+        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        # The CLI reads a public-line file, not a `-` alias for stdin — see the
+        # note in prove_client_host.
+        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file /dev/stdin" < "$new_pub" \
+            || bad "$name: remote peer rotate"
+        cli_put "ping -c2 -W3 1.1.1.1" >/dev/null 2>&1 || bad "$name: rotation broke active tunnel egress"
+        ok "$name: tunnel survives rotation across the network"
+        rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
+        ok "$name: rotated and finalized on remote server"
+    fi
+
+    # Teardown for the next transport: detach, then reap the daemon whose
+    # command line names this transport's config directory.
+    cli_put "$quick_r detach $rdir/client.toml" >/dev/null 2>&1
+    # Same literal-match trap as above, mirrored for the kill: the parent
+    # shell of this pkill contains the pattern, so it must not match itself.
+    rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+}
+
+# ── the host-direct proof ────────────────────────────────────────────────
+# The old behaviour, kept deliberately: the client runs on the invoking
+# machine against its real interfaces, which is the closest a test gets to a
+# real second laptop. It rewrites this machine's routes for the run and needs
+# local root, which is why it is opt-in rather than the default.
+prove_client_host() {
     local name=$1 dir=$2 config iface=$CIFACE
     config=$(ls "$dir"/*.toml | head -1)
     [ -n "$config" ] || bad "$name: no client config was produced"
@@ -390,13 +700,23 @@ prove_client() {
     # could not install (a full tunnel without a fwmark, for instance).
     "$QUICK" attach "$config" --dry-run > "$dir/attach-dry.log" 2>&1 \
         || { cat "$dir/attach-dry.log"; bad "$name: the config as produced cannot be attached"; }
-    python3 - "$config" "$iface" "$SRV_IP" "$dir" <<'PY'
+    # The large-response target is resolved here and pinned two ways: into
+    # this config's allowed set, so the flow is carried by the tunnel instead
+    # of the physical link (an unpinned name would silently travel outside
+    # the interface and make the size pass vacuously), and with --resolve on
+    # the curl below. Empty means the size check is skipped, not ignored.
+    local edge
+    edge=$(getent ahostsv4 speed.cloudflare.com 2>/dev/null | awk '{print $1; exit}')
+    python3 - "$config" "$iface" "$SRV_IP" "$dir" "$edge" <<'PY'
 import re, sys
-path, iface, srv, workdir = sys.argv[1:5]
+path, iface, srv, workdir, edge = sys.argv[1:6]
 text = open(path).read()
 text = re.sub(r'^name = ".*?"', f'name = "{iface}"', text, count=1, flags=re.M)
 text = re.sub(r'^control = .*$', f'control = "{workdir}/c.sock"', text, flags=re.M)
-text = re.sub(r'allowed_ips = \[.*?\]', f'allowed_ips = ["{srv}/32", "1.1.1.1/32"]', text)
+allowed = [f'"{srv}/32"', '"1.1.1.1/32"']
+if edge:
+    allowed.append(f'"{edge}/32"')  # pin the large-response target so the flow is tunnel-carried
+text = re.sub(r'allowed_ips = \[.*?\]', 'allowed_ips = [' + ', '.join(allowed) + ']', text)
 text = re.sub(r'^dns = .*\n', '', text, flags=re.M)
 open(path, 'w').write(text)
 PY
@@ -418,7 +738,14 @@ PY
     [ "$established" = 1 ] || bad "$name: no handshake (is UDP $PORT reachable?)"
 
     ping -c2 -W3 "$SRV_IP" > "$dir/tunnel.log" 2>&1 || { cat "$dir/tunnel.log"; bad "$name: the tunnel does not ping"; }
-    ping -c3 -W4 1.1.1.1 > "$dir/egress.log" 2>&1 || { cat "$dir/egress.log"; bad "$name: no egress through the server"; }
+    ping -c3 -W4 1.1.1.1 > "$dir/egress.log" 2>&1 || {
+        cat "$dir/egress.log"
+        say "server forwarding state at the moment of the egress failure"
+        rsh "sudo iptables -L FORWARD -n -v | head -8
+             sudo nft list table inet vallumtest 2>/dev/null
+             sudo tail -n 8 $REMOTE_DIR/server.log" || true
+        bad "$name: no egress through the server"
+    }
     if command -v dig >/dev/null 2>&1; then
         dig +time=3 +tries=1 @1.1.1.1 example.com A > "$dir/dig.log" 2>&1
         if ! grep -q "ANSWER SECTION" "$dir/dig.log"; then
@@ -435,9 +762,10 @@ PY
     # A 1 MiB HTTPS response exercises the path MTU end to end. A wrong MTU is
     # reported by users as "the VPN is up but some sites hang", so the size that
     # arrived matters more than the fact that something did.
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1 && [ -n "$edge" ]; then
         local got
         got=$(curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+            --resolve speed.cloudflare.com:443:$edge \
             "https://speed.cloudflare.com/__down?bytes=1000000" 2>"$dir/curl.log" || true)
         if [ "${got:-0}" -ge 900000 ]; then
             ok "$name: a 1 MiB HTTPS response arrives intact"
@@ -446,7 +774,7 @@ PY
             bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
         fi
     else
-        note "curl absent: the large-response check was skipped"
+        note "curl absent, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
     fi
 
     # A leak is a routing decision: with a full tunnel attached, the lookup for
@@ -460,13 +788,35 @@ PY
     esac
 
     if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
-        local v6dev
-        v6dev=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null \
-            | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
-        case "$v6dev" in
-            vallum*) ok "$name: IPv6 egress routes into the tunnel ($v6dev)" ;;
-            "")      note "could not determine the IPv6 route" ;;
-            *)       bad "$name: IPv6 egress escapes via $v6dev, not the tunnel" ;;
+        # The strict assertion is about a tunnel that carries IPv6. A config
+        # rewritten to a split tunnel around $SRV_IP is IPv4-only by
+        # construction, so a dual-stack host would fail `not wlp0s20f3`
+        # every run by construction too. Decide instead of asserting: for a
+        # config that carries v6, egress must route into the tunnel; for one
+        # that does not, v6 staying on the physical link is split-tunnel
+        # semantics, and the fail-closed guard (ADR-0018) is the control for
+        # a full-tunnel posture. This gate never installs that guard on the
+        # invoking machine — it would block every other v4 destination's
+        # browsing for the run's duration.
+        local allowed_line
+        allowed_line=$(grep '^allowed_ips' "$config" 2>/dev/null || true)
+        case "$allowed_line" in
+            *:*)
+                local v6dev
+                v6dev=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null \
+                    | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+                case "$v6dev" in
+                    vallum*) ok "$name: IPv6 egress routes into the tunnel ($v6dev)" ;;
+                    "")      note "could not determine the IPv6 route" ;;
+                    *)       bad "$name: IPv6 egress escapes via $v6dev, not the tunnel" ;;
+                esac
+                ;;
+            *)
+                note "$name: this client is IPv4-only, so the IPv6 route assertion does not apply"
+                note "   on a dual-stack host a v4-only split tunnel leaves IPv6 on the physical"
+                note "   link — that is split-tunnel semantics. For a full-tunnel posture the"
+                note "   fail-closed guard blocks it: vallum policy on (see ADR-0018/ADR-0020)"
+                ;;
         esac
     else
         note "no global IPv6 on this host: the IPv6 leak check does not apply"
@@ -523,7 +873,12 @@ PY
         say "rotation live across the network"
         local new_key="$dir/new.key" new_pub="$dir/new.pub"
         "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
-        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file -" < "$new_pub" \
+        # The CLI reads a public-line file, not a `-` alias for stdin: `-` is
+        # stdin for --token only (`setup.rs read_token_arg`), and the product's
+        # own convention for piped keys is the literal /dev/stdin — the same
+        # path `setup --remote` offers for `peer enroll`. A literal `-` here
+        # failed with "No such file or directory" and stopped the run.
+        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file /dev/stdin" < "$new_pub" \
             || bad "$name: remote peer rotate"
         ping -c2 -W3 1.1.1.1 >/dev/null 2>&1 || bad "$name: rotation broke active tunnel egress"
         ok "$name: tunnel survives rotation across the network"
@@ -546,9 +901,12 @@ for kind in $TRANSPORTS; do
     name="laptop-$kind"
     dir="$LOCAL_DIR/$kind"
     rm -rf "$dir" && mkdir -p "$dir"
-    # The client half runs as the invoking user (their SSH keys, and `setup`
-    # writes here instead of /etc/vallum), so the directory must be theirs.
-    chown "${SUDO_USER:-root}" "$LOCAL_DIR" "$dir" 2>/dev/null
+    # The enrolment half runs as the invoking user (their SSH keys, and `setup`
+    # writes here instead of /etc/vallum). Only needed when the script itself
+    # was invoked under sudo; without sudo the directories are already theirs.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        chown "$SUDO_USER" "$LOCAL_DIR" "$dir"
+    fi
     say "transport: $kind"
     case "$kind" in
         bundle) enrol_bundle "$name" "$dir" ;;
@@ -556,7 +914,7 @@ for kind in $TRANSPORTS; do
         token)  enrol_token "$name" "$dir" ;;
         *) bad "unknown transport: $kind (bundle, ssh, token)" ;;
     esac
-    ok "$kind: client config on this machine"
+    ok "$kind: client config produced"
     prove_client "$name" "$dir"
 done
 
@@ -588,7 +946,11 @@ if [ "$UPGRADE" = 1 ]; then
     ok "the tunnel survives an in-place upgrade"
 fi
 
-say "PASS — a real client, a real server, real egress, three enrolment transports"
+if [ "$NAMESPACED" = 1 ]; then
+    say "PASS — a real server, real egress, a client proved inside a remote namespace, three enrolment transports"
+else
+    say "PASS — a real client, a real server, real egress, three enrolment transports"
+fi
 
 # The stamp scripts/release.sh requires. It lives outside the repository and
 # names the commit it proved, so an old pass cannot vouch for a new tree.
@@ -600,4 +962,8 @@ fi
 mkdir -p "$OWNER_STATE/vallum"
 printf '%s\n' "$(git rev-parse HEAD)" > "$OWNER_STATE/vallum/remote-verified"
 chown -R "${SUDO_USER:-root}" "$OWNER_STATE/vallum" 2>/dev/null
-say "recorded $(git rev-parse --short HEAD) as verified on two hosts"
+if [ "$NAMESPACED" = 1 ]; then
+    say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced)"
+else
+    say "recorded $(git rev-parse --short HEAD) as verified on two hosts"
+fi

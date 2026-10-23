@@ -247,9 +247,14 @@ pub struct Attached {
     /// The control socket, if configured.
     pub control: Option<ControlServer>,
     /// The addresses this interface owns. A packet leaving it may only carry
-    /// one of these: anything else is refused by the peer's `allowed_ips`
-    /// check, so sending it converts a local mistake into silent far-side loss.
+    /// one of these unless [`Self::forward`] is set: anything else is refused
+    /// by the peer's `allowed_ips` check, so sending it converts a local
+    /// mistake into silent far-side loss.
     pub addresses: Vec<vallum_tunnel::Prefix>,
+    /// Whether this node is a gateway: a packet whose source is not an
+    /// address here may still be relayed, because the far side's
+    /// `allowed_ips` check is where a source claim is judged. See ADR-0020.
+    pub forward: bool,
 }
 
 impl std::fmt::Debug for Attached {
@@ -283,28 +288,57 @@ pub(crate) enum Input {
 /// running is logged and counted, not fatal: a tunnel does not exit because one
 /// datagram did not go.
 #[must_use = "the run loop returns only when the tunnel has stopped"]
-/// Whether a packet's inner source is an address this interface owns.
+/// Whether a packet's inner source may leave this interface.
 ///
-/// The peer refuses traffic whose source is outside its `allowed_ips`, and it is
-/// right to: that check is what stops one peer claiming another's address. The
-/// consequence is that a packet with a foreign source is not merely misrouted,
-/// it is *unacceptable*, so the sender should decline it where the reason is
-/// still visible instead of sealing it and losing it at the far end.
+/// Two claims, one rule (ADR-0020). Owned, always: a source inside
+/// `addresses` is this host speaking, and it is right to decline anything
+/// else locally when the host is not a gateway — that turns the peer's
+/// silent `allowed_ips` refusal (no counter, no ICMP, no log) into a cause
+/// named here, which is what made the physical-address leak from a socket
+/// bound before the tunnel came up diagnosable.
 ///
-/// A packet that does not parse as IP is not ours either: a tunnel has no
-/// business inventing an interpretation for bytes it cannot classify.
-fn source_is_ours(source: Option<std::net::IpAddr>, addresses: &[vallum_tunnel::Prefix]) -> bool {
-    source.is_some_and(|ip| addresses.iter().any(|prefix| prefix.contains(&ip)))
+/// Not owned, and `[interface] forward` is on: the node is a gateway, and a
+/// packet whose destination routes to a peer but whose source belongs to
+/// nobody here is a relayed flow — the honest case is a conntrack reply that
+/// came back after this host forwarded its neighbour's packet. Far-side
+/// policy still governs: the receiving peer's `allowed_ips` decides whether
+/// to accept the source, so relaying does not let a host claim another's
+/// address, it just refuses claims where they are real instead of where a
+/// relay merely looks like one.
+fn outbound_allows(
+    source: Option<std::net::IpAddr>,
+    addresses: &[vallum_tunnel::Prefix],
+    forwards: bool,
+) -> bool {
+    source.is_some_and(|ip| {
+        addresses.iter().any(|prefix| prefix.contains(&ip)) || (forwards && !is_link_local(&ip))
+    })
+}
+
+/// Whether `ip` sits inside a link-local block (v4 `169.254.0.0/16`, v6
+/// `fe80::/10`).
+///
+/// A link-local source means nothing across a link boundary, whoever's
+/// interface it claims to come from, so it is refused even by a gateway.
+#[must_use]
+fn is_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            first & 0xffc0 == 0xfe80
+        }
+    }
 }
 
 #[cfg(test)]
-mod source_is_ours_tests {
-    use super::source_is_ours;
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod outbound_source_tests {
+    use super::{is_link_local, outbound_allows};
     use std::net::IpAddr;
     use std::str::FromStr;
     use vallum_tunnel::Prefix;
 
-    #[allow(clippy::expect_used)]
     fn addrs() -> Vec<Prefix> {
         vec![
             Prefix::from_str("10.7.0.2/32").expect("valid prefix literal"),
@@ -318,8 +352,8 @@ mod source_is_ours_tests {
 
     #[test]
     fn the_tunnel_address_is_ours() {
-        assert!(source_is_ours(ip("10.7.0.2"), &addrs()));
-        assert!(source_is_ours(ip("fd00:7::2"), &addrs()));
+        assert!(outbound_allows(ip("10.7.0.2"), &addrs(), false));
+        assert!(outbound_allows(ip("fd00:7::2"), &addrs(), false));
     }
 
     #[test]
@@ -327,9 +361,10 @@ mod source_is_ours_tests {
         // The address observed leaking on the live deployment: a socket bound
         // before the tunnel came up keeps using the physical interface's
         // global IPv6, and the peer rejects every packet it sends.
-        assert!(!source_is_ours(
+        assert!(!outbound_allows(
             ip("2600:4041:542b:7800:6781:d74:5e93:4f62"),
-            &addrs()
+            &addrs(),
+            false,
         ));
     }
 
@@ -338,12 +373,45 @@ mod source_is_ours_tests {
         // Also observed rejected on the live deployment. A link-local address
         // has no meaning beyond its own link, so it can never be a valid
         // payload for a tunnel that crosses one.
-        assert!(!source_is_ours(ip("fe80::6d93:636d:98a0:a51a"), &addrs()));
+        assert!(!outbound_allows(
+            ip("fe80::6d93:636d:98a0:a51a"),
+            &addrs(),
+            false
+        ));
     }
 
     #[test]
     fn an_unparseable_packet_is_not_ours() {
-        assert!(!source_is_ours(None, &addrs()));
+        assert!(!outbound_allows(None, &addrs(), false));
+    }
+
+    #[test]
+    fn a_gateway_relays_a_foreign_source() {
+        // The conntrack reply that made the first verify-remote run fail: a
+        // server that forwarded a neighbour's packet to the internet received
+        // the reply back with src 1.1.1.1 and refused it locally, so every
+        // forwarded flow died while ping still worked.
+        assert!(outbound_allows(ip("1.1.1.1"), &addrs(), true));
+    }
+
+    #[test]
+    fn a_gateway_still_refuses_link_local_and_unparseable() {
+        assert!(!outbound_allows(
+            ip("fe80::6d93:636d:98a0:a51a"),
+            &addrs(),
+            true
+        ));
+        assert!(!outbound_allows(None, &addrs(), true));
+    }
+
+    #[test]
+    fn the_v4_link_local_block_is_recognised() {
+        assert!(is_link_local(
+            &"169.254.19.53".parse::<IpAddr>().expect("ip")
+        ));
+        assert!(is_link_local(&"fe80::1".parse::<IpAddr>().expect("ip")));
+        assert!(!is_link_local(&"1.1.1.1".parse::<IpAddr>().expect("ip")));
+        assert!(!is_link_local(&"fec0::1".parse::<IpAddr>().expect("ip")));
     }
 }
 
@@ -362,6 +430,7 @@ pub fn run(
         budget,
         control,
         addresses,
+        forward,
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
@@ -429,6 +498,9 @@ pub fn run(
     // source, because the condition is a local misconfiguration rather than a
     // per-packet event.
     let mut foreign_source_warned: HashSet<std::net::IpAddr> = HashSet::new();
+    // Sources relayed because this interface forwards: one line per source,
+    // once, for the same reason. Every subsequent packet is silent.
+    let mut relayed_sources_noted: HashSet<std::net::IpAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
     let mut last_control_check = Instant::now();
@@ -485,24 +557,48 @@ pub fn run(
             Ok(Input::Ip(packet)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
                 // A packet may only leave this interface carrying an address it
-                // owns. Anything else — a link-local source, or a physical
-                // address a socket was bound to before the tunnel came up — is
-                // discarded by the peer's `allowed_ips` check with no counter,
-                // no ICMP and no log. Declining it here turns a silent far-side
-                // loss into a local cause that names its address.
+                // owns — unless the interface forwards (ADR-0020), in which
+                // case a relayed flow re-enters with a source that belongs to
+                // nobody here. Anything else — a link-local source, or a
+                // physical address a socket was bound to before the tunnel
+                // came up — is discarded by the peer's `allowed_ips` check with
+                // no counter, no ICMP and no log. Declining it here turns a
+                // silent far-side loss into a local cause that names its
+                // address; a gateway declines only what no role legitimises.
                 let source = vallum_tunnel::packet_source(&packet);
-                if source_is_ours(source, &addresses) {
-                    Some(Event::OutboundIp { packet })
-                } else {
-                    if let Some(ip) = source {
-                        if foreign_source_warned.insert(ip) {
-                            log_warn!(
+                let owned =
+                    source.is_some_and(|ip| addresses.iter().any(|prefix| prefix.contains(&ip)));
+                if outbound_allows(source, &addresses, forward) {
+                    if let (false, Some(ip)) = (owned, source) {
+                        if relayed_sources_noted.insert(ip) {
+                            log_info!(
                                 log,
-                                "dropping outbound packet from {ip}: this interface does not \
-                                 own that address, so the peer would reject it"
+                                "relaying packet from {ip}: not an address here, and \
+                                 `[interface] forward` is on (ADR-0020)"
                             );
                         }
                     }
+                    Some(Event::OutboundIp { packet })
+                } else if let Some(ip) = source {
+                    if foreign_source_warned.insert(ip) {
+                        if is_link_local(&ip) {
+                            log_warn!(
+                                log,
+                                "dropping outbound packet from {ip}: a link-local source means \
+                                 nothing across a link"
+                            );
+                        } else {
+                            log_warn!(
+                                log,
+                                "dropping outbound packet from {ip}: this interface does not \
+                                 own that address, so the peer would reject it — set \
+                                 `forward = true` in [interface] if this host relays for a \
+                                 peer (ADR-0020)"
+                            );
+                        }
+                    }
+                    None
+                } else {
                     None
                 }
             }

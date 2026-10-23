@@ -89,6 +89,10 @@ pub struct Resolved {
     pub peers: Vec<PeerConfig>,
     /// The log threshold.
     pub level: Level,
+    /// Whether the node is a gateway: packets whose source is not an address
+    /// of this interface may still be relayed, because the far side's
+    /// `allowed_ips` check is where a claim is judged. See ADR-0020.
+    pub forward: bool,
     /// Things the operator should know. Logged, not fatal.
     pub warnings: Vec<String>,
     /// Who to become after the privileged setup. `None` keeps the process as it
@@ -113,6 +117,7 @@ impl std::fmt::Debug for Resolved {
             .field("fwmark", &self.fwmark)
             .field("peer_count", &self.peers.len())
             .field("level", &self.level)
+            .field("forward", &self.forward)
             .field("warnings", &self.warnings)
             .field("privileges", &self.privileges)
             .field("outer_budget", &self.outer_budget)
@@ -647,6 +652,7 @@ impl ResolveConfig for Config {
             seed,
             peers,
             level,
+            forward: self.interface.forward.unwrap_or(false),
             warnings,
             privileges,
             outer_budget: budget,
@@ -874,6 +880,7 @@ mod tests {
             seed: SharedSecret::new(seed),
             peers: Vec::new(),
             level: Level::parse("info").expect("level"),
+            forward: false,
             warnings: Vec::new(),
             privileges: None,
             outer_budget: 1372,

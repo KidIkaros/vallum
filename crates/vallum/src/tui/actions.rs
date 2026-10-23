@@ -272,6 +272,7 @@ fn add_peer(app: &mut App, form: &super::app::Form) -> FormResult {
         remove: false,
         update_only: false,
         replace_allowed_ips: true,
+        previous_public_key: None,
     };
     let set = Set {
         private_key: None,
@@ -341,6 +342,7 @@ fn edit_peer(app: &mut App, form: &super::app::Form, index: usize) -> FormResult
         remove: false,
         update_only: true,
         replace_allowed_ips: true,
+        previous_public_key: None,
     };
     let set = Set {
         private_key: None,
@@ -386,6 +388,7 @@ pub fn confirm(app: &mut App) {
                     remove: true,
                     update_only: false,
                     replace_allowed_ips: false,
+                    previous_public_key: None,
                 }],
             };
             match apply(app, &set) {

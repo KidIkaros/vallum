@@ -80,6 +80,14 @@ pub mod field {
     /// Peer fields.
     pub const VALLUM_NAME: &str = "vallum_name";
     /// Peer fields.
+    ///
+    /// In a `set`, the identity a rotation moved aside: the referenced peer —
+    /// matched by this key, not by the block's `public_key` — adopts the new
+    /// identity and keeps the old one accepted (ADR-0019). `none` retires the
+    /// window (`peer finalize`). Absent means the config says nothing about
+    /// rotation for this peer, and the live window is left alone.
+    pub const VALLUM_PREVIOUS_PUBLIC_KEY: &str = "vallum_previous_public_key";
+    /// Peer fields.
     pub const PRESHARED_KEY: &str = "preshared_key";
     /// Peer fields.
     pub const ENDPOINT: &str = "endpoint";
@@ -201,6 +209,10 @@ pub struct Peer {
     pub update_only: bool,
     /// Replace the peer's allowed IPs rather than appending.
     pub replace_allowed_ips: bool,
+    /// The rotation window, as a full-state statement: the identity the peer
+    /// rotates from, an empty vector to retire the window, or absent when the
+    /// config says nothing about rotation for this peer.
+    pub previous_public_key: Option<Vec<u8>>,
 }
 
 /// Parse a request body.
@@ -264,6 +276,7 @@ pub fn parse(text: &str) -> Result<Request, String> {
                     }
                     // Peer fields require an open peer block.
                     field::VALLUM_NAME
+                    | field::VALLUM_PREVIOUS_PUBLIC_KEY
                     | field::PRESHARED_KEY
                     | field::ENDPOINT
                     | field::PERSISTENT_KEEPALIVE_INTERVAL
@@ -277,6 +290,18 @@ pub fn parse(text: &str) -> Result<Request, String> {
                         match key {
                             field::VALLUM_NAME => {
                                 peer.name = Some(value.to_owned());
+                            }
+                            field::VALLUM_PREVIOUS_PUBLIC_KEY => {
+                                // `(none)` retires the window; a key names the
+                                // identity to rotate from. Length is validated
+                                // against the suite at apply time, like
+                                // `public_key`.
+                                peer.previous_public_key =
+                                    Some(if value == "none" || value == "(none)" {
+                                        Vec::new()
+                                    } else {
+                                        parse_any_key(value)?
+                                    });
                             }
                             field::PRESHARED_KEY => {
                                 let parsed = parse_fixed_key(value)?;
@@ -407,6 +432,9 @@ pub struct PeerState {
     pub public_key: Vec<u8>,
     /// The peer public line (`vallum1:…`).
     pub public_line: String,
+    /// The identity still accepted besides the current one, when a rotation is
+    /// open; empty when the window is closed.
+    pub previous_public_key: Vec<u8>,
     /// A short fingerprint of the peer key.
     pub fingerprint: [u8; 8],
     /// The configured PSK, if any.
@@ -531,6 +559,15 @@ pub fn render_get(state: &DeviceState) -> String {
             hex_encode(&peer.public_key)
         ));
         out.push_str(&format!("{}={}\n", field::VALLUM_NAME, peer.name));
+        if peer.previous_public_key.is_empty() {
+            out.push_str(&format!("{}=(none)\n", field::VALLUM_PREVIOUS_PUBLIC_KEY));
+        } else {
+            out.push_str(&format!(
+                "{}={}\n",
+                field::VALLUM_PREVIOUS_PUBLIC_KEY,
+                hex_encode(&peer.previous_public_key)
+            ));
+        }
         out.push_str(&format!(
             "{}={}\n",
             field::VALLUM_FINGERPRINT,
@@ -821,6 +858,14 @@ pub fn render_set(set: &Set) -> String {
         if let Some(name) = &peer.name {
             out.push_str(&format!("{}={name}\n", field::VALLUM_NAME));
         }
+        if let Some(previous) = &peer.previous_public_key {
+            let value = if previous.is_empty() {
+                "(none)".to_owned()
+            } else {
+                hex_encode(previous)
+            };
+            out.push_str(&format!("{}={value}\n", field::VALLUM_PREVIOUS_PUBLIC_KEY));
+        }
         if let Some(psk) = peer.preshared_key {
             let value = psk.map_or_else(|| "00".repeat(32), |key| hex_encode(&key));
             out.push_str(&format!("{}={value}\n", field::PRESHARED_KEY));
@@ -1025,6 +1070,7 @@ mod tests {
                     allowed_ips,
                     valid_until: identity.map(|(valid_until, _)| valid_until),
                     rotating: identity.is_some_and(|(_, rotating)| rotating),
+                    previous_public_key: Vec::new(),
                     epoch,
                 },
             )
@@ -1196,6 +1242,7 @@ mod tests {
                 remove: false,
                 update_only: true,
                 replace_allowed_ips: true,
+                previous_public_key: None,
             }],
         };
         let text = render_set(&set);
@@ -1272,6 +1319,7 @@ mod tests {
                 valid_until: Some(1_800_000_000),
                 rotating: true,
                 epoch: 2,
+                previous_public_key: vec![3u8; 32],
             }],
         };
         let text = render_get(&state);
@@ -1331,6 +1379,7 @@ mod tests {
                 valid_until: None,
                 rotating: false,
                 epoch: 0,
+                previous_public_key: Vec::new(),
             }],
         };
         let response = parse_response(&render_get(&state));
@@ -1341,6 +1390,10 @@ mod tests {
         // closed rotation explicitly.
         assert_eq!(response.peer_field(0, "vallum_valid_until"), None);
         assert_eq!(response.peer_field(0, "vallum_rotating"), Some("0"));
+        assert_eq!(
+            response.peer_field(0, field::VALLUM_PREVIOUS_PUBLIC_KEY),
+            Some("(none)")
+        );
     }
 
     #[test]

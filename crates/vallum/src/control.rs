@@ -298,6 +298,12 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             public_line: crate::keys::encode_public(device.suite_id(), config.identity()),
             fingerprint: device.fingerprint(id).unwrap_or([0u8; 8]),
             preshared_key: config.preshared_key().map(|psk| *psk.as_bytes()),
+            previous_public_key: config
+                .previous_identities()
+                .first()
+                .map_or_else(Vec::new, |accepted| {
+                    accepted.identity().kem().as_bytes().to_vec()
+                }),
             endpoint: device.endpoint(id),
             last_handshake: last_handshake.map(|stamp| (stamp.unix_seconds(), stamp.nanos())),
             tx_bytes,
@@ -407,7 +413,22 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
     if public_key.len() != expected_key_len {
         return Err(EINVAL);
     }
-    let existing = device.peer_by_kem(&public_key);
+    // The row this update addresses. A rotation names the key it replaces and
+    // the row still answers to it while the window is open — the block's own
+    // key is the peer's *new* identity, which no row carries yet. An empty
+    // previous (`peer finalize`) is keyed by the current key, exactly like an
+    // ordinary update, so the fallback covers that case too.
+    if let Some(previous) = &update.previous_public_key {
+        if !previous.is_empty() && previous.len() != expected_key_len {
+            return Err(EINVAL);
+        }
+    }
+    let existing = match update.previous_public_key.as_deref() {
+        Some(previous) if !previous.is_empty() => device
+            .peer_by_kem(previous)
+            .or_else(|| device.peer_by_kem(&public_key)),
+        _ => device.peer_by_kem(&public_key),
+    };
     if update.remove {
         if let Some(id) = existing {
             device.remove_peer(id);
@@ -420,6 +441,15 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
         None if update.update_only => return Err(ENOENT),
         None => {
             let identity = PeerIdentity::kem_only(KemPublicKey::new(public_key.to_vec()));
+            // A rotated config can reach a daemon that never saw the row — a
+            // restart while the window was open. The row comes up already
+            // carrying the window, so the replaced identity is accepted from
+            // the first packet.
+            let window = update
+                .previous_public_key
+                .as_ref()
+                .filter(|key| !key.is_empty())
+                .map(|key| PeerIdentity::kem_only(KemPublicKey::new(key.to_vec())));
             let generated = format!(
                 "peer-{}",
                 crate::keys::hex_encode(
@@ -431,11 +461,27 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
                         .as_slice()
                 )
             );
-            device
-                .add_peer(PeerConfig::new(name.unwrap_or(generated), identity))
-                .map_err(|_| EEXIST)?
+            let name = name.unwrap_or(generated);
+            let mut config = PeerConfig::new(name, identity);
+            if let Some(previous) = window {
+                config = config.with_previous_identity(previous, None);
+            }
+            device.add_peer(config).map_err(|_| EEXIST)?
         }
     };
+
+    // Install the rotation on the row: the block's identity becomes current,
+    // the named one stays accepted — or the window is retired, for `finalize`.
+    // Both are no-ops when the daemon already runs that state, so a re-sent
+    // syncconf changes nothing.
+    if let Some(previous) = &update.previous_public_key {
+        if previous.is_empty() {
+            device.finalize_identity(id);
+        } else {
+            let new = PeerIdentity::kem_only(KemPublicKey::new(public_key.to_vec()));
+            device.rotate_identity(id, new);
+        }
+    }
 
     if let Some(name) = update.name {
         device.set_name(id, name);
@@ -572,6 +618,176 @@ mod tests {
         );
         let request = uapi::parse(&body).expect("a legal set");
         assert!(handle(&mut device, &mut context, request).contains("errno=2"));
+    }
+
+    /// A rotation update names both keys and lives on the row it names.
+    ///
+    /// The identity swap is the whole point: the block's key becomes current,
+    /// the replaced one stays accepted inside the window, and the set replays
+    /// like an ordinary syncconf — no remove-then-add, no replacement row.
+    #[test]
+    fn a_rotation_apply_swaps_the_identity_and_opens_a_window() {
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x11; 32]).expect("identity");
+        let old = StaticIdentity::generate(&*suite, &[0x12; 32]).expect("identity");
+        let new = StaticIdentity::generate(&*suite, &[0x13; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite.clone());
+        let old_key = crate::keys::hex_encode(old.public().as_bytes());
+        let new_key = crate::keys::hex_encode(new.public().as_bytes());
+
+        let add = uapi::parse(&format!(
+            "set=1\npublic_key={old_key}\nvallum_name=laptop\nallowed_ip=10.7.0.2/32\n"
+        ))
+        .expect("a legal set");
+        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+
+        let rotate = uapi::parse(&format!(
+            "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
+             \nvallum_name=laptop\nupdate_only=true\n"
+        ))
+        .expect("a legal rotation");
+        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+
+        let reply = handle(&mut device, &mut context, Request::Get);
+        // The row is keyed by the new key now, and the window reports the old.
+        assert!(reply.contains(&format!("public_key={new_key}")), "{reply}");
+        assert!(
+            reply.contains(&format!(
+                "{}={old_key}",
+                uapi::field::VALLUM_PREVIOUS_PUBLIC_KEY
+            )),
+            "{reply}"
+        );
+        // The old identity is still accepted, so in-flight traffic survives.
+        assert!(device.peer_by_kem(old.public().as_bytes()).is_some());
+        // One row, not a replacement pair.
+        let reply = uapi::parse_response(&reply);
+        assert_eq!(reply.peers.len(), 1);
+        assert_eq!(
+            reply.peer_field(0, uapi::field::VALLUM_NAME),
+            Some("laptop")
+        );
+    }
+
+    /// Replaying the same syncconf must not re-open or re-wind anything: a
+    /// rotation sent twice installs once, and the row keeps one window.
+    #[test]
+    fn re_applying_a_rotation_leaves_the_row_unchanged() {
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x14; 32]).expect("identity");
+        let old = StaticIdentity::generate(&*suite, &[0x15; 32]).expect("identity");
+        let new = StaticIdentity::generate(&*suite, &[0x16; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite.clone());
+        let old_key = crate::keys::hex_encode(old.public().as_bytes());
+        let new_key = crate::keys::hex_encode(new.public().as_bytes());
+
+        let add = uapi::parse(&format!(
+            "set=1\npublic_key={old_key}\nvallum_name=laptop\n"
+        ))
+        .expect("a legal set");
+        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        let rotate = uapi::parse(&format!(
+            "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
+             \nvallum_name=laptop\nupdate_only=true\n"
+        ))
+        .expect("a legal rotation");
+        assert!(handle(&mut device, &mut context, rotate.clone()).contains("errno=0"));
+        let before = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+
+        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+        let after = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+        assert_eq!(
+            before, after,
+            "a replayed rotation changed the running state"
+        );
+        // Still one row, still accepting the replaced identity.
+        assert_eq!(after.peers.len(), 1);
+        assert!(device.peer_by_kem(old.public().as_bytes()).is_some());
+    }
+
+    /// `vallum_previous_public_key=(none)` retires the window: afterwards the
+    /// replaced identity stops answering and the row is a plain single-key
+    /// peer again.
+    #[test]
+    fn a_finalize_apply_closes_the_window() {
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x17; 32]).expect("identity");
+        let old = StaticIdentity::generate(&*suite, &[0x18; 32]).expect("identity");
+        let new = StaticIdentity::generate(&*suite, &[0x19; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite.clone());
+        let old_key = crate::keys::hex_encode(old.public().as_bytes());
+        let new_key = crate::keys::hex_encode(new.public().as_bytes());
+
+        let add = uapi::parse(&format!(
+            "set=1\npublic_key={old_key}\nvallum_name=laptop\n"
+        ))
+        .expect("a legal set");
+        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        let rotate = uapi::parse(&format!(
+            "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
+             \nvallum_name=laptop\nupdate_only=true\n"
+        ))
+        .expect("a legal rotation");
+        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+
+        let finalize = uapi::parse(&format!(
+            "set=1\npublic_key={new_key}\nvallum_previous_public_key=(none)\
+             \nupdate_only=true\n"
+        ))
+        .expect("a legal finalize");
+        assert!(handle(&mut device, &mut context, finalize).contains("errno=0"));
+
+        assert!(!device.peer_by_kem(old.public().as_bytes()).is_some());
+        let reply = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+        assert_eq!(
+            reply.peer_field(0, uapi::field::VALLUM_PREVIOUS_PUBLIC_KEY),
+            Some("(none)")
+        );
+    }
+
+    /// A rotation update arriving at a daemon that never saw the row — a
+    /// restart while the window was open — adds the row already carrying the
+    /// window, instead of failing `update_only` or building a peerless window.
+    #[test]
+    fn a_rotation_update_can_arrive_at_a_cold_daemon() {
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x1a; 32]).expect("identity");
+        let old = StaticIdentity::generate(&*suite, &[0x1b; 32]).expect("identity");
+        let new = StaticIdentity::generate(&*suite, &[0x1c; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite);
+        let old_key = crate::keys::hex_encode(old.public().as_bytes());
+        let new_key = crate::keys::hex_encode(new.public().as_bytes());
+
+        let rotate = uapi::parse(&format!(
+            "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
+             \nvallum_name=laptop\n"
+        ))
+        .expect("a legal rotation on an empty daemon");
+        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+
+        assert!(device.peer_by_kem(new.public().as_bytes()).is_some());
+        assert!(device.peer_by_kem(old.public().as_bytes()).is_some());
+        let reply = handle(&mut device, &mut context, Request::Get);
+        assert!(reply.contains(&format!("public_key={new_key}")), "{reply}");
+        assert!(
+            reply.contains(&format!(
+                "{}={old_key}",
+                uapi::field::VALLUM_PREVIOUS_PUBLIC_KEY
+            )),
+            "{reply}"
+        );
     }
 
     /// A socket that accepts and then says nothing must not hang the caller.

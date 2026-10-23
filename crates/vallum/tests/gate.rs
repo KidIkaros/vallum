@@ -325,6 +325,7 @@ fn launch_from_text(
                     budget: resolved.outer_budget,
                     control,
                     addresses: resolved.addresses.clone(),
+                    forward: resolved.forward,
                 },
                 &mut rng,
                 Logger::new(level),

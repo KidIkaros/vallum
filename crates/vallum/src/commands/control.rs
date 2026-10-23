@@ -352,6 +352,21 @@ fn peer_lines(peer: &vallum_tunnel::PeerConfig) -> String {
         "public_key={}\n",
         keys::hex_encode(peer.identity().kem().as_bytes())
     ));
+    // The rotation window is part of the row's full state (ADR-0021): the set
+    // names the identity the row rotates from, or `(none)` when the config
+    // claims no window. Emitting it unconditionally makes every `set` a
+    // complete statement — a config that says nothing about rotation closes
+    // the window, exactly the state a cold restart of the same config would
+    // land on.
+    let previous = peer
+        .previous_identities()
+        .first()
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()))
+        .unwrap_or_else(|| "(none)".to_owned());
+    out.push_str(&format!(
+        "{}={previous}\n",
+        uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY
+    ));
     // The name is the only human handle on a peer, and every surface that
     // reports traffic — `show`, the metrics exporter, the TUI — reads it from
     // the running daemon rather than from the config. Omitting it here made the
@@ -462,6 +477,19 @@ fn peer_differs(peer: &vallum_tunnel::PeerConfig, current: &[(String, String)]) 
     if desired_keepalive != current_keepalive {
         return true;
     }
+    // The window is compared as part of the row: a config that still names a
+    // previous must not be read as satisfied by a daemon that closed it, and
+    // `peer finalize` (the config drops the window) must reach the daemon even
+    // when every other field agrees.
+    let current_previous = peer_entry_field(current, uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY)
+        .filter(|value| *value != "(none)");
+    let desired_previous = peer
+        .previous_identities()
+        .first()
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()));
+    if desired_previous.as_deref() != current_previous {
+        return true;
+    }
     let current_ips: Vec<&str> = current
         .iter()
         .filter(|(k, _)| k == uapi_field::ALLOWED_IP)
@@ -536,21 +564,42 @@ pub fn syncconf(args: &SetconfArgs) -> Result<SyncReport, Error> {
     let device_changed = !dev_diff.is_empty();
     body.push_str(&dev_diff);
 
+    // A key the config keeps as a rotation window belongs to the row that
+    // rotates from it: it must not be removed as "absent from the config"
+    // (ADR-0021). Until `peer finalize` closes the window, the row answers to
+    // both its keys.
+    let previous_desired: Vec<String> = resolved
+        .peers
+        .iter()
+        .flat_map(|peer| peer.previous_identities())
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()))
+        .collect();
+
     let mut removed_peers = 0;
     for key in &current_peers {
-        if !desired.contains(key) {
-            body.push_str(&format!("public_key={key}\nremove=true\n"));
-            removed_peers += 1;
+        if desired.contains(key) || previous_desired.contains(key) {
+            continue;
         }
+        body.push_str(&format!("public_key={key}\nremove=true\n"));
+        removed_peers += 1;
     }
 
     let mut added_peers = 0;
     let mut updated_peers = 0;
     for peer in &resolved.peers {
         let key_hex = keys::hex_encode(peer.identity().kem().as_bytes());
+        let previous_hex = peer
+            .previous_identities()
+            .first()
+            .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()));
+        // A rotated row on the daemon is keyed by the replaced key until the
+        // swap applies; match by either key, or the row reads as "absent" and
+        // a remove/add pair — never the rotation the config asked for.
         if let Some(curr) = parsed_current.peers.iter().find(|p| {
-            p.iter()
-                .any(|(k, v)| k == uapi_field::PUBLIC_KEY && v == &key_hex)
+            p.iter().any(|(k, v)| {
+                k == uapi_field::PUBLIC_KEY
+                    && (v == &key_hex || Some(v.as_str()) == previous_hex.as_deref())
+            })
         }) {
             if peer_differs(peer, curr) {
                 updated_peers += 1;
@@ -669,6 +718,92 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use vallum_core::identity::PeerIdentity;
+    use vallum_crypto::KemPublicKey;
+
+    const KEM_KEY_LEN: usize = 2374;
+
+    fn peer_with_previous(name: &str, previous: Option<&[u8]>) -> vallum_tunnel::PeerConfig {
+        let config = vallum_tunnel::PeerConfig::new(
+            name,
+            PeerIdentity::kem_only(KemPublicKey::new(vec![0x11; KEM_KEY_LEN])),
+        );
+        match previous {
+            Some(key) => config.with_previous_identity(
+                PeerIdentity::kem_only(KemPublicKey::new(key.to_vec())),
+                None,
+            ),
+            None => config,
+        }
+    }
+
+    fn current_block(name: &str, previous_hex: Option<&&str>) -> Vec<(String, String)> {
+        let mut block = vec![
+            (uapi_field::PUBLIC_KEY.to_owned(), "00".repeat(KEM_KEY_LEN)),
+            (uapi_field::VALLUM_NAME.to_owned(), name.to_owned()),
+        ];
+        if let Some(hex) = previous_hex {
+            block.push((
+                uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY.to_owned(),
+                (*hex).to_owned(),
+            ));
+        } else {
+            block.push((
+                uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY.to_owned(),
+                "(none)".to_owned(),
+            ));
+        }
+        block
+    }
+
+    #[test]
+    fn a_peer_lines_statement_names_the_window() {
+        // With a window open the set names the replaced key; without one it
+        // closes it explicitly. Either way the statement is complete.
+        let previous = [0x22u8; KEM_KEY_LEN];
+        let open = peer_lines(&peer_with_previous("laptop", Some(&previous)));
+        // The set names the replaced identity; with no window it says so
+        // explicitly — every statement is complete, never "field omitted".
+        assert!(open.contains(&format!(
+            "{}={}",
+            uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY,
+            keys::hex_encode(&previous)
+        )));
+        let closed = peer_lines(&peer_with_previous("laptop", None));
+        assert!(closed.contains(&format!(
+            "{}=(none)",
+            uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY
+        )));
+    }
+
+    #[test]
+    fn a_window_the_config_closed_or_opened_is_seen_by_the_diff() {
+        // The daemon still accepts the replaced key, but the config's window
+        // is gone: `peer finalize` must not be swallowed by an "everything
+        // agrees" diff.
+        let old_key = [0x22u8; KEM_KEY_LEN];
+        let old_hex = keys::hex_encode(&old_key);
+        assert!(peer_differs(
+            &peer_with_previous("laptop", None),
+            &current_block("laptop", Some(&old_hex.as_str()))
+        ));
+        // And the reverse: the config rotates (window names the old key) but
+        // the daemon row has no window yet — that is a rotate to apply, not a
+        // row to re-add.
+        assert!(peer_differs(
+            &peer_with_previous("laptop", Some(&old_key)),
+            &current_block("laptop", None)
+        ));
+        // An installed rotation matches its config: read as "satisfied".
+        assert!(!peer_differs(
+            &peer_with_previous("laptop", Some(&old_key)),
+            &current_block("laptop", Some(&old_hex.as_str()))
+        ));
+        assert!(!peer_differs(
+            &peer_with_previous("laptop", None),
+            &current_block("laptop", None)
+        ));
+    }
 
     fn show_args(config: Option<PathBuf>, control: Option<PathBuf>) -> ShowArgs {
         ShowArgs {

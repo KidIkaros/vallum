@@ -707,6 +707,12 @@ fn write_config(
         body.push_str(&format!("addresses = [{list}]\n"));
     }
     body.push_str(&format!("listen = \"{}\"\n", args.listen));
+    // A server that runs `server init` exists to forward for its peers: its
+    // host steps install the forwarding rules and NAT, and every relayed
+    // reply re-enters the tunnel with a source that is not this interface's.
+    // The flag says so, or the egress source check eats those replies (the
+    // failure `verify-remote.sh` caught live). See ADR-0020.
+    body.push_str("forward = true\n");
     if let Some(endpoint) = public_endpoint {
         body.push_str(&format!("public_endpoint = \"{endpoint}\"\n"));
     }

@@ -144,6 +144,41 @@ impl PeerConfig {
         self.name = name.into();
     }
 
+    /// Rotate the configured identity: the replaced one stays accepted as a
+    /// previous identity until [`Self::clear_previous`] retires it.
+    ///
+    /// Idempotent both ways: rotating onto the identity already in place does
+    /// nothing, and a window that already holds an identity is not duplicated.
+    /// Returns whether the configuration changed.
+    pub(crate) fn rotate_identity(&mut self, identity: PeerIdentity) -> bool {
+        let replaced = std::mem::replace(&mut self.identity, identity);
+        if replaced.kem().as_bytes() == self.identity.kem().as_bytes() {
+            return false;
+        }
+        let already = self
+            .previous
+            .iter()
+            .any(|accepted| accepted.identity().kem().as_bytes() == replaced.kem().as_bytes());
+        if already {
+            return false;
+        }
+        self.previous.push(AcceptedIdentity {
+            identity: replaced,
+            validity: self.validity,
+        });
+        true
+    }
+
+    /// Retire every accepted previous identity (`peer finalize`).
+    /// Returns whether a window was open.
+    pub(crate) fn clear_previous(&mut self) -> bool {
+        if self.previous.is_empty() {
+            return false;
+        }
+        self.previous.clear();
+        true
+    }
+
     /// The addresses this peer may send from and receive to.
     #[must_use]
     pub fn with_allowed_ips(mut self, nets: impl IntoIterator<Item = Prefix>) -> Self {

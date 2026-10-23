@@ -21,3 +21,5 @@
 | [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | accepted | 2026-10-21 |
 | [0018](0018-fail-closed-egress.md) | A packet leaves only through the tunnel, or to the endpoint | accepted | 2026-10-22 |
 | [0019](0019-passive-side-reinitiates.md) | The passive side re-initiates, so a restart costs seconds not 120 s | proposed | 2026-10-22 |
+| [0020](0020-gateway-forwarding-source-policy.md) | Forwarded replies mix sources; the egress check must not eat them | accepted | 2026-10-22 |
+| [0021](0021-live-rotation-syncconf.md) | A live `set` names the rotation window, not a replacement peer | accepted | 2026-10-23 |
