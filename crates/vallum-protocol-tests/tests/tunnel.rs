@@ -1527,3 +1527,102 @@ fn a_peer_that_gave_up_recovers_when_the_path_comes_back() {
         "the packet that restarted the handshake was not delivered"
     );
 }
+
+// ── the server-restart case ──────────────────────────────────────────
+
+/// A server that restarts loses its session but keeps its identity.
+///
+/// The client still holds its own session, so the next handshake completes on
+/// both sides — but the epoch is a **local** counter, folded into the
+/// data-plane KDF (`vallum-core/src/keys.rs`: `frame([transcript, epoch])`). A
+/// server that re-establishes at epoch 0 while the client advances to epoch 1
+/// derives a *different* data-plane root, so the two ends cannot open each
+/// other's packets even though the handshake succeeded.
+///
+/// This is the shape of ADR-0019's measured symptom: the client re-establishes
+/// successfully every 120 s and traffic still does not return.
+///
+/// #[ignore] until ADR-0019 lands: the test pins the *bug*, so the gate must
+/// stay green while the fix is built. Un-ignore in the same commit as the fix.
+#[test]
+#[ignore = "ADR-0019: pins the epoch-divergence; un-ignore with the fix"]
+fn a_server_that_restarts_and_loses_its_session_still_carries_traffic() {
+    let suite = suite();
+    let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
+    let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("b key");
+
+    let a_peer = PeerConfig::new("b", b_identity.to_peer())
+        .with_allowed_ips([net("10.0.0.2/32")])
+        .with_endpoint(endpoint(B_EP));
+    let b_peer = PeerConfig::new("a", a_identity.to_peer()).with_allowed_ips([net("10.0.0.1/32")]);
+
+    let a_peer_identity = a_identity.to_peer();
+    let a = Device::new(
+        suite.clone(),
+        a_identity,
+        vec![a_peer],
+        &mut TestRng(0x1111),
+        0,
+    )
+    .expect("A's configuration is consistent");
+    let b = Device::new(
+        suite.clone(),
+        b_identity,
+        vec![b_peer],
+        &mut TestRng(0x2222),
+        0,
+    )
+    .expect("B's configuration is consistent");
+
+    let mut link = Net {
+        clock_ms: 0,
+        wall_s: 1_700_000_000,
+        hosts: vec![
+            Host::new(a, endpoint(A_EP), 0xAAAA),
+            Host::new(b, endpoint(B_EP), 0xBBBB),
+        ],
+        drop_types: Vec::new(),
+    };
+
+    // First handshake: both ends establish at epoch 0 and traffic flows.
+    link.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    link.settle();
+    assert_eq!(link.hosts[1].delivered, vec![ipv4(A_IP, B_IP, b"before")]);
+
+    // The server restarts: it keeps its identity and its peer configuration,
+    // and loses its session — exactly what a daemon restart does.
+    let restarted_b_identity =
+        StaticIdentity::generate(&*suite, &B_SEED).expect("the restarted server's key");
+    let restarted_b = Device::new(
+        suite,
+        restarted_b_identity,
+        vec![PeerConfig::new("a", a_peer_identity).with_allowed_ips([net("10.0.0.1/32")])],
+        &mut TestRng(0x2222),
+        0,
+    )
+    .expect("the restarted server's configuration is consistent");
+    link.hosts[1].device = restarted_b;
+    link.hosts[1].established.clear();
+    link.hosts[1].delivered.clear();
+
+    // The client rekeys on its own 120 s timer. Both ends must end up with a
+    // session, and traffic must flow.
+    link.advance(130_000);
+    link.pump(8);
+
+    let epoch_a = link.hosts[0].device.epoch(link.hosts[0].peer_id());
+    let epoch_b = link.hosts[1].device.epoch(link.hosts[1].peer_id());
+    assert!(
+        epoch_a.is_some() && epoch_b.is_some(),
+        "the tunnel did not re-establish: A={epoch_a:?} B={epoch_b:?}"
+    );
+    eprintln!("PROBE epoch_a={epoch_a:?} epoch_b={epoch_b:?}");
+
+    link.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    link.settle();
+    assert_eq!(
+        link.hosts[1].delivered,
+        vec![ipv4(A_IP, B_IP, b"after")],
+        "the tunnel re-established but carries no traffic"
+    );
+}

@@ -23,7 +23,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Vallum tunnel on {{ $labels.interface }} is down"
+          summary: "Vallum tunnel is down"
           description: >-
             No handshake for over 180 s, past the reject window. Clients are
             either blocked (if the guard is installed) or leaking.
@@ -37,7 +37,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Peer {{ $labels.name }} has not handshaked in 180 s"
+          summary: "Peer {{ $labels.peer }} has not handshaked in 180 s"
           description: >-
             Rekey is every 120 s, so 180 s means at least one rekey was missed
             and the session is past the reject point.
@@ -46,7 +46,7 @@ groups:
       # handshakes — wrong key, wrong suite, or an epoch mismatch after a
       # restart. 0.1/s is 6 per minute, well above background retry noise.
       - alert: VallumHandshakeRefused
-        expr: rate(vallum_handshakes_refused[5m]) > 0.1
+        expr: rate(vallum_loop_handshakes_refused_total[5m]) > 0.1
         for: 5m
         labels:
           severity: warning
@@ -60,7 +60,7 @@ groups:
       # sending. The fault lab reproduces this with FAULT=mtu1280; 1/s sustained
       # is past what the reassembly window can absorb.
       - alert: VallumFragmentsDropped
-        expr: rate(vallum_fragments_dropped[5m]) > 1
+        expr: rate(vallum_loop_fragments_dropped_total[5m]) > 1
         for: 5m
         labels:
           severity: warning
@@ -79,7 +79,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Vallum on {{ $labels.interface }} is past its stated capacity"
+          summary: "Vallum is past its stated capacity"
           description: >-
             Above the 2,000-peer target. Move peers to another daemon, or switch
             to the 0x0002 suite if the threat model allows it.
