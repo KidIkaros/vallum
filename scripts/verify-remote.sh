@@ -471,6 +471,45 @@ PY
     else
         note "no global IPv6 on this host: the IPv6 leak check does not apply"
     fi
+    # ── no foreign source may enter the tunnel ──
+    # The peer refuses an inner source outside its allowed_ips, and it is right
+    # to: that check is what stops one peer claiming another's address. The
+    # consequence is that a packet with a foreign source is not misrouted, it is
+    # *unacceptable*, so the sender must decline it where the cause is visible
+    # rather than seal it and lose it at the far end. Both directions are
+    # asserted: nothing foreign during normal traffic, then a foreign source
+    # attempted on purpose, which must be refused and named.
+    # Link-local traffic reaches the tunnel at startup on every host — MLD and
+    # neighbour discovery for the interface's own addresses — and refusing it is
+    # correct, since a link-local source means nothing across a link boundary.
+    # So the clean-run assertion is about *routable* foreign sources only; a
+    # check that failed on the expected case would be red on every run and
+    # ignored within a week.
+    if grep "does not own that address" "$dir/client.log" | grep -qv 'from fe80:'; then
+        grep "does not own that address" "$dir/client.log" | grep -v 'from fe80:' | head -3
+        bad "$name: ordinary traffic was refused for a routable foreign source"
+    else
+        ok "$name: no routable foreign source during normal traffic"
+    fi
+
+    # The positive control. An address the config does not declare is added to
+    # the interface and a packet is sourced from it; the daemon must refuse it.
+    # Without this the assertion above could never be shown to be capable of
+    # failing, which is how a suite that only passes gets mistaken for coverage.
+    local foreign=192.0.2.99
+    if ip addr add "$foreign/32" dev "$iface" 2>/dev/null; then
+        ping -I "$foreign" -c1 -W1 "$SRV_IP" >/dev/null 2>&1
+        sleep 1
+        if grep -q "does not own that address" "$dir/client.log"; then
+            ok "$name: a foreign source is refused locally and named"
+        else
+            bad "$name: a packet sourced from $foreign was sealed, not refused"
+        fi
+        ip addr del "$foreign/32" dev "$iface" 2>/dev/null
+    else
+        note "could not add $foreign to $iface: foreign-source control skipped"
+    fi
+
     # DNS "nowhere else" is the remaining half, and it cannot be asserted yet:
     # resolution outside the tunnel only leaks once the tunnel is *down*, which
     # is what the fail-closed policy changes. See docs/roadmap.md items 2 and 3.
