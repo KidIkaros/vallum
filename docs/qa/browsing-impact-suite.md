@@ -35,6 +35,22 @@ namespaces, and which today has **no** policy, DNS or fail-closed coverage at
 all (no match for `policy`, `blocked`, `53` or `dns` in 1,327 lines). That gap
 is itself the finding.
 
+`e2e-netns.sh` is not automatically safe either: its *primary* namespace is the
+invoking host's — `veth-a` lives in the current namespace and only `veth-b` is
+isolated (line 145). Running `vallum policy on` there would block the machine
+running the test, the same hazard that disqualified `verify-remote.sh`.
+
+The mechanism that makes it safe: `vallum policy` takes `--config` and acts on
+the namespace it is invoked in, with no `--netns` flag. So the test needs a
+**third namespace** of its own, and the command must run through
+`ip netns exec <ns> vallum policy on -c <config>`. Nothing outside that
+namespace is touched, and a mistake inside it cannot strand the host.
+
+**Done means:** in that third namespace, with a tunnel up, `vallum policy on`
+followed by killing the tunnel makes a lookup fail; `vallum policy off` makes
+the same lookup succeed. The off case is the control that proves the on case was
+measuring the policy and not a broken harness.
+
 Two distinct claims, and only the second is new:
 
 1. A lookup succeeds through the tunnel. *Already covered* by `dig @1.1.1.1`.
