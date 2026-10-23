@@ -122,8 +122,8 @@ pub(crate) fn verdict_carrying(
     session_age: Option<Duration>,
     dead_after: Duration,
     worst_delivery: Option<f64>,
-    degraded_for: Duration,
-    degraded_after: Duration,
+    degraded_duration: Duration,
+    degraded_threshold: Duration,
 ) -> Verdict {
     let handshake_live = session_age.is_some_and(|age| age < dead_after);
     if !handshake_live {
@@ -134,7 +134,7 @@ pub(crate) fn verdict_carrying(
     }
 
     let delivery_degraded = worst_delivery.is_some_and(|ratio| ratio < DELIVERY_FLOOR);
-    if delivery_degraded && degraded_for >= degraded_after {
+    if delivery_degraded && degraded_duration >= degraded_threshold {
         return match attached {
             true => Verdict::Withdraw(WithdrawReason::DeliveryDegraded),
             false => Verdict::Hold,
@@ -288,7 +288,7 @@ pub(crate) fn watch(
 
     let socket = control_socket(&config, config_path, &interface);
     let dead_after = dead_after();
-    let degraded_after = degraded_after();
+    let degraded_threshold = degraded_after();
     let failure_policy = FailurePolicy::from_config(&config);
     // Guard exactly what attach installed. A config whose routes are all covered
     // by its own interface installs nothing, so there is nothing to withdraw —
@@ -309,7 +309,7 @@ pub(crate) fn watch(
             let delivery = health.as_ref().and_then(|h| h.worst_delivery);
 
             let is_degraded = delivery.is_some_and(|ratio| ratio < DELIVERY_FLOOR);
-            let degraded_for = if is_degraded {
+            let degraded_duration = if is_degraded {
                 let start = degraded_since.get_or_insert_with(Instant::now);
                 start.elapsed()
             } else {
@@ -322,8 +322,8 @@ pub(crate) fn watch(
                 age,
                 dead_after,
                 delivery,
-                degraded_for,
-                degraded_after,
+                degraded_duration,
+                degraded_threshold,
             ) {
                 Verdict::Withdraw(reason) => {
                     let msg = match reason {
@@ -333,7 +333,7 @@ pub(crate) fn watch(
                         WithdrawReason::DeliveryDegraded => {
                             format!(
                                 "delivery below threshold (10%) for {}s",
-                                degraded_after.as_secs()
+                                degraded_threshold.as_secs()
                             )
                         }
                     };

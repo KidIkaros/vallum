@@ -78,7 +78,9 @@ pub(crate) fn policy_for(
         return Err("a full tunnel (allowed_ips 0.0.0.0/0) cannot use [quick] table = off".into());
     }
     let mark = config.interface.fwmark.filter(|mark| *mark != 0).ok_or(
-        "a full tunnel (allowed_ips 0.0.0.0/0) needs `[interface] fwmark` so the          tunnel's own packets can reach the real gateway; set e.g. `fwmark = 51820`          in the config, or a dead tunnel leaves this host with no route at all",
+        "a full tunnel (allowed_ips 0.0.0.0/0) needs `[interface] fwmark` so the \
+             tunnel's own packets can reach the real gateway; set e.g. `fwmark = 51820` \
+             in the config, or a dead tunnel leaves this host with no route at all",
     )?;
     Ok(Some(Policy {
         table: if table == "auto" {
@@ -221,6 +223,43 @@ impl RoutePlan {
         }
     }
 
+    /// The two policy rules a full tunnel's default route needs, in the order
+    /// they are installed: the lookup rule, then the suppression of the main
+    /// table's own default.
+    fn policy_rules(&mut self, policy: &Policy) {
+        let mark = policy.mark.to_string();
+        for v6 in [false, true] {
+            if (v6 && !policy.v6) || (!v6 && !policy.v4) {
+                continue;
+            }
+            self.rule(
+                v6,
+                &[
+                    "rule",
+                    "add",
+                    "not",
+                    "fwmark",
+                    &mark,
+                    "table",
+                    &policy.table,
+                ],
+            );
+            self.rule(
+                v6,
+                &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
+            );
+        }
+    }
+
+    /// The routing table a prefix goes into: a full tunnel's default route
+    /// lives in the policy table, everything else in whatever the caller said.
+    fn route_table<'a>(prefix: &Prefix, policy: Option<&'a Policy>, table: &'a str) -> &'a str {
+        match policy {
+            Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
+            _ => table,
+        }
+    }
+
     /// Every command must succeed: a half-applied plan is the failure this
     /// type exists to prevent.
     ///
@@ -343,34 +382,10 @@ pub(crate) fn plan_routes(
     let mut plan = RoutePlan::default();
     if let Some(policy) = &policy {
         // Rules before routes, so no lookup can find an empty table.
-        let mark = policy.mark.to_string();
-        for v6 in [false, true] {
-            if (v6 && !policy.v6) || (!v6 && !policy.v4) {
-                continue;
-            }
-            plan.rule(
-                v6,
-                &[
-                    "rule",
-                    "add",
-                    "not",
-                    "fwmark",
-                    &mark,
-                    "table",
-                    &policy.table,
-                ],
-            );
-            plan.rule(
-                v6,
-                &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
-            );
-        }
+        plan.policy_rules(policy);
     }
     for prefix in &routes {
-        let route_table = match &policy {
-            Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
-            _ => table,
-        };
+        let route_table = RoutePlan::route_table(prefix, policy.as_ref(), table);
         plan.route(interface, prefix, route_table);
     }
     Ok(plan)
@@ -387,10 +402,7 @@ pub(crate) fn plan_blackhole_routes(
     let policy = policy_for(config, &routes, table)?;
     let mut plan = RoutePlan::default();
     for prefix in &routes {
-        let route_table = match &policy {
-            Some(policy) if prefix.as_ipnet().prefix_len() == 0 => policy.table.as_str(),
-            _ => table,
-        };
+        let route_table = RoutePlan::route_table(prefix, policy.as_ref(), table);
         plan.blackhole(prefix, route_table);
     }
     Ok(plan)
@@ -458,28 +470,7 @@ pub(crate) fn teardown_plan(
                 plan.route(interface, prefix, &policy.table);
             }
         }
-        let mark = policy.mark.to_string();
-        for v6 in [false, true] {
-            if (v6 && !policy.v6) || (!v6 && !policy.v4) {
-                continue;
-            }
-            plan.rule(
-                v6,
-                &[
-                    "rule",
-                    "add",
-                    "not",
-                    "fwmark",
-                    &mark,
-                    "table",
-                    &policy.table,
-                ],
-            );
-            plan.rule(
-                v6,
-                &["rule", "add", "table", "main", "suppress_prefixlength", "0"],
-            );
-        }
+        plan.policy_rules(&policy);
     }
     for prefix in &routes {
         if prefix.as_ipnet().prefix_len() != 0 {

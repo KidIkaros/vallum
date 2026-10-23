@@ -20,7 +20,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
@@ -206,11 +206,14 @@ pub(crate) fn heal_config_on_disk(config_path: &Path, dry_run: bool) {
     }
 }
 
-pub(crate) fn up(
+/// Load the config, gate its hooks on the privilege boundary, persist the
+/// healed local mark, and derive the interface and table every command works
+/// against. This is the shared prologue of `up`, `down`, `attach` and `detach`.
+fn materialize(
     config_path: &Path,
     dry_run: bool,
     allow_insecure_config: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(Config, String, String), Box<dyn std::error::Error>> {
     let config = load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
     heal_config_on_disk(config_path, dry_run);
@@ -219,16 +222,121 @@ pub(crate) fn up(
         .name
         .clone()
         .unwrap_or_else(|| "vallum0".to_owned());
-    let table = config.quick.table.as_deref().unwrap_or("auto");
+    let table = config.quick.table.as_deref().unwrap_or("auto").to_owned();
+    Ok((config, interface, table))
+}
+
+/// Start the daemon, and record its pid so [`down`] and [`rollback`] can stop
+/// it by number rather than by search.
+fn spawn_daemon(binary: &str, config_path: &Path) -> Result<Child, Box<dyn std::error::Error>> {
+    let child = Command::new(binary)
+        .arg("run")
+        .arg("--config")
+        .arg(config_path)
+        .spawn()?;
+    let pidfile = config_path.with_extension("pid");
+    if let Err(error) = fs::write(&pidfile, child.id().to_string()) {
+        // The pidfile failed after the daemon started; do not leave it
+        // orphaned.
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.into());
+    }
+    Ok(child)
+}
+
+/// Stop the daemon recorded in the config's pidfile, if any.
+fn stop_daemon(config_path: &Path, dry_run: bool) {
+    let pidfile = config_path.with_extension("pid");
+    if let Ok(pid) = fs::read_to_string(&pidfile) {
+        let pid = pid.trim();
+        if dry_run {
+            println!("kill -TERM {pid}");
+        } else {
+            let _ = Command::new("kill").arg("-TERM").arg(pid).status();
+            let _ = fs::remove_file(&pidfile);
+        }
+    }
+}
+
+/// Everything after the daemon side of an attach: routes, DNS, then the post
+/// hooks. A DNS failure takes the routes back out — a full tunnel must not
+/// take the host's traffic while its resolver is unmanaged — and the caller's
+/// `undo` says what that means for it (`up` also stops the daemon).
+fn attach_host_side(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+    undo: impl FnOnce(&Config, &str, &str, bool),
+) -> Result<(), Box<dyn std::error::Error>> {
+    apply_routes(config, interface, table, dry_run)?;
+
+    if !config.quick.dns.is_empty() {
+        if let Err(error) = set_dns(
+            interface,
+            &config.quick.dns,
+            dns_domain(config).as_deref(),
+            dry_run,
+        ) {
+            undo(config, interface, table, dry_run);
+            return Err(format!(
+                "DNS configuration failed for `{interface}`: {error}; refusing to attach to prevent DNS leaks \
+                 (set `[quick] dns = []` if you manage DNS manually)"
+            )
+            .into());
+        }
+    }
+
+    for hook in &config.quick.post_up {
+        run_hook(hook, dry_run)?;
+    }
+    Ok(())
+}
+
+/// The host-level half of teardown: down hooks, routes, DNS, then the caller's
+/// daemon work, then post hooks. `down` stops the daemon in between;
+/// `detach` has nothing to stop.
+fn withdraw_host_side(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    dry_run: bool,
+    between: impl FnOnce(),
+) -> Result<(), Box<dyn std::error::Error>> {
+    for hook in &config.quick.pre_down {
+        run_hook(hook, dry_run)?;
+    }
+
+    remove_routes(config, interface, table, dry_run);
+    if !config.quick.dns.is_empty() {
+        unset_dns(interface, dry_run)?;
+    }
+
+    between();
+
+    for hook in &config.quick.post_down {
+        run_hook(hook, dry_run)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn up(
+    config_path: &Path,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
 
     for hook in &config.quick.pre_up {
         run_hook(hook, dry_run)?;
     }
 
-    let result = up_after_pre(&config, config_path, &interface, table, dry_run);
+    let result = up_after_pre(&config, config_path, &interface, &table, dry_run);
     if result.is_err() {
         // A partially applied `up` must not leave a daemon or routes behind.
-        rollback(&config, config_path, &interface, table, dry_run);
+        rollback(&config, config_path, &interface, &table, dry_run);
     }
     result
 }
@@ -246,21 +354,7 @@ fn up_after_pre(
         println!("{binary} run --config {}", config_path.display());
         None
     } else {
-        let child = Command::new(&binary)
-            .arg("run")
-            .arg("--config")
-            .arg(config_path)
-            .spawn()?;
-        let pidfile = config_path.with_extension("pid");
-        if let Err(error) = fs::write(&pidfile, child.id().to_string()) {
-            // The pidfile failed after the daemon started; do not leave it
-            // orphaned.
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error.into());
-        }
-        Some(child)
+        Some(spawn_daemon(&binary, config_path)?)
     };
 
     if !dry_run {
@@ -268,27 +362,9 @@ fn up_after_pre(
         wait_for_session(config, config_path, interface)?;
     }
 
-    apply_routes(config, interface, table, dry_run)?;
-
-    if !config.quick.dns.is_empty() {
-        if let Err(error) = set_dns(
-            interface,
-            &config.quick.dns,
-            dns_domain(config).as_deref(),
-            dry_run,
-        ) {
-            rollback(config, config_path, interface, table, dry_run);
-            return Err(format!(
-                "DNS configuration failed for `{interface}`: {error}; refusing to attach to prevent DNS leaks \
-                 (set `[quick] dns = []` if you manage DNS manually)"
-            )
-            .into());
-        }
-    }
-
-    for hook in &config.quick.post_up {
-        run_hook(hook, dry_run)?;
-    }
+    attach_host_side(config, interface, table, dry_run, |c, i, t, d| {
+        rollback(c, config_path, i, t, d)
+    })?;
 
     if let Some(mut child) = child.take() {
         // A short-lived daemon is a failure; report it rather than leaving a
@@ -306,18 +382,7 @@ fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, d
     if !config.quick.dns.is_empty() {
         let _ = unset_dns(interface, dry_run);
     }
-    let pidfile = config_path.with_extension("pid");
-    if let Ok(pid) = fs::read_to_string(&pidfile) {
-        let pid = pid.trim();
-        if dry_run {
-            println!("kill -TERM {pid}");
-        } else {
-            let _ = Command::new("kill").arg("-TERM").arg(pid).status();
-        }
-    }
-    if !dry_run {
-        let _ = fs::remove_file(&pidfile);
-    }
+    stop_daemon(config_path, dry_run);
 }
 
 pub(crate) fn down(
@@ -325,40 +390,10 @@ pub(crate) fn down(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_normalized(config_path)?;
-    check_config_ownership(config_path, &config, allow_insecure_config)?;
-    heal_config_on_disk(config_path, dry_run);
-    let interface = config
-        .interface
-        .name
-        .clone()
-        .unwrap_or_else(|| "vallum0".to_owned());
-    let table = config.quick.table.as_deref().unwrap_or("auto");
-
-    for hook in &config.quick.pre_down {
-        run_hook(hook, dry_run)?;
-    }
-
-    remove_routes(&config, &interface, table, dry_run);
-    if !config.quick.dns.is_empty() {
-        unset_dns(&interface, dry_run)?;
-    }
-
-    let pidfile = config_path.with_extension("pid");
-    if let Ok(pid) = fs::read_to_string(&pidfile) {
-        let pid = pid.trim();
-        if dry_run {
-            println!("kill -TERM {pid}");
-        } else {
-            let _ = Command::new("kill").arg("-TERM").arg(pid).status();
-            let _ = fs::remove_file(&pidfile);
-        }
-    }
-
-    for hook in &config.quick.post_down {
-        run_hook(hook, dry_run)?;
-    }
-    Ok(())
+    let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
+    withdraw_host_side(&config, &interface, &table, dry_run, || {
+        stop_daemon(config_path, dry_run)
+    })
 }
 
 /// Apply the config's host-level work to an interface someone else started.
@@ -371,15 +406,7 @@ pub(crate) fn attach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_normalized(config_path)?;
-    check_config_ownership(config_path, &config, allow_insecure_config)?;
-    heal_config_on_disk(config_path, dry_run);
-    let interface = config
-        .interface
-        .name
-        .clone()
-        .unwrap_or_else(|| "vallum0".to_owned());
-    let table = config.quick.table.as_deref().unwrap_or("auto");
+    let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
 
     for hook in &config.quick.pre_up {
         run_hook(hook, dry_run)?;
@@ -396,28 +423,7 @@ pub(crate) fn attach(
         wait_for_session(&config, config_path, &interface)?;
     }
 
-    apply_routes(&config, &interface, table, dry_run)?;
-
-    if !config.quick.dns.is_empty() {
-        if let Err(error) = set_dns(
-            &interface,
-            &config.quick.dns,
-            dns_domain(&config).as_deref(),
-            dry_run,
-        ) {
-            remove_routes(&config, &interface, table, dry_run);
-            return Err(format!(
-                "DNS configuration failed for `{interface}`: {error}; refusing to attach to prevent DNS leaks \
-                 (set `[quick] dns = []` if you manage DNS manually)"
-            )
-            .into());
-        }
-    }
-
-    for hook in &config.quick.post_up {
-        run_hook(hook, dry_run)?;
-    }
-    Ok(())
+    attach_host_side(&config, &interface, &table, dry_run, remove_routes)
 }
 
 /// Remove what [`attach`] applied, leaving the daemon running.
@@ -426,30 +432,8 @@ pub(crate) fn detach(
     dry_run: bool,
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_normalized(config_path)?;
-    check_config_ownership(config_path, &config, allow_insecure_config)?;
-    heal_config_on_disk(config_path, dry_run);
-    let interface = config
-        .interface
-        .name
-        .clone()
-        .unwrap_or_else(|| "vallum0".to_owned());
-    let table = config.quick.table.as_deref().unwrap_or("auto");
-
-    for hook in &config.quick.pre_down {
-        run_hook(hook, dry_run)?;
-    }
-
-    remove_routes(&config, &interface, table, dry_run);
-
-    if !config.quick.dns.is_empty() {
-        unset_dns(&interface, dry_run)?;
-    }
-
-    for hook in &config.quick.post_down {
-        run_hook(hook, dry_run)?;
-    }
-    Ok(())
+    let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
+    withdraw_host_side(&config, &interface, &table, dry_run, || ())
 }
 
 pub(crate) fn save(
@@ -1132,6 +1116,32 @@ mod tests {
     fn no_dns_tool_and_unwritable_resolv_is_reported_as_none() {
         assert_eq!(dns_backend_from(|_| false, true, false), DnsBackend::None);
         assert_eq!(dns_backend_from(|_| false, false, false), DnsBackend::None);
+    }
+
+    #[test]
+    fn a_failed_backup_never_touches_resolv_conf() {
+        // The hazard the fix closes: the backup is the only way back, so a
+        // backup that cannot be written must stop everything before the
+        // resolver file is deleted or overwritten.
+        let dir =
+            std::env::temp_dir().join(format!("vallum-quick-resolv-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let resolv = dir.join("resolv.conf");
+        fs::write(&resolv, "nameserver 192.168.1.1\n").unwrap();
+        // A path that cannot be turned into the backup's parent directory.
+        let blocker = dir.join("blocker");
+        fs::write(&blocker, "not a directory").unwrap();
+        let bak = blocker.join("resolv.conf.bak");
+
+        let servers = vec!["1.1.1.1".to_owned()];
+        assert!(backup_and_write_resolv_conf_at(&resolv, &bak, "v0", &servers, false).is_err());
+        assert_eq!(
+            fs::read_to_string(&resolv).unwrap(),
+            "nameserver 192.168.1.1\n"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
