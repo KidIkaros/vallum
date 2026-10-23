@@ -329,6 +329,18 @@ pub fn unguard(dry_run: bool) -> Result<Vec<String>, Error> {
     hostnet::apply(&unguard_steps(), dry_run)
 }
 
+/// Whether an explicit `on` is declined because the config's own shape says a
+/// guard would do more harm than good.
+///
+/// A split tunnel under `auto` deliberately leaves egress alone: blocking it
+/// would cut the user off from everything the tunnel does not carry. Asking for
+/// `on` does not override that, so the request is refused — and must be
+/// reported as a refusal, because a refusal that exits 0 is indistinguishable
+/// from a guard that was installed.
+pub fn declines_guard(config: &Config, wanted: Mode) -> bool {
+    !is_full_tunnel(config) && wanted != Mode::On
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -364,6 +376,40 @@ allowed_ips = ["0.0.0.0/0"]
             "a tunnel with no v6 address must drop v6, or it escapes"
         );
         assert!(!rules.contains("meta nfproto ipv4 drop"));
+    }
+
+    /// The same peer, carried by a split tunnel, with no `[quick] policy`.
+    const SPLIT_V4: &str = r#"
+[interface]
+name = "vallum-laptop"
+private_key = "k.key"
+addresses = ["10.7.0.2/32"]
+
+[[peer]]
+name = "server"
+public_key = "vallum1:0003:aa:-"
+endpoint = "203.0.113.5:51820"
+allowed_ips = ["10.7.0.1/32"]
+"#;
+
+    #[test]
+    fn a_split_tunnel_under_auto_declines_an_explicit_on() {
+        let split = config(SPLIT_V4);
+        assert!(declines_guard(&split, Mode::from_config(&split)));
+    }
+
+    #[test]
+    fn a_split_tunnel_that_asks_for_on_is_not_declined() {
+        // The documented escape: state the intent in the config and a split
+        // tunnel is guarded anyway.
+        let asked = config(&SPLIT_V4.replace("[[peer]]", "[quick]\npolicy = \"on\"\n\n[[peer]]"));
+        assert!(!declines_guard(&asked, Mode::from_config(&asked)));
+    }
+
+    #[test]
+    fn a_full_tunnel_under_auto_is_not_declined() {
+        let full = config(&FULL_V4.replace("policy = \"on\"\n", ""));
+        assert!(!declines_guard(&full, Mode::from_config(&full)));
     }
 
     #[test]

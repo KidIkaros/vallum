@@ -485,8 +485,12 @@ PY
     # So the clean-run assertion is about *routable* foreign sources only; a
     # check that failed on the expected case would be red on every run and
     # ignored within a week.
-    if grep "does not own that address" "$dir/client.log" | grep -qv 'from fe80:'; then
-        grep "does not own that address" "$dir/client.log" | grep -v 'from fe80:' | head -3
+    refusals() {
+        grep "does not own that address" "$dir/client.log" 2>/dev/null | grep -v 'from fe80:'
+    }
+
+    if [ -n "$(refusals | head -1)" ]; then
+        refusals | head -3
         bad "$name: ordinary traffic was refused for a routable foreign source"
     else
         ok "$name: no routable foreign source during normal traffic"
@@ -500,7 +504,8 @@ PY
     if ip addr add "$foreign/32" dev "$iface" 2>/dev/null; then
         ping -I "$foreign" -c1 -W1 "$SRV_IP" >/dev/null 2>&1
         sleep 1
-        if grep -q "does not own that address" "$dir/client.log"; then
+        if grep -q "does not own that address" "$dir/client.log" &&
+            grep "does not own that address" "$dir/client.log" | grep -q "from $foreign"; then
             ok "$name: a foreign source is refused locally and named"
         else
             bad "$name: a packet sourced from $foreign was sealed, not refused"
