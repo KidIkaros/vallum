@@ -369,7 +369,32 @@ fn attach(
     }
 
     if !dry_run {
-        wait_for_interface(&interface)?;
+        // Nothing in this function starts a daemon: `attach` runs the config's
+        // `pre_up` hooks and then waits for an interface those hooks were
+        // supposed to create. When there are no hooks the wait can only time
+        // out, and "did not come up" then describes the symptom while hiding
+        // the only fact that matters — that nothing was ever going to create it.
+        wait_for_interface(&interface).map_err(|_| -> Box<dyn std::error::Error> {
+            if config.quick.pre_up.is_empty() {
+                let unit = config_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("vallum0");
+                format!(
+                    "interface `{interface}` did not appear, and no `pre_up` hook is \
+                     configured, so nothing started the daemon. Start it first \
+                     (`systemctl start vallum@{unit}`), or add a `pre_up` hook to [quick]."
+                )
+                .into()
+            } else {
+                format!(
+                    "interface `{interface}` did not appear within 5s of running {} `pre_up` \
+                     hook(s); check the daemon's log for why it exited",
+                    config.quick.pre_up.len()
+                )
+                .into()
+            }
+        })?;
         wait_for_session(&config, config_path, &interface)?;
     }
 
