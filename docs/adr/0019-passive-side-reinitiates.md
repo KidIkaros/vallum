@@ -1,6 +1,6 @@
 # 19. The passive side must re-initiate, or a restart costs every client 120 s
 
-**Status:** accepted — unblocked, see "The blocker is resolved" below · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
+**Status:** implemented (`064949c`, protocol tests pin both restart directions and the rate limit) · **Date:** 2026-10-22 · **Found by:** restarting a live server under a full-tunnel client
 
 ## Context
 

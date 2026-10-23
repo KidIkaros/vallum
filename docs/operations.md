@@ -142,19 +142,21 @@ sudo ip link set <uplink> down
 
 ## Restart behaviour
 
-## Restarting a server disconnects every client
+## Restarting a server is a seconds-long blip for clients
 
-A client only re-establishes when its own rekey timer expires, because the server
-never initiates a handshake — it is always the responder (ADR-0019). Measured on
-a live deployment: a client whose server restarted recovered only at its next
-rekey, **120 s later**, and a 45 s observation window after the restart saw no
-successful traffic at all.
+When a client learns mid-tunnel that its server has restarted, the outage is a
+few seconds: every datagram from a still-running client names a session the
+restarted server no longer holds, and the server answers that signal (rate-limited,
+per ADR-0019) with a fresh handshake to the client's address. The old behaviour —
+a silent drop and a wait for the client's own rekey timer, **120 s** measured on a
+live deployment — is fixed.
 
-So a server restart is a 120-second outage for every attached client, and a
-full-tunnel client is blackholed for all of it. Plan it: detach clients first, or
-restart during a window and tell people. `persistent_keepalive = 25` does not
-help — a keepalive is a data packet on an existing session, not a probe that can
-discover the session is gone.
+The recovery is visible: `vallum_peer_reinit_offered_total` in the metrics output
+counts offers, and a fresh `vallum status` shows the handshake age reset.
+
+What still costs real seconds: a stopped server that is *not* running cannot
+answer anything, so clients recover only when the server is back. A restart that
+stops and never starts is an outage, not a blip.
 
 `vallum@` carries `StartLimitBurst=3` in `StartLimitIntervalSec=60`, so a config
 that cannot start fails after three attempts instead of the 259 restarts a
