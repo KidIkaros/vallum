@@ -209,16 +209,32 @@ impl RoutePlan {
         out
     }
 
+    /// The contract at the boundary: only lines this crate could have written
+    /// are commands — `route ...`, `rule ...`, or `-6` followed by one of
+    /// those. Anything else in the record is corruption or tampering, not a
+    /// refusal to execute: it is named as such and skipped rather than handed
+    /// to `ip` verbatim.
     pub(crate) fn parse(text: &str) -> Self {
         Self {
             commands: text
                 .lines()
-                .map(|line| {
-                    line.split_whitespace()
+                .filter_map(|line| {
+                    let command: Vec<String> = line
+                        .split_whitespace()
                         .map(str::to_owned)
-                        .collect::<Vec<String>>()
+                        .collect();
+                    if command.is_empty() {
+                        return None;
+                    }
+                    if is_plan_verb(&command) {
+                        Some(command)
+                    } else {
+                        eprintln!(
+                            "vallum-quick: ignoring a line the route record could not have written: {line}"
+                        );
+                        None
+                    }
                 })
-                .filter(|command| !command.is_empty())
                 .collect(),
         }
     }
@@ -297,6 +313,17 @@ impl RoutePlan {
         for command in &self.commands {
             let _ = ip(command, dry_run);
         }
+    }
+}
+
+fn is_plan_verb(command: &[String]) -> bool {
+    match command.first().map(String::as_str) {
+        Some("route") | Some("rule") => true,
+        Some("-6") => matches!(
+            command.get(1).map(String::as_str),
+            Some("route") | Some("rule")
+        ),
+        _ => false,
     }
 }
 

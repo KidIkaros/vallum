@@ -46,7 +46,20 @@ pub(crate) enum FailurePolicy {
     Restore,
 }
 
+/// Which failure policy applies: the environment first, the config second,
+/// fail closed last. Precedence is visible here, at the edge, because this is
+/// the one place a name must not hide which source overrode which.
+pub(crate) fn failure_policy(config: &Config) -> FailurePolicy {
+    std::env::var("VALLUM_FAILURE_POLICY")
+        .ok()
+        .and_then(|value| FailurePolicy::parse(&value))
+        .or_else(|| Some(FailurePolicy::from_config(config)))
+        .unwrap_or(FailurePolicy::Block)
+}
+
 impl FailurePolicy {
+    /// The policy in the config, or the default. Pure: the environment is
+    /// consulted by [`failure_policy`] at the wire's edge, not here.
     pub(crate) fn from_config(config: &Config) -> Self {
         if let Ok(val) = std::env::var("VALLUM_FAILURE_POLICY") {
             if let Some(policy) = Self::parse(&val) {
@@ -265,6 +278,52 @@ fn session_health(socket: &Path) -> Option<SessionHealth> {
     Some(parse_session_health(&reply))
 }
 
+/// Take the tunnel routes out according to the failure policy, and release it
+/// truthfully:
+///
+/// * on `Block`, the blackhole `route replace` **overwrites** the tunnel routes
+///   in the policy table, so the recorded plan no longer describes what is
+///   installed. The record is deleted for the same reason [`remove_routes`]
+///   deletes it on `Restore` — otherwise a restarted watchdog re-derives
+///   `attached` as true from the stale record, and with a live session it
+///   holds forever: the blackhole outlives the failure that installed it and
+///   the recovered host stays offline until a human intervenes.
+/// * on `Restore`, [`remove_routes`] already removes the record.
+pub(crate) fn withdraw_for_failure(
+    config: &Config,
+    interface: &str,
+    table: &str,
+    policy: FailurePolicy,
+    dry_run: bool,
+    msg: &str,
+) {
+    match policy {
+        FailurePolicy::Block => {
+            if dry_run {
+                println!("would block {interface}: {msg} (fail-closed blackhole)");
+            } else {
+                apply_blackhole_routes(config, interface, table, false);
+                let _ = std::fs::remove_file(state_path(interface));
+                eprintln!(
+                    "vallum-quick: {interface}: {msg} — blackhole routes installed (fail-closed), \
+                     traffic blocked"
+                );
+            }
+        }
+        FailurePolicy::Restore => {
+            if dry_run {
+                println!("would withdraw {interface}: {msg}");
+            } else {
+                remove_routes(config, interface, table, false);
+                eprintln!(
+                    "vallum-quick: {interface}: {msg} — routes withdrawn, \
+                     this host keeps its own gateway"
+                );
+            }
+        }
+    }
+}
+
 /// Hold the routes only while the session is alive and carrying.
 ///
 /// `attach` gates installation on a handshake, but nothing took the routes back
@@ -289,7 +348,7 @@ pub(crate) fn watch(
     let socket = control_socket(&config, config_path, &interface);
     let dead_after = dead_after();
     let degraded_threshold = degraded_after();
-    let failure_policy = FailurePolicy::from_config(&config);
+    let failure_policy = failure_policy(&config);
     // Guard exactly what attach installed. A config whose routes are all covered
     // by its own interface installs nothing, so there is nothing to withdraw —
     // but the process stays resident so the unit has one lifecycle either way.
@@ -337,30 +396,7 @@ pub(crate) fn watch(
                             )
                         }
                     };
-                    match failure_policy {
-                        FailurePolicy::Block => {
-                            if dry_run {
-                                println!("would block {interface}: {msg} (fail-closed blackhole)");
-                            } else {
-                                apply_blackhole_routes(&config, &interface, table, false);
-                                eprintln!(
-                                    "vallum-quick: {interface}: {msg} — blackhole routes installed (fail-closed), \
-                                     traffic blocked"
-                                );
-                            }
-                        }
-                        FailurePolicy::Restore => {
-                            if dry_run {
-                                println!("would withdraw {interface}: {msg}");
-                            } else {
-                                remove_routes(&config, &interface, table, false);
-                                eprintln!(
-                                    "vallum-quick: {interface}: {msg} — routes withdrawn, \
-                                     this host keeps its own gateway"
-                                );
-                            }
-                        }
-                    }
+                    withdraw_for_failure(&config, &interface, table, failure_policy, dry_run, &msg);
                     attached = false;
                 }
                 Verdict::Restore => {

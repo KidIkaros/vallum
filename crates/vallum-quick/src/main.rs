@@ -526,12 +526,12 @@ mod tests {
     };
     use crate::hooks::check_config_ownership_as;
     use crate::routes::{
-        covers, dev_of, managed_routes, plan_blackhole_routes, plan_routes, policy_for,
-        route_query, teardown_plan, Prefix, RoutePlan, POLICY_TABLE,
+        covers, dev_of, managed_routes, plan_blackhole_routes, plan_routes, policy_for, read_plan,
+        route_query, state_path, teardown_plan, Prefix, RoutePlan, POLICY_TABLE,
     };
     use crate::watch::{
-        clamp_dead_after, parse_session_health_at, verdict, verdict_carrying, FailurePolicy,
-        Verdict, WithdrawReason, DEAD_AFTER, WATCH_POLL,
+        clamp_dead_after, parse_session_health_at, verdict, verdict_carrying, withdraw_for_failure,
+        FailurePolicy, Verdict, WithdrawReason, DEAD_AFTER, WATCH_POLL,
     };
 
     fn prefix(text: &str) -> Prefix {
@@ -1244,6 +1244,84 @@ mod tests {
     fn failure_policy_defaults_to_block() {
         let config = config_with("fp-def", "");
         assert_eq!(FailurePolicy::from_config(&config), FailurePolicy::Block);
+    }
+
+    #[test]
+    fn failure_policy_honors_the_config_and_the_edge_supplies_the_environment() {
+        // `from_config` is the pure projection now: the environment is read at
+        // the `watch` edge, with the precedence env → config → block spelled
+        // out there. This pins the pure half.
+        let restore = config_with("fp-restore", "\n[quick]\nfailure_policy = \"restore\"\n");
+        assert_eq!(FailurePolicy::from_config(&restore), FailurePolicy::Restore);
+        let bogus = config_with(
+            "fp-bogus",
+            "\n[quick]\nfailure_policy = \"patch-everything\"\n",
+        );
+        assert_eq!(FailurePolicy::from_config(&bogus), FailurePolicy::Block);
+    }
+
+    #[test]
+    fn a_fail_closed_withdraw_releases_the_record_so_a_restart_is_not_stuck() {
+        // The bug this closes: a blackhole withdraw overwrote the tunnel
+        // routes but left the plan record, so a restarted watchdog re-derived
+        // `attached` as true and, with the session live, held forever — a
+        // recovered host stayed blackholed until someone intervened.
+        let dir = std::env::temp_dir().join(format!("vallum-quick-block-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nfwmark = 51820\n\n\
+             [[peer]]\nname = \"p\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        std::env::set_var("VALLUM_STATE_DIR", &dir);
+        let state = state_path("v0");
+        fs::write(
+            &state,
+            "rule add not fwmark 51820 table 51820\n\
+             rule add table main suppress_prefixlength 0\n\
+             route add 0.0.0.0/0 dev v0 table 51820\n",
+        )
+        .unwrap();
+
+        assert!(read_plan(&state).is_some());
+
+        // Fail closed: the blackhole replaces the tunnel routes, so the
+        // record must not claim they are still installed.
+        withdraw_for_failure(
+            &Config::load(&path).unwrap(),
+            "v0",
+            "auto",
+            FailurePolicy::Block,
+            false,
+            "no handshake",
+        );
+        assert!(
+            !state.exists(),
+            "the record outlived the routes it described"
+        );
+
+        // A restarted watchdog re-derives `attached = false` — and a live
+        // session then reaches the Restore arm instead of holding forever.
+        assert!(read_plan(&state).is_none());
+
+        std::env::remove_var("VALLUM_STATE_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_record_line_is_never_a_command() {
+        // The boundary contract: the record is parsed by whatever reads the
+        // state file, so only lines this crate could have written become
+        // commands; anything else is named and skipped, never handed to `ip`.
+        let plan = RoutePlan::parse(
+            "route add 10.9.0.0/24 dev v0\n\
+             echo hello && rm -rf /\n\
+             addr add 1.2.3.4 dev lo\n",
+        );
+        assert_eq!(plan.render(), "route add 10.9.0.0/24 dev v0\n");
     }
 
     #[test]
