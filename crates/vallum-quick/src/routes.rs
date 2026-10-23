@@ -53,7 +53,7 @@ pub(crate) const POLICY_TABLE: &str = "51820";
 /// 0` leaves every non-default route to the main table. The daemon marks its
 /// own UDP packets (`[interface] fwmark` → `SO_MARK`), so its handshake and
 /// data escape to the real gateway while everything else enters the tunnel.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Policy {
     pub(crate) table: String,
     pub(crate) mark: u32,
@@ -183,6 +183,12 @@ impl RoutePlan {
     }
 
     /// `add`/`replace` → `del`, last command first: installation order reversed.
+    ///
+    /// This is a one-way map, not an involution: a `replace` re-reversed comes
+    /// back as an `add`, because the `del` it became cannot remember where it
+    /// started. Nothing in live paths reverses twice — the record only ever
+    /// holds what [`plan_routes`] built, and teardown runs a single reversal —
+    /// and the double-reverse property is pinned at that scale in `tests`.
     pub(crate) fn reversed(&self) -> Self {
         let mut commands: Vec<Vec<String>> = self.commands.iter().rev().cloned().collect();
         for command in &mut commands {
@@ -574,4 +580,166 @@ fn ip(args: &[String], dry_run: bool) -> Result<(), Box<dyn std::error::Error>> 
         return Err(format!("ip {} failed", args.join(" ")).into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn a_table() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("auto".to_owned()),
+            Just("main".to_owned()),
+            Just("51820".to_owned()),
+        ]
+    }
+
+    fn an_interface() -> impl Strategy<Value = String> {
+        prop_oneof![Just("v0".to_owned()), Just("demo".to_owned())]
+    }
+
+    /// Any prefix, either family. Built through `Prefix::new` so `ipnet`
+    /// normalizes host bits instead of trusting the generator to produce
+    /// canonical addresses.
+    fn a_prefix() -> impl Strategy<Value = Prefix> {
+        prop_oneof![
+            (any::<u32>(), 0u8..=32).prop_map(|(bits, len)| {
+                Prefix::new(ipnet::IpNet::new(IpAddr::V4(Ipv4Addr::from(bits)), len).unwrap())
+            }),
+            (any::<u128>(), 0u8..=128).prop_map(|(bits, len)| {
+                Prefix::new(ipnet::IpNet::new(IpAddr::V6(Ipv6Addr::from(bits)), len).unwrap())
+            }),
+        ]
+    }
+
+    fn a_policy() -> impl Strategy<Value = Policy> {
+        (any::<u16>(), a_table(), any::<bool>(), any::<bool>())
+            .prop_map(|(mark, table, v4, v6)| Policy {
+                table,
+                mark: u32::from(mark),
+                v4,
+                v6,
+            })
+            // No family at all installs no rules and contributes nothing.
+            .prop_filter("a policy must cover at least one family".to_owned(), |p| {
+                p.v4 || p.v6
+            })
+    }
+
+    /// One constructor call, as [`RoutePlan`] takes any order of them.
+    #[derive(Debug, Clone)]
+    enum Step {
+        Route(Prefix, String, String),
+        Blackhole(Prefix, String, String),
+        Rules(Policy),
+    }
+
+    fn a_step() -> BoxedStrategy<Step> {
+        prop_oneof![
+            (a_prefix(), an_interface(), a_table())
+                .prop_map(|(prefix, interface, table)| Step::Route(prefix, interface, table)),
+            (a_prefix(), an_interface(), a_table())
+                .prop_map(|(prefix, interface, table)| Step::Blackhole(prefix, interface, table)),
+            a_policy().prop_map(Step::Rules),
+        ]
+        .boxed()
+    }
+
+    /// Every plan this crate can emit: routes, blackholes and policy rules in
+    /// any order and combination, as the constructors produce them.
+    fn a_plan() -> impl Strategy<Value = RoutePlan> {
+        proptest::collection::vec(a_step(), 0..=6).prop_map(|steps| {
+            let mut plan = RoutePlan::default();
+            for step in steps {
+                match step {
+                    Step::Route(prefix, interface, table) => {
+                        plan.route(&interface, &prefix, &table);
+                    }
+                    // The interface argument is ignored; the strategy still
+                    // shapes it to keep the call site honest.
+                    Step::Blackhole(prefix, _interface, table) => {
+                        plan.blackhole(&prefix, &table);
+                    }
+                    Step::Rules(policy) => plan.policy_rules(&policy),
+                }
+            }
+            plan
+        })
+    }
+
+    /// What reaches the state file: [`plan_routes`] output only, i.e. route
+    /// adds and policy rules — never a blackhole (those are installed ad hoc
+    /// and never recorded), and never anything but `add` verbs.
+    fn a_record_plan() -> impl Strategy<Value = RoutePlan> {
+        let record_step = prop_oneof![
+            (a_prefix(), an_interface(), a_table())
+                .prop_map(|(prefix, interface, table)| Step::Route(prefix, interface, table)),
+            a_policy().prop_map(Step::Rules),
+        ];
+        proptest::collection::vec(record_step, 0..=6).prop_map(|steps| {
+            let mut plan = RoutePlan::default();
+            for step in steps {
+                match step {
+                    Step::Route(prefix, interface, table) => {
+                        plan.route(&interface, &prefix, &table);
+                    }
+                    Step::Rules(policy) => plan.policy_rules(&policy),
+                    Step::Blackhole(..) => unreachable!("record plans never blackhole"),
+                }
+            }
+            plan
+        })
+    }
+
+    /// Blackholes alone, in the shapes [`plan_blackhole_routes`] builds.
+    fn a_blackhole_plan() -> impl Strategy<Value = RoutePlan> {
+        proptest::collection::vec((a_prefix(), a_table()), 0..=6).prop_map(|steps| {
+            let mut plan = RoutePlan::default();
+            for (prefix, table) in steps {
+                plan.blackhole(&prefix, &table);
+            }
+            plan
+        })
+    }
+
+    proptest! {
+        /// The record is written with [`RoutePlan::render`] and read back
+        /// with [`RoutePlan::parse`]; nothing may be lost in between.
+        #[test]
+        fn parse_round_trips_render(plan in a_plan()) {
+            prop_assert_eq!(RoutePlan::parse(&plan.render()), plan);
+        }
+
+        /// Reversal must be its own inverse at the scale where shape matters:
+        /// over record plans (`add` verbs only). Blackhole plans are excluded
+        /// by contract — their `replace` verb reverses to `del` and cannot
+        /// remember which it came from; see [`RoutePlan::reversed`].
+        #[test]
+        fn reversing_twice_restores_the_plan(plan in a_record_plan()) {
+            prop_assert_eq!(plan.reversed().reversed(), plan);
+        }
+
+        /// What a blackhole plan actually owes teardown: single-reversed, it
+        /// removes every blackhole it installed, last-first, same prefix, same
+        /// table — regardless of how the verb itself round-trips.
+        #[test]
+        fn reversing_a_blackhole_plan_removes_every_blackhole(plan in a_blackhole_plan()) {
+            let teardown = plan.reversed();
+            let removals: Vec<&Vec<String>> = teardown.commands.iter().collect();
+            let installed: Vec<&Vec<String>> = plan.commands.iter().collect();
+            prop_assert_eq!(removals.len(), installed.len());
+            for (installed, removed) in installed.iter().rev().zip(removals) {
+                let marker = installed.iter().position(|arg| arg == "blackhole").unwrap();
+                prop_assert_eq!(&installed[marker - 1], "replace");
+                prop_assert_eq!(&removed[marker], "blackhole");
+                prop_assert_eq!(&removed[marker - 1], "del");
+                prop_assert_eq!(&removed[marker..], &installed[marker..]);
+            }
+        }
+    }
 }

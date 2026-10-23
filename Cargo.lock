@@ -3537,6 +3537,7 @@ version = "1.6.2"
 dependencies = [
  "clap 4.6.7",
  "ipnet",
+ "proptest",
  "vallum-config",
  "vallum-core",
 ]
