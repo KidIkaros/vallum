@@ -3,8 +3,12 @@
 Roadmap item 1. The suite that proves what a browser experiences through
 Vallum, and the definition of done for the leak work in items 2, 3 and 4.
 
-Runs from `scripts/verify-remote.sh` against a real server, because a same-host
-client cannot exercise egress.
+Runs from `scripts/verify-remote.sh` against a real server for the assertions
+that need real egress and a real client log (A3, the oversized payload, the
+egress-device checks), and from `scripts/e2e-netns.sh` in disposable network
+namespaces for the assertions that would otherwise block or re-route the
+machine running the tests (A1, A2). The split is deliberate, not accidental:
+see "Where each assertion lives".
 
 ## Correction to the roadmap's problem statement
 
@@ -123,13 +127,42 @@ is how a tunnel dropping half its datagrams reported healthy for a whole session
 
 ## Tickets, blockers first
 
-| # | Ticket | Blocked by | Done means |
-|---|---|---|---|
-| T1 | A3: foreign-source assertion + positive control | — | injecting a foreign source fails the suite; the clean run passes |
-| T2 | A1: DNS closed with the tunnel down, plus the policy-off control | — | runs in `e2e-netns.sh`, not `verify-remote.sh`; both directions observed, each failing when its condition is removed |
-| T3 | A2: run the leak assertions under a full tunnel in a netns | T1, T2 | full-tunnel leak checks pass, host routing untouched |
-| T4 | Correct item 1's problem statement in `docs/roadmap.md` | T1–T3 | the roadmap describes the suite that exists |
+All four are built. Each row says where it landed and what its positive control
+is, because the wording here is what a later reader should be able to check
+against the script:
 
-T4 is last because the document should describe what was built, not what was
-intended. It is not optional: the stale claims in item 1 are why three existing
-assertions were about to be rebuilt from scratch.
+| # | Ticket | Status | Where | Positive control |
+|---|---|---|---|---|
+| T1 | A3: foreign-source assertion + positive control | Built | `verify-remote.sh` (the mechanism landed as of `7aa9ab8`) | injecting a foreign source fails the suite; the clean run passes |
+| T2 | A1: DNS closed with the tunnel down, plus the policy-off control | Built | `e2e-netns.sh`, in `ns2` | the pre-policy control observes the query reaching the physical link, and `policy off` makes the same lookup cross again |
+| T3 | A2: run the leak assertions under a full tunnel in a netns | Built | `e2e-netns.sh`, a fresh daemon pair under `$WORK/full/` | the wire capture is proven able to see a `dport 53` datagram pre-attach, and `quick detach` restores the crossing |
+| T4 | Correct item 1's problem statement in `docs/roadmap.md` | Built | `docs/roadmap.md` | the roadmap describes the suite this document describes |
+
+T4 was last because the document should describe what was built, not what was
+intended. The stale claims in item 1 are why three existing assertions were
+almost rebuilt from scratch.
+
+## How A1 and A2 observe on the wire
+
+Both assertions use a fabricated UDP responder bound to :53 on `10.99.0.1` and
+raw `AF_PACKET` captures on `veth-a`, so "blocked" and "answered" are read from
+the link rather than inferred from a probe's exit status:
+
+- **A1.** With the policy off, the lookup is answered (control). `vallum policy
+  on` inside `ns2`, and the same lookup dies: no answer, and the ping stays
+  blocked. `policy off` and both cross again. The guard's port-53 drop is what
+  blocked the lookup, and being on the wire is what distinguishes "the guard
+  blocked it" from "the resolvers was not there at all".
+- **A2.** A fresh pair of daemons under `$WORK/full/`, B a full-tunnel client
+  (`allowed_ips 0.0.0.0/0`, `fwmark`, no `persistent_keepalive` other than B's
+  optional dial, the routes installed by the real `vallum-quick attach` with
+  `VALLUM_STATE_DIR` under `$WORK` so nothing outside the scratch dir is
+  touched). Before attach, the TEST-NET probe (203.0.113.53) crosses the link;
+  after attach it must not (only B's own datagrams count — A's relaying of the
+  in-tunnel traffic is the tunnel working, not a leak); after detach it must
+  cross again.
+- The endpoint-address exception is deliberate and documented in the script: the
+  endpoint's connected /24 outranks the suppressed default in the rule plan, so
+  a probe hitting the endpoint is not a leak, it is the policy-routed full
+  tunnel working. That is why the probe works on TEST-NET ranges instead of the
+  endpoint's own address.

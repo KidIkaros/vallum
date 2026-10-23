@@ -47,38 +47,54 @@ production-readiness task, however much it would be nice to have.
 Ordered by dependency, not by size. The suite in (1) comes first because it is how
 the rest is proven; without it, every later item is a claim.
 
-### 1. The browsing-impact suite
+### 1. The browsing-impact suite (Built)
 
-**Problem.** Nothing has measured what a browser experiences through Vallum. The
-traffic evidence that exists — `scripts/e2e-netns.sh` and
-`scripts/verify-remote.sh` — proves *a tunnel carries packets*. It does not prove
-DNS resolves in-tunnel, that an oversized payload arrives, that nothing escapes
-the tunnel's prefixes, or how split and full tunnel differ. `verify-host.sh`
-cannot answer it and says so: four of its assertions are `NOT VERIFIED` because a
-same-host client cannot exercise egress.
+**Problem, corrected after building.** An early statement of this item said that
+nothing measured a browser's experience and that the harnesses proved "a tunnel
+that carries packets". That was stale: `verify-remote.sh` already asserted the
+oversized-payload arrival intact, the egress-device checks (`ip route get` for
+IPv4 and IPv6) and the foreign-source refusal, and peer-to-peer IPv6 was already
+gated in `e2e-netns.sh`. What was genuinely missing — and is now built, per
+`docs/qa/browsing-impact-suite.md` — was narrower and sharper:
 
-**Why it is first.** Items 2, 3 and 4 are "fix the leak". You cannot fix a leak
+1. **The DNS leak could not be seen from the exit side.** `dig @1.1.1.1` proved
+   egress through the tunnel, never that nothing reaches port 53 outside it when
+   the policy is on. Now in `e2e-netns.sh`: with a fabricated resolver bound to
+   :53 on the outer link and a raw-packet capture, `policy on` visibly eats the
+   lookup on the wire, and `policy off` returning the answer is the control that
+   the on-case measured the guard and not the harness.
+2. **Every leak check ran against a split tunnel.** The remote harness rewrites
+   the config to split before testing, and `verify-host.sh` cannot touch the
+   invoking host's routes. Now in `e2e-netns.sh`: a fresh pair of daemons under
+   the scratch dir, B a full-tunnel client whose routes are installed by the
+   product's own `vallum-quick attach` plan, and after attach no lookup B makes
+   reaches the link (only B's own datagrams count; the endpoint's connected /24
+   outranking the suppressed default is documented in the script, not papered
+   over). `quick detach` restoring the crossing is the control.
+3. **What `verify-host.sh` could not verify** is now split honestly between two
+   harnesses: remote-listed egress in `verify-remote.sh`, and everything that
+   would block or re-route the invoking machine in `e2e-netns.sh`'s disposable
+   namespaces.
+
+**Why it was first.** Items 2, 3 and 4 are "fix the leak". You cannot fix a leak
 you cannot see, and you cannot claim you fixed it without a test that fails when
-it comes back. This suite is the definition of done for all three.
+it comes back. This suite is the definition of done for all three — and each of
+its assertions ships with a positive control, because a suite that can only pass
+is the same defect as a `status` that only says `up`.
 
-**Done means** a suite that, with a real tunnel up on a host with egress, asserts:
-DNS resolves through the tunnel and nowhere else; a payload larger than the tunnel
-MTU arrives intact; no traffic escapes the tunnel's prefixes while attached, for
-IPv4 **and** IPv6; split tunnel routes only what it was told to. Each assertion
-fails loudly. It runs from `verify-remote.sh`, where egress exists.
-
-**Blocked on infrastructure — IPv6 internet egress.** The `IPv6` half of the
-escape assertion cannot be written yet. `wingman-vps` has no global IPv6: the
+**Blocked on infrastructure — IPv6 internet egress.** Internet-facing IPv6
+gress cannot be asserted from here yet. `wingman-vps` has no global IPv6: the
 kernel is enabled (`disable_ipv6=0`) but netplan sets `dhcp6: false` with no v6
 address or route, and neither delivery mechanism answers on the link — 12 s of
 `accept_ra=2` produced no address and no default route, and `dhcpcd -6 -T`
 solicited a DHCPv6 server and timed out. The provider must assign an address or
-prefix before this is testable.
+prefix before this is testable. The suite does not silently skip it: the
+harnesses report the gap explicitly.
 
-What *is* testable today is peer-to-peer IPv6: `fd00:7::2` to `fd00:7::1`
-round-trips at ~64 ms. The suite should assert that, and assert **no foreign
-source enters the tunnel** — which `run` now enforces and logs — while internet
-IPv6 stays explicitly marked blocked rather than silently omitted.
+What *is* testable today the suite asserts: peer-to-peer IPv6 (`fd00:7::2` to
+`fd00:7::1`) round-trips through a v6-only restart, dual-stack inner addresses
+over a v6 outer path both crossing, and **no foreign source entering the
+tunnel** — `run` enforces and logs that refusal.
 
 ### 2. A failure policy that defaults to closed (Closed)
 

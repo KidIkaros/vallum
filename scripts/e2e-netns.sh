@@ -34,6 +34,10 @@
 # Usage:
 #   scripts/e2e-netns.sh [path/to/vallum]
 #
+# QUICK=path/to/vallum-quick overrides the second binary (default
+# target/debug/vallum-quick), which the full-tunnel phase runs inside ns2 to
+# install the product's own route plan.
+#
 # Set KEEP=1 to leave the scratch directory (keys, configs and both daemons' logs)
 # behind instead of deleting it — the fastest way to read what a failure saw.
 #
@@ -45,9 +49,16 @@ set -euo pipefail
 
 BIN=${1:-$(dirname -- "$0")/../target/debug/vallum}
 BIN=$(readlink -f -- "$BIN")
+QUICK=${QUICK:-$(dirname -- "$0")/../target/debug/vallum-quick}
+[ -e "$QUICK" ] && QUICK=$(readlink -f -- "$QUICK")
 if [ ! -x "$BIN" ]; then
     echo "no vallum binary at $BIN" >&2
-    echo "build it first: cargo build -p vallum" >&2
+    echo "build it first: cargo build -p vallum vallum-quick" >&2
+    exit 2
+fi
+if [ ! -x "$QUICK" ]; then
+    echo "no vallum-quick binary at $QUICK (the full-tunnel phase needs it)" >&2
+    echo "build it first: cargo build -p vallum vallum-quick" >&2
     exit 2
 fi
 
@@ -59,7 +70,9 @@ WORK=$(mktemp -d /tmp/vallum-e2e.XXXXXX)
 # The binary is normally under the home directory for the same reason, so stage
 # a copy where the namespace can reach it.
 install -m 0755 -- "$BIN" "$WORK/vallum"
+install -m 0755 -- "$QUICK" "$WORK/vallum-quick"
 BIN="$WORK/vallum"
+QUICK="$WORK/vallum-quick"
 if [ -n "${KEEP:-}" ]; then
     trap 'echo "kept: $WORK"' EXIT
 else
@@ -68,7 +81,12 @@ fi
 
 # `-U` user, `-r` map to root inside it, `-n` network. The inner script is passed
 # the binary and the scratch directory as $1 and $2.
-unshare -Urn --map-root-user bash -s -- "$BIN" "$WORK" <<'INNER'
+# The body is materialized to a file rather than piped through `bash -s`: bash's
+# parser on a non-seekable stdin heredoc mis-reparses already-consumed bytes when
+# the script grows past a certain size (observed as mangled re-executions of
+# `write_config`), and this suite sits right above that threshold. A seekable
+# file sidesteps the bug and makes the inner script independently lintable.
+cat > "$WORK/inner.sh" <<'INNER'
 set -euo pipefail
 
 BIN=$1
@@ -123,6 +141,10 @@ stop_all() {
     if [ -n "${A_JOB:-}" ]; then kill -KILL "$A_JOB" 2>/dev/null || true; fi
     if [ -n "${B_JOB:-}" ]; then kill -KILL "$B_JOB" 2>/dev/null || true; fi
     if [ -n "${SNIFF_PID:-}" ]; then kill -KILL "$SNIFF_PID" 2>/dev/null || true; fi
+    # The A1 DNS responder runs its own endless loop, so on any exit — including
+    # a failure before the phase's own cleanup ran — it must die before `wait`,
+    # or the trap blocks here until the file's eventual deletion.
+    if [ -n "${DNS_PID:-}" ]; then kill -KILL "$DNS_PID" 2>/dev/null || true; fi
     kill_pidfile "$HOLDER_PIDFILE" -KILL
     wait 2>/dev/null || true
 }
@@ -505,11 +527,15 @@ SNIFF_PID=""
 [ -s "$WORK/inithello.bin" ] || bad "the capture saw no complete InitHello; see $WORK/sniff.log"
 CAPTURED=$(wc -c < "$WORK/inithello.bin" | tr -d ' ')
 # 4609 B of message (the frozen `init_hello_len`, hint included) plus a 20 B
-# `mac1` field: a 16 B MAC under a 4 B tag and length. Pinning the number here is
-# what turns the size table in docs/proof/daemon.md into a live check.
-[ "$CAPTURED" = 4665 ] || bad "captured $CAPTURED bytes of InitHello, expected 4665"
+# `mac1` field (a 16 B MAC under a 4 B tag and length), a 36 B PSK admission
+# tag and an 12 B epoch claim: 4609 + 20 + 36 + 12 = 4677. The 4665 that the
+# pin used to say predates ADR-0019, whose epoch field grew the wire by
+# exactly those 12 B. Pinning the number here is what turns the size table in
+# docs/proof/daemon.md into a live check — and a stale pin is exactly what
+# just happened, which is also why it is a pin and not a range.
+[ "$CAPTURED" = 4677 ] || bad "captured $CAPTURED bytes of InitHello, expected 4677"
 read -r SEGMENTS LARGEST SEEN < "$WORK/segments.txt"
-printf '   captured %s bytes after reassembly: 4609 B message + 20 B mac1 field\n' "$CAPTURED"
+printf '   captured %s bytes after reassembly: 4609 B message + 20 B mac1 + 36 B PSK tag + 12 B epoch\n' "$CAPTURED"
 printf '   it crossed as %s Vallum fragments, the largest UDP payload being %s B\n' \
     "$SEGMENTS" "$LARGEST"
 # One `InitHello` datagram would mean the envelope never engaged, and the rest of
@@ -517,7 +543,7 @@ printf '   it crossed as %s Vallum fragments, the largest UDP payload being %s B
 [ "$SEGMENTS" -gt 1 ] \
     || bad "the InitHello crossed in one datagram; the segmentation envelope never engaged"
 [ "$SEGMENTS" -eq 4 ] \
-    || printf '   note   %s fragments for 4665 B at a 1442 B payload (ceil(4665/1442) = 4)\n' "$SEGMENTS"
+    || printf '   note   %s fragments for 4677 B at a 1442 B payload (ceil(4677/1442) = 4)\n' "$SEGMENTS"
 ok "the InitHello crossed as whole UDP datagrams and reassembled byte for byte"
 
 # ── the other direction, over the session A started ──────────────────
@@ -545,30 +571,103 @@ fi
 # applying the policy there would block the machine running the test.
 say "fail-closed egress: policy on must block, policy off must not"
 
+# A resolver in ns1, on the outer link. Not a real resolver — a UDP endpoint
+# that answers any query with a fabricated A record. What it Fabricates is
+# irrelevant; a reply at all proves the query crossed the link, which is the
+# observation the browsing-impact suite asks for: did the lookup reach the
+# physical network, or did it die at the guard?
+python3 - "$OUTER_A" "$WORK/dns-responder.log" <<'PY' &
+import socket, sys
+
+address = sys.argv[1]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind((address, 53))
+s.settimeout(1.0)
+try:
+    while True:
+        try:
+            query, peer = s.recvfrom(4096)
+        except socket.timeout:
+            continue
+        # Echo the id and the question back with one fabricated A answer.
+        answer = query[:2] + b"\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00" + query[12:]
+        answer += b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x01\x00\x04\x01\x02\x03\x04"
+        s.sendto(answer, peer)
+except BrokenPipeError:
+    pass
+except OSError as e:
+    print(e, file=sys.stderr)
+PY
+DNS_PID=$!
+# The responder must be listening before the first probe; bind is immediate but
+# do not rely on a race with the queue in an unrelated thread.
+sleep 0.3
+
+dns_query() { # exits 0 iff a fabricated answer came back in time
+    in_ns python3 - "$OUTER_A" <<'PY'
+import socket, sys
+
+query = (b"\x0a\x0b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+         b"\x07example\x03com\x00\x00\x01\x00\x01")
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(2.0)
+s.sendto(query, (sys.argv[1], 53))
+try:
+    data, _ = s.recvfrom(4096)
+except socket.timeout:
+    sys.exit("no answer in 2 s")
+sys.exit(0) if data[:2] == query[:2] else sys.exit("answer id did not match")
+PY
+}
 
 # B reaches A's outer address over the veth, outside any tunnel. That is the
 # leak path — what a browser would use if the tunnel died.
-crosses_in_ns 5 "$OUTER_A" || bad "ns2 cannot reach the outer network before any policy is applied"
-ok "ns2 reaches the outer network with no policy applied"
+crosses_in_ns 5 "$OUTER_A" || { kill $DNS_PID; bad "ns2 cannot reach the outer network before any policy is applied"; }
+# The DNS half of the same path, observed as a *reply*: without this, "blocked"
+# later could mean the harness could never see a lookup cross in the first
+# place, which is exactly the silence that hid the FORWARD-policy trap in
+# verify-remote.sh (ping crosses, port 53 does not).
+if dns_query; then
+    ok "a DNS query outside the tunnel reaches the physical link and is answered (control)"
+else
+    kill $DNS_PID
+    bad "the DNS control query got no answer: the harness cannot observe port 53"
+fi
 
 in_ns "$BIN" policy on --config "$WORK/a.toml" > "$WORK/policy-on.log" 2>&1 \
-    || { cat "$WORK/policy-on.log"; bad "policy on failed inside ns2"; }
+    || { kill $DNS_PID; cat "$WORK/policy-on.log"; bad "policy on failed inside ns2"; }
 # A declining guard also exits 0, so "applied" is identified from the command's
 # own report rather than from the exit status — and then proved by the ping
 # below, which is the part that actually matters. Reading the ruleset instead
 # proved unreliable: `nft` is not reliably on PATH under nsenter here.
 grep -q 'is blocked' "$WORK/policy-on.log" \
-    || { cat "$WORK/policy-on.log"; bad "policy on did not report a guard"; }
+    || { kill $DNS_PID; cat "$WORK/policy-on.log"; bad "policy on did not report a guard"; }
 if in_ns ping -c1 -W2 -q "$OUTER_A" >/dev/null 2>&1; then
+    kill $DNS_PID
     bad "egress escaped with the policy on: the killswitch did not block"
 fi
 ok "policy on blocks egress outside the tunnel"
+# DNS is dropped explicitly, before any allow rule: a leaky port-53 allowlist
+# is the leak. The same lookup that crossed a moment ago must now die inside
+# ns2, never the far side of the veth.
+if dns_query 2>/dev/null; then
+    kill $DNS_PID
+    bad "a DNS lookup crossed with the policy on: port 53 leaked"
+fi
+ok "with the policy on, a DNS lookup fails closed — the answer never arrives"
 
 in_ns "$BIN" policy off --config "$WORK/a.toml" > "$WORK/policy-off.log" 2>&1 \
-    || { cat "$WORK/policy-off.log"; bad "policy off failed inside ns2"; }
+    || { kill $DNS_PID; cat "$WORK/policy-off.log"; bad "policy off failed inside ns2"; }
 # The control. Without it, "blocked" could just as well mean the harness broke.
-crosses_in_ns 5 "$OUTER_A" || bad "egress stayed blocked after policy off: the block was not the policy"
+crosses_in_ns 5 "$OUTER_A" || { kill $DNS_PID; bad "egress stayed blocked after policy off: the block was not the policy"; }
 ok "policy off restores egress (control)"
+if dns_query; then
+    ok "policy off restores DNS too (control)"
+else
+    kill $DNS_PID
+    bad "the DNS lookup stayed blocked after policy off: the block was not the guard"
+fi
+kill $DNS_PID 2>/dev/null
 
 # ── what the outer network actually saw ──────────────────────────────
 
@@ -1360,5 +1459,206 @@ cp "$PROV/a-new.key" "$PROV/a/vallum0.key"
 grep -q 'name = "b"' "$PROV/a/vallum0.toml" && bad "peer remove left the peer behind"
 ok "peer remove took the peer out of the config"
 
+# ── the full tunnel: routes in, nothing escapes ───────────
+#
+# The browsing-impact suite's last gap (docs/qa/browsing-impact-suite.md, A2).
+# Every lifecycle above attaches a split tunnel, so the leak assertions ran
+# against the configuration least likely to leak, and the routes were never a
+# product's: `quick attach` writes what `verify-remote.sh` must not — the host's
+# own default route. In this namespace it is disposable, so the real route plan
+# runs: B is a full-tunnel client (allowed_ips 0.0.0.0/0, a fwmark so its own
+# UDP still reaches the endpoint), and `vallum-quick attach` installs the
+# policy-routed default inside ns2. The plan's state goes under $WORK via
+# VALLUM_STATE_DIR, for the same reason the scratch dir is under /tmp.
+say "full tunnel: the routes go in, nothing escapes"
+
+mkdir -p "$WORK/full/a" "$WORK/full/b"
+"$BIN" server init --config "$WORK/full/a/vallum0.toml" --address "$INNER_A/24" \
+    --listen "$OUTER_A:51831" --no-host --no-service \
+    > "$WORK/full/a-init.log" 2>&1 || bad "server init (full-tunnel A)"
+"$BIN" server init --config "$WORK/full/b/vallum0.toml" --address "$INNER_B/24" \
+    --listen "$OUTER_B:51829" --no-host --no-service \
+    > "$WORK/full/b-init.log" 2>&1 || bad "server init (full-tunnel B)"
+"$BIN" pubkey --private-key "$WORK/full/b/vallum0.key" > "$WORK/full/b.pub"
+"$BIN" pubkey --private-key "$WORK/full/a/vallum0.key" > "$WORK/full/a.pub"
+"$BIN" peer add b --config "$WORK/full/a/vallum0.toml" \
+    --public-key-file "$WORK/full/b.pub" --no-apply > /dev/null 2>&1 \
+    || bad "peer add (full-tunnel A)"
+"$BIN" peer add a --config "$WORK/full/b/vallum0.toml" \
+    --public-key-file "$WORK/full/a.pub" --endpoint "$OUTER_A:51831" \
+    --keepalive 1 --no-apply \
+    > /dev/null 2>&1 || bad "peer add (full-tunnel B)"
+
+# The full-tunnel half: a default-route claim, a mark for the daemon's own UDP,
+# and the control socket the attach's handshake wait reads. The template already
+# carries `control` and `fwmark`, so these replace rather than insert: duplicate
+# keys refuse to parse.
+sed -i 's|^allowed_ips = .*|allowed_ips = ["0.0.0.0/0"]|' "$WORK/full/b/vallum0.toml"
+sed -i 's|^fwmark = .*|fwmark = 51820|' "$WORK/full/b/vallum0.toml"
+sed -i 's|^control = .*|control = "control.sock"|' "$WORK/full/b/vallum0.toml"
+# A's template control path points at /run/vallum, which the lab has no right
+# to create; a relative socket beside its config is what the split-tunnel A
+# uses above.
+sed -i 's|^control = .*|control = "control.sock"|' "$WORK/full/a/vallum0.toml"
+grep -q '^allowed_ips = \["0.0.0.0/0"\]' "$WORK/full/b/vallum0.toml" \
+    || bad "the full-tunnel claim was not written"
+grep -q '^fwmark = 51820$' "$WORK/full/b/vallum0.toml" || bad "the mark was not written"
+
+: > "$WORK/full/a.pid"
+: > "$WORK/full/b.pid"
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$WORK/full/b.pid" "$WORK/full/b/vallum0.toml" > "$WORK/full/b.log" 2>&1 &
+bash -c 'echo $$ > "$1"; cd /; exec "$2" run --config "$3"' \
+    _ "$WORK/full/a.pid" "$BIN" "$WORK/full/a/vallum0.toml" > "$WORK/full/a.log" 2>&1 &
+
+DEADLINE=$((SECONDS + 10))
+while :; do
+    if grep -q "tunnel up on interface" "$WORK/full/a.log" \
+        && grep -q "tunnel up on interface" "$WORK/full/b.log"; then
+        break
+    fi
+    for pidfile in "$WORK/full/a.pid" "$WORK/full/b.pid"; do
+        [ -s "$pidfile" ] || continue
+        kill -0 "$(cat "$pidfile")" 2>/dev/null \
+            || bad "the $(basename "$pidfile" .pid) full-tunnel daemon exited; see $WORK/full"
+    done
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "a full-tunnel interface did not come up within 10 s"
+    fi
+    sleep 0.1
+done
+
+# B does not dial on its own; traffic starts the handshake, as everywhere above.
+DEADLINE=$((SECONDS + 20))
+until ping -c1 -W1 -q "$INNER_B" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+        bad "the full-tunnel client did not establish; see $WORK/full"
+    fi
+    sleep 0.2
+done
+ok "the full-tunnel client established"
+
+# What port 53 does on the wire, before and after the routes exist.
+#
+# The probe aims at 203.0.113.53 (TEST-NET), not at the endpoint: a policy-
+# routed full tunnel deliberately keeps endpoint-destined traffic on the
+# physical link (the connected /24 outranks the suppressed default in the rule
+# plan), so a probe at the endpoint would "leak" by design and the assertion
+# would mean nothing. 203.0.113.53 has no route anywhere, so the only way a
+# datagram reaches 53 there pre-attach is the lookup a browser would make.
+client53() { in_ns python3 - <<'PY' >/dev/null 2>&1 || true
+import socket
+
+query = (b"\x0a\x0b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+         b"\x07example\x03com\x00\x00\x01\x00\x01")
+socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(query, ("203.0.113.53", 53))
+PY
+}
+
+capture53() { # $1 seconds  $2 output file: how many dport-53 datagrams B itself sent over veth-a
+    python3 - "$1" "$OUTER_B" <<'PY' > "$2" &
+import socket, sys, time
+
+deadline = time.time() + float(sys.argv[1])
+client = sys.argv[2]
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+s.bind(("veth-a", 0))
+s.settimeout(0.2)
+count = 0
+while time.time() < deadline:
+    try:
+        frame, _ = s.recvfrom(65535)
+    except socket.timeout:
+        continue
+    if frame[12:14] != b"\x08\x00":
+        continue
+    ip = frame[14:]
+    ihl = (ip[0] & 0xF) * 4
+    if ip[9] != 17:  # UDP
+        continue
+    if int.from_bytes(ip[ihl + 2 : ihl + 4], "big") != 53:
+        continue
+    # Only datagrams B sent count: A relays the probe once it is inside the
+    # tunnel, and that relay (src 10.99.0.1) is the tunnel working, not a leak.
+    if socket.inet_ntoa(ip[12:16]) != client:
+        continue
+    count += 1
+    # Name the leaker: with a probe and several daemons on the same link, a bare
+    # count is not evidence of which datagram escaped.
+    print("  leaked: src", socket.inet_ntoa(ip[12:16]), "->", socket.inet_ntoa(ip[16:20]), "dport", int.from_bytes(ip[ihl + 2 : ihl + 4], "big"), file=sys.stderr)
+print(count)
+PY
+}
+
+# The capture must be capable of seeing an escape before its zero means
+# anything: with no tunnel routes in place, the same lookup crosses the link.
+# The TEST-NET probe needs a route to the physical link first (the namespace
+# dies with the holder, so this default is disposed of with the lab).
+in_ns ip route add default via "$OUTER_A" dev veth-b
+capture53 2.5 "$WORK/full/pre.cap"
+CPID=$!
+sleep 0.4
+client53
+wait "$CPID"
+PRE53=$(cat "$WORK/full/pre.cap")
+[ "${PRE53:-0}" -ge 1 ] \
+    || bad "the pre-attach control saw nothing cross: the capture cannot see an escape"
+printf '   control: before attach, %s dport-53 datagram crossed the physical link\n' "$PRE53"
+
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" attach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/attach.log" 2>&1 \
+    || { cat "$WORK/full/attach.log"; bad "quick attach failed inside ns2"; }
+ok "quick attach installed the full-tunnel routes inside ns2"
+
+ROUTE_GET=$(in_ns ip route get 8.8.0.1)
+case "$ROUTE_GET" in
+    *veth-b*) bad "the full tunnel left the physical default in force: $ROUTE_GET" ;;
+esac
+case "$ROUTE_GET" in
+    *vallum0*) ;;
+    *) bad "a lookup outside allowed_ips resolved to '$ROUTE_GET', not the tunnel" ;;
+esac
+ok "an outside lookup routes into the tunnel"
+
+capture53 2.5 "$WORK/full/during.cap"
+CPID=$!
+sleep 0.4
+client53
+wait "$CPID"
+DURING53=$(cat "$WORK/full/during.cap")
+[ "${DURING53:-1}" = 0 ] \
+    || bad "$DURING53 dport-53 datagrams crossed the link under a full tunnel"
+ok "under the full tunnel, a lookup outside it never reaches the link"
+
+if crosses 20 "$INNER_B"; then
+    ok "the full tunnel still carries its own traffic"
+else
+    bad "the full tunnel stopped carrying after attach"
+fi
+
+# The routes must leave as they came: the recorded plan reversed by detach.
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" detach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/detach.log" 2>&1 \
+    || { cat "$WORK/full/detach.log"; bad "quick detach failed inside ns2"; }
+
+capture53 2.5 "$WORK/full/post.cap"
+CPID=$!
+sleep 0.4
+client53
+wait "$CPID"
+POST53=$(cat "$WORK/full/post.cap")
+[ "${POST53:-0}" -ge 1 ] \
+    || bad "the probe did not cross after detach: the routes did not actually leave, or never came back"
+ok "detach restored egress (control)"
+
+say "shutting the full-tunnel daemons down"
+kill_pidfile "$WORK/full/a.pid"
+kill_pidfile "$WORK/full/b.pid"
+wait_gone "$WORK/full/a.pid" 5 || bad "the full-tunnel A ignored SIGTERM"
+wait_gone "$WORK/full/b.pid" 5 || bad "the full-tunnel B ignored SIGTERM"
+ok "the full-tunnel daemons exited on SIGTERM"
+
 printf '\n== PASS\n'
 INNER
+
+unshare -Urn --map-root-user bash "$WORK/inner.sh" "$BIN" "$WORK"
