@@ -158,6 +158,27 @@ property of the product.
 outage and a reboot; it backs off rather than hammering; and the suite in (1)
 covers recovery, not just steady state.
 
+**Measured, 2026-10-22.** A server restart was scheduled with
+`systemd-run --on-active` and observed from an attached client:
+
+```
+carrying before the restart
+went down at +46s
+RESULT: still down 152s after the outage began
+```
+
+It does not recover, and it does not recover on the client's 120 s rekey either —
+the observation ran past that interval with traffic being sent throughout. That
+makes ADR-0019 the only mechanism on the table: waiting for the client's own
+timer is not a recovery path, so the passive side has to re-initiate.
+
+**A deployment defect found on the way, and fixed.** The server's daemon was a
+bare process (`vallum run --config /etc/vallum/vallum0.toml`), with no unit at
+all — `systemctl restart vallum` failed because there was nothing to restart.
+Half of "always-on" is being supervised, and this host was not. It now runs as
+`vallum.service` with `Restart=always`, which is what made the measurement above
+possible: every earlier attempt was void because no restart ever happened.
+
 ### 6. Say what the crypto is (Closed)
 
 **Problem.** `origin-crypto-sdk` opens with `EXPERIMENTAL — NOT FOR PRODUCTION
