@@ -194,6 +194,16 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         checks.push(check_config_mode(args.config.as_deref()));
         if let Some(host) = &args.probe_mtu {
             checks.push(check_path_mtu(host, resolved));
+        } else {
+            let mut probed = std::collections::HashSet::new();
+            for peer in &resolved.peers {
+                if let Some(endpoint) = peer.endpoint() {
+                    let host = endpoint.ip().to_string();
+                    if probed.insert(host.clone()) {
+                        checks.push(check_path_mtu(&host, resolved));
+                    }
+                }
+            }
         }
     }
 
@@ -570,64 +580,37 @@ fn check_service(config: Option<&Path>) -> Check {
 }
 
 /// The largest ICMP payload that crosses the path, by bisection.
-///
-/// Bounds are the IPv4 minimum reassembly buffer (576 - 28 = 548) and a
-/// 1500-byte Ethernet path (1500 - 28 = 1472). Nine probes at most.
-fn bisect_mtu(mut fits: impl FnMut(u16) -> bool) -> Option<u16> {
-    const MIN: u16 = 548;
-    const MAX: u16 = 1472;
-    if !fits(MIN) {
-        return None;
-    }
-    if fits(MAX) {
-        return Some(MAX);
-    }
-    let mut good = MIN;
-    let mut bad = MAX;
-    while bad - good > 1 {
-        let middle = good + (bad - good) / 2;
-        if fits(middle) {
-            good = middle;
-        } else {
-            bad = middle;
-        }
-    }
-    Some(good)
-}
-
-fn ping_fits(host: &str, payload: u16) -> bool {
-    std::process::Command::new("ping")
-        .args([
-            "-M",
-            "do",
-            "-s",
-            &payload.to_string(),
-            "-c",
-            "1",
-            "-W",
-            "2",
-            host,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+#[cfg(test)]
+fn bisect_mtu(fits: impl FnMut(u16) -> bool) -> Option<u16> {
+    crate::net::bisect_mtu(fits)
 }
 
 /// Measure the outer path and say whether `outer_mtu` fits it.
 fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
     let configured = u16::try_from(resolved.outer_budget + 48).unwrap_or(u16::MAX);
-    let Some(payload) = bisect_mtu(|size| ping_fits(host, size)) else {
+    let floor_budget = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
+    let min_outer_mtu = (floor_budget + usize::from(crate::config::OUTER_HEADER_LEN)) as u16;
+
+    let Some(measured) = crate::net::probe_path_mtu_host(host) else {
         return Check::new(
             "path-mtu",
             Status::Warn,
             format!(
-                "inconclusive: no ICMP reply from {host} at any size (filtered, or no route).                  Measure it by hand: ping -M do -s 1472 {host}"
+                "inconclusive: no ICMP reply from {host} at any size (filtered, or no route). \
+                 Measure it by hand: ping -M do -s 1472 {host}"
             ),
         );
     };
-    let measured = payload + 28;
-    if measured >= configured {
+    if measured < min_outer_mtu {
+        Check::new(
+            "path-mtu",
+            Status::Fail,
+            format!(
+                "{host} carries {measured} bytes, below the minimum supported outer MTU of \
+                 {min_outer_mtu} bytes"
+            ),
+        )
+    } else if measured >= configured {
         Check::new(
             "path-mtu",
             Status::Pass,
@@ -638,7 +621,8 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
             "path-mtu",
             Status::Warn,
             format!(
-                "{host} carries {measured} bytes, below outer_mtu {configured};                  set `interface.outer_mtu = {measured}` or packets will be dropped"
+                "{host} carries {measured} bytes, below outer_mtu {configured}; \
+                 set `interface.outer_mtu = {measured}` or packets will be dropped"
             ),
         )
     }
@@ -780,7 +764,7 @@ mod tests {
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let args = super::DoctorArgs {
-            config: Some(config_path),
+            config: Some(config_path.clone()),
             control: None,
             probe_mtu: None,
             json: false,
@@ -792,6 +776,11 @@ mod tests {
             outcome.is_ok(),
             "doctor on offline config should pass with warning, got: {outcome:?}"
         );
+
+        let resolved = super::check_config(&config_path).unwrap();
+        let loopback_check = super::check_path_mtu("127.0.0.1", &resolved);
+        assert_eq!(loopback_check.status, super::Status::Pass);
+        assert!(loopback_check.detail.contains("fits"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

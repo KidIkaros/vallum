@@ -19,7 +19,7 @@ use crate::net::{DatagramSocket, SharedSocket, UdpTransport};
 use crate::privileges;
 use crate::run::{self, Shutdown};
 use crate::tun::{self, InterfaceSpec};
-use crate::{log_debug, log_info, log_warn, Error};
+use crate::{log_info, log_warn, Error};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -66,10 +66,62 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let clock = Arc::new(SystemClock::new());
     let mut rng = entropy::OsRng::new();
 
+    // The config can only guess the path MTU; probing it discovers what the path actually carries.
+    // If `interface.outer_mtu` was not explicitly configured, probe the configured peer endpoints
+    // (with kernel route cache fallback) before opening the TUN interface, so both the TUN interface
+    // MTU (governing TCP MSS) and the outer segmentation budget are sized correctly from the start.
+    let explicit_outer_mtu = config.interface.outer_mtu.is_some();
+    let floor_budget = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
+    let min_outer_mtu = floor_budget + usize::from(config::OUTER_HEADER_LEN);
+
+    let discovered_path_mtu = resolved
+        .peers
+        .iter()
+        .filter_map(|peer| peer.endpoint())
+        .filter_map(|endpoint| {
+            crate::net::probe_path_mtu(endpoint).or_else(|| crate::net::path_mtu(endpoint).ok())
+        })
+        .min();
+
+    let mut outer_budget = resolved.outer_budget;
+    let mut inner_mtu = resolved.mtu;
+
+    if let Some(discovered) = discovered_path_mtu {
+        if (discovered as usize) < min_outer_mtu {
+            log_warn!(
+                log,
+                "discovered path MTU {discovered} is below the minimum supported outer MTU of \
+                 {min_outer_mtu} bytes; tunnel packets will likely fail on this link"
+            );
+        }
+        if !explicit_outer_mtu && discovered < config::DEFAULT_OUTER_MTU {
+            let clamped_mtu = (discovered as usize).max(min_outer_mtu);
+            let derived_budget = clamped_mtu.saturating_sub(usize::from(config::OUTER_HEADER_LEN));
+            outer_budget = outer_budget.min(derived_budget);
+            let mut derived_inner =
+                u16::try_from(outer_budget.saturating_sub(crate::tun::DATA_OVERHEAD))
+                    .unwrap_or(crate::tun::DEFAULT_MTU)
+                    .min(crate::tun::DEFAULT_MTU);
+            let has_v6 = resolved
+                .addresses
+                .iter()
+                .any(|prefix| prefix.as_ipnet().addr().is_ipv6());
+            if has_v6 && derived_inner < config::IPV6_MIN_MTU {
+                derived_inner = config::IPV6_MIN_MTU;
+            }
+            inner_mtu = inner_mtu.min(derived_inner);
+            log_info!(
+                log,
+                "path MTU discovered as {discovered} bytes (PPPoE/DS-Lite link); \
+                 outer budget set to {outer_budget}, inner MTU set to {inner_mtu}"
+            );
+        }
+    }
+
     let spec = InterfaceSpec {
         name: resolved.interface_name.clone(),
         addresses: resolved.addresses.clone(),
-        mtu: resolved.mtu,
+        mtu: inner_mtu,
     };
     let mut interface_warnings = Vec::new();
     let parts =
@@ -98,33 +150,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_info!(log, "dropped privileges to {}", privileges.describe());
     }
 
-    // The config can only guess the path MTU; the kernel knows it. A handshake
-    // cut to a budget the path cannot carry is dropped before it leaves, and the
-    // tunnel then never comes up at all — which is what `outer_mtu` exists to
-    // prevent, for operators who already knew the number. Take the smallest path
-    // to any peer so a narrow link is sized correctly from the first datagram;
-    // an explicit `outer_mtu` still wins when it is smaller.
-    let floor = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
-    let discovered = resolved
-        .peers
-        .iter()
-        .filter_map(|peer| peer.endpoint())
-        .filter_map(|endpoint| crate::net::path_mtu(endpoint).ok())
-        .min()
-        .map(|mtu| usize::from(mtu).saturating_sub(usize::from(config::OUTER_HEADER_LEN)))
-        .map(|budget| budget.max(floor));
-    let budget = match discovered {
-        Some(discovered) => {
-            log_debug!(
-                log,
-                "the path to the nearest peer carries {discovered} bytes of datagram budget \
-                 (config allows {})",
-                resolved.outer_budget
-            );
-            resolved.outer_budget.min(discovered)
-        }
-        None => resolved.outer_budget,
-    };
+    let budget = outer_budget;
 
     let suite: Arc<dyn vallum_crypto::CryptoSuite> = Arc::new(suite);
 

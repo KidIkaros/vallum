@@ -472,3 +472,54 @@ pub fn with_local_fwmark(config_text: &str) -> String {
         config_text.to_owned()
     }
 }
+
+/// Insert `outer_mtu` into `[interface]` of `config_text` if not already present.
+///
+/// Preserves surrounding comments and fields. If the text does not parse or
+/// `outer_mtu` is already present, returns the text untouched.
+#[must_use]
+pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.interface.outer_mtu.is_some() {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + 24);
+    let mut placed = false;
+    for line in config_text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !placed && line.trim() == "[interface]" {
+            out.push_str(&format!("outer_mtu = {outer_mtu}\n"));
+            placed = true;
+        }
+    }
+    if placed {
+        out
+    } else {
+        config_text.to_owned()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_outer_mtu_inserts_when_absent() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_outer_mtu(text, 1400);
+        assert!(with.contains("outer_mtu = 1400\n"));
+        let parsed: Config = toml::from_str(&with).unwrap();
+        assert_eq!(parsed.interface.outer_mtu, Some(1400));
+    }
+
+    #[test]
+    fn with_outer_mtu_preserves_explicit_value() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_outer_mtu(text, 1400);
+        assert_eq!(with, text);
+    }
+}

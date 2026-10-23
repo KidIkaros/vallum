@@ -654,7 +654,19 @@ fn place_config(
     crate::keys::save_secret(&key_path, secret)?;
     // `fwmark` is this machine's routing detail: a server released before the
     // field existed hands back a config that would refuse to attach.
-    let config_text = vallum_config::with_local_fwmark(config_text);
+    let mut config_text = vallum_config::with_local_fwmark(config_text);
+
+    // Probe path MTU to the server endpoint. If a reduced-MTU link (PPPoE, DS-Lite)
+    // is measured, configure `interface.outer_mtu` so large payloads do not hang.
+    if !endpoint.is_empty() && endpoint != "?" {
+        if let Some(measured) = crate::net::probe_path_mtu_host(endpoint) {
+            if measured < crate::config::DEFAULT_OUTER_MTU {
+                say!("   ok    path MTU to {endpoint} measured as {measured} bytes (configured interface.outer_mtu = {measured})");
+                config_text = vallum_config::with_outer_mtu(&config_text, measured);
+            }
+        }
+    }
+
     crate::keys::write_private(&config_path, config_text.as_bytes())?;
 
     say!();

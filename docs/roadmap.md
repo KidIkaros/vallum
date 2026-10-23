@@ -126,6 +126,14 @@ remotely, and exactly what a production user on a home line hits.
 payload on a reduced-MTU link, and the failure mode is a clear message rather
 than a hang.
 
+**Resolved:**
+- `net.rs` implements active path MTU discovery (`probe_path_mtu`, `probe_path_mtu_host`) using ICMP PMTUD bisection with DF set (`ping -M do`) and parsing of kernel/router next-hop MTU error reports.
+- `run.rs` automatically discovers path MTU across peer endpoints prior to opening the TUN interface whenever `outer_mtu` is omitted in the config, clamping inner MTU and outer budget so TCP MSS negotiation prevents black-holing on PPPoE (1492) and DS-Lite (1400/1280) links.
+- `doctor.rs` automatically audits path MTU against each configured peer endpoint (or `--probe-mtu`), reporting passes, warnings with required `outer_mtu` values, or failures when below the 682-byte protocol minimum.
+- `setup.rs` actively probes the server endpoint during client setup/join, recording `outer_mtu` into the generated configuration when a reduced link is detected.
+- The probe is bounded by `PROBE_BUDGET` (3 s). It runs before the TUN interface exists, so an endpoint that silently swallows ICMP must not delay startup: each unanswered probe costs up to a second and the bisection needs ~10, which would be ~10 s per unreachable peer against systemd's 90 s `TimeoutStartSec`. Past the budget the prober reports "does not fit" and the bisection settles on the largest size it confirmed, so an unmeasured path keeps the configured default instead of blocking the interface.
+- **Known limitation:** the probe shells out to `ping`. If it is not on `PATH` the probe is inconclusive and PMTU silently does not apply — the tunnel still comes up at the configured MTU, so this degrades to the pre-existing behaviour rather than failing.
+
 ### 5. Always-on, with backoff
 
 **Problem.** Reconnection needs a human. The watchdog withdraws routes when the
