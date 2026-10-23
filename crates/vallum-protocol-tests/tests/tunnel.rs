@@ -1728,3 +1728,118 @@ fn a_client_that_restarts_reconnects_while_the_server_keeps_its_session() {
         "the tunnel re-established but carries no traffic"
     );
 }
+
+/// ADR-0019's second half: the **passive** side must re-initiate.
+///
+/// The server restarts — losing its session, keeping its identity and its
+/// running process — while the client keeps sending on the session it still
+/// holds. Every such datagram names a session index the restarted server does
+/// not have. The old behaviour dropped them in silence, and the tunnel came
+/// back only when the client's own rekey timer fired 120 s later: that was the
+/// measured outage. The restarted server cannot decrypt anything, but a
+/// rate-limited reactive re-handshake must be what recovers the tunnel, not
+/// the client's rekey — so none of these pumps advance the clock at all.
+#[test]
+fn a_restarted_server_reinitiates_when_a_client_keeps_sending() {
+    let suite = suite();
+    let a_identity = StaticIdentity::generate(&*suite, &A_SEED).expect("a key");
+    let b_identity = StaticIdentity::generate(&*suite, &B_SEED).expect("b key");
+
+    let a_peer = PeerConfig::new("b", b_identity.to_peer())
+        .with_allowed_ips([net("10.0.0.2/32")])
+        .with_endpoint(endpoint(B_EP));
+    let b_peer = PeerConfig::new("a", a_identity.to_peer()).with_allowed_ips([net("10.0.0.1/32")]);
+
+    let a_peer_identity = a_identity.to_peer();
+    let a = Device::new(
+        suite.clone(),
+        a_identity,
+        vec![a_peer],
+        &mut TestRng(0x1111),
+        0,
+    )
+    .expect("A's configuration is consistent");
+    let b = Device::new(
+        suite.clone(),
+        b_identity,
+        vec![b_peer],
+        &mut TestRng(0x2222),
+        0,
+    )
+    .expect("B's configuration is consistent");
+
+    let mut link = Net {
+        clock_ms: 0,
+        wall_s: 1_700_000_000,
+        hosts: vec![
+            Host::new(a, endpoint(A_EP), 0xAAAA),
+            Host::new(b, endpoint(B_EP), 0xBBBB),
+        ],
+        drop_types: Vec::new(),
+    };
+
+    // First handshake: both ends establish at epoch 0 and traffic flows.
+    link.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    link.settle();
+    assert_eq!(link.hosts[1].delivered, vec![ipv4(A_IP, B_IP, b"before")]);
+
+    // The server restarts: same identity and peer configuration, no session,
+    // no learned endpoint — the roaming case a real restart creates.
+    link.advance(2_000);
+    link.pump(4);
+    let restarted_b_identity =
+        StaticIdentity::generate(&*suite, &B_SEED).expect("the restarted server's key");
+    let restarted_b = Device::new(
+        suite,
+        restarted_b_identity,
+        vec![PeerConfig::new("a", a_peer_identity).with_allowed_ips([net("10.0.0.1/32")])],
+        &mut TestRng(0x2222),
+        0,
+    )
+    .expect("the restarted server's configuration is consistent");
+    link.hosts[1].device = restarted_b;
+    link.hosts[1].established.clear();
+    link.hosts[1].delivered.clear();
+
+    // The client knows nothing and keeps speaking. Ten stale datagrams inside
+    // the budget: the first one must be the only offer the server grants —
+    // exactly ADR-0019's rate limit, in the flood shape the limit exists for.
+    for _ in 0..10 {
+        link.outbound(0, ipv4(A_IP, B_IP, b"probe"));
+        link.pump(1);
+    }
+    link.pump(16);
+
+    let stats_b = link.hosts[1]
+        .device
+        .stats(link.hosts[1].peer_id())
+        .expect("peer B");
+    assert_eq!(
+        stats_b.reinit_offered, 1,
+        "the restarted server offered more than the rate limit allows"
+    );
+
+    // The tunnel is back. The next packet goes through the *new* session.
+    link.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    link.settle();
+
+    let epoch_a = link.hosts[0].device.epoch(link.hosts[0].peer_id());
+    let epoch_b = link.hosts[1].device.epoch(link.hosts[1].peer_id());
+    assert_eq!(
+        epoch_a, epoch_b,
+        "the ends did not agree on an epoch across the server restart"
+    );
+    assert!(
+        epoch_a.is_some(),
+        "the tunnel did not re-establish: A={epoch_a:?} B={epoch_b:?}"
+    );
+    // Deliveries during the flood window are legitimate: once the tunnel is
+    // back, the stale "probe" datagrams the client was still sealing ride the
+    // new session as normal traffic. The final packet, sent after settle,
+    // proves the end-to-end path.
+    assert_eq!(
+        link.hosts[1].delivered.last(),
+        Some(&ipv4(A_IP, B_IP, b"after")),
+        "the tunnel re-established but carries no traffic"
+    );
+}

@@ -420,9 +420,18 @@ impl Device {
     // ── handshake driving ────────────────────────────────────────────
 
     /// Begin a handshake with `peer`, if one is not already in flight.
+    ///
+    /// `dial` is a fallback address used **only** when the peer has no endpoint
+    /// yet — the ADR-0019 reinit offer, where the only address we can attach to
+    /// a stale-session datagram is the address it arrived from. A configured or
+    /// learned endpoint always wins, so the rule (an address is committed as our
+    /// peer's endpoint only once authenticated traffic arrived from it) is
+    /// untouched: an offer to a roaming peer dials where the traffic came from
+    /// without making that the peer's endpoint.
     pub(super) fn start_handshake(
         &mut self,
         index: usize,
+        dial: Option<SocketAddr>,
         clock: Clock,
         rng: &mut dyn Randomness,
         out: &mut Vec<Action>,
@@ -437,9 +446,11 @@ impl Device {
             });
             return;
         }
-        // No address to dial: the peer must call us. Common for a roaming peer
-        // whose endpoint has not been learned yet.
-        let Some(endpoint) = self.peers[index].endpoint else {
+        // No address to dial: the peer must call us, unless the caller saw one
+        // (the reinit offer dials the stale traffic's source address, which is
+        // not committed as the endpoint).
+        let endpoint = self.peers[index].endpoint.or(dial);
+        let Some(endpoint) = endpoint else {
             return;
         };
         let suite = Arc::clone(&self.suite);

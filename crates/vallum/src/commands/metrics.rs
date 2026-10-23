@@ -280,6 +280,14 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             "Datagrams that opened but whose inner source was outside allowed_ips.",
         ),
         (
+            "peer_reinit_offered_total",
+            "counter",
+            "Rate-limited reactive re-handshakes offered to the peer (ADR-0019): \
+             their-side traffic arrived on a session this side no longer holds. \
+             Sustained growth means a peer whose path or key is dropping; \
+             offers are capped by the reinit budget, not scaled by packets.",
+        ),
+        (
             "peer_delivery_ratio",
             "gauge",
             "Datagrams received over datagrams sent in the last window; 1 when \
@@ -333,6 +341,9 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
                 }
                 "peer_dropped_allowed_ips_total" => {
                     number(response, index, uapi::field::DROPPED_ALLOWED_IPS).to_string()
+                }
+                "peer_reinit_offered_total" => {
+                    number(response, index, uapi::field::REINIT_OFFERED).to_string()
                 }
                 "peer_delivery_ratio" => {
                     let sent = number(response, index, uapi::field::WINDOW_SENT);

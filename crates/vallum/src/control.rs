@@ -309,6 +309,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             dropped_allowed_ips: device
                 .stats(id)
                 .map_or(0, |stats| stats.dropped_allowed_ips),
+            reinit_offered: device.stats(id).map_or(0, |stats| stats.reinit_offered),
             last_rejected_source: device
                 .stats(id)
                 .and_then(|stats| stats.last_rejected_source),

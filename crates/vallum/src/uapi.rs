@@ -102,6 +102,8 @@ pub mod field {
     pub const DROPPED_NO_SESSION: &str = "vallum_dropped_no_session";
     pub const DROPPED_REPLAY: &str = "vallum_dropped_replay";
     pub const DROPPED_ALLOWED_IPS: &str = "vallum_dropped_allowed_ips";
+    /// Reactive re-handshake offers a peer was given (ADR-0019), rate-limited.
+    pub const REINIT_OFFERED: &str = "vallum_reinit_offered";
     /// The most recent inner source rejected by `allowed_ips`; `none` if the
     /// packet did not parse as IP, `-` if nothing has been rejected.
     pub const LAST_REJECTED_SOURCE: &str = "vallum_last_rejected_source";
@@ -427,6 +429,8 @@ pub struct PeerState {
     pub dropped_replay: u64,
     /// Datagrams dropped by the `allowed_ips` check.
     pub dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers this peer was given (ADR-0019).
+    pub reinit_offered: u64,
     /// The most recent inner source rejected by `allowed_ips`.
     pub last_rejected_source: Option<std::net::IpAddr>,
     /// Persistent keepalive, in seconds.
@@ -573,6 +577,11 @@ pub fn render_get(state: &DeviceState) -> String {
             "{}={}\n",
             field::DROPPED_ALLOWED_IPS,
             peer.dropped_allowed_ips
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::REINIT_OFFERED,
+            peer.reinit_offered
         ));
         let rejected = match (peer.dropped_allowed_ips, peer.last_rejected_source) {
             (0, _) => "-".to_owned(),
@@ -965,6 +974,7 @@ mod tests {
                 any::<u64>(),
                 any::<u64>(),
                 any::<u64>(),
+                any::<u64>(),
             ),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
@@ -988,6 +998,7 @@ mod tests {
                         dropped_no_session,
                         dropped_replay,
                         dropped_allowed_ips,
+                        reinit_offered,
                     ),
                     keepalive,
                     allowed_ips,
@@ -1008,6 +1019,7 @@ mod tests {
                     dropped_no_session,
                     dropped_replay,
                     dropped_allowed_ips,
+                    reinit_offered,
                     last_rejected_source: None,
                     keepalive,
                     allowed_ips,
@@ -1253,6 +1265,7 @@ mod tests {
                 dropped_no_session: 1,
                 dropped_replay: 2,
                 dropped_allowed_ips: 3,
+                reinit_offered: 4,
                 last_rejected_source: None,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
@@ -1311,6 +1324,7 @@ mod tests {
                 dropped_no_session: 0,
                 dropped_replay: 0,
                 dropped_allowed_ips: 0,
+                reinit_offered: 0,
                 last_rejected_source: None,
                 keepalive: None,
                 allowed_ips: Vec::new(),

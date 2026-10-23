@@ -82,7 +82,7 @@ impl Device {
             TimerAction::None => {}
             TimerAction::SendKeepalive if persistent => {}
             TimerAction::SendKeepalive => self.send_keepalive(index, clock, rng, out),
-            TimerAction::StartHandshake => self.start_handshake(index, clock, rng, out),
+            TimerAction::StartHandshake => self.start_handshake(index, None, clock, rng, out),
             TimerAction::RetransmitHandshake => self.retransmit_handshake(index, clock, out),
             TimerAction::GiveUp => self.abandon_handshake(index),
             TimerAction::Expire => self.tear_down(index, now),
@@ -130,7 +130,7 @@ impl Device {
             self.send_keepalive(index, clock, rng, out);
             true
         } else {
-            self.start_handshake(index, clock, rng, out);
+            self.start_handshake(index, None, clock, rng, out);
             false
         }
     }

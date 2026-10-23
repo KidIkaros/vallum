@@ -99,6 +99,9 @@ pub(super) struct Peer {
     pub(super) previous_own_index: Option<u32>,
     pub(super) handshake: Handshake,
     pub(super) timers: Timers,
+    /// When this peer was last offered a reactive re-handshake from the data
+    /// plane, so reinitiation stays within ADR-0019's per-peer budget.
+    pub(super) last_reinit_ms: Option<u64>,
     pub(super) timestamp_guard: Tai64nGuard,
     pub(super) shaper: Shaper,
     pub(super) blocked_until: Option<u64>,
@@ -128,6 +131,8 @@ pub(super) struct Peer {
     /// and used to share one counter, which made an aggregate look like a
     /// diagnosis.
     pub(super) dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers made to this peer, per ADR-0019.
+    pub(super) reinit_offered: u64,
     /// The most recent inner source address rejected by the `allowed_ips`
     /// check, or `None` if the packet did not parse as IP at all.
     ///
@@ -250,6 +255,7 @@ impl Peer {
             previous_own_index: None,
             handshake: Handshake::Idle,
             timers: Timers::new(now_ms),
+            last_reinit_ms: None,
             timestamp_guard: Tai64nGuard::new(),
             shaper,
             blocked_until: None,
@@ -263,6 +269,7 @@ impl Peer {
             dropped_no_session: 0,
             dropped_replay: 0,
             dropped_allowed_ips: 0,
+            reinit_offered: 0,
             last_rejected_source: None,
             dropped: 0,
             rejected: 0,

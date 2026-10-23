@@ -299,6 +299,8 @@ pub struct PeerStats {
     pub dropped_replay: u64,
     /// Datagrams that opened but whose inner source was outside `allowed_ips`.
     pub dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers made to this peer, per ADR-0019.
+    pub reinit_offered: u64,
     /// The most recent inner source rejected by `allowed_ips`, if any.
     pub last_rejected_source: Option<std::net::IpAddr>,
     /// When the last handshake completed, if one has.
@@ -333,6 +335,10 @@ pub struct Device {
     /// same reason, and the most diagnostic counter here: it is what a stale
     /// session looks like from the receiving side.
     dropped_unknown_index: u64,
+    /// When we last offered a reactive re-handshake to *any* peer, the device
+    /// half of ADR-0019's reinit budget (the per-peer half is
+    /// [`Peer::last_reinit_ms`]).
+    last_reinit_global_ms: Option<u64>,
 }
 
 impl core::fmt::Debug for Device {
@@ -384,6 +390,7 @@ impl Device {
             under_load: false,
             dropped_malformed: 0,
             dropped_unknown_index: 0,
+            last_reinit_global_ms: None,
             now_ms,
         };
         for config in configs {
@@ -688,6 +695,7 @@ impl Device {
                 dropped_no_session: peer.dropped_no_session,
                 dropped_replay: peer.dropped_replay,
                 dropped_allowed_ips: peer.dropped_allowed_ips,
+                reinit_offered: peer.reinit_offered,
                 last_rejected_source: peer.last_rejected_source,
                 last_handshake: peer.last_handshake,
             })

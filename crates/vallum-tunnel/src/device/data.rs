@@ -4,6 +4,12 @@
 
 use super::*;
 
+/// ADR-0019's reinit budget, keyed per peer and per device: at least this much
+/// time between two reactive re-handshake offers to one peer, and between any
+/// two device-wide. Stale-session traffic can trigger a handshake only at this
+/// cadence.
+pub(super) const PASSIVE_REINIT_INTERVAL_MS: u64 = 15_000;
+
 /// The largest `Pad` target among a shaper's effects, if any.
 ///
 /// The maximum, not the last: if two machines pad the same packet, the larger
@@ -24,6 +30,7 @@ impl Device {
         clock: Clock,
         source: SocketAddr,
         bytes: &[u8],
+        rng: &mut dyn Randomness,
         out: &mut Vec<Action>,
     ) {
         let suite = Arc::clone(&self.suite);
@@ -36,6 +43,12 @@ impl Device {
             // restart this is what every packet from a still-running peer looks
             // like, and it was previously indistinguishable from silence.
             self.dropped_unknown_index = self.dropped_unknown_index.saturating_add(1);
+            // We cannot decrypt the packet and there is nothing to do with it,
+            // but its shape alone can be trusted enough to be the trigger: it
+            // parsed as a data message and carries an index that is not ours.
+            // ADR-0019: it may mean a peer is trying to reach us and we are not,
+            // so offer a reactive re-handshake, rate-limited.
+            self.offer_passive_reinit(source, clock, rng, out);
             return;
         };
         let index = peer_id.index();
@@ -83,6 +96,74 @@ impl Device {
         out.push(Action::Deliver { packet: plaintext });
     }
 
+    /// The passive side's reactive re-handshake offer, per ADR-0019.
+    ///
+    /// Traffic from `source` just landed with an index no session of ours names:
+    /// from a peer's perspective our session has lapsed and theirs is alive, the
+    /// mirror image of what [`Device::on_data`] handles above. We cannot decrypt
+    /// anything, and the packet itself carries no proof of identity — so the
+    /// whole defence is the rate limit: at most one offer per peer per
+    /// [`PASSIVE_REINIT_INTERVAL_MS`], and at most one device-wide, so a flood
+    /// of spoofed stale-session datagrams buys an attacker one handshake per
+    /// interval, not one handshake per packet.
+    ///
+    /// The peer is chosen conservatively: a peer whose endpoint is exactly the
+    /// datagram's source address, or — when the datagram matches no endpoint —
+    /// the one sessionless peer whose endpoint has never been learned. Handshake
+    /// completion and everything after goes through the full authenticated path.
+    fn offer_passive_reinit(
+        &mut self,
+        source: SocketAddr,
+        clock: Clock,
+        rng: &mut dyn Randomness,
+        out: &mut Vec<Action>,
+    ) {
+        let now = clock.monotonic_ms;
+        // The device-wide gate first: nothing is offered while its interval is
+        // running, whatever the per-peer state.
+        if self
+            .last_reinit_global_ms
+            .is_some_and(|t| now.saturating_sub(t) < PASSIVE_REINIT_INTERVAL_MS)
+        {
+            return;
+        }
+        let available = |peer: &Peer| {
+            peer.session.is_none()
+                && peer
+                    .last_reinit_ms
+                    .is_none_or(|t| now.saturating_sub(t) >= PASSIVE_REINIT_INTERVAL_MS)
+        };
+        // A peer whose learned endpoint is the source; or, when nothing matches,
+        // the unique peer with no endpoint to its name — a restart wiped it and
+        // the roaming client has not re-learned its address yet, so there is
+        // exactly one peer the datagram can belong to. A peer with a handshake
+        // already in flight is skipped by start_handshake, but offering into it
+        // would still burn the budget, so it is filtered out here.
+        let maybe_peer = self
+            .peers
+            .iter()
+            .position(|peer| peer.endpoint == Some(source) && available(peer))
+            .or_else(|| {
+                let mut candidates = self
+                    .peers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, peer)| peer.endpoint.is_none() && available(peer));
+                let (index, _) = candidates.next()?;
+                candidates.next().is_none().then_some(index)
+            })
+            .filter(|&index| matches!(self.peers[index].handshake, Handshake::Idle));
+        let Some(index) = maybe_peer else {
+            return;
+        };
+        self.last_reinit_global_ms = Some(now);
+        self.peers[index].last_reinit_ms = Some(now);
+        self.peers[index].reinit_offered = self.peers[index].reinit_offered.saturating_add(1);
+        // The offer dials the address the stale datagram came from; that is not
+        // committed as the peer's endpoint — see `start_handshake`.
+        self.start_handshake(index, Some(source), clock, rng, out);
+    }
+
     // ── outbound ─────────────────────────────────────────────────────
 
     pub(super) fn on_outbound_ip(
@@ -104,7 +185,7 @@ impl Device {
             // as soon as the handshake completes, which is what makes the first
             // ping of a tunnel work instead of being discarded.
             self.enqueue(index, packet);
-            self.start_handshake(index, clock, rng, out);
+            self.start_handshake(index, None, clock, rng, out);
             return;
         }
         if self.peers[index].blocked_until.is_some() {

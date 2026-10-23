@@ -25,7 +25,7 @@ impl Device {
             }
             MessageType::RespHello => self.on_resp_hello(clock, source, bytes, out),
             MessageType::InitConf => self.on_init_conf(clock, source, bytes, out),
-            MessageType::Data => self.on_data(clock, source, bytes, out),
+            MessageType::Data => self.on_data(clock, source, bytes, rng, out),
             MessageType::CookieReply => self.on_cookie_reply(&message, out),
             // Identity documents travel out of band: P3 carries the signature
             // inline in the handshake, so a device has nothing to do with a
