@@ -260,8 +260,12 @@ separate approximation of it.
 ## Next — after the seven hold
 
 - **Per-app split tunnelling.** Destination prefixes cannot express "browser
-  through the tunnel, everything else direct". Needs a decision on mechanism
-  (cgroup, netns, or namespace-per-app) before any code.
+  through the tunnel, everything else direct". Mechanism decided in ADR-0023:
+  the full tunnel's own mark tables, classified by an `nft` `socket cgroupv2`
+  match, with launch-bound membership (`vallum app run NAME -- CMD`) so the
+  cgroup is created by the launcher rather than discovered. Implementation is
+  still next; its first task is the ADR's probe — verifying `socket cgroupv2`
+  support on both harnesses' kernels before any `routes.rs` work.
 - **NAT traversal and relay.** ADR-0016 is `proposed` and deliberately says what
   Vallum will *not* do. Stays proposed until someone needs it behind a symmetric
   NAT.
