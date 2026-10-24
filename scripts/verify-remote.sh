@@ -673,6 +673,81 @@ PY
         ok "$name: rotated and finalized on remote server"
     fi
 
+    # ── the client verdict, on the real link ──
+    # What pages must be what was tested: the same three endings the netns
+    # gate (e2e-netns.sh) proves, here against a daemon on the real live
+    # network over the server's real NAT. The scrape runs inside the namespace
+    # the way a real exporter would see it, and the dead endings are proven
+    # against the namespace's own guard tables — which is why this leg sits
+    # inside prove_client_ns and not prove_client_host: the script never
+    # installs or removes a guard on the invoking machine's tables.
+    say "client verdict: the scrape carries the status verdict"
+    cli_put "$vallum_r metrics --config $rdir/client.toml > $rdir/metrics-live.txt 2>&1" \
+        || { rsh "cat $rdir/metrics-live.txt"; bad "$name: the scrape failed while the daemon lived"; }
+    rsh "cat $rdir/metrics-live.txt" > "$dir/metrics-live.txt"
+    grep -q '^# TYPE vallum_client_verdict gauge$' "$dir/metrics-live.txt" \
+        || bad "$name: the scrape has no client-verdict family"
+    grep -q "client_verdict{interface=\"$iface\",verdict=\"up\"} 1" "$dir/metrics-live.txt" \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the live scrape did not read verdict=up"; }
+    grep -q '^vallum_up 1$' "$dir/metrics-live.txt" \
+        || bad "$name: the live scrape did not report up=1"
+    ok "$name: the live scrape carries the verdict the status verb would print"
+
+    # The endings that page. The transported config runs as a deliberate
+    # split tunnel — where a dead daemon without a guard is `down` by design,
+    # not a leak — so the leaked ending needs the config to state a full
+    # -tunnel posture. The provisioning writer already ships a `[quick]`
+    # section (`table = "auto"`, optional `dns`), so the policy is set inside
+    # it, in place — the same thing the netns gate writes for its own config
+    # before the same ending. The final state is asserted, and anything else
+    # fails loudly rather than faking the alert.
+    rsh "if grep -q '^policy = ' $rdir/client.toml; then
+             sed -i 's/^policy\\(\s*=\\).*$/policy = \"on\"/' $rdir/client.toml
+         else
+             sed -i '/^\\[quick\\]/a policy = \"on\"' $rdir/client.toml
+         fi
+         grep -q '^policy = \"on\"$' $rdir/client.toml" \
+        || bad "$name: the config did not end with policy = on; the verdict leg's rewrite broke in that config shape"
+
+    rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    cli_put "rm -f $rdir/c.sock"
+    # `ip netns exec` execs binaries, not a shell, so a `command -v` builtin is
+    # a "no such file" here — the check must go through a shell.
+    cli_put "sh -c 'command -v nft'" >/dev/null 2>&1 \
+        || bad "$name: the target has no nft; the verdict leg cannot read the guard state"
+
+    cli_put "$vallum_r policy on --config $rdir/client.toml" > "$dir/policy-dead-on.log" 2>&1 \
+        || { cat "$dir/policy-dead-on.log"; bad "$name: policy on failed with the daemon dead"; }
+    grep -q 'is blocked' "$dir/policy-dead-on.log" \
+        || { cat "$dir/policy-dead-on.log"; bad "$name: dead-daemon policy on did not report a guard"; }
+    # The dead scrape must exit nonzero — scripts gate on that — yet still
+    # write the file: silence would hide the state instead of naming it.
+    if cli_put "$vallum_r metrics --config $rdir/client.toml --output $rdir/metrics-blocked.prom" \
+        >/dev/null 2>&1; then
+        bad "$name: the scrape exited 0 while the daemon was dead"
+    fi
+    rsh "cat $rdir/metrics-blocked.prom" > "$dir/metrics-blocked.prom" 2>/dev/null
+    grep -q 'verdict="blocked"' "$dir/metrics-blocked.prom" \
+        || { cat "$dir/metrics-blocked.prom" 2>/dev/null; bad "$name: a dead daemon under a guard did not read blocked"; }
+    grep -q '^vallum_up 0$' "$dir/metrics-blocked.prom" \
+        || bad "$name: the dead-daemon scrape did not report up=0"
+    ok "$name: a dead daemon under an installed guard scrapes as blocked, the scrape failing"
+
+    cli_put "$vallum_r policy off --config $rdir/client.toml" > "$dir/policy-dead-off.log" 2>&1 \
+        || { cat "$dir/policy-dead-off.log"; bad "$name: policy off failed with the daemon dead"; }
+    if cli_put "$vallum_r metrics --config $rdir/client.toml --output $rdir/metrics-leaking.prom" \
+        >/dev/null 2>&1; then
+        bad "$name: the scrape exited 0 with a dead daemon and no guard"
+    fi
+    rsh "cat $rdir/metrics-leaking.prom" > "$dir/metrics-leaking.prom" 2>/dev/null
+    grep -q 'verdict="LEAKING"' "$dir/metrics-leaking.prom" \
+        || { cat "$dir/metrics-leaking.prom" 2>/dev/null; bad "$name: a dead daemon with no guard did not read LEAKING"; }
+    ok "$name: a dead daemon with no guard scrapes as LEAKING — the state the pager names"
+
     # Teardown for the next transport: detach, then reap the daemon whose
     # command line names this transport's config directory.
     cli_put "$quick_r detach $rdir/client.toml" >/dev/null 2>&1
@@ -885,6 +960,23 @@ PY
         rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
         ok "$name: rotated and finalized on remote server"
     fi
+
+    # ── the client verdict, live ending only ──
+    # The same series the netns gate and the namespaced leg assert. Only the
+    # live ending proves here: the dead endings are guard manipulations, and
+    # this script never installs or removes a guard on the invoking machine
+    # (the same rule that keeps --host-direct from applying the egress
+    # policy). The namespace leg owns the dead endings.
+    say "client verdict: the live scrape carries the status verdict"
+    "$VALLUM" metrics --config "$config" > "$dir/metrics-live.txt" 2>&1 \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the scrape failed while the daemon lived"; }
+    grep -q '^# TYPE vallum_client_verdict gauge$' "$dir/metrics-live.txt" \
+        || bad "$name: the scrape has no client-verdict family"
+    grep -q "client_verdict{interface=\"$iface\",verdict=\"up\"} 1" "$dir/metrics-live.txt" \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the live scrape did not read verdict=up"; }
+    grep -q '^vallum_up 1$' "$dir/metrics-live.txt" \
+        || bad "$name: the live scrape did not report up=1"
+    ok "$name: the live scrape carries the verdict the status verb would print"
 
     kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
     CLIENT_PID=""

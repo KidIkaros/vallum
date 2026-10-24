@@ -91,6 +91,9 @@ set -euo pipefail
 
 BIN=$1
 WORK=$2
+# The full-tunnel phase runs the product's own second binary; the outer script
+# stages it beside the rest and passes it here.
+QUICK=$3
 
 OUTER_A=10.99.0.1
 OUTER_B=10.99.0.2
@@ -508,6 +511,20 @@ ok "the TUI renders the live device and peer table headlessly"
 grep -q 'PASS  control' "$WORK/doctor.txt" || bad "doctor did not pass the control check"
 ok "doctor checks the control socket"
 
+# The client verdict rides the same scrape as the counters: one labeled series
+# computed by the same verdict function `vallum status` runs. Asserting that
+# series here is what makes "what pages is what the suite tests" true instead
+# of aspirational — the alerts files match exactly it.
+"$BIN" metrics --config "$WORK/a.toml" --control "$WORK/control.sock" \
+    > "$WORK/metrics-live.txt" 2>&1 || bad "metrics failed while the daemon lived"
+grep -q '^# TYPE vallum_client_verdict gauge$' "$WORK/metrics-live.txt" \
+    || { cat "$WORK/metrics-live.txt"; bad "the scrape has no client-verdict family"; }
+grep -q 'vallum_client_verdict{interface="vallum0",verdict="up"} 1' "$WORK/metrics-live.txt" \
+    || { cat "$WORK/metrics-live.txt"; bad "the live scrape did not read verdict=up"; }
+grep -q '^vallum_up 1$' "$WORK/metrics-live.txt" \
+    || bad "the live scrape did not report up=1"
+ok "the scrape carries the verdict the status verb would print (up)"
+
 
 "$BIN" syncconf "$WORK/a.toml" || bad "syncconf failed on an unchanged config"
 ok "syncconf applied an unchanged config idempotently"
@@ -896,6 +913,53 @@ else
     bad "the tunnel did not survive the rebind"
 fi
 ok "the bound port is now 51999, as the control plane reports"
+
+# ── the client scrape when the daemon is gone ──────────────
+#
+# The live scrape above is the comfortable case. Item 7's core case is a dead
+# daemon: the process dies, the operator's scraper still runs, and what it
+# gets must name the host's real state. Guard state is a host property, so the
+# verdict stays computable without the daemon — `blocked` under an installed
+# guard, `LEAKING` without one — and those are exactly the states the alerts
+# files page on. Proving both endings here, in a disposable namespace the way
+# the egress guard was proven in ns2, is what closes the loop on item 7's
+# harness side.
+say "scraping the client verdict with the daemon dead"
+
+kill_pidfile "$A_PIDFILE"
+wait_gone "$A_PIDFILE" 5 || bad "A would not die for the dead-daemon scrape"
+ok "daemon A is gone while B keeps running"
+# Stale socket file: the daemon normally unlinks it on the way down, but if it
+# left one, a scrape would meet a file instead of the dead-daemon branch.
+rm -f "$WORK/control.sock"
+
+# Endings in operator order: guard installed, then guard removed.
+"$BIN" policy on --config "$WORK/a.toml" > "$WORK/policy-dead-on.log" 2>&1 \
+    || { cat "$WORK/policy-dead-on.log"; bad "policy on failed with the daemon dead"; }
+grep -q 'is blocked' "$WORK/policy-dead-on.log" \
+    || { cat "$WORK/policy-dead-on.log"; bad "dead-daemon policy on did not report a guard"; }
+# The dead scrape must exit nonzero — scripts gate on that — yet still write
+# the file: silence or staleness would hide the state instead of naming it.
+if "$BIN" metrics --config "$WORK/a.toml" --output "$WORK/metrics-blocked.prom" \
+    > /dev/null 2>&1; then
+    bad "metrics exited 0 while the daemon was dead"
+fi
+grep -q 'verdict="blocked"' "$WORK/metrics-blocked.prom" \
+    || { cat "$WORK/metrics-blocked.prom" 2>/dev/null; bad "a dead daemon under a guard did not read blocked"; }
+grep -q '^vallum_up 0$' "$WORK/metrics-blocked.prom" \
+    || bad "the dead-daemon scrape did not report up=0"
+ok "a dead daemon under an installed guard scrapes as blocked, with a failing scrape"
+
+"$BIN" policy off --config "$WORK/a.toml" > "$WORK/policy-dead-off.log" 2>&1 \
+    || { cat "$WORK/policy-dead-off.log"; bad "policy off failed with the daemon dead"; }
+if "$BIN" metrics --config "$WORK/a.toml" --output "$WORK/metrics-leaking.prom" \
+    > /dev/null 2>&1; then
+    bad "metrics exited 0 with a dead daemon and no guard"
+fi
+grep -q 'verdict="LEAKING"' "$WORK/metrics-leaking.prom" \
+    || { cat "$WORK/metrics-leaking.prom" 2>/dev/null; bad "a dead daemon with no guard did not read LEAKING"; }
+ok "a dead daemon with no guard scrapes as LEAKING — the state the pager names"
+# The namespace is left as it was found, so the restarts below start clean.
 
 # ── shut down ────────────────────────────────────────────────────────
 
@@ -1661,4 +1725,4 @@ ok "the full-tunnel daemons exited on SIGTERM"
 printf '\n== PASS\n'
 INNER
 
-unshare -Urn --map-root-user bash "$WORK/inner.sh" "$BIN" "$WORK"
+unshare -Urn --map-root-user bash "$WORK/inner.sh" "$BIN" "$WORK" "$QUICK"
