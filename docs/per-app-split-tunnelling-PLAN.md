@@ -198,6 +198,20 @@ between, no quoting layer, exactly ONE process. The verb stays stdlib-only:
 no `nix`/`libc` dependency, and the recorded form is
 `Command::pre_exec` + `std::process::id()`.
 
+**Amendment, 2026-10-25 (landed)**: the workspace policy is
+`unsafe_code = "forbid"`, and `pre_exec` is inherently `unsafe`, so every
+invocation the plan sketched is unwritable as stated. The landed form
+reaches the same execution point without it: the verb moves **itself** into
+the leaf `<name>-<pid>` (its own pid, known immediately — no spawn-ordering
+trick needed) and then plain-spawns the command as a child. Everything
+counted for is preserved: the child is born into the leaf by cgroup
+inheritance (so every descendant joins the class); argv is preserved
+exactly — the spawn goes straight to exec, no shell, no quoting layer; the
+verb keeps the wait and forwards the child's exit code; the stdlib-only
+property holds. The delta is process count (two, verbatim reverting when
+the child exits, still no pid discovery) and the leaf's pid being the
+verb's. The one-property test lives in the gate's verb-lifecycle case.
+
 ## Tests the plan lands with
 
 1. **Gate, pair-assertion (the `route`/`filter` distinction):** in

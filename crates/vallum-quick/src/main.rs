@@ -25,6 +25,7 @@ use std::process::{Child, Command};
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
 
+mod class;
 mod dns;
 mod hooks;
 mod routes;
@@ -115,6 +116,19 @@ enum Action {
         #[arg(long)]
         allow_insecure_config: bool,
     },
+    /// Launch a process inside the tunnel's per-app class (ADR-0023).
+    App {
+        /// The configuration file, for its interface name.
+        config: PathBuf,
+        /// The member name; backs the cgroup leaf `<name>-<pid>`.
+        name: String,
+        /// The command and its arguments, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
+        cmd: Vec<String>,
+        /// Report the launch instead of performing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Print the config without its `[quick]` table.
     Strip {
         /// The configuration file.
@@ -159,6 +173,12 @@ fn main() -> std::process::ExitCode {
             dry_run,
             allow_insecure_config,
         } => detach(config, *dry_run, *allow_insecure_config),
+        Action::App {
+            config,
+            name,
+            cmd,
+            dry_run,
+        } => class::app_run(config, name, cmd, *dry_run),
         Action::Watch {
             config,
             dry_run,
@@ -289,6 +309,8 @@ fn attach_host_side(
         }
     }
 
+    class::attach_class(config, interface, dry_run)?;
+
     for hook in &config.quick.post_up {
         run_hook(hook, dry_run)?;
     }
@@ -309,6 +331,9 @@ fn withdraw_host_side(
         run_hook(hook, dry_run)?;
     }
 
+    // The class rule came down first when it went up (routes, DNS, class),
+    // so it is first down too — reversal, not convenience.
+    class::detach_class(interface, dry_run);
     remove_routes(config, interface, table, dry_run);
     if !config.quick.dns.is_empty() {
         unset_dns(interface, dry_run)?;

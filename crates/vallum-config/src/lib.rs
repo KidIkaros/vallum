@@ -89,6 +89,16 @@ pub struct Quick {
     /// CIDR prefixes.
     #[serde(default)]
     pub allow: Vec<String>,
+    /// Claim the per-app classification class for this tunnel (ADR-0023).
+    ///
+    /// When true, `vallum-quick attach` installs one `socket cgroupv2` rule
+    /// that marks traffic launched into the class, and `vallum-quick app run`
+    /// becomes a way to start a process inside it. The daemon parses and
+    /// ignores this: the class is host-level work, owned by `vallum-quick`
+    /// alone. A full tunnel only — a prefix-list tunnel has no class to ride;
+    /// `attach` refuses the combination.
+    #[serde(default)]
+    pub app_class: bool,
 }
 
 /// The `[enroll]` table: the optional token-gated enrolment responder.

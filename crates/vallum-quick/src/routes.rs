@@ -105,7 +105,7 @@ pub(crate) fn policy_for(
 /// `/etc/vallum` either: this is state, not configuration.
 const STATE_DIR: &str = "/var/lib/vallum";
 
-fn state_dir() -> PathBuf {
+pub(crate) fn state_dir() -> PathBuf {
     // Overridable for the same reason `VALLUM_BIN` is: a test harness needs to
     // exercise the record without writing to the host's `/var/lib`.
     std::env::var_os("VALLUM_STATE_DIR")
