@@ -212,6 +212,19 @@ property holds. The delta is process count (two, verbatim reverting when
 the child exits, still no pid discovery) and the leaf's pid being the
 verb's. The one-property test lives in the gate's verb-lifecycle case.
 
+**Amendment, 2026-10-25 (the leaf note, observed live)**: the landed form
+put the verb itself inside the leaf, so the sketch's exit-time `rmdir`
+above was refused on *every* launch — the verb is a resident of the leaf
+until after `remove_dir` runs — and the "descendant still inside" note
+fired on clean launches that had none. Measured in the live verb watch
+(userns+netns, tier-2 class, one counting rule): the honest decision reads
+the leaf's `cgroup.procs` and subtracts the verb's own pid. Empty minus
+self → the verb steps back into the class root, `rmdir`s its now-empty
+leaf immediately, and says nothing. A resident pid remains → the note
+fires and names it. The decision is a pure helper
+(`leaf_member_pids`) with a unit test; the sweep contract below is
+unchanged — a real straggler leaf still waits for the next attach.
+
 ## Tests the plan lands with
 
 1. **Gate, pair-assertion (the `route`/`filter` distinction):** in

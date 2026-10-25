@@ -614,14 +614,28 @@ pub(crate) fn app_run(
     let status = child
         .wait()
         .map_err(|error| format!("waiting on `{name}` failed: {error}"))?;
-    if fs::remove_dir(&leaf).is_err() {
-        // The leaf outlived its launch: whatever is inside is still classed,
-        // and the next attach sweeps it once it is empty. The note names the
-        // leaf, the way the launch made it precise.
+
+    // The leaf outlived its launch only if a *descendant* is still inside:
+    // the verb itself is in the leaf, so a bare `remove_dir` here would be
+    // refused on every launch and the note would lie every time. The honest
+    // decision reads the leaf's membership and subtracts the verb's own pid.
+    let procs = fs::read_to_string(leaf.join("cgroup.procs")).unwrap_or_default();
+    let stragglers = leaf_member_pids(&procs, pid);
+    if stragglers.is_empty() {
+        // Clean launch: step back into the class root so this empty leaf can
+        // be removed now, not swept at some future attach.
+        let _ = fs::write(class.dir.join("cgroup.procs"), pid.to_string());
+        let _ = fs::remove_dir(&leaf);
+    } else {
+        // A leaf with residents outlived the launch: whatever is inside is
+        // still classed, and it stays until it exits — then the next attach
+        // sweeps it. The note names the leaf, the way the launch made it
+        // precise, and carries the pids it saw.
         eprintln!(
-            "note   leaf `{}` outlived its launch (a descendant is still inside); \
-             it stays until it exits, then the next attach sweeps it",
-            leaf.display()
+            "note   leaf `{}` outlived its launch (still inside: {}); it stays \
+             until it exits, then the next attach sweeps it",
+            leaf.display(),
+            stragglers.join(", ")
         );
     }
 
@@ -630,6 +644,21 @@ pub(crate) fn app_run(
     // killed by a signal reports as 1 — the parent cannot name the signal
     // without a libc dependency, and the crate is stdlib-only by policy.
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// The member pids a leaf's `cgroup.procs` names, minus the verb's own pid.
+///
+/// The decide-what-to-report logic, kept pure so tests state it without a
+/// kernel: one whitespace-separated pid column (cgroup v2), lines may be
+/// empty; anything non-numeric on a line is skipped rather than parsed
+/// however it happens to behave.
+fn leaf_member_pids(procs: &str, own_pid: u32) -> Vec<String> {
+    procs
+        .split_whitespace()
+        .filter_map(|word| word.parse::<u32>().ok())
+        .filter(|pid| *pid != own_pid)
+        .map(|pid| pid.to_string())
+        .collect()
 }
 
 /// The member-name allowlist: cgroup-name legality, plus the null-free and
@@ -775,6 +804,20 @@ allowed_ips = ["10.0.0.0/8"]
         // A stranger's line is named and skipped, never executed.
         let mixed = format!("{text}nft ip evil wrap\nnot nft at all\n");
         assert_eq!(parse_record(&mixed).len(), 2);
+    }
+
+    #[test]
+    fn leaf_residency_subtracts_the_verb_itself() {
+        // The verb is always first in its own leaf; a clean launch leaves
+        // nothing else, a straggler names its pid.
+        assert!(leaf_member_pids("1133710", 1133710).is_empty());
+        assert_eq!(
+            leaf_member_pids("1133710\n1133718", 1133710),
+            vec!["1133718".to_owned()]
+        );
+        assert!(leaf_member_pids("", 1).is_empty());
+        // Non-numeric lines are skipped, never guessed at.
+        assert!(leaf_member_pids("junk\n1133710", 1133710).is_empty());
     }
 
     #[test]
