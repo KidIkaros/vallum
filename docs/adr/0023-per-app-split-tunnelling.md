@@ -39,11 +39,18 @@ The forces that shaped it are all in the repo today:
    policy routing table the full tunnel already holds, and the guard's
    fail-closed semantics apply to that class exactly as they do to the whole
    tunnel — when the tunnel is down, member traffic is blocked, not reverted.
-   The exact `nft` form (a `socket cgroupv2 level N` match, evaluated against
-   the scope `vallum app run` created) is an implementation detail; what is
-   decided is that the classifier is a mark in the existing tables, and all
-   members share one mark rather than one per app — per-app differentiation
-   beyond membership is a decided-against extension for v1.
+   The exact `nft` form is measured, not assumed: the rule names the class's
+   cgroup-relative path, and the match compares the socket's cgroup path
+   against it at the class's depth (`level N "path"`, where N is the depth).
+   nft validates the string against the hierarchy at rule-add time — a
+   component-only name resolves only for a top-level class, and slashes are
+   unnameable through the argv grammar, so deep classes are written through
+   `nft -f` — and the class directory must exist before any rule names it.
+   `level 0` is effectively unusable: its exact-path compare needs slashes in
+   the string. The measure record is `docs/proof/socket-cgroupv2.md`. What
+   remains decided here is unchanged: the classifier is a mark in the existing
+   tables, and all members share one mark rather than one per app — per-app
+   differentiation beyond membership is a decided-against extension for v1.
 
 2. **Membership: launch-bound.** A process becomes a member by being
    *launched* as one — a `vallum app run NAME -- CMD` verb and a `detach`-style
@@ -95,7 +102,7 @@ The forces that shaped it are all in the repo today:
   per-app class with no new rules to write — `failure_policy = "block"`
   blocking member traffic when the tunnel dies is inheritance, not a feature.
 - Membership is provable per process lifetime: the scope exists exactly as
-  long as the launch he compiled it, so `doctor` can name member scopes and
+  long as the launch that created it, so `doctor` can name member scopes and
   what they are classified as.
 - `doctor` and the alerts files inherit honest statements about members:
   a member traffic pattern missing the tunnel is named by the existing
@@ -114,10 +121,16 @@ The forces that shaped it are all in the repo today:
 
 ### Risks
 
-- `nft` support for `socket cgroupv2` at the needed level must be probed on
-  both harnesses' kernels before any `routes.rs` work is written — the
-  first task under this ADR, and a probe the e2e-netns gate can assert in a
-  scratch namespace, like the rest of the guard work is proved.
+- `nft` support for `socket cgroupv2` must be asserted on every harness's
+  kernel before any `routes.rs` work. Measured 2026-10-23 on both: the remote
+  harness (`wingman-vps`, kernel 6.8.0-31, real root, top-level class at
+  level 1) and the local harness (kernel 7.0.0-38, delegated `user@uid`
+  subtree, deep class at level 4 — the delegated environment with mapped
+  credentials the gate's own unprivilege runs in). The e2e-netns gate carries
+  the case (`scripts/e2e-netns.sh`, "per-app classification" phase): class
+  directory before the rule, unscoped control plus a machinery control, a
+  member counted, and a nested member counted by the same single rule. All
+  measured PASS in `docs/proof/socket-cgroupv2.md`.
 - Marks must not collide with the tunnel's own `fwmark = 4660`/`51820`
   budget; the classifier's mark gets a named constant and a documented space.
 - Non-systemd hosts where cgroup v2 delegation fails would break `app run` —

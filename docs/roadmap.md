@@ -264,8 +264,11 @@ separate approximation of it.
   the full tunnel's own mark tables, classified by an `nft` `socket cgroupv2`
   match, with launch-bound membership (`vallum app run NAME -- CMD`) so the
   cgroup is created by the launcher rather than discovered. Implementation is
-  still next; its first task is the ADR's probe — verifying `socket cgroupv2`
-  support on both harnesses' kernels before any `routes.rs` work.
+  still next; the probe that gated it has measured on both harnesses' kernels
+  and lives as an assertion in the netns gate (`docs/proof/socket-cgroupv2.md`):
+  one `socket cgroupv2` rule classifies every member of one class and nothing
+  outside it. `routes.rs` work can start on the measured form — class paths at
+  their depth, never exact-path compares, class directories before rules.
 - **NAT traversal and relay.** ADR-0016 is `proposed` and deliberately says what
   Vallum will *not* do. Stays proposed until someone needs it behind a symmetric
   NAT.
