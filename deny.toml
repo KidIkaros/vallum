@@ -23,6 +23,17 @@ ignore = [
     # its CLI.
     "RUSTSEC-2021-0139", # ansi_term
     "RUSTSEC-2024-0375", # atty
+    # crypto-bigint 0.5.5 constant-time defect (RUSTSEC-2026-0387), riding the
+    # SDK's direct `elliptic-curve = "0.13"` declaration. Measured 2026-10-25:
+    # no SDK source file references elliptic-curve by its own path — every EC
+    # call site (`ec_schnorr` on secp256k1, ES256 on secp256r1) imports it
+    # through the k256/p256 0.14 re-exports, whose graph entry is the 0.7 line
+    # (held at 0.7.9 here, past the yanked 0.7.6 fix) — so the 0.5.5 entry is
+    # declared-at-Cargo.toml weight, not a path the shipped suites route
+    # secrets through. The fix is upstream, not in this lock: OriginSDK drops
+    # the declaration (its latest tag v0.7.3 is our pin), or ships a version on
+    # the 0.14 line. Re-check when the SDK's pin moves.
+    "RUSTSEC-2026-0387", # crypto-bigint — unused SDK direct-dep graph entry
 ]
 
 [licenses]
