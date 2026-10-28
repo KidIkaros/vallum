@@ -25,9 +25,9 @@ use std::process::{Child, Command};
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
 
-mod class;
 mod dns;
 mod hooks;
+mod member;
 mod routes;
 mod session;
 mod watch;
@@ -116,11 +116,11 @@ enum Action {
         #[arg(long)]
         allow_insecure_config: bool,
     },
-    /// Launch a process inside the tunnel's per-app class (ADR-0023).
+    /// Launch a process inside the tunnel's member namespace (ADR-0023).
     App {
         /// The configuration file, for its interface name.
         config: PathBuf,
-        /// The member name; backs the cgroup leaf `<name>-<pid>`.
+        /// The member name, used in messages and the state directory only.
         name: String,
         /// The command and its arguments, after `--`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
@@ -178,7 +178,7 @@ fn main() -> std::process::ExitCode {
             name,
             cmd,
             dry_run,
-        } => class::app_run(config, name, cmd, *dry_run),
+        } => member::app_run(config, name, cmd, *dry_run),
         Action::Watch {
             config,
             dry_run,
@@ -291,6 +291,20 @@ fn attach_host_side(
     dry_run: bool,
     undo: impl FnOnce(&Config, &str, &str, bool),
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Per-app means the host is not a tunnel client: the device moves into the
+    // member namespace and the host keeps its own routes and resolver. Nothing
+    // is applied here for the host, so nothing here can leak.
+    if config.quick.app_class {
+        if let Err(error) = member::attach(config, interface, dry_run) {
+            undo(config, interface, table, dry_run);
+            return Err(error);
+        }
+        for hook in &config.quick.post_up {
+            run_hook(hook, dry_run)?;
+        }
+        return Ok(());
+    }
+
     apply_routes(config, interface, table, dry_run)?;
 
     if !config.quick.dns.is_empty() {
@@ -308,8 +322,6 @@ fn attach_host_side(
             .into());
         }
     }
-
-    class::attach_class(config, interface, dry_run)?;
 
     for hook in &config.quick.post_up {
         run_hook(hook, dry_run)?;
@@ -331,9 +343,17 @@ fn withdraw_host_side(
         run_hook(hook, dry_run)?;
     }
 
-    // The class rule came down first when it went up (routes, DNS, class),
-    // so it is first down too — reversal, not convenience.
-    class::detach_class(interface, dry_run);
+    // Per-app: the device goes back to this namespace and the holder stops.
+    // The host never had routes or DNS of the tunnel's to take back.
+    if config.quick.app_class {
+        member::detach(interface, dry_run);
+        between();
+        for hook in &config.quick.post_down {
+            run_hook(hook, dry_run)?;
+        }
+        return Ok(());
+    }
+
     remove_routes(config, interface, table, dry_run);
     if !config.quick.dns.is_empty() {
         unset_dns(interface, dry_run)?;
@@ -403,9 +423,14 @@ fn up_after_pre(
 
 /// Undo whatever a failed `up` may have applied.
 fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, dry_run: bool) {
-    remove_routes(config, interface, table, dry_run);
-    if !config.quick.dns.is_empty() {
-        let _ = unset_dns(interface, dry_run);
+    // A failed attach may have moved the device or created the holder; both are
+    // the namespace's to undo, and detach is a no-op without a record.
+    member::detach(interface, dry_run);
+    if !config.quick.app_class {
+        remove_routes(config, interface, table, dry_run);
+        if !config.quick.dns.is_empty() {
+            let _ = unset_dns(interface, dry_run);
+        }
     }
     stop_daemon(config_path, dry_run);
 }

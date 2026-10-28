@@ -13,6 +13,7 @@
 #   ./scripts/verify-remote.sh --product --keep user@vps.example.com
 #   ./scripts/verify-remote.sh --upgrade user@vps.example.com
 #   ./scripts/verify-remote.sh --transports token user@vps.example.com
+#   ./scripts/verify-remote.sh --app-class user@vps.example.com
 #   ./scripts/verify-remote.sh --clean-remote user@vps.example.com
 #
 # A host that already runs Vallum is refused, because the test installs its own
@@ -61,6 +62,13 @@
 # record: without it a --product run proves `server init` and then uninstalls
 # what it just proved, leaving a host with no Vallum and no keys.
 #
+# --app-class adds the per-app launch path (ADR-0023) after the transports:
+# the bundle client is rebuilt as a full tunnel with a mark, the product's own
+# attach installs the class, and a launched member's DNS query must answer
+# through the tunnel and be counted by the class rule. It is opt-in because it
+# creates a cgroup directory on the target (removed when empty). Namespaced
+# mode only, and a target that cannot carry the class is reported as skipped.
+#
 # --keep skips cleanup entirely, so it keeps whatever the run left running. In
 # the default scratch mode that is a test daemon still listening on the port,
 # with its config in /tmp — not a deployment. The script says what it kept on
@@ -92,6 +100,7 @@ PRODUCT=0
 KEEP=0
 CLEAN=0
 UPGRADE=0
+APP_CLASS=0
 NAMESPACED=1
 TRANSPORTS="bundle ssh token"
 TARGET=""
@@ -110,6 +119,11 @@ while [ $# -gt 0 ]; do
         # across every release's CLI.
         --upgrade) UPGRADE=1; PRODUCT=1; TRANSPORTS="bundle" ;;
         --keep) KEEP=1 ;;
+        # The per-app launch path (ADR-0023), on the real link: a full tunnel,
+        # the product's own attach installing the class, and one launched
+        # member whose DNS query is counted by the class rule. Off by default
+        # because it leaves a cgroup directory on the host (removed if empty).
+        --app-class) APP_CLASS=1 ;;
         # Where the client half runs. Default is a remote namespace (no local
         # root, no local routes touched); --host-direct keeps the old behaviour
         # of installing the client on the invoking machine.
@@ -989,6 +1003,129 @@ PY
     done
 }
 
+# ── the per-app launch path, on the real link (ADR-0023) ─────────────────
+# Opt-in (--app-class), and namespaced mode only: it rebuilds the bundle
+# transport's client as a *full* tunnel with `app_class`, attaches, and checks
+# the split the mark cannot produce — the client keeps its own path, the device
+# leaves its namespace, and a launched member's traffic leaves from inside the
+# tunnel's. State lives under the scratch dir; the host's resolver is compared
+# before and after rather than rewritten.
+prove_app_class_ns() {
+    local name=$1 dir="$LOCAL_DIR/bundle" config rdir
+    rdir="$REMOTE_DIR/cli/$1"
+    config="$rdir/client.toml"
+    local quick_r="$REMOTE_DIR/vallum-quick" vallum_r="$REMOTE_DIR/vallum"
+    local iface=$CIFACE
+
+    [ "$NAMESPACED" = 1 ] || { note "--app-class needs the namespaced client: skipped"; return 0; }
+    [ -f "$dir/client.toml" ] || { note "the bundle transport did not run: the per-app case is skipped"; return 0; }
+    rsh "test -f $config" 2>/dev/null || { note "no remote bundle config: the per-app case is skipped"; return 0; }
+    cli_put "sh -c 'command -v nsenter'" >/dev/null 2>&1 \
+        || { note "the target has no nsenter: the per-app case is skipped"; return 0; }
+
+    say "per-app class: a member rides the tunnel; the client keeps its own path"
+    # The transport proof left a split tunnel with host routes. The class path
+    # installs none — the member namespace decides — so the config is rewritten
+    # and the daemon restarted to read it.
+    rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+
+    rsh "sudo python3 - $config <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r'^allowed_ips = .*$', 'allowed_ips = [\"0.0.0.0/0\"]', text, flags=re.M)
+if re.search(r'^\\[quick\\]', text, flags=re.M):
+    text = re.sub(r'^\\[quick\\]$', '[quick]\\napp_class = true', text, count=1, flags=re.M)
+else:
+    text += '\\n[quick]\\napp_class = true\\n'
+open(path, 'w').write(text)
+PY" || bad "$name: rewriting the class config failed"
+
+    local resolv_before
+    resolv_before=$(cli_put "sha256sum /etc/resolv.conf 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+
+    cli_put "nohup $vallum_r run --config $config > $rdir/app-class.log 2>&1 &"
+    local up=0
+    for _ in $(seq 1 20); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 && { up=1; break; }
+        sleep 0.5
+    done
+    if [ "$up" != 1 ]; then
+        rsh "cat $rdir/app-class.log 2>/dev/null" >&2
+        bad "$name: the class daemon did not create $iface"
+    fi
+
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r attach $config" \
+        > "$dir/app-class-attach.log" 2>&1 \
+        || { cat "$dir/app-class-attach.log"; bad "$name: class attach failed"; }
+
+    if ! rsh "sudo test -f $rdir/state/$iface.quick-ns"; then
+        if grep -q 'cannot carry the per-app class' "$dir/app-class-attach.log"; then
+            note "$name: the target cannot carry the member namespace: the per-app case is skipped, not passed"
+            cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r detach $config" >/dev/null 2>&1 || true
+            rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
+            return 0
+        fi
+        bad "$name: attach reported success but wrote no namespace record"
+    fi
+
+    # The device left the client's namespace, and the client kept its own path:
+    # the split this mechanism exists for, asserted directly.
+    if cli_put "ip link show $iface" >/dev/null 2>&1; then
+        bad "$name: attach left $iface in the client's namespace"
+    fi
+    if cli_put "ip route get 1.1.1.1" 2>/dev/null | grep -q "dev $iface"; then
+        bad "$name: the client's own traffic was routed into the tunnel"
+    fi
+    ok "$name: the device left the client's namespace; the client kept its own path"
+
+    # A launcher with no member: the namespace must be reachable and must not
+    # borrow the client's route table.
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config lookup -- sh -c 'ip route get 1.1.1.1; cat /etc/resolv.conf'" \
+        > "$dir/app-lookup.log" 2>&1 \
+        || { cat "$dir/app-lookup.log"; bad "$name: the launched member's lookup failed"; }
+    grep -q "dev $iface" "$dir/app-lookup.log" \
+        || { cat "$dir/app-lookup.log"; bad "$name: the launched member did not route through $iface"; }
+
+    # Traffic through the member's path: the server's outer address is inside
+    # the full tunnel's allowed_ips, so this ping leaves from the tunnel address
+    # and is also the traffic that finishes the handshake.
+    local established=0
+    for _ in $(seq 1 20); do
+        cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config gateway -- ping -c1 -W1 $SRV_IP" \
+            >/dev/null 2>&1 || true
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    [ "$established" = 1 ] || bad "$name: the member's traffic did not establish the tunnel"
+    ok "$name: a launched member's traffic carried the tunnel"
+
+    local resolv_after
+    resolv_after=$(cli_put "sha256sum /etc/resolv.conf 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+    [ "$resolv_before" = "$resolv_after" ] \
+        || bad "$name: attach rewrote the client's /etc/resolv.conf"
+    ok "$name: the client's resolver is untouched"
+
+    # Detach returns the device and refuses further launches: a member started
+    # after detach would run outside the tunnel, which is the leak the verb
+    # exists to prevent.
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r detach $config" >/dev/null 2>&1 || true
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 && break; sleep 0.2; done
+    cli_put "ip link show $iface" >/dev/null 2>&1 \
+        || bad "$name: detach did not return $iface to the client namespace"
+    if cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config late -- true" \
+        > "$dir/app-late.log" 2>&1; then
+        bad "$name: app launched after detach"
+    fi
+    ok "$name: detach returned the device and the verb refuses to launch"
+
+    # The daemon is left stopped on purpose: the next transport starts its own,
+    # and a live one would hold the device this case moved around.
+    rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+}
+
 for kind in $TRANSPORTS; do
     name="laptop-$kind"
     dir="$LOCAL_DIR/$kind"
@@ -1036,6 +1173,10 @@ if [ "$UPGRADE" = 1 ]; then
     say "proving the tunnel again on the upgraded daemon"
     prove_client "$name" "$dir"
     ok "the tunnel survives an in-place upgrade"
+fi
+
+if [ "$APP_CLASS" = 1 ]; then
+    prove_app_class_ns "laptop-bundle"
 fi
 
 if [ "$NAMESPACED" = 1 ]; then

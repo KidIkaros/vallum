@@ -144,6 +144,12 @@ stop_all() {
     if [ -n "${A_JOB:-}" ]; then kill -KILL "$A_JOB" 2>/dev/null || true; fi
     if [ -n "${B_JOB:-}" ]; then kill -KILL "$B_JOB" 2>/dev/null || true; fi
     if [ -n "${SNIFF_PID:-}" ]; then kill -KILL "$SNIFF_PID" 2>/dev/null || true; fi
+    # The member-namespace holder, if a failure left one behind: it holds a
+    # netns with the tunnel device in it, and both die with the holder.
+    if [ -n "${WORK:-}" ] && [ -s "$WORK/state/vallum0.quick-ns" ]; then
+        NS_HOLDER=$(awk '/^pid /{print $2}' "$WORK/state/vallum0.quick-ns" 2>/dev/null || true)
+        if [ -n "${NS_HOLDER:-}" ]; then kill -KILL "$NS_HOLDER" 2>/dev/null || true; fi
+    fi
     # The A1 DNS responder runs its own endless loop, so on any exit — including
     # a failure before the phase's own cleanup ran — it must die before `wait`,
     # or the trap blocks here until the file's eventual deletion.
@@ -685,98 +691,6 @@ else
     bad "the DNS lookup stayed blocked after policy off: the block was not the guard"
 fi
 kill $DNS_PID 2>/dev/null
-
-# ── per-app classification: socket cgroupv2 (ADR-0023) ───────────────
-# One rule must classify every member of one class and nothing outside it —
-# the property ADR-0023's launch-bound membership leans on. The remote probe
-# (docs/proof/socket-cgroupv2.md) also caught a lie: a rule whose cgroup path
-# did not exist at add time "passed" for two whole runs because the assertions
-# checked the table, not the rule. Nothing here is allowed that laziness:
-# control and positive are both counted, and the scope directory is created
-# before any rule names it.
-say "per-app classification: one socket cgroupv2 rule, members only"
-
-if [ -x "$(command -v nft || true)" ]; then NFT_BIN=nft; else NFT_BIN=; fi
-# The class directory must be creatable by whoever runs the gate. Real root
-# puts it at the hierarchy root (tier 1, the remote probe's form); a
-# systemd-delegated user session puts it under user@uid.service (tier 2).
-# The names below are cgroup-relative: for a class on a delegated subtree
-# they carry the full prefix whose depth decides the rule's level.
-CG_DELEG=
-for d in /sys/fs/cgroup/user.slice/*/user@*.service; do
-    # The `|| true` keeps a non-glob pattern from ending the whole gate,
-    # exactly as every check inside this script that may not hold does.
-    [ -d "$d" ] && [ -w "$d" ] && { CG_DELEG="${d#/sys/fs/cgroup/}"; break; } || true
-done
-if [ -n "$NFT_BIN" ] && [ -w /sys/fs/cgroup ]; then
-    CG_REL=vallum-e2e
-    DFT=/sys/fs/cgroup/$CG_REL
-elif [ -n "$NFT_BIN" ] && [ -n "$CG_DELEG" ]; then
-    CG_REL=$CG_DELEG/vallum-e2e
-    DFT=/sys/fs/cgroup/$CG_REL
-fi
-if [ -n "${DFT:-}" ]; then
-    CG_DEPTH=$(printf '%s' "$CG_REL" | awk -F/ '{print NF}')
-    mkdir -p "$DFT/member" "$DFT/member/tab" \
-        || bad "the gate could not create its cgroup class $DFT"
-else
-    printf '   note  no writable cgroup v2 subtree here: the socket cgroupv2 case is skipped, not passed\n'
-    printf '   note  where it ran and what it found: docs/proof/socket-cgroupv2.md\n'
-fi
-
-if [ -n "${DFT:-}" ]; then
-    cg_clean() { nft -a delete table ip vallumcg 2>/dev/null || true; rmdir "$DFT/member/tab" "$DFT/member" "$DFT" 2>/dev/null || true; }
-    cg_pk() { nft list counter ip vallumcg "$1" 2>/dev/null | sed -n 's/.*packets \([0-9]*\).*/\1/p'; }
-    cg_send() { python3 - <<'PY' >/dev/null 2>&1
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-for _ in range(3):
-    s.sendto(b"x", ("127.0.0.1", 59999))
-PY
-}
-
-    # The rule speaks nft -f because slashes are only writable in the file
-    # grammar — and the path is written to exist, so the level-1-vs-0 lesson
-    # from the probe cannot bite here.
-    nft delete table ip vallumcg 2>/dev/null || true
-    cat > "$WORK/cg.nft" <<NFTEOF
-add table ip vallumcg
-add chain ip vallumcg output { type filter hook output priority 0 ; policy accept ; }
-add counter ip vallumcg nmem
-add counter ip vallumcg nall
-add rule ip vallumcg output socket cgroupv2 level $CG_DEPTH "$CG_REL" counter name nmem
-add rule ip vallumcg output ip daddr 127.0.0.1 counter name nall
-NFTEOF
-    nft -f "$WORK/cg.nft" \
-        || { cg_clean; bad "nft refused the socket cgroupv2 rule it validated against an existing path"; }
-
-    cg_send
-    [ "$(cg_pk nall)" -gt 0 ] || { cg_clean; bad "the machinery control counted nothing: this host cannot classify sockets"; }
-    [ "$(cg_pk nmem)" = 0 ] \
-        || { cg_clean; bad "unscoped traffic hit the class counter: the rule does not discriminate"; }
-    ok "unscoped traffic misses the class, and the counting machinery works (nall > 0)"
-
-    # Membership by launch, narrowed to its kernel core: the process moves
-    # itself in (the verb outruns it, then the child inherits), the socket is
-    # created after the move, so at runtime the packet's cgroup is the class.
-    ( echo $BASHPID > "$DFT/member/cgroup.procs" || exit 1
-      cg_send ) \
-        || { cg_clean; bad "entering the class failed"; }
-    [ "$(cg_pk nmem)" -gt 0 ] \
-        || { cg_clean; bad "a class member's traffic did not hit the rule"; }
-    ok "a class member's traffic hits the rule ($(cg_pk nmem) packets)"
-
-    # The nested member inherits under the SAME rule — the shared-class shape
-    # ADR-0023 records as the decided form, not something added per member.
-    ( echo $BASHPID > "$DFT/member/tab/cgroup.procs" || exit 1
-      cg_send ) \
-        || { cg_clean; bad "entering the nested member failed"; }
-    [ "$(cg_pk nmem)" -ge 6 ] \
-        || { cg_clean; bad "the nested member was not counted by the same rule"; }
-    ok "a nested member inherits, under the same single rule (cumulative $(cg_pk nmem))"
-
-    cg_clean
-fi
 
 # ── what the outer network actually saw ──────────────────────────────
 
@@ -1774,6 +1688,9 @@ case "$ROUTE_GET" in
     *vallum0*) ;;
     *) bad "a lookup outside allowed_ips resolved to '$ROUTE_GET', not the tunnel" ;;
 esac
+# Host-wide: this phase's client has no `app_class`, so every process rides
+# the tunnel. The exclusive case — only members, host untouched — is its own
+# phase below.
 ok "an outside lookup routes into the tunnel"
 
 capture53 2.5 "$WORK/full/during.cap"
@@ -1806,6 +1723,145 @@ POST53=$(cat "$WORK/full/post.cap")
 [ "${POST53:-0}" -ge 1 ] \
     || bad "the probe did not cross after detach: the routes did not actually leave, or never came back"
 ok "detach restored egress (control)"
+# ── per-app: the shared member namespace (ADR-0023) ────────────────
+#
+# The exclusive path, and the property the mark could not give: a member's
+# traffic must reach the far side with the *tunnel's* source address, while a
+# process on the host keeps the physical path. The mechanism is a namespace,
+# not a rule: `attach` creates a holder, moves the device into it, and `app`
+# enters it. Nothing here depends on cgroups or nft.
+#
+# The measurement is the source address at the far side, which this lab cannot
+# read directly (no HTTP server), so the wire-level discriminator is the same
+# one the full-tunnel phase uses: a dport-53 datagram from the host crosses
+# veth-a, a member's does not — it is inside the tunnel before it is a packet
+# on the link. The namespace's own view (`ip route get`) is the other half.
+say "per-app: one shared member namespace, host left alone"
+
+sed -i 's|^table = "auto"$|table = "auto"\napp_class = true\ndns = ["10.7.0.1"]|' \
+    "$WORK/full/b/vallum0.toml"
+grep -q '^app_class = true$' "$WORK/full/b/vallum0.toml" \
+    || bad "the app_class claim was not written"
+HOST_RESOLV_BEFORE=$(sha256sum /etc/resolv.conf | cut -d' ' -f1)
+
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" attach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-attach.log" 2>&1 \
+    || { cat "$WORK/full/ns-attach.log"; bad "attach with app_class failed"; }
+
+NS_RECORD="$WORK/state/vallum0.quick-ns"
+[ -s "$NS_RECORD" ] \
+    || { cat "$WORK/full/ns-attach.log"; bad "attach wrote no member-namespace record"; }
+NSPID=$(awk '/^pid /{print $2}' "$NS_RECORD")
+[ -n "$NSPID" ] || bad "the member-namespace record has no holder pid"
+kill -0 "$NSPID" 2>/dev/null || bad "the holder pid $NSPID is not running"
+ok "attach created the member namespace (holder pid $NSPID)"
+
+# Host side: not a tunnel client any more. The device left, and an outside
+# lookup takes the physical route the host had before the attach.
+if in_ns ip link show vallum0 >/dev/null 2>&1; then
+    bad "the device is still in the host namespace after an app_class attach"
+fi
+HOST_LOOKUP=$(in_ns ip route get 8.8.0.1)
+case "$HOST_LOOKUP" in
+    *veth-b*) ;;
+    *) bad "a host lookup does not use the physical path: $HOST_LOOKUP" ;;
+esac
+ok "the host keeps its physical path; the device left the host namespace"
+
+# Member side: the namespace owns the device, the address and the default.
+MEMBER_LOOKUP=$(nsenter -t "$NSPID" -n ip route get 203.0.113.53)
+case "$MEMBER_LOOKUP" in
+    *vallum0*) ;;
+    *) bad "a member lookup does not resolve into the tunnel: $MEMBER_LOOKUP" ;;
+esac
+ok "a member lookup resolves into the tunnel"
+
+# The verb puts the child there, and the pushed resolver is the namespace's.
+MEMBER_VERB=$(VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app \
+    "$WORK/full/b/vallum0.toml" probe -- ip route get 203.0.113.53 2>&1) \
+    || { printf '%s\n' "$MEMBER_VERB"; bad "app run failed inside the member namespace"; }
+case "$MEMBER_VERB" in
+    *vallum0*) ;;
+    *) bad "the launched member does not resolve into the tunnel: $MEMBER_VERB" ;;
+esac
+MEMBER_RESOLV=$(VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app \
+    "$WORK/full/b/vallum0.toml" probe -- cat /etc/resolv.conf 2>&1)
+case "$MEMBER_RESOLV" in
+    *"nameserver 10.7.0.1"*) ;;
+    *) bad "the member does not read the pushed resolver: $MEMBER_RESOLV" ;;
+esac
+[ "$(sha256sum /etc/resolv.conf | cut -d' ' -f1)" = "$HOST_RESOLV_BEFORE" ] \
+    || bad "attach rewrote the host's resolv.conf for a per-app tunnel"
+ok "app launches inside the namespace with the pushed resolver; the host's resolv.conf is untouched"
+
+# Wire level, both directions of the pair. `capture53` backgrounds its own
+# reader and leaves its pid in `$!`; backgrounding the function would make
+# `wait` return at once and read an empty file.
+capture53 2.5 "$WORK/full/ns-host.cap"
+CPID=$!
+sleep 0.4
+client53
+wait "$CPID"
+HOST53=$(cat "$WORK/full/ns-host.cap")
+[ "${HOST53:-0}" -ge 1 ] \
+    || bad "the host probe did not cross: the control cannot see an escape"
+ok "host traffic stays physical ($HOST53 dport-53 datagrams crossed)"
+
+cat > "$WORK/full/member53.py" <<'MEMBER53'
+import socket
+
+query = (b"\x0a\x0b\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+         b"\x07example\x03com\x00\x00\x01\x00\x01")
+socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(query, ("203.0.113.53", 53))
+MEMBER53
+capture53 2.5 "$WORK/full/ns-member.cap"
+CPID=$!
+sleep 0.4
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" dns -- \
+    python3 "$WORK/full/member53.py" > "$WORK/full/ns-member-dns.log" 2>&1 \
+    || { cat "$WORK/full/ns-member-dns.log"; bad "the member DNS probe failed"; }
+wait "$CPID"
+MEMBER53=$(cat "$WORK/full/ns-member.cap")
+[ "${MEMBER53:-1}" = 0 ] \
+    || bad "$MEMBER53 member DNS datagrams crossed the physical link: the member was not in the tunnel"
+ok "a member's DNS never reaches the physical link"
+
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" ping -- \
+    ping -c1 -W2 10.7.0.1 > "$WORK/full/ns-member-ping.log" 2>&1 \
+    || { cat "$WORK/full/ns-member-ping.log"; bad "the member cannot reach the tunnel address"; }
+ok "the member reaches the tunnel address"
+
+# Detach: the device returns to the host, the record goes, the verb refuses.
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" detach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-detach.log" 2>&1 \
+    || { cat "$WORK/full/ns-detach.log"; bad "detach of the member namespace failed"; }
+in_ns ip link show vallum0 >/dev/null 2>&1 \
+    || bad "detach did not move the device back to the host namespace"
+[ ! -e "$NS_RECORD" ] || bad "detach left the member-namespace record behind"
+if VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" \
+    probe -- true > "$WORK/full/ns-refuse.log" 2>&1; then
+    bad "app run launched after the member namespace was detached"
+fi
+grep -q 'not attached' "$WORK/full/ns-refuse.log" \
+    || { cat "$WORK/full/ns-refuse.log"; bad "the refusal did not name the missing attachment"; }
+ok "detach returns the device, and the verb refuses to launch afterwards"
+
+# The cycle: a re-attach restores the member path, and detach again leaves the
+# host as it was for the teardown below.
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" attach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-attach2.log" 2>&1 \
+    || { cat "$WORK/full/ns-attach2.log"; bad "the re-attach failed"; }
+[ -s "$NS_RECORD" ] || bad "the re-attach wrote no member-namespace record"
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" probe -- \
+    ip route get 203.0.113.53 > "$WORK/full/ns-member2.log" 2>&1 \
+    || { cat "$WORK/full/ns-member2.log"; bad "the member launch after re-attach failed"; }
+grep -q vallum0 "$WORK/full/ns-member2.log" \
+    || bad "the re-attached member does not resolve into the tunnel"
+ok "a re-attach restores the member path"
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" detach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-detach2.log" 2>&1 \
+    || { cat "$WORK/full/ns-detach2.log"; bad "the final member-namespace detach failed"; }
+
 
 say "shutting the full-tunnel daemons down"
 kill_pidfile "$WORK/full/a.pid"

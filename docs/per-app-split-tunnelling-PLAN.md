@@ -1,9 +1,26 @@
 # The per-app split tunnelling plan (ADR-0023 → implementation sketch)
 
-**Status:** plan. No `routes.rs` or verb code below is written yet; this is the
-shape that builds on what ADR-0023 decided and what
-`docs/proof/socket-cgroupv2.md` measured. It exists so the first PR has a
-named target instead of re-deriving the design from the ADR's prose.
+**Status:** implemented (v1). `crates/vallum-quick/src/member.rs` carries the
+member namespace, the attach/detach lifecycle and the `app` verb; the netns
+gate carries the host/member split, the member's DNS path, detach and the
+re-attach cycle. One argv detail differs from the sketch: `app` is the
+subcommand, so the landed invocation is `vallum-quick app CONFIG NAME -- CMD`
+(no separate `run` word). This file is kept as the plan it landed from, not
+rewritten to match the code: the amendments record where the landed form
+differs and the mechanisms that did not survive measurement. Per-app DNS
+beyond the pushed resolver, metrics and riding a split (prefix-list) tunnel
+remain out, per ADR-0023.
+
+**Landed as a shared member namespace (2026-10-28).** The mark path this plan
+sketched was implemented, measured and abandoned the same day: a socket picks
+its source address before any output-chain mark exists, so a "member" packet
+entered the tunnel with the physical source and the peer dropped it
+(`docs/proof/socket-cgroupv2.md`). What landed instead moves the tunnel device
+into one shared mount+net namespace and launches members there
+(`crates/vallum-quick/src/member.rs`; ADR-0023's second amendment; the lab
+measurement in `docs/proof/member-netns.md`). The host is untouched, members
+carry the tunnel's source by construction, and DNS is a private `resolv.conf`
+inside that namespace.
 
 ## What the measurement already settled
 
@@ -116,6 +133,13 @@ free the same way: when the watchdog blackholes the policy table
 (`plan_blackhole_routes`, ADR-0022's route-record seam), class-marked
 packets blackhole with the tunnel's. **No guard code change in v1** — the
 `failure_policy = "block"` posture is the table's, not a per-app rule.
+
+> **Replaced 2026-10-28:** none of the mark machinery described in this section
+> is in the product. The class rule, the policy ride and the `CLASS_MARK` were
+> removed with the mechanism; `attach` moves the device into the member
+> namespace instead, and the host installs no routes or `nft` tables at all.
+> The section is kept as the plan it started from — see ADR-0023's amendments
+> for what replaced it and why the mark could not work.
 
 ### The record
 
@@ -256,8 +280,10 @@ unchanged — a real straggler leaf still waits for the next attach.
 
 ## What v1 stays out of, and why
 
-- **Per-app DNS, metrics, alerts** — ADR-0023: received, not built; the
-  member's resolver path is the tunnel's; per-app observability is v2.
+- **Per-app DNS beyond the push, metrics, alerts** — ADR-0023: the member's
+  resolver is a private `resolv.conf` naming the tunnel's pushed resolvers, so
+  a member cannot have a DNS different from that push; per-app observability is
+  v2.
 - **Retroactive claim of an already-running process** — the membership
   decision: deliberate launch, never discovery.
 - **Riding a split (prefix-list) tunnel** — one class, one table; prefix

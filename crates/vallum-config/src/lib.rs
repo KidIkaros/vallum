@@ -89,14 +89,19 @@ pub struct Quick {
     /// CIDR prefixes.
     #[serde(default)]
     pub allow: Vec<String>,
-    /// Claim the per-app classification class for this tunnel (ADR-0023).
+    /// Tunnel only the processes launched into the member namespace (ADR-0023).
     ///
-    /// When true, `vallum-quick attach` installs one `socket cgroupv2` rule
-    /// that marks traffic launched into the class, and `vallum-quick app run`
-    /// becomes a way to start a process inside it. The daemon parses and
-    /// ignores this: the class is host-level work, owned by `vallum-quick`
-    /// alone. A full tunnel only — a prefix-list tunnel has no class to ride;
-    /// `attach` refuses the combination.
+    /// When true, `vallum-quick attach` creates one shared mount+net namespace,
+    /// binds a private `resolv.conf` naming `[quick] dns` inside it, and moves
+    /// the tunnel device there. The host installs no routes and rewrites no
+    /// resolver, so a process outside the namespace keeps exactly the
+    /// networking it had. `vallum-quick app CONFIG NAME -- CMD` is the only way
+    /// in. The daemon parses and ignores this: the namespace is host-level
+    /// work, owned by `vallum-quick` alone.
+    ///
+    /// A full tunnel only — the namespace's default route is the tunnel device,
+    /// so `allowed_ips` must claim `0.0.0.0/0` (or `::/0`), and the interface
+    /// needs an address to carry inside; `attach` refuses anything else.
     #[serde(default)]
     pub app_class: bool,
 }

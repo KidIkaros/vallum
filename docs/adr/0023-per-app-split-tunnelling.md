@@ -1,7 +1,7 @@
 # ADR-0023: Per-app split tunnelling rides the tunnel's mark tables, with launch-bound membership
 
 **Date**: 2026-10-23
-**Status**: accepted
+**Status**: implemented (v1 — `crates/vallum-quick/src/member.rs`: a shared member network namespace). The mechanism is not the mark table this record first chose: the 2026-10-28 amendments record why the mark could not split the host, and what replaced it. Launch-bound membership is unchanged — `vallum-quick app CONFIG NAME -- CMD` is still the only way in.
 **Deciders**: the maintainer, over a grounded grill session on 2026-10-23
 
 ## Context
@@ -34,6 +34,9 @@ The forces that shaped it are all in the repo today:
 ## Decision
 
 1. **Mechanism: a cgroup classifier riding the tunnel's own mark tables.**
+   *Superseded (2026-10-28): the mark steers packets but cannot move a socket's
+   source address, so it cannot split the host. Replaced by one shared member
+   namespace — see the second amendment at the end of this record.*
    The router chooses the path per packet, not per process: traffic produced
    inside a member app's cgroup is marked, `ip rule` steers the mark to the
    policy routing table the full tunnel already holds, and the guard's
@@ -96,43 +99,143 @@ The forces that shaped it are all in the repo today:
 
 ### Positive
 
-- No second routing model: per-app traffic and full-tunnel traffic land in the
-  same policy table; a single implementation of per-app follows.
-- No second leak model: the guard's fail-closed behavior extends to the
-  per-app class with no new rules to write — `failure_policy = "block"`
-  blocking member traffic when the tunnel dies is inheritance, not a feature.
-- Membership is provable per process lifetime: the scope exists exactly as
-  long as the launch that created it, so `doctor` can name member scopes and
-  what they are classified as.
-- `doctor` and the alerts files inherit honest statements about members:
-  a member traffic pattern missing the tunnel is named by the existing
-  verdict/alert surface, because the class is in the same tables.
+- The host is untouched. `attach` installs no host routes and rewrites no host
+  resolver; a process that is not a member keeps exactly the networking it had
+  before the tunnel existed.
+- The member's source address is the tunnel's by construction, because the
+  namespace decides the route before the socket exists. No mark, no `nft`
+  rule, no source rewrite, no app cooperation.
+- Fail-closed is structural: the member namespace's only default route is the
+  tunnel device, so a dead session leaves members with no path rather than the
+  physical one.
+- Membership is still launch-bound: the verb is the only way in, and a process
+  started outside it is not a member.
 
 ### Negative
 
 - An app that cannot be launched through the verb is *not a member* and is
   documented as such, not magically detected. Membership is a deliberate
   launch decision, by design.
-- Per-app DNS is **received, not built**: the member's resolver path is the
-  tunnel's own (same table, same guard), so a member cannot have a DNS
-  different from the tunnel's push. Fine-grained DNS per app is v2 territory.
+- Members share one namespace: they share loopback and can reach each other's
+  local services, while a helper process left outside cannot talk to a member's
+  loopback. One namespace per tunnel, not one per app.
+- DNS is a private `resolv.conf` in the namespace naming the tunnel's pushed
+  resolvers. A member cannot have a DNS different from that push; fine-grained
+  DNS per app is v2 territory.
 - Per-app metrics/alerts beyond the tunnel's existing client verdict is v2
   territory; this ADR names exactly one class, not per-app observability.
+- The product now depends on `unshare` and `nsenter` (util-linux) for the
+  namespace, as it already does on `ip`.
 
 ### Risks
 
-- `nft` support for `socket cgroupv2` must be asserted on every harness's
-  kernel before any `routes.rs` work. Measured 2026-10-23 on both: the remote
-  harness (`wingman-vps`, kernel 6.8.0-31, real root, top-level class at
-  level 1) and the local harness (kernel 7.0.0-38, delegated `user@uid`
-  subtree, deep class at level 4 — the delegated environment with mapped
-  credentials the gate's own unprivilege runs in). The e2e-netns gate carries
-  the case (`scripts/e2e-netns.sh`, "per-app classification" phase): class
-  directory before the rule, unscoped control plus a machinery control, a
-  member counted, and a nested member counted by the same single rule. All
-  measured PASS in `docs/proof/socket-cgroupv2.md`.
-- Marks must not collide with the tunnel's own `fwmark = 4660`/`51820`
-  budget; the classifier's mark gets a named constant and a documented space.
-- Non-systemd hosts where cgroup v2 delegation fails would break `app run` —
-  the verb must fail *loudly* (naming the environment, not pretending to
-  attach), consistent with the abort-on-fail DNS posture of item 3.
+- Holder lifecycle. The namespace is held by a process `attach` spawns; if the
+  holder dies, the device dies with the namespace and the daemon loses its
+  interface. `detach` moves the device back and stops the holder, and `app`
+  refuses when the holder is gone rather than launching outside the tunnel.
+  Crash recovery for a device left in a dead namespace is not yet exercised.
+- A mount namespace is required for the private resolver. `attach` creates it
+  with `unshare --mount --propagation private`; on a host where that fails,
+  attach refuses rather than leaking the host's resolver.
+- Sharing one namespace means a browser's helper processes must live in it. A
+  helper launched outside cannot reach the member's loopback by design.
+
+## Amendment, 2026-10-28 (measured: the mark cannot split the host)
+
+Dogfooding the landed v1 on the operator path (`vallum-quick up` →
+`vallum-quick app … web -- curl …`) showed that the class discriminates but
+changes no packet's path: the full tunnel's `not fwmark <interface mark>` rule
+claims every process, so members and non-members both ride the tunnel. The
+gate's own full-tunnel assertion with `app_class = true` says the same thing —
+an outside lookup resolves into the tunnel.
+
+The obvious repair — replace that rule with `fwmark 5140 table <policy>` and
+leave the main table's default in place — was implemented and measured (netns
+lab, kernel 7.0.0-38, nft 1.0.9, delegated cgroup subtree). It does **not**
+work, for a reason the mark cannot touch:
+
+- The rule installs, and only members are marked (class counter: host fetch 0,
+  member fetch 7), so classification is exact.
+- The member's datagram enters `vallum0` carrying the **physical** source
+  address: `IP 192.0.2.1 > 203.0.113.9: ICMP echo request` on the client's
+  tunnel device. The socket chose its route and source at connect time, before
+  any output-chain mark exists; `ip_route_me_harder` re-routes the destination
+  only.
+- The peer drops it on cryptokey routing (source not in its `allowed_ips`):
+  100 % loss for ICMP, a TCP connect timeout. A member's ping to the tunnel's
+  own address still works — that isolates the cause to source selection, not to
+  a broken tunnel.
+
+A NAT-to-tunnel-address hairpin at output would give the packet the tunnel
+source, with conntrack restoring the socket's local address on reply. It could
+not be measured on this harness (`snat` is `EOPNOTSUPP` in the unprivileged
+netns the gate runs in, and there is no root to run it outside); it is recorded
+as an open option, not a decision.
+
+**Therefore v1 is a classifier.** `[quick] app_class = true` installs the class
+rule, the mark and the launch verb; the tunnel remains host-wide. This ADR's
+motivating case — "the browser rides the tunnel, the terminal rides the
+physical link" — is **not** delivered by v1, and no wording in this repository
+should claim that it is.
+
+### The v2 mechanism decision (decided: mechanism 1, implemented below)
+
+Only two mechanisms give a member's sockets a tunnel-owned source before the
+first lookup. Both are larger than a rule change, so the choice was made on a
+measurement rather than on paper:
+
+1. **A shared member network namespace** — one namespace, the tunnel interface
+   moved into it, one resolver and one guard inside it; `app` launches into it.
+   A kernel boundary that covers every app, static binaries included. Reverses
+   the namespace-per-app alternative below in its *single shared namespace*
+   form, and moves DNS, guard and interface work into that namespace.
+   **Chosen.** Prototyped and then landed (`docs/proof/member-netns.md`): with
+   the device moved after establishment, a member's fetch carried `10.7.0.2`
+   while a host process kept its physical address, DNS resolved through the
+   tunnel from a private `resolv.conf`, and the daemon plus its control plane
+   survived the move. The implementation is the second amendment below.
+2. **Socket marking at creation** — an eBPF `cgroup/connect4` program calling
+   `bpf_setsockopt(SO_MARK)`, or an `LD_PRELOAD` shim setting `SO_MARK` in
+  `socket()`. The latter silently misses static and uninstrumented binaries
+  and is therefore unsuitable as the only mechanism.
+
+## Amendment, 2026-10-28 (second): the shared member namespace, landed
+
+Mechanism 1 above is implemented in `crates/vallum-quick/src/member.rs`. The
+cgroup class, its mark, the leaf/sweep machinery and the `nft` tables are gone;
+so is the `fwmark` requirement, which only existed to let the daemon escape a
+host-wide tunnel the host no longer has.
+
+What `attach` does for `[quick] app_class = true`:
+
+- spawns a holder with `unshare --propagation private --mount --net` and waits
+  for a ready token the holder writes only after its setup succeeded;
+- when `[quick] dns` is set, writes a private `resolv.conf` naming those
+  resolvers and bind-mounts it over `/etc/resolv.conf` *inside* the holder;
+- moves the tunnel device into that namespace and gives it its configured
+  addresses and a default route per family — and installs nothing on the host:
+  no routes, no resolver, no `nft` tables;
+- records `pid` and interface in `<state>/<iface>.quick-ns`, written after the
+  setup so a failure leaves nothing to honour.
+
+`app CONFIG NAME -- CMD` proves the record, the holder and the device, then
+execs `nsenter -t <holder> -n -m -- CMD` and exits with the child's code.
+`detach` issues the move home *inside* the holder (`ip` resolves names in its
+own namespace), stops the holder, and removes the record; a device that cannot
+be moved back is named rather than silently lost. `watch` refuses an
+`app_class` config: there are no host routes to hold, and a dead session in the
+namespace is already fail-closed.
+
+Measured on the operator path in the lab (`docs/proof/member-netns.md`): a
+member's fetch arrived from the tunnel address while a host fetch kept the
+physical one, DNS resolved through the tunnel from the private file, `detach`
+returned the device with the daemon still running, and a re-attach restored the
+member path. The netns gate carries the same shape — host lookup physical,
+member lookup and member DNS inside the tunnel, device home on detach, refusal
+when detached, re-attach — and the full-tunnel phase's escape assertions now run
+on a client without `app_class`, where they are true.
+
+Still open, and named in the proof file: crash recovery for a holder that dies
+with the device inside, the systemd lifecycle of the holder, and the sharing
+semantics of one namespace per tunnel.
+

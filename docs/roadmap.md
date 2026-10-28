@@ -259,16 +259,26 @@ separate approximation of it.
 
 ## Next — after the seven hold
 
-- **Per-app split tunnelling.** Destination prefixes cannot express "browser
-  through the tunnel, everything else direct". Mechanism decided in ADR-0023:
-  the full tunnel's own mark tables, classified by an `nft` `socket cgroupv2`
-  match, with launch-bound membership (`vallum app run NAME -- CMD`) so the
-  cgroup is created by the launcher rather than discovered. Implementation is
-  still next; the probe that gated it has measured on both harnesses' kernels
-  and lives as an assertion in the netns gate (`docs/proof/socket-cgroupv2.md`):
-  one `socket cgroupv2` rule classifies every member of one class and nothing
-  outside it. `routes.rs` work can start on the measured form — class paths at
-  their depth, never exact-path compares, class directories before rules.
+- **Per-app split tunnelling — v1 landed (shared member namespace).**
+  Destination prefixes cannot express "browser through the tunnel, everything
+  else direct". ADR-0023's first mechanism — a cgroup mark riding the tunnel's
+  tables — was implemented, measured and abandoned the same day: a socket
+  chooses its source address before any output-chain mark exists, so a marked
+  member entered the tunnel with the physical source and the peer dropped it
+  (`docs/proof/socket-cgroupv2.md`). What landed is the other measured option,
+  in `vallum-quick/src/member.rs`: `[quick] app_class = true` makes `attach`
+  create one shared mount+net namespace, bind a private `resolv.conf` naming
+  the pushed resolvers, and move the tunnel device into it. The host installs
+  no routes and rewrites no resolver; `vallum-quick app CONFIG NAME -- CMD`
+  enters that namespace and carries the tunnel's source address; `detach` moves
+  the device home and stops the holder. The gate carries the split (host
+  lookup physical, member lookup and DNS inside the tunnel), detach, the
+  refusal when detached, and the re-attach cycle; the lab record is
+  `docs/proof/member-netns.md`.
+
+  **Still out:** per-app DNS beyond the pushed resolver, per-app metrics and
+  alerts, riding a split (prefix-list) tunnel, and crash recovery for a holder
+  that dies with the device inside it. Per ADR-0023's second amendment.
 - **NAT traversal and relay.** ADR-0016 is `proposed` and deliberately says what
   Vallum will *not* do. Stays proposed until someone needs it behind a symmetric
   NAT.

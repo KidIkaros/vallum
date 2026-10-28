@@ -338,6 +338,18 @@ pub(crate) fn watch(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = crate::load_normalized(config_path)?;
     check_config_ownership(config_path, &config, allow_insecure_config)?;
+    // Per-app tunnels have no host routes to hold: the device lives in the
+    // member namespace, whose default route is the fail-closed state. Refuse
+    // rather than run a watchdog that would guard nothing and could install
+    // host policy routes for a tunnel the host does not own.
+    if config.quick.app_class {
+        return Err(
+            "`app_class = true` puts the tunnel in the member namespace: there are \
+                    no host routes to watch, and a dead session is already fail-closed \
+                    there. Run `watch` on a whole-host tunnel"
+                .into(),
+        );
+    }
     let interface = config
         .interface
         .name
