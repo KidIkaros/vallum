@@ -3,19 +3,23 @@
 //! The control socket: a Unix listener that speaks [`crate::uapi`].
 //!
 //! The socket is `0600` and same-user only; it is the same trust boundary as
-//! the private-key file. A request is parsed here, forwarded to the loop thread
-//! as an [`Input`](crate::run::Input), and answered there — all mutation happens
-//! on the thread that owns the device, never concurrently with a packet.
+//! the private-key file. The mode is set before the path is published (staged
+//! in a `0700` directory, then renamed), so a permissive umask cannot expose a
+//! connectable socket even briefly. A request is parsed here, forwarded to the
+//! loop thread as an [`Input`](crate::run::Input), and answered there — all
+//! mutation happens on the thread that owns the device, never concurrently
+//! with a packet.
 
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown as NetShutdown;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -123,11 +127,108 @@ fn claim_path(path: &Path) -> io::Result<()> {
     }
 }
 
+/// How many staged sockets this process has bound, so their staging
+/// directories cannot collide when one process binds more than one.
+static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Bind a Unix socket inside `dir` and give it its final mode there.
+///
+/// `UnixListener::bind` creates the socket with `0777 & ~umask`, and a chmod
+/// afterwards leaves the inode reachable under that looser mode until it runs.
+/// The directory is created `0700` first and the socket is chmodded `0600`
+/// inside it, so neither the socket nor its name is reachable while the mode is
+/// still provisional — the rename that publishes it happens only after both.
+fn stage_socket(dir: &Path) -> io::Result<(UnixListener, PathBuf)> {
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        // A leftover from a previous process with this pid and sequence: the
+        // name is ours by construction, so clearing it cannot touch anyone
+        // else's staging directory.
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_dir_all(dir)?;
+            fs::DirBuilder::new().mode(0o700).create(dir)?;
+        }
+        other => {
+            other?;
+        }
+    }
+    let staged = dir.join("control.sock");
+    let result = (|| {
+        let listener = UnixListener::bind(&staged)?;
+        // The socket is the same trust boundary as the private-key file: same
+        // user only. A world-writable control socket would be a remote `set`.
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))?;
+        Ok::<UnixListener, io::Error>(listener)
+    })();
+    match result {
+        Ok(listener) => Ok((listener, staged)),
+        Err(error) => {
+            let _ = fs::remove_dir_all(dir);
+            Err(error)
+        }
+    }
+}
+
+/// Publish a socket at `path` with its mode already `0600`.
+///
+/// The socket is bound and chmodded in a `0700` staging directory beside the
+/// final path, then renamed into place — a rename within one directory keeps
+/// the inode and its mode, so the first appearance at `path` is already private.
+/// A permissive umask cannot publish a connectable socket, because the only
+/// umask-derived mode ever exists in a directory no other user can traverse.
+///
+/// The destination is reserved with `create_new` before the rename. That is the
+/// same refusal `bind` gives, and it is what keeps a daemon that raced in from
+/// being silently replaced: a rename over an occupied path would succeed and
+/// orphan its accept loop.
+fn bind_private(path: &Path) -> io::Result<UnixListener> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("`{}` has no file name to publish", path.display()),
+        )
+    })?;
+    let staging = parent.join(format!(
+        ".{}.bind-{}-{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let (listener, staged) = stage_socket(&staging)?;
+    let reservation = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(&staged, path) {
+        drop(reservation);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    drop(reservation);
+    // Empty now that the socket has moved out; a failure here is litter, not a
+    // reason to take the plane down.
+    let _ = fs::remove_dir(&staging);
+    Ok(listener)
+}
+
 /// Bind the socket and serve requests until shutdown.
 ///
 /// # Errors
 ///
-/// If the path cannot be created, bound, or chmodded.
+/// If the path cannot be staged, reserved, or published.
 pub(crate) fn serve(
     path: PathBuf,
     tx: mpsc::SyncSender<Input>,
@@ -146,10 +247,7 @@ pub(crate) fn serve(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let listener = UnixListener::bind(&path)?;
-    // The socket is the same trust boundary as the private-key file: same user
-    // only. A world-writable control socket would be a remote `set`.
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let listener = bind_private(&path)?;
     listener.set_nonblocking(true)?;
 
     thread::Builder::new()
@@ -908,6 +1006,91 @@ mod tests {
         let _ = drip.join();
         let _ = handle.join();
         let _ = responder.join();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The bind-time inode is private before it has a published name: created
+    /// `0600` inside a `0700` directory that no other user can traverse.
+    ///
+    /// This is the property a chmod after `bind` cannot offer — between the two
+    /// calls the socket is reachable at its configured path under `0777 & ~umask`.
+    #[test]
+    fn the_staged_socket_is_unreachable_and_already_private() {
+        let dir = std::env::temp_dir().join(format!("vallum-stage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let staging = dir.join("stage");
+
+        let (_listener, staged) = stage_socket(&staging).expect("stage");
+        let dir_mode = fs::metadata(&staging)
+            .expect("staging metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "the staging directory is {dir_mode:o}");
+        let socket_mode = fs::metadata(&staged)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            socket_mode, 0o600,
+            "the staged socket is {socket_mode:o}, not the umask's 0777"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The published socket carries `0600` from its first appearance, the owner
+    /// still reaches it, and the staging directory does not outlive the bind.
+    #[test]
+    fn a_published_socket_is_private_and_leaves_no_staging_behind() {
+        let dir = std::env::temp_dir().join(format!("vallum-publish-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        let listener = bind_private(&path).expect("bind");
+        let mode = fs::metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the published socket is {mode:o}");
+        UnixStream::connect(&path).expect("the owner can connect");
+
+        let entries: Vec<_> = fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "staging left behind: {entries:?}");
+
+        drop(listener);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Publishing must not replace a path that is already occupied: the
+    /// reservation refuses it the way `bind` would, so a daemon that raced in
+    /// keeps its socket instead of being silently orphaned by a rename.
+    #[test]
+    fn publishing_refuses_an_occupied_path() {
+        let dir = std::env::temp_dir().join(format!("vallum-occupied-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        let live = UnixListener::bind(&path).expect("the first daemon binds");
+        let error = bind_private(&path).expect_err("an occupied path must be refused");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists,
+            "the refusal is {error:?}"
+        );
+        // The original listener is untouched and still answers.
+        UnixStream::connect(&path).expect("the first daemon's socket survives");
+
+        drop(live);
         let _ = fs::remove_dir_all(&dir);
     }
 }
