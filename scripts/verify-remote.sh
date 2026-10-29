@@ -63,11 +63,12 @@
 # what it just proved, leaving a host with no Vallum and no keys.
 #
 # --app-class adds the per-app launch path (ADR-0023) after the transports:
-# the bundle client is rebuilt as a full tunnel with a mark, the product's own
-# attach installs the class, and a launched member's DNS query must answer
-# through the tunnel and be counted by the class rule. It is opt-in because it
-# creates a cgroup directory on the target (removed when empty). Namespaced
-# mode only, and a target that cannot carry the class is reported as skipped.
+# the bundle client is rebuilt as a full tunnel, the product's own attach moves
+# the device into a member namespace, and a launched member must route, resolve
+# and carry traffic through the tunnel while the client keeps its own path and
+# resolver. It is opt-in because it moves a device and starts a holder process
+# on the target, and it needs `unshare`/`nsenter` there. Namespaced mode only.
+# No cgroup, mark or nft rule is involved: the namespace is the boundary.
 #
 # --keep skips cleanup entirely, so it keeps whatever the run left running. In
 # the default scratch mode that is a test daemon still listening on the port,
@@ -120,9 +121,10 @@ while [ $# -gt 0 ]; do
         --upgrade) UPGRADE=1; PRODUCT=1; TRANSPORTS="bundle" ;;
         --keep) KEEP=1 ;;
         # The per-app launch path (ADR-0023), on the real link: a full tunnel,
-        # the product's own attach installing the class, and one launched
-        # member whose DNS query is counted by the class rule. Off by default
-        # because it leaves a cgroup directory on the host (removed if empty).
+        # the product's own attach moving the device into a member namespace,
+        # and one launched member that routes, resolves and carries traffic
+        # through the tunnel. Off by default because it moves a device on the
+        # target and starts a holder process.
         --app-class) APP_CLASS=1 ;;
         # Where the client half runs. Default is a remote namespace (no local
         # root, no local routes touched); --host-direct keeps the old behaviour
@@ -154,6 +156,11 @@ if [ "$NAMESPACED" != 1 ] && [ "$(id -u)" != 0 ]; then
 fi
 
 # The remote half must run as the invoking user: root's SSH keys are not theirs.
+# `rsh "<script>"` hands ssh a *double-quoted* string, so everything in it
+# expands here before it is sent. A backtick in a remote comment is a local
+# command substitution whose output becomes remote script lines — a comment
+# reading `ufw allow` ran ufw on this machine and sent its usage text to the
+# target's shell. No backticks inside an rsh argument: quote words with ' or ".
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     OWNER_HOME=$(eval echo "~$SUDO_USER")
     rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh -o BatchMode=yes "$TARGET" "$@"; }
@@ -382,7 +389,16 @@ else
     rsh "set -e
          sudo nft delete table inet vallumtest 2>/dev/null || true
          sudo sysctl -q -w net.ipv4.ip_forward=1
-         sudo ufw allow $PORT/udp >/dev/null
+         # Only an *active* ufw filters anything, and only then is an allow rule
+         # needed. A host with ufw installed but inactive (the default on many
+         # images) made 'ufw allow' fail — 'ERROR: Invalid syntax' — and took the
+         # whole setup down over a rule that would have changed nothing. The
+         # check is the status line, not the binary's presence.
+         if sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+             sudo ufw allow $PORT/udp >/dev/null
+         else
+             echo 'note: ufw is not active on the target; no allow rule is needed'
+         fi
          # Forwarding acceptance is not optional. ufw's before-forward chain
          # accepts ICMP echo, so a tunnel with no FORWARD rule pings happily
          # and drops every TCP and UDP packet — the trap in
@@ -685,6 +701,45 @@ PY
         ok "$name: tunnel survives rotation across the network"
         rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
         ok "$name: rotated and finalized on remote server"
+
+        # Finalize retires the old key on the server. The live session carries
+        # on, which is all the assertion above sees — but the client's config
+        # still names the retired key, so the *next* handshake is refused, and
+        # nothing in the log says why. (The per-app case below restarts the
+        # daemon, and a restarted daemon must handshake: that is how this was
+        # found.) Adopt the rotated key and prove a fresh handshake with it, so
+        # the run does not end on a deployment that only works until the next
+        # rekey.
+        rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+        for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+        rscp "$new_key" "$TARGET:$rdir/client.key" || bad "$name: scp the rotated key"
+        rsh "sudo python3 - $rdir/client.toml <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r'^private_key = .*$', 'private_key = \"client.key\"', text, count=1, flags=re.M)
+open(path, 'w').write(text)
+PY" || bad "$name: pointing the config at the rotated key failed"
+        cli_put "nohup $vallum_r run --config $rdir/client.toml > $rdir/client.log 2>&1 &"
+        local fresh=0
+        # The restart took the routes attach had installed with the old device,
+        # and the attach that puts them back is the caller's next step — so put
+        # the one route this probe needs back by hand. Without it the ping has no
+        # route to the server, nothing enters the TUN, and the failure looks
+        # like a rejected key.
+        for _ in $(seq 1 20); do cli_put "ip link show $iface" >/dev/null 2>&1 && break; sleep 0.5; done
+        cli_put "ip route replace $SRV_IP/32 dev $iface" >/dev/null 2>&1 || true
+        for _ in $(seq 1 20); do
+            cli_put "ping -4 -c1 -W1 -I $CLI_IP $SRV_IP" >/dev/null 2>&1
+            cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { fresh=1; break; }
+            sleep 0.5
+        done
+        cli_put "ip route del $SRV_IP/32 dev $iface" >/dev/null 2>&1 || true
+        if [ "$fresh" != 1 ]; then
+            rsh "sudo tail -5 $rdir/client.log" >&2
+            bad "$name: the rotated key did not handshake"
+        fi
+        ok "$name: the rotated key handshakes a fresh session"
     fi
 
     # ── the client verdict, on the real link ──
@@ -1006,10 +1061,10 @@ PY
 # ── the per-app launch path, on the real link (ADR-0023) ─────────────────
 # Opt-in (--app-class), and namespaced mode only: it rebuilds the bundle
 # transport's client as a *full* tunnel with `app_class`, attaches, and checks
-# the split the mark cannot produce — the client keeps its own path, the device
-# leaves its namespace, and a launched member's traffic leaves from inside the
-# tunnel's. State lives under the scratch dir; the host's resolver is compared
-# before and after rather than rewritten.
+# what the namespace alone makes possible — the client keeps its own path, the
+# device leaves its namespace, and a launched member routes, resolves and
+# carries traffic from inside the tunnel's while the client's own resolver is
+# untouched. State lives under the scratch dir.
 prove_app_class_ns() {
     local name=$1 dir="$LOCAL_DIR/bundle" config rdir
     rdir="$REMOTE_DIR/cli/$1"
@@ -1018,13 +1073,18 @@ prove_app_class_ns() {
     local iface=$CIFACE
 
     [ "$NAMESPACED" = 1 ] || { note "--app-class needs the namespaced client: skipped"; return 0; }
-    [ -f "$dir/client.toml" ] || { note "the bundle transport did not run: the per-app case is skipped"; return 0; }
+    # The local config keeps the name the bundle gave it (the interface), while
+    # `prove_client_ns` copies it over as `client.toml` — so the local half is
+    # "any .toml" and the remote half is that fixed name. Testing for
+    # `client.toml` locally skipped this whole case on every run.
+    [ -n "$(ls "$dir"/*.toml 2>/dev/null | head -1)" ] \
+        || { note "the bundle transport did not run: the per-app case is skipped"; return 0; }
     rsh "test -f $config" 2>/dev/null || { note "no remote bundle config: the per-app case is skipped"; return 0; }
-    cli_put "sh -c 'command -v nsenter'" >/dev/null 2>&1 \
-        || { note "the target has no nsenter: the per-app case is skipped"; return 0; }
+    cli_put "sh -c 'command -v unshare && command -v nsenter'" >/dev/null 2>&1 \
+        || { note "the target has no unshare/nsenter: the per-app case is skipped"; return 0; }
 
-    say "per-app class: a member rides the tunnel; the client keeps its own path"
-    # The transport proof left a split tunnel with host routes. The class path
+    say "per-app: a member rides the tunnel; the client keeps its own path"
+    # The transport proof left a split tunnel with host routes. The per-app path
     # installs none — the member namespace decides — so the config is rewritten
     # and the daemon restarted to read it.
     rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
@@ -1060,15 +1120,8 @@ PY" || bad "$name: rewriting the class config failed"
         > "$dir/app-class-attach.log" 2>&1 \
         || { cat "$dir/app-class-attach.log"; bad "$name: class attach failed"; }
 
-    if ! rsh "sudo test -f $rdir/state/$iface.quick-ns"; then
-        if grep -q 'cannot carry the per-app class' "$dir/app-class-attach.log"; then
-            note "$name: the target cannot carry the member namespace: the per-app case is skipped, not passed"
-            cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r detach $config" >/dev/null 2>&1 || true
-            rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
-            return 0
-        fi
-        bad "$name: attach reported success but wrote no namespace record"
-    fi
+    rsh "sudo test -f $rdir/state/$iface.quick-ns" \
+        || bad "$name: attach reported success but wrote no member-namespace record"
 
     # The device left the client's namespace, and the client kept its own path:
     # the split this mechanism exists for, asserted directly.
@@ -1094,11 +1147,18 @@ PY" || bad "$name: rewriting the class config failed"
     local established=0
     for _ in $(seq 1 20); do
         cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config gateway -- ping -c1 -W1 $SRV_IP" \
-            >/dev/null 2>&1 || true
+            > "$dir/app-gateway.log" 2>&1 || true
         cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
         sleep 0.5
     done
-    [ "$established" = 1 ] || bad "$name: the member's traffic did not establish the tunnel"
+    # A silent member proves nothing: the launcher's own output and the daemon's
+    # log are the only record of why a packet did not reach the tunnel.
+    [ "$established" = 1 ] || {
+        cat "$dir/app-gateway.log"
+        rsh "sudo tail -20 $rdir/app-class.log 2>/dev/null" >&2
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>&1 >&2 || true
+        bad "$name: the member's traffic did not establish the tunnel"
+    }
     ok "$name: a launched member's traffic carried the tunnel"
 
     local resolv_after

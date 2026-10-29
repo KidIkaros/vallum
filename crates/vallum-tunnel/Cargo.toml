@@ -15,3 +15,8 @@ homepage.workspace = true
 vallum-core.workspace = true
 vallum-crypto.workspace = true
 ipnet.workspace = true
+
+# Tests only: this crate carries no suite implementation, and a peer table cannot
+# be built without one. Nothing here reaches the library.
+[dev-dependencies]
+vallum-crypto-sdk.workspace = true

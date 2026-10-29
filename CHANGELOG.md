@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A finalized key rotation no longer strands the peer.** `peer rotate` moved
+  the peer's identity and kept the replaced key accepted until `peer finalize`,
+  but left the running daemon's handshake hint on the *replaced* key. While the
+  window was open both keys resolved, so the rotation looked correct; `finalize`
+  then closed the window and the rotated key resolved to no peer at all, and
+  every handshake from it was dropped without a log line or a counter. The
+  tunnel carried on over the session it already had and only went quiet at the
+  next rekey — and a daemon restarted from the same config worked, which is what
+  made it read like a crypto fault instead of a stale index.
+
+  The hint is a projection of the accepted identities, so it is now rebuilt from
+  the current one when a rotation is applied. The regression test asserts both
+  directions: the new key resolves before and after `finalize`, the retired one
+  resolves until the window closes and never after.
+
 - **`install.sh` refuses a downgrade.** The SSH signature over `SHA256SUMS`
   proves who built a release, never when — so a replayed older release,
   signature and checksums intact, installed cleanly over a newer one.

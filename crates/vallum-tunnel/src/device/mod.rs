@@ -512,10 +512,14 @@ impl Device {
         }
         // The hint table is a projection of the accepted identities, built
         // once at `Peer::new`; rebuild it so an inbound handshake matches
-        // either key. The session and its index entries are untouched: their
-        // keys predate the swap, and the replaced identity carries them until
-        // the peer adopts its own new one (ADR-0019).
+        // either key. The current hint is part of that projection and must move
+        // with the identity: left on the replaced key, it resolved the *old*
+        // key once the window opened and nothing at all for the new one after
+        // `finalize` retired the window — every handshake from the rotated peer
+        // was then dropped as "no peer for hint", silently, until the daemon
+        // restarted and rebuilt the table from the config.
         let suite = self.suite.clone();
+        peer.hint = vallum_core::peer_hint(&*suite, peer.config.identity().kem());
         peer.previous = peer
             .config
             .previous_identities()
