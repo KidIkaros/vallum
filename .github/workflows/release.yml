@@ -1,80 +1,63 @@
 name: release
 
-# Hosted Actions is unavailable on the private/free plan. Releases are built and
-# uploaded locally; re-enable the tag trigger when Actions is available.
+# A tag is a claim that a tree is deployable, so pushing one runs the cheap half
+# of that claim: the tag names the version in `Cargo.toml`, the changelog has a
+# section for it, and `scripts/release.sh`'s own preflight agrees the tag is at
+# HEAD. A tag on a tree that would refuse to release fails here, before anything
+# is built or uploaded.
+#
+# What a tag does *not* do is publish. Publishing needs two things that are
+# deliberately outside this repository and its secrets: the release signing key
+# (`~/.config/vallum/release-signing-key`, whose public half is committed at
+# `packaging/vallum-release.pub`) and the two-host stamp written by
+# `scripts/verify-remote.sh`. `scripts/release.sh` is the publisher, run on the
+# machine that holds the key. Handing CI the key would make the trust anchor
+# depend on a repository secret, and publishing unsigned assets from here would
+# be worse than not publishing: `install.sh` warns on an unsigned release rather
+# than refusing, so the first tag built by a runner would install with only a
+# warning and look official.
+#
+# The full gate is `ci` on the same commit; `scripts/verify.sh` re-runs it with
+# E2E at publish time.
+
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
-
-env:
-  CARGO_TERM_COLOR: always
+  contents: read
 
 jobs:
-  release:
-    name: build and publish
+  releasable:
+    name: the tagged tree is releasable
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vallum
-
-      - name: Check the tag matches the workspace version
+      - name: The tag names the version in Cargo.toml
         working-directory: vallum
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="vallum") | .version')
-          test "v$version" = "$GITHUB_REF_NAME" || {
-            echo "tag $GITHUB_REF_NAME does not match Cargo version $version"
-            exit 1
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$version" ] || { echo "cannot read the workspace version"; exit 1; }
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+              echo "manual run on ${GITHUB_REF_NAME:-?}: a release tag would have to be v$version"
+              exit 0
+          fi
+          test "$GITHUB_REF_NAME" = "v$version" || {
+              echo "tag $GITHUB_REF_NAME does not match Cargo version $version"
+              exit 1
           }
 
-      - name: Build the release binaries
+      - name: Release preflight
         working-directory: vallum
-        run: cargo build --release -p vallum -p vallum-quick
-
-      - name: Install packaging tools
-        run: |
-          cargo install cargo-deb --locked
-          cargo install cargo-generate-rpm --locked
-
-      - name: Build the packages
-        working-directory: vallum
-        run: |
-          rm -rf target/debian crates/vallum/target/generate-rpm
-          cargo deb -p vallum --no-build
-          (cd crates/vallum && cargo generate-rpm)
-
-      - name: Assemble the tarball
-        working-directory: vallum
-        run: |
-          set -euo pipefail
-          name="vallum-${GITHUB_REF_NAME}-x86_64-linux"
-          mkdir -p "dist/$name"
-          cp target/release/vallum target/release/vallum-quick "dist/$name/"
-          cp LICENSE README.md "dist/$name/"
-          cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
-          cp packaging/vallum.bash "dist/$name/"
-          cp packaging/vallum@.service packaging/vallum-quick@.service "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          cp target/debian/*.deb dist/ 2>/dev/null || true
-          version="${GITHUB_REF_NAME#v}"
-          cp "crates/vallum/target/generate-rpm/vallum-${version}-"*.rpm dist/ 2>/dev/null || true
-          (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} + > SHA256SUMS)
-
-      - name: Publish the release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: vallum/dist/*
-          generate_release_notes: true
+        # The script's own preflight, without its build: clean tree, tagged
+        # commit is HEAD, `CHANGELOG.md` documents the version. The signing key
+        # and the two-host stamp are checked at publish, on the machine that has
+        # them; here the stamp is skipped with a reason rather than faked.
+        run: >-
+          scripts/release.sh --dry-run
+          --skip-remote "CI has no second host; the stamp is written by the machine that publishes"

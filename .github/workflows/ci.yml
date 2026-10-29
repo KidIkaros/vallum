@@ -60,6 +60,13 @@ jobs:
 
       - name: Clippy (all features)
         working-directory: vallum
+        # Stable only. The lint set moves with the compiler, and 1.95's clippy
+        # asks for `collapsible_match` rewrites that are not equivalent here:
+        # `KeyCode::Left => { if !masked { .. } }` becomes a *guarded arm*, which
+        # falls through to later arms instead of doing nothing. The MSRV leg
+        # exists to prove the code builds and tests on 1.95; suggestions are
+        # judged on the compiler whose lints are current.
+        if: matrix.toolchain == 'stable'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
@@ -93,21 +100,24 @@ jobs:
         with:
           workspaces: vallum
 
-      - name: Build the daemon
+      - name: Build both binaries
         working-directory: vallum
-        run: cargo build -p vallum
-
-      - name: Stage the daemon for the netns gate
-        working-directory: vallum
-        run: install -m 755 target/debug/vallum /tmp/vallum-e2e
+        # `vallum-quick` is not optional here: the full-tunnel phase installs
+        # the product's own route plan with it, and the script refuses to start
+        # without it — a daemon-only build fails at the gate's first line.
+        run: cargo build -p vallum -p vallum-quick
 
       - name: Run the netns gate
         working-directory: vallum
+        # Both binaries default to `target/debug/`; the script copies them into
+        # /tmp itself, because the user namespace it creates cannot traverse the
+        # home directory the runner checks out into.
+        #
         # The script creates its own user and network namespaces. Some runners
         # restrict unprivileged user namespaces (Ubuntu 24.04's AppArmor
         # default); there, the same script runs under sudo. A failure is never
         # skipped — it either passes one way or fails the job.
-        run: bash scripts/e2e-netns.sh /tmp/vallum-e2e || sudo -E bash scripts/e2e-netns.sh /tmp/vallum-e2e
+        run: bash scripts/e2e-netns.sh || sudo -E bash scripts/e2e-netns.sh
 
   audit:
     name: advisories and supply chain

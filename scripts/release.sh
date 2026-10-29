@@ -2,9 +2,11 @@
 #
 # Build and publish a release from this checkout.
 #
-# Hosted GitHub Actions is unavailable on this plan, so this script is the
-# release pipeline: it builds the binaries, the .deb and .rpm, the tarball, and
-# SHA256SUMS, then uploads them with `gh`.
+# This script is the release pipeline, not the workflow beside it. A tag push
+# runs the preflight only (.github/workflows/release.yml): publishing needs the
+# signing key and the two-host stamp, neither of which belongs in CI. It builds
+# the binaries, the .deb and .rpm, the tarballs and the SBOM, signs SHA256SUMS,
+# then uploads them with `gh`.
 #
 #   scripts/release.sh                 # build, then create or update the release
 #   scripts/release.sh --no-upload     # build into dist/ and stop

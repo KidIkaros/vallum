@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# The local gate of record. Hosted GitHub Actions is unavailable on the
-# private/free plan, so this script is what "green" means.
+# The gate of record. `.github/workflows/ci.yml` runs the same checks on every
+# push, but this script is what "green" means: it carries the checks that need
+# this machine (the standalone-clone build, the release-signature round trip),
+# and `scripts/release.sh` re-runs it with E2E=1 before a tag is published.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)

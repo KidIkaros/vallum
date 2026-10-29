@@ -102,8 +102,9 @@ and the completion, then hands off to `vallum server init`:
 
 The setup itself — key, config, forwarding, firewall, NAT, units — lives in
 `vallum server init` (ADR-0013) so it has one implementation, unit tests, and a
-`--json` form. `scripts/release.sh` is the release pipeline, because hosted
-Actions is unavailable on this plan.
+`--json` form. `scripts/release.sh` is the release pipeline: publishing holds
+the signing key and the two-host stamp, so it stays on the machine that has
+them rather than in a CI job.
 
 ---
 

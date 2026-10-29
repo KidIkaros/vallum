@@ -36,6 +36,22 @@ releases without the two-host pass, and `--skip-arm "reason"` releases without
 the aarch64 artifact; each reason is printed, and it should be a sentence
 someone would be willing to read later.
 
+## CI on a tag
+
+Pushing `v*` runs `.github/workflows/release.yml`, and it does not publish. It
+checks the cheap half of "this tree is releasable" — the tag names the
+`Cargo.toml` version, the tagged commit is HEAD, `CHANGELOG.md` documents the
+version — by running `release.sh --dry-run`, so the tag is judged by the same
+preflight as the publish rather than by a second copy of it. The signing key and
+the two-host stamp are the publisher's own checks, below.
+
+Publishing stays local because the two things it needs are not CI's to hold: the
+signing key would make the repository's trust anchor depend on a repository
+secret, and the two-host stamp is written by a machine that ran
+`verify-remote.sh`. That is not a gap to close later — `install.sh` only *warns*
+on an unsigned release, so a tag built by a runner would install with a warning
+and look official. The preflight is what makes that impossible.
+
 ## The artifacts
 
 Every release ships, per architecture (`x86_64`, `aarch64`):
