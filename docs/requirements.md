@@ -122,8 +122,14 @@ A tunnel is **carrying** if traffic transmitted across it is being acknowledged 
 - **Verdict mapping in `vallum status`:**
   - `up`: Daemon alive, guard installed (if active), latest handshake fresh (< 180s), delivery ratio >= 0.1 (or idle).
   - `degraded`: Daemon alive, guard installed, handshake fresh, but delivery ratio < 0.1 across >= 100 packets.
-  - `blocked`: Guard installed, daemon stopped or handshake dead (> 180s). Egress is safely blocked.
-  - `leaking`: Daemon dead or handshake expired, guard NOT installed. Egress is escaping via gateway.
+  - `stale`: Daemon alive, but the oldest peer's handshake is >= 180s old — past `REJECT_AFTER_TIME`, so the daemon has stopped using the key and the session is dead. Judged before the delivery ratio, because an idle tunnel never sends enough datagrams for that rule to say anything. Not a leak: outbound packets still enter the tunnel and are dropped there.
+  - `blocked`: Guard installed, daemon stopped. Egress is safely blocked.
+  - `leaking`: Daemon dead, guard NOT installed. Egress is escaping via gateway.
+
+  Every state that is not `up` requires a reason a daemon can be asked for. A
+  live process is not a live session: handshake *presence* was once taken as
+  proof of liveness, and a host whose server died overnight reported `up` until
+  the delivery ratio had a sample to judge — which an idle host never has.
 
 ---
 

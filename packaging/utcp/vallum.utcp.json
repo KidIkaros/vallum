@@ -436,7 +436,7 @@
     },
     {
       "name": "vallum_status",
-      "description": "Answer \"is traffic in the tunnel, blocked, or leaking?\" by reading the host rather than the process, so it still works when the daemon is dead. Verdicts: up, degraded, starting, blocked, down, LEAKING, unknown. Only LEAKING exits non-zero.",
+      "description": "Answer \"is traffic in the tunnel, blocked, or leaking?\" by reading the host rather than the process, so it still works when the daemon is dead. Verdicts: up, degraded, stale, starting, blocked, down, LEAKING, unknown. `stale` means the daemon answers but its last handshake is past the 180 s reject window, so the session is dead while the process lives. Only LEAKING exits non-zero.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -461,6 +461,7 @@
             "enum": [
               "up",
               "degraded",
+              "stale",
               "starting",
               "blocked",
               "down",

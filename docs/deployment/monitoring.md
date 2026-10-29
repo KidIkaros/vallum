@@ -12,8 +12,9 @@ Every scrape carries `vallum_up` (did the control socket answer) and
 the labels so a fleet dashboard can show which hosts run which release.
 
 A scrape started with `--config` also carries `vallum_client_verdict` — the
-verdict `vallum status` reports for that host (`up`, `degraded`, `starting`,
-`blocked`, `LEAKING`, `down`), computed by the same code path, every scrape:
+verdict `vallum status` reports for that host (`up`, `degraded`, `stale`,
+`starting`, `blocked`, `LEAKING`, `down`), computed by the same code path, every
+scrape:
 
 | Metric | Meaning |
 |---|---|
@@ -84,13 +85,21 @@ healthy peer on the server:
   included, and it has outlasted any self-recovery window.
 - `VallumClientDegraded` (`verdict="degraded"`, 10 min) — attached, handshaked,
   carrying nothing: the browser-dead state that a fresh handshake does not show.
+- `VallumClientStale` (`verdict="stale"`, 150 s) — the daemon answers and the
+  session is dead: no handshake inside the 180 s reject window. An idle host has
+  no delivery sample for `VallumClientDegraded` to fire on, which is why this
+  state needed its own verdict rather than being reported as `up`. The grace is
+  the recovery budget the real-link gate allows (`scripts/verify-remote.sh`,
+  `RECOVERY_BUDGET`) — the same number in both files, so the pager never fires
+  on a recovery the suite still considers on time. With the reject window in
+  front of it, it pages about 5.5 minutes after the last handshake.
 - `VallumClientReconnectLoop` (handshake rate > 0.1/s for 10 min) — recovery
   is looping rather than converging; steady state rekey is ~0.008/s per peer.
 
 Load it via `rule_files` and tune `for:` before paging. DNS failing is not a
 separate alert on purpose: the policy drops `:53` egress outside the tunnel and
 the resolver install is fail-closed, so "DNS broke" manifests as one of the
-three verdict states above — the same states the browsing suite asserts.
+four verdict states above — the same states the browsing suite asserts.
 
 ## Operational tooling
 

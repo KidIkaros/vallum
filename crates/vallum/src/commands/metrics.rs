@@ -75,10 +75,13 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
     // and what a human checks therefore cannot drift apart. It is only
     // computable when a config was named — `--control` alone has no policy to
     // resolve or guard state that means anything against a bare socket.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
     let client_verdict = args
         .config
         .as_deref()
-        .and_then(|path| client_verdict_word(path, reply.as_deref().ok()));
+        .and_then(|path| client_verdict_word(path, reply.as_deref().ok(), now));
     let verdict_text = match (&client_verdict, reply.as_ref()) {
         (Some(word), Ok(reply)) => verdict_family(&args.prefix, &interface_name(reply), word),
         (Some(word), Err(_)) => {
@@ -97,9 +100,6 @@ pub fn metrics(args: &MetricsArgs) -> Result<(), Error> {
     let text = match &reply {
         Ok(reply) => {
             let response = uapi::parse_response(reply);
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_secs());
             format!("{}\n{}", verdict_text, render(&response, &args.prefix, now))
         }
         Err(_) => {
@@ -150,11 +150,15 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), Error> {
 /// A config that cannot be read or resolved degrades to `None` rather than
 /// blocking the scrape; `status` reports the unreadable config as an error, so
 /// the scrape staying up is not hiding anything it has not already surfaced.
-fn client_verdict_word(config: &Path, reply: Option<&str>) -> Option<String> {
+fn client_verdict_word(config: &Path, reply: Option<&str>, now: u64) -> Option<String> {
     let loaded = config_from(config)?;
     let guard = policy::guard_state();
     let resolved = policy::resolve(&loaded);
-    Some(status_verdict(reply, guard, resolved).word().to_owned())
+    Some(
+        status_verdict(reply, guard, resolved, now)
+            .word()
+            .to_owned(),
+    )
 }
 
 /// A loaded config, or `None` if it cannot be read.
@@ -608,14 +612,15 @@ errno=0\n";
         // The live-failure reply from the fixture above: handshaked and
         // delivering 1.2%. `status` says `degraded` for exactly that, and the
         // scrape must agree — both surfaces call one function.
-        let live_failure = status_verdict(Some(GET), GuardState::Absent, Mode::Off);
+        // 42 s after the fixture's handshake, so the age rule leaves it alone.
+        let live_failure = status_verdict(Some(GET), GuardState::Absent, Mode::Off, 1792522042);
         assert_eq!(live_failure.word(), "degraded");
         assert!(verdict_family("vallum", "vallum0", live_failure.word())
             .contains("verdict=\"degraded\""));
 
         // Daemon gone, guard holding: blocked, not leaking — the state that
         // makes the dead-daemon scrape page instead of going quiet.
-        let blocked = status_verdict(None, GuardState::Installed, Mode::Off);
+        let blocked = status_verdict(None, GuardState::Installed, Mode::Off, 1792522042);
         assert_eq!(blocked.word(), "blocked");
     }
 

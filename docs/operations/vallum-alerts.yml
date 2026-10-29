@@ -135,9 +135,9 @@ groups:
   #
   # DNS failing is not a separate alert on purpose: a client cannot resolve
   # outside the tunnel (the policy drops :53 egress and the resolver install is
-  # fail-closed), so "DNS broke" manifests as one of the three states below —
-  # degraded, blocked, or leaking. Paging on the verdict family pages on the
-  # same signal the browsing suite asserts, not a parallel approximation.
+  # fail-closed), so "DNS broke" manifests as one of the four states below —
+  # degraded, stale, blocked, or leaking. Paging on the verdict family pages on
+  # the same signal the browsing suite asserts, not a parallel approximation.
   - name: vallum-client
     rules:
       # The guard is down and nothing is blocking: traffic — DNS included — is
@@ -187,6 +187,31 @@ groups:
             floor (0.1 over a window with >= 100 sent). The client re-keyed and
             traffic did not come back: check the server side's peer delivery,
             and localhost MTU if it is a narrowed path.
+
+      # Attached, and the protocol has given up on the key: no handshake inside
+      # the 180 s reject window, so the session is dead while the daemon still
+      # answers the socket. This is the state a laptop sat in for hours while
+      # `status` reported `up`.
+      #
+      # 150 s is not a guess: it is the recovery budget the real-link gate
+      # allows (`scripts/verify-remote.sh`, RECOVERY_BUDGET), measured at 4 s on
+      # `wingman-vps`. Paging sooner would page on a recovery the suite says is
+      # still on time; paging later would hide one that is not. With the reject
+      # window in front of it, the pager fires ~5.5 minutes after the last
+      # handshake, and says so in the annotation.
+      - alert: VallumClientStale
+        expr: vallum_client_verdict{verdict="stale"}
+        for: 150s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Client {{ $labels.interface }} has been stale past its 150 s recovery budget"
+          description: >-
+            For 150 s after the 180 s reject window the session has been dead
+            while the daemon kept answering: nothing leaks — packets enter the
+            tunnel and die there — but nothing works either, and recovery has
+            already had the whole budget the real-link gate allows it. Check the
+            path to the endpoint and whether the server is up.
 
       # A client handshakes on rekey, about one every 120 s — 0.008/s per
       # peer. One every 10 s sustained means recovery is looping: reconnect,

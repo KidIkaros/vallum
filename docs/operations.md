@@ -19,6 +19,7 @@ exactly when you need it.
 |---|---|---|
 | `up` | tunnel carrying traffic | 0 |
 | `degraded` | handshaking, but sending datagrams and not being answered | 0 |
+| `stale` | **daemon alive, but its last handshake is past the 180 s reject window — the session is dead** | 0 |
 | `starting` | daemon running, no handshake yet | 0 |
 | `blocked` | **daemon dead, guard holds — nothing leaks** | 0 |
 | `down` | daemon dead, split tunnel, nothing to block | 0 |
@@ -28,6 +29,14 @@ exactly when you need it.
 `blocked` and `leaking` both mean the tunnel is down. Only one of them is safe.
 The distinction is the reason this command exists, and `unknown` is deliberately
 not `LEAKING` — not being able to look is not evidence that nothing is there.
+
+`stale` is the one that keeps an idle host honest. The daemon answers the
+socket, so every older version of this command called it `up`; but at
+`REJECT_AFTER_TIME` (180 s) the protocol stops using the key, so a handshake
+that old is the daemon's own statement that the session is dead. It is not
+`blocked` (the process is running), and it is not `LEAKING` (packets still enter
+the tunnel and are dropped there) — so it gets its own word, and the alert that
+pages on it is `VallumClientStale`.
 
 ---
 
