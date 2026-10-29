@@ -208,6 +208,31 @@ crosses_in_ns() {
     done
 }
 
+# What the addresses and the daemon actually looked like at the moment a check
+# failed. Without it a failure only says what is missing, and the namespace is
+# gone by the time the script exits: the one run that failed in ten was
+# undiagnosable for exactly this reason.
+dump_addrs() { # $1 label  $2 log  $3 pidfile  $4 = ns: inspect the second namespace
+    local label=$1 log=$2 pidfile=$3 where=${4:-} run_in=ip
+    if [ -n "$where" ]; then
+        run_in=in_ns
+    fi
+    {
+        printf '\n── %s: interface state at the failing check\n' "$label"
+        $run_in ip addr show dev vallum0 || true
+        $run_in ip -6 addr show dev vallum0 || true
+        local pid
+        pid=$(cat "$pidfile" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf '── %s: pid %s is still running\n' "$label" "$pid"
+        else
+            printf '── %s: pid %s is gone\n' "$label" "${pid:-?}"
+        fi
+        printf '── %s: last 20 lines of %s\n' "$label" "$log"
+        tail -n 20 "$log" || true
+    } >&2
+}
+
 in_ns ip link set lo up
 ip link set veth-b netns "$(cat "$HOLDER_PIDFILE")"
 in_ns ip link set veth-b up
@@ -1162,14 +1187,22 @@ while :; do
 done
 
 # Both addresses, both families, assigned by the daemon over netlink.
-ip addr show dev vallum0 | grep -q '10.8.0.1/32' \
-    || bad "A has no v4 /32 address; see $A_LOG"
-ip -6 addr show dev vallum0 | grep -q 'fd00:8::1/128' \
-    || bad "A has no v6 /128 address; see $A_LOG"
-in_ns ip addr show dev vallum0 | grep -q '10.8.0.2/32' \
-    || bad "B has no v4 /32 address; see $B_LOG"
-in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:8::2/128' \
-    || bad "B has no v6 /128 address; see $B_LOG"
+if ! ip addr show dev vallum0 | grep -q '10.8.0.1/32'; then
+    dump_addrs A "$A_LOG" "$A_PIDFILE"
+    bad "A has no v4 /32 address; see $A_LOG"
+fi
+if ! ip -6 addr show dev vallum0 | grep -q 'fd00:8::1/128'; then
+    dump_addrs A "$A_LOG" "$A_PIDFILE"
+    bad "A has no v6 /128 address; see $A_LOG"
+fi
+if ! in_ns ip addr show dev vallum0 | grep -q '10.8.0.2/32'; then
+    dump_addrs B "$B_LOG" "$B_PIDFILE" ns
+    bad "B has no v4 /32 address; see $B_LOG"
+fi
+if ! in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:8::2/128'; then
+    dump_addrs B "$B_LOG" "$B_PIDFILE" ns
+    bad "B has no v6 /128 address; see $B_LOG"
+fi
 ok "one interface carries both families, assigned by the daemon"
 
 # A /32 and a /128 install no connected route; the operator adds host routes,

@@ -337,7 +337,28 @@ separate approximation of it.
   workflow was deleted; `docs/proof/platforms.md` now states that the daemon on
   macOS is unverified.
 - **A code-based KEM.** ADR-0012 defers it until there is a reason.
-- **A public repository.** Held deliberately until production readiness is real.
+- **A public repository.** Held deliberately until production readiness is real,
+  which from here is a checkable condition rather than a feeling: the seven
+  conditions above closed, a hosted run of `ci.yml`, `fuzz.yml` and
+  `release.yml` green on `main`, and one install path a stranger can follow
+  (`scripts/install.sh` from source today; an artifact once the next item stops
+  being deferred). What publication is meant to produce is the part the private
+  repository cannot: outside deployments and review, which are what the audit and
+  the `experimental-pq` status wait on, and a second maintainer. Status: the
+  triggers are enabled again — they had been off because hosted Actions was
+  unavailable on the private plan — and every job's commands pass locally via
+  `scripts/verify.sh`, but no hosted run has happened yet, so the first public
+  push is what proves them. One unexplained failure stands between here and a
+  confident first run: `e2e-netns.sh` failed once in ten on the dual-stack
+  `/32`+`/128` address check, during a parallel `cargo test --workspace`. It has
+  not recurred in sixteen full runs since (ten under CPU load, six beside a
+  concurrent `cargo test --workspace`), nor in 500 daemon startups under load
+  asserting both addresses immediately after `tunnel up`; the daemon assigns and
+  ACKs each address before it logs that line, so the failure should be
+  impossible, which is the reason to keep watching it rather than explain it
+  away. The gate now dumps the interface state, the daemon pid and the log tail
+  when any of those four checks fails, so a recurrence is diagnosable instead of
+  a line in a CI log.
 - **Publishing a version.** The tag marks a tree. It becomes worth doing when
   someone needs an artifact, not before.
 
