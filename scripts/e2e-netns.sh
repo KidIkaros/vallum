@@ -1203,7 +1203,24 @@ if ! in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:8::2/128'; then
     dump_addrs B "$B_LOG" "$B_PIDFILE" ns
     bad "B has no v6 /128 address; see $B_LOG"
 fi
-ok "one interface carries both families, assigned by the daemon"
+
+# The same addresses, read back from the daemon that assigned them. The kernel
+# and the daemon are two witnesses: `ip` shows what netlink installed, and
+# `show --control` shows what the daemon says it is serving. This gate has
+# failed exactly once, on a run whose log had no error in it, with "A has no v6
+# /128 address" — the shape of a disagreement between the two. Asserting that
+# they agree does not explain that run, but the next one will say which side
+# lost the address instead of only that the kernel does not have it.
+"$BIN" show --control "$WORK/control.sock" --dump > "$WORK/dual-show.dump" 2>&1 \
+    || bad "A's control socket did not answer on the dual-stack path; see $WORK/dual-show.dump"
+for net in 10.8.0.1/32 fd00:8::1/128; do
+    if ! grep -qx "vallum_address=$net" "$WORK/dual-show.dump"; then
+        sed -n 's/^vallum_address=/  reports /p' "$WORK/dual-show.dump" >&2
+        bad "A does not report $net although the kernel has it; see $WORK/dual-show.dump"
+    fi
+done
+
+ok "one interface carries both families, and the daemon reports both"
 
 # A /32 and a /128 install no connected route; the operator adds host routes,
 # exactly as the config warning says.
