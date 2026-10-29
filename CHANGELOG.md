@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- **`vallum status` stops calling a dead session `up`.** `up` was decided from
+  handshake *presence*, so a host whose server died overnight reported `up` for
+  as long as it stayed quiet: the delivery rule underneath it needs 100
+  datagrams in the window before it will judge anything, and an idle tunnel
+  never sends that many. The verdict now decides from handshake *age* first,
+  against the protocol's own `REJECT_AFTER_TIME` (180 s), and the state has its
+  own word — `stale`: the daemon answers, the session is dead. It is not
+  `blocked` (the process is running) and not `LEAKING` (packets still enter the
+  tunnel and are dropped there), so `VallumClientStale` pages on it with the
+  grace a real restart does not need.
+
+- **`vallum status` reads the control socket its config names.** It resolved
+  `/run/vallum/<iface>.sock` regardless of the `control` the config declared, so
+  a daemon listening anywhere else — a scratch root, a second instance, a test
+  namespace — was reported `not running`, and the verdict said `down` or
+  `blocked` about a tunnel that was carrying. `vallum metrics` already resolved
+  it from the config; both surfaces now agree. Found by the outage leg below,
+  which failed on its first run because of it.
+
+- **A real link proves the outage, and the recovery from it.** Recovery was
+  pinned in-process by protocol tests and in the namespace lab, but never across
+  two machines: `verify-remote.sh` stopped the *server* and required the client,
+  untouched, to stop lying, stop leaking and come back. It does not use a
+  single ping for this — a stream keeps the delivery window full for the whole
+  outage, so "idle, nothing to judge" cannot be the explanation for a green
+  verdict.
+
+  Measured against `wingman-vps`: 731 datagrams into the dead tunnel, none
+  answered, with the route still naming the tunnel (`degraded` within the first
+  minute, `stale` past 180 s); **carried again 4 s after the server returned**,
+  with the client daemon untouched; zero further handshakes in the next 30 s.
+  About four minutes of wall clock, once per run, namespaced mode only
+  (`--no-outage` skips it).
+
 - **A finalized key rotation no longer strands the peer.** `peer rotate` moved
   the peer's identity and kept the replaced key accepted until `peer finalize`,
   but left the running daemon's handshake hint on the *replaced* key. While the

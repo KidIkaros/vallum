@@ -134,6 +134,42 @@ have reached the v6 check.
 | A1, DNS closed | `e2e-netns.sh` | a killswitch test would block the machine running `verify-remote.sh` |
 | A2, full tunnel | `e2e-netns.sh` | a full tunnel would replace the invoking host's default route |
 | Existing MTU / egress-device checks | `verify-remote.sh` | already there and passing |
+| A4, outage and recovery | `verify-remote.sh` | the server really stops; a netns lab cannot make an outage out of anything but its own daemons |
+
+### A4 — The tunnel comes back, and the client does not lie meanwhile
+
+Two conditions fail together and are therefore asserted together: **always-on**
+(3) and **the operator finds out before the user** (7). In `verify-remote.sh`,
+with the client attached and untouched, and once per run:
+
+- the **server** is stopped (the unit under `--product`, the process for a
+  scratch server), and a ping stream keeps the delivery window full, so
+  "idle, therefore nothing to judge" cannot be the explanation for a green
+  verdict;
+- the verdict must leave `up` within the first minute and reach `stale` once
+  the last handshake is older than `REJECT_AFTER_TIME`;
+- the route for a tunnel destination must still name the tunnel while every
+  datagram sent dies in it — the no-leak result must be the tunnel holding, not
+  a route that quietly reverted to the physical link;
+- the server is started again and the client must carry with nobody touching it,
+  then settle: the 30 s after recovery may not contain a handshake storm;
+- the **positive controls** are the baseline read and the baseline probe taken
+  immediately before the stop, and the recovery time measured from the restart.
+
+Cost: about four minutes of wall clock, once per run, namespaced mode only
+(`--no-outage` skips it).
+
+Measured against `wingman-vps`, 2026-10-29: 731 datagrams into the dead tunnel,
+none answered, route still naming the tunnel; `degraded` inside the first
+minute, `stale` past 180 s; carried again 4 s after the server returned, client
+daemon untouched; zero further handshakes in the next 30 s.
+
+The first two runs of this leg failed, both on the harness rather than on the
+tunnel: a `status` that read `/run/vallum/<iface>.sock` while the config named
+its own socket (the client was carrying and the verdict said `down`), and a
+server-stop pattern that matched the client's daemon as well. Both are fixed
+in the scripts and pinned by assertions (`show` must still answer after the
+stop; the socket the config names is a unit test).
 
 ## Rule for every assertion
 

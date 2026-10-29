@@ -212,8 +212,25 @@ ADR-0019 end to end, pinned by protocol tests in the gate:
   the existing rekey give-up budget on the active side plus the reinit budget on
   the passive side.
 
-What remains here is only the (1) dependency: recovery exercised as part of the
-browsing-impact suite, on a real link, rather than in-process.
+**Resolved on the real link, 2026-10-29 — the (1) dependency is met.**
+`verify-remote.sh` now stops the *server* (the unit under `--product`, the
+process for a scratch server) while the client stays attached and untouched, and
+requires four things of the resulting minutes: the verdict must leave `up` and
+reach `stale` once the last handshake is past `REJECT_AFTER_TIME`; the route for
+a tunnel destination must still name the tunnel while every datagram sent dies
+in it, so the no-leak result is the tunnel holding rather than a route that
+quietly reverted; the client must carry again with nobody touching it; and the
+recovered tunnel must not thrash. A ping stream fills the delivery window for
+the whole outage, because the delivery rule cannot judge an idle tunnel — and an
+idle client is exactly the case that used to report `up`.
+
+**Measured against `wingman-vps`, 2026-10-29.** 731 datagrams into the dead
+tunnel, none answered, with the route still naming it; `degraded` inside the
+first minute, `stale` past 180 s; **carried again 4 s after the server
+returned**, with the client daemon untouched; zero further handshakes in the
+30 s that followed. The leg failed on its first two runs — first a `status` that
+read the wrong socket, then a server-stop pattern that also matched the client —
+which is what a gate is for.
 
 ### 6. Say what the crypto is (Closed)
 
@@ -254,6 +271,33 @@ behaviour and completely invisible from the server's counters.
 (traffic blocked, DNS failing, reconnect looping), and the signal it pages on is
 the same one the suite in (1) asserts — so what pages is what was tested, not a
 separate approximation of it.
+
+**Resolved.** Three pieces, in the order the failure needed them.
+
+- **The signal.** `vallum_client_verdict` rides every `--config` scrape as one
+  series naming the host's state, and the `vallum-client` rule group pages on
+  that label: `VallumClientLeaking` (no grace), `VallumClientBlocked`,
+  `VallumClientDegraded`, `VallumClientStale`, `VallumClientReconnectLoop`. A
+  `--control`-only scrape deliberately carries none of it: guard state and
+  policy mode are properties of the host and the config, not of a bare socket.
+  DNS failing is not a separate alert on purpose — the policy drops `:53` egress
+  and the resolver install is fail-closed, so "DNS broke" *is* one of the four
+  verdict states, which is what makes the paging signal the tested one.
+- **The verdict was wrong in exactly the way this item exists for.** `up` was
+  decided from handshake *presence*, and the delivery rule underneath it needs
+  100 datagrams in the window to judge anything — so a laptop whose server died
+  overnight reported `up` for as long as it stayed quiet. `stale` now decides
+  first, from handshake *age* against the protocol's own `REJECT_AFTER_TIME`,
+  and it is its own word rather than `blocked` (the process is alive) or
+  `LEAKING` (packets still enter the tunnel and die there). The outage leg is
+  the gate that exercises that word on a real link, which is also why the bug
+  surfaced at all — the leg failed on its first run.
+- **A config's own socket is honoured.** `vallum status` read
+  `/run/vallum/<iface>.sock` whatever the config's `control` said, so a live
+  daemon with its own socket was reported `not running`, and the verdict said
+  `down` or `blocked` about a tunnel that was up. `vallum metrics` already
+  resolved it the other way; both surfaces now agree, and `the_socket_is_the_one_the_config_names`
+  is the unit gate for it.
 
 ---
 

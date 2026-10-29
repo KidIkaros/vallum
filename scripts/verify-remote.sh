@@ -70,6 +70,13 @@
 # on the target, and it needs `unshare`/`nsenter` there. Namespaced mode only.
 # No cgroup, mark or nft rule is involved: the namespace is the boundary.
 #
+# Every namespaced run also stops the *server* once and waits it out
+# (--no-outage to skip): about four minutes of wall clock, because the client's
+# verdict may not be trusted as not-`up` until its last handshake is older than
+# the 180 s reject window, and the recovery that follows must come without
+# touching the client. That leg is the only place `always-on` is asserted on a
+# real link instead of in-process.
+#
 # --keep skips cleanup entirely, so it keeps whatever the run left running. In
 # the default scratch mode that is a test daemon still listening on the port,
 # with its config in /tmp — not a deployment. The script says what it kept on
@@ -102,6 +109,21 @@ KEEP=0
 CLEAN=0
 UPGRADE=0
 APP_CLASS=0
+# The outage leg runs once per run, not once per transport: it costs minutes and
+# proves a property of the client, not of the enrolment path that produced it.
+OUTAGE_DONE=0
+OUTAGE=1
+OUTAGE_PINGS=1300
+# The protocol's own reject window, in seconds (`REJECT_AFTER_TIME_MS`). Copied
+# rather than read from the crate because this script has no cargo; the daemon
+# is the authority, and the leg fails loudly if the two ever disagree.
+REJECT_WINDOW=180
+# How long the client is given to carry again once the server has returned. It
+# is one number in two places on purpose: the `VallumClientStale` alert
+# (`packaging/vallum-alerts.yml`) waits exactly this long before paging, so a
+# client is never paged for taking the time this gate allows it. Change both or
+# neither.
+RECOVERY_BUDGET=150
 NAMESPACED=1
 TRANSPORTS="bundle ssh token"
 TARGET=""
@@ -126,6 +148,9 @@ while [ $# -gt 0 ]; do
         # through the tunnel. Off by default because it moves a device on the
         # target and starts a holder process.
         --app-class) APP_CLASS=1 ;;
+        # Skip the server-outage leg: for a host whose provider rate-limits a
+        # restart, or a quick pass where the recovery claim is not what changed.
+        --no-outage) OUTAGE=0 ;;
         # Where the client half runs. Default is a remote namespace (no local
         # root, no local routes touched); --host-direct keeps the old behaviour
         # of installing the client on the invoking machine.
@@ -173,6 +198,11 @@ fi
 CLIENT_PID=""
 REMOTE_STARTED=0
 FORWARD_WAS=""
+# How the server half is stopped and started again for the outage leg: the unit
+# in --product mode, the process in scratch mode. One of the two is set by the
+# server setup below; `server_stop`/`server_start` pick by $PRODUCT.
+SERVER_UNIT=""
+SERVER_PATTERN=""
 
 cleanup() {
     set +e
@@ -377,6 +407,7 @@ if [ "$PRODUCT" = 1 ]; then
     ok "both units active"
     SERVER_CMD="sudo /usr/bin/vallum"
     CONFIG=/etc/vallum/vallumrc.toml
+    SERVER_UNIT=vallum@vallumrc
 else
     say "scratch server (no systemd, no /etc)"
     rsh "sudo $REMOTE_DIR/vallum server init --config $REMOTE_DIR/server.toml --name vallumrc \
@@ -422,6 +453,11 @@ else
     ok "forwarding, NAT, one UDP port, daemon up"
     SERVER_CMD="sudo $REMOTE_DIR/vallum"
     CONFIG=$REMOTE_DIR/server.toml
+    # The config, not just the binary: the client daemon is started from the
+    # same directory and its command line begins identically, so `^<dir>/vallum
+    # run` stopped both. The outage leg measured a client that had been killed
+    # along with its server, and the verdict read `down` for the wrong reason.
+    SERVER_PATTERN="^$REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml"
 fi
 
 say "server ready for enrolment"
@@ -504,6 +540,198 @@ enrol_token() {
 # set of assertions; only the address space differs.
 prove_client() {
     if [ "$NAMESPACED" = 1 ]; then prove_client_ns "$@"; else prove_client_host "$@"; fi
+}
+
+# ── stopping and starting the server ─────────────────────────────────────
+# By unit in --product mode, by process in scratch mode. `stop` rather than
+# kill in the product case on purpose: the shipped unit is `Restart=always`, so
+# a killed process would come straight back and there would be no outage.
+server_stop() {
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo systemctl stop $SERVER_UNIT" || return 1
+        for _ in $(seq 1 20); do
+            rsh "sudo systemctl is-active $SERVER_UNIT" 2>/dev/null | grep -q '^inactive$' && return 0
+            sleep 0.5
+        done
+        return 1
+    fi
+    rsh "sudo pkill -f '$SERVER_PATTERN'" || return 1
+    # The process, not the socket: a killed daemon can leave its socket file
+    # behind, and waiting on the file would report a stop that did not happen.
+    for _ in $(seq 1 20); do
+        rsh "sudo pgrep -f '$SERVER_PATTERN' >/dev/null" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+server_start() {
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo systemctl start $SERVER_UNIT" || return 1
+        for _ in $(seq 1 30); do
+            rsh "sudo test -S /run/vallum/vallumrc.sock" 2>/dev/null && return 0
+            sleep 0.5
+        done
+        return 1
+    fi
+    rsh "sudo nohup $REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml \
+         >> $REMOTE_DIR/server.log 2>&1 &" || return 1
+    for _ in $(seq 1 30); do
+        rsh "test -S $REMOTE_DIR/server.sock" 2>/dev/null && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+# ── the outage, and recovery without a human ─────────────────────────────
+# Roadmap item 5's last piece. Recovery is pinned in-process by protocol tests
+# and in the namespace lab, but nowhere on the real link: this stops the server
+# while the client stays attached and untouched, and requires four things.
+#
+#   1. The client's verdict stops saying `up` while it is dead — including past
+#      the reject window, which is the case an idle laptop sat in for hours.
+#   2. Nothing crosses. The route into the tunnel is still there (so this is not
+#      fail-open) and every datagram sent dies in it.
+#   3. The tunnel returns with nobody touching the client.
+#   4. It does not hammer once it is back.
+#
+# A ping stream, not a single ping, keeps the delivery window full for the whole
+# outage: the verdict is only allowed to judge 100 datagrams in the window, and
+# an idle window would let `up` be explained away. It is also what a user with a
+# dead browser actually does.
+prove_outage_recovery() {
+    local name=$1 dir=$2 rdir=$3 iface=$CIFACE
+    local vallum_r="$REMOTE_DIR/vallum"
+    local word="" deadline sent took e0 e1
+
+    [ "$OUTAGE" = 1 ] || { note "--no-outage: the server-outage leg was skipped"; return 0; }
+    [ "$OUTAGE_DONE" = 1 ] && return 0
+    OUTAGE_DONE=1
+
+    say "outage: the server goes away, and the client must not lie, leak or need a hand"
+
+    # The baseline, so a later `stale` cannot be a client that was already dead.
+    cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1 \
+        || bad "$name: the tunnel did not carry before the outage"
+    cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-before.json" 2>&1
+    grep -q '"verdict": "up"' "$dir/status-before.json" \
+        || { cat "$dir/status-before.json"; bad "$name: the verdict was not up before the outage"; }
+    ok "$name: carrying and reported up before the outage"
+
+    server_stop || { rsh "sudo tail -5 $REMOTE_DIR/server.log" >&2; bad "$name: the server could not be stopped, so nothing was measured"; }
+    # Only the *server* stopped. A pattern that also matched the client's daemon
+    # would make every later assertion about a client that is not running, and
+    # `down` would look like an outage verdict instead of a dead process.
+    cli_put "$vallum_r show --control $rdir/c.sock" > /dev/null 2>&1 \
+        || { rsh "sudo tail -5 $rdir/client.log" >&2; bad "$name: the client daemon stopped too — the server-stop pattern matches it"; }
+    cli_put "nohup ping -c $OUTAGE_PINGS -i 0.2 -W 1 1.1.1.1 > $rdir/outage-ping.log 2>&1 &"
+
+    # 1a. The delivery verdict stops saying up. With the stream running the
+    # window is full within seconds, so a bounded poll cannot be excused by a
+    # sample that is still too small.
+    for _ in $(seq 1 30); do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-outage.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-outage.json" | head -1)
+        case "$word" in up|"") sleep 2 ;; *) break ;; esac
+    done
+    case "$word" in
+        up|"") cat "$dir/status-outage.json"; bad "$name: the verdict still said up with the server stopped" ;;
+    esac
+    ok "$name: a dead server reads as $word, not up"
+
+    # 1b. Past the reject window the daemon itself has declared the session
+    # dead, and the verdict must say so rather than falling back to `up` when
+    # the delivery window drains.
+    deadline=$(( $(date +%s) + REJECT_WINDOW + 80 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-stale.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-stale.json" | head -1)
+        [ "$word" = stale ] && break
+        sleep 5
+    done
+    [ "$word" = stale ] \
+        || { cat "$dir/status-stale.json"; bad "$name: the verdict never reached stale past the ${REJECT_WINDOW} s reject window (last read: ${word:-none})"; }
+    ok "$name: past ${REJECT_WINDOW} s the verdict is stale — the daemon answers, the session is dead"
+
+    # 2. Nothing crossed, and the reason is that the tunnel held rather than
+    # that the route quietly reverted to the physical link.
+    local dev
+    dev=$(cli_put "ip route get 1.1.1.1" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+    case "$dev" in
+        vallum*) : ;;
+        *) bad "$name: during the outage egress to 1.1.1.1 went via ${dev:-no device}, not the tunnel — that is fail-open" ;;
+    esac
+
+    # The bracket keeps pkill from matching the shell that runs it: its own
+    # command line contains the pattern, and killing itself would never reach
+    # ping — the same trap `[v]allum` breaks everywhere else in this script.
+    rsh "sudo pkill -INT -f '[p]ing -c $OUTAGE_PINGS' >/dev/null 2>&1; true"
+    sleep 2
+    rsh "cat $rdir/outage-ping.log" > "$dir/outage-ping.log" 2>/dev/null
+    if grep -qE '[0-9]+ packets transmitted, [1-9][0-9]* (packets )?received' "$dir/outage-ping.log"; then
+        cat "$dir/outage-ping.log"
+        bad "$name: traffic crossed while the server was stopped"
+    fi
+    sent=$(sed -n 's/^\([0-9]*\) packets transmitted.*/\1/p' "$dir/outage-ping.log" | tail -1)
+    [ "${sent:-0}" -ge 100 ] \
+        || { cat "$dir/outage-ping.log"; bad "$name: the outage probe sent ${sent:-0} datagrams, too few for the window to judge anything"; }
+    ok "$name: $sent datagrams into a dead tunnel, none answered, and the route still pointed at it"
+
+    # 3. Recovery, with every client-side process left exactly as it was: what
+    # is restarted here is the server, and nothing else.
+    say "recovery: the server returns; the client is not touched"
+    took=$(date +%s)
+    server_start || { rsh "sudo tail -10 $REMOTE_DIR/server.log" >&2; bad "$name: the server did not come back"; }
+    # Carrying again is the recovery claim, and it is measured separately from
+    # the verdict: the verdict cannot say `up` until the 60 s delivery window
+    # has drained of the outage's failed datagrams, which is the window's own
+    # latency and not the tunnel's. Reporting one number for both would credit
+    # the window drain to the protocol.
+    local carried=0
+    deadline=$(( $(date +%s) + RECOVERY_BUDGET ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        # Traffic is what makes recovery observable: neither side dials an idle
+        # peer, and the re-initiation needs a stale datagram to be triggered by.
+        cli_put "ping -c1 -W1 1.1.1.1" > /dev/null 2>&1 && { carried=1; break; }
+        sleep 2
+    done
+    [ "$carried" = 1 ] \
+        || { rsh "sudo tail -20 $rdir/client.log" >&2; bad "$name: traffic did not cross again within ${RECOVERY_BUDGET} s of the server returning"; }
+    took=$(( $(date +%s) - took ))
+    ok "$name: carried again ${took}s after the server returned, with the client daemon untouched"
+
+    word=""
+    deadline=$(( $(date +%s) + 120 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-recovered.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-recovered.json" | head -1)
+        [ "$word" = up ] && break
+        cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1
+        sleep 3
+    done
+    [ "$word" = up ] \
+        || { cat "$dir/status-recovered.json"; bad "$name: the tunnel carried again but the verdict stayed ${word:-unknown} for 120 s"; }
+    cli_put "ping -c2 -W3 1.1.1.1" > "$dir/recovered-ping.log" 2>&1 \
+        || { cat "$dir/recovered-ping.log"; bad "$name: the verdict said up but traffic still did not cross"; }
+    ok "$name: the verdict is back to up once the delivery window drained"
+
+    # 4. Recovering once is not the same as recovering stably: a client that
+    # handshakes in a loop looks healthy in any single reading.
+    e0=$(_established "$vallum_r" "$rdir")
+    sleep 30
+    cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1
+    e1=$(_established "$vallum_r" "$rdir")
+    [ $((e1 - e0)) -le 2 ] \
+        || bad "$name: $((e1 - e0)) handshakes in 30 s of steady traffic — recovery is looping, not settling"
+    ok "$name: $((e1 - e0)) handshake(s) in 30 s of steady traffic — the recovered tunnel is not thrashing"
+}
+
+# `vallum_loop_handshakes_established_total`, or 0 when the scrape cannot say.
+_established() {
+    local vallum_r=$1 rdir=$2 value
+    value=$(cli_put "$vallum_r metrics --config $rdir/client.toml" 2>/dev/null \
+        | awk '/^vallum_loop_handshakes_established_total/ { print $2; exit }')
+    case "$value" in ''|*[!0-9]*) echo 0 ;; *) echo "$value" ;; esac
 }
 
 # ── the namespaced proof ─────────────────────────────────────────────────
@@ -689,6 +917,11 @@ PY
         note "could not add $foreign to $iface: foreign-source control skipped"
     fi
 
+    # The server-outage leg (roadmap item 5 / ADR-0019), on the real link and
+    # with the client left exactly as it is. Runs once per invocation: it costs
+    # minutes and proves a property of the client, not of the transport.
+    prove_outage_recovery "$name" "$dir" "$rdir"
+
     if [ "$kind" = "bundle" ]; then
         say "rotation live across the network"
         local new_key="$dir/new.key" new_pub="$dir/new.pub"
@@ -837,6 +1070,12 @@ PY" || bad "$name: pointing the config at the rotated key failed"
 prove_client_host() {
     local name=$1 dir=$2 config iface=$CIFACE
     config=$(ls "$dir"/*.toml | head -1)
+    # The outage leg is namespaced-only: it stops the real server and waits out
+    # the reject window, which is fine against a client in a namespace and is
+    # not something to do while this machine's own routes are rewritten. Stated
+    # rather than silently skipped, because it is the one production claim a
+    # --host-direct run does not cover.
+    note "$name: the server-outage leg runs in namespaced mode only (see --namespaced)"
     [ -n "$config" ] || bad "$name: no client config was produced"
 
     # Before rewriting it into a split tunnel, check the config as the server
