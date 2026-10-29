@@ -345,20 +345,24 @@ separate approximation of it.
   being deferred). What publication is meant to produce is the part the private
   repository cannot: outside deployments and review, which are what the audit and
   the `experimental-pq` status wait on, and a second maintainer. Status: the
-  triggers are enabled again — they had been off because hosted Actions was
-  unavailable on the private plan — and every job's commands pass locally via
-  `scripts/verify.sh`, but no hosted run has happened yet, so the first public
-  push is what proves them. One unexplained failure stands between here and a
-  confident first run: `e2e-netns.sh` failed once in ten on the dual-stack
-  `/32`+`/128` address check, during a parallel `cargo test --workspace`. It has
-  not recurred in sixteen full runs since (ten under CPU load, six beside a
-  concurrent `cargo test --workspace`), nor in 500 daemon startups under load
-  asserting both addresses immediately after `tunnel up`; the daemon assigns and
-  ACKs each address before it logs that line, so the failure should be
-  impossible, which is the reason to keep watching it rather than explain it
-  away. The gate now dumps the interface state, the daemon pid and the log tail
-  when any of those four checks fails, so a recurrence is diagnosable instead of
-  a line in a CI log.
+  triggers are enabled and hosted runs now fire on every push to `main`, but no
+  job has started — GitHub answers each one with "recent account payments have
+  failed or your spending limit needs to be increased", which is the private
+  plan's billing wall rather than a workflow defect: a public repository's
+  Actions minutes are free. The criterion above is therefore still unproved.
+  Every job's commands pass locally via `scripts/verify.sh`, and the first run
+  whose jobs actually start is what proves the hosted wiring. One unexplained
+  failure stands between here and a confident first run: `e2e-netns.sh` failed
+  once in ten on the dual-stack `/32`+`/128` address check, during a parallel
+  `cargo test --workspace`. It has not recurred in sixteen full runs since (ten
+  under CPU load, six beside a concurrent `cargo test --workspace`), nor in 500
+  daemon startups under load asserting both addresses immediately after `tunnel
+  up`; the daemon assigns and ACKs each address before it logs that line, so the
+  failure should be impossible, which is the reason to keep watching it rather
+  than explain it away. The gate now dumps the interface state, the daemon pid
+  and the log tail when any of those four checks fails, and reads the addresses
+  back from the daemon (`vallum show --control --dump`) so a recurrence says
+  which witness disagrees instead of leaving a line in a CI log.
 - **Publishing a version.** The tag marks a tree. It becomes worth doing when
   someone needs an artifact, not before.
 

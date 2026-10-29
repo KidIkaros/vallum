@@ -180,6 +180,49 @@
   nothing either way and the dump could not distinguish "no routes" from "routes
   elsewhere". It now prints the namespace's rules and `ip route show table all`.
 
+- **CI has its triggers back, and a tag is judged without becoming a
+  release.** The workflows had their triggers off wherever hosted Actions was
+  unavailable on the private plan, which made every check in this file a claim
+  about a local run. `ci.yml` and `fuzz.yml` fire on every push and pull request
+  again, and `release.yml` fires on a `v*` tag to run the preflight only: the
+  tag names the `Cargo.toml` version and `scripts/release.sh --dry-run` judges
+  the rest, so a tag is held to the same gate as a publish instead of a second
+  copy of it. It does not upload, deliberately — publishing needs the signing
+  key and the two-host stamp, and `install.sh` only *warns* on an unsigned
+  release, so a runner-built tag would install with a warning and look official.
+
+  Proving the jobs could pass at all found two defects: the netns gate could
+  never have run in CI, because the job built `vallum` alone and the script
+  exits 2 without `vallum-quick`; and the 1.95 clippy leg asked for
+  `collapsible_match` rewrites that are not equivalent here — a guarded
+  `KeyCode::Left` arm falls through to later arms instead of doing nothing — so
+  clippy now runs on stable and the MSRV leg keeps fmt, build and tests.
+
+- **The release publisher builds from a clean checkout, which it never did.**
+  `release.sh` runs `E2E=1 scripts/verify.sh` before it builds anything, and
+  that gate built only `vallum`; the netns gate refuses to start without
+  `vallum-quick`, so a release failed at the script's first line on every fresh
+  clone — an incrementally built tree hid it, because the binary was already in
+  `target/debug`. The publisher also diffed `packaging/vallum.{bash,zsh,fish}`
+  against the release binary two steps *before* `gen-completions.sh` wrote them,
+  and those files are gitignored, so a clean tree refused with "no such file".
+
+  Both stay checks, and both now run where the files they read exist. The
+  completions check asks for content rather than equality: staleness died when
+  the files stopped being committed, and an empty file is what can still ship.
+  A full `--no-upload` run in a fresh clone now completes through signing, with
+  `SHA256SUMS.sig` verified against the committed key.
+
+- **The dual-stack assertion has two witnesses, and a failure says which one
+  disagrees.** The kernel's view (`ip addr`) and the daemon's own (`vallum show
+  --control --dump`) must now agree that the peer holds both addresses, so the
+  gate cannot pass on a daemon that logged "tunnel up" over an interface that
+  lost them in between. The one-in-ten failure this was meant to explain has not
+  recurred in sixteen full runs since — each address is ACKed over netlink
+  before that line is logged, and a failure there is fatal — so the mechanism
+  stays unknown, and what changed is that a recurrence names the losing side
+  instead of only the kernel's.
+
 ## 1.6.2 — 2026-10-21
 
 - **The routes now follow the session.** A new `vallum-quick watch` runs as
