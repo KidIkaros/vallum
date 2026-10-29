@@ -37,6 +37,14 @@ cargo build -p vallum
 cargo run -q -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/vallum-tui.txt
 grep -q Vallum /tmp/vallum-tui.txt
 if [ "${E2E:-0}" = "1" ]; then
+    # Both binaries, not just the daemon: the full-tunnel phase installs the
+    # product's own route plan with `vallum-quick`, and `scripts/e2e-netns.sh`
+    # refuses to start without it. Neither the TUI step above (`cargo build -p
+    # vallum`) nor `cargo test` leaves a plain `target/debug/vallum-quick`, so
+    # this gate failed on every clean checkout — which is what `release.sh`
+    # runs before it builds anything.
+    echo "== e2e (netns): both binaries"
+    cargo build -p vallum -p vallum-quick
     echo "== e2e (netns)"
     bash scripts/e2e-netns.sh
 fi
