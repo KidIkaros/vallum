@@ -1941,6 +1941,7 @@ dependencies = [
  "libfuzzer-sys",
  "vallum",
  "vallum-core",
+ "vallum-crypto",
  "vallum-crypto-sdk",
  "vallum-tunnel",
 ]

@@ -18,6 +18,16 @@ into the daemon.
 | `handshake_decode` | arbitrary bytes into the three pre-session decoders | never panic; every rejection is a typed `HandshakeError`; `responder_identify`, `initiator_process_resp`, and `responder_process_conf` are each exercised |
 | `replay` | 9-byte chunks: `u64` counter + flag | `next()` never decreases; a counter is accepted at most once; nothing panics |
 | `shaping` | 9-byte chunks: event selector + `u64` draw | no panic; every effect names a real machine; all reference machines are driven through arbitrary interleavings |
+| `epoch_open` | arbitrary bytes as a data packet | after a rekey the session holds two epochs at once: arbitrary bytes never panic and never open; a packet sealed under the retired epoch **and** one under the current epoch both open; past `RETAIN_PREVIOUS_EPOCH_MS` the retired epoch's straggler is refused |
+
+`epoch_open` is the target a rekey made necessary: `Session::open` is fed by the
+network on every packet, and a rekey is the only thing that makes it demultiplex
+between a current and a retained epoch. Its fixture is a key schedule rather than
+a handshake — two sessions derive the same epochs from fixed keys with the
+indices swapped — so it runs at ~500 inputs/s instead of paying a KEM per input
+(the measured cost: 23 702 runs in 46 s). The positive half is what keeps the
+negative half honest: a session that rejected everything would fail the two
+`sealed … opens` assertions.
 
 The round-trip invariant in `message_parse` is the strongest one: the parser
 accepts TLV fields in any order and the builder emits them in the order given, so
@@ -58,6 +68,8 @@ executions, no crash.
   `InitConf`), so the first run starts from valid, maximum-size inputs.
 - `replay`: a sequence with duplicates, gaps, and probes.
 - `shaping`: an event/draw stream that reaches `Timeout` and the block path.
+- `epoch_open`: none. Its interesting state is derived, not parsed, so the first
+  run starts from the empty corpus and the assertions build the epochs.
 
 `scripts/fuzz.sh` copies the seeds into `fuzz/corpus/<target>/` (which is
 git-ignored, because libFuzzer writes new inputs there) before running.
