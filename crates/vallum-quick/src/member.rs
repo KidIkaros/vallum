@@ -23,6 +23,18 @@
 //!   (the host's, where the daemon lives) and stop the holder. A holder that
 //!   died took the device with it; the record is removed either way.
 //!
+//! # When the holder dies
+//!
+//! Measured in a real `init_net` (`docs/proof/member-netns.md`): the kernel
+//! destroys a network namespace's devices with it, so `kill -9` on the holder
+//! does not hand the tunnel back — the device ceases to exist and the daemon is
+//! left without an interface. Quick cannot recreate a TUN the daemon owns, so
+//! recovery is a daemon restart, and the shape of it depends on who owns the
+//! daemon: `up` owns the one it spawned and restarts it itself, while `attach`
+//! (the systemd form) names the unit to restart. What quick must never do is
+//! pretend: a stale record that says "attached" while the device is gone makes
+//! every later `app` fail with advice that cannot work.
+//!
 //! Measured in the lab (`docs/proof/member-netns.md`): a member's fetch arrived
 //! from the tunnel's address while a host process kept its physical one, DNS
 //! resolved through the tunnel from a private `resolv.conf`, and the daemon and
@@ -47,9 +59,15 @@ const HOLDER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// One line per field rather than a serialized struct, the way the route record
 /// is one line per command: a file an operator can read, and a parser with one
 /// job. `pid` is the holder process, which is also the namespace handle.
+///
+/// `start` is the holder's `/proc/<pid>/stat` start time, recorded so a pid the
+/// kernel has since recycled is not mistaken for the holder — the recovery path
+/// kills what the record names, and pids are reused quickly. It is optional so a
+/// record written before this field existed still parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Record {
     pid: u32,
+    start: Option<u64>,
     interface: String,
 }
 
@@ -126,23 +144,60 @@ fn resolv_text(servers: &[String]) -> String {
 
 fn parse_record(text: &str) -> Option<Record> {
     let mut pid = None;
+    let mut start = None;
     let mut interface = None;
     for line in text.lines() {
         let mut fields = line.split_whitespace();
         match (fields.next(), fields.next()) {
             (Some("pid"), Some(value)) => pid = value.parse::<u32>().ok(),
+            (Some("start"), Some(value)) => start = value.parse::<u64>().ok(),
             (Some("interface"), Some(value)) => interface = Some(value.to_owned()),
             _ => {}
         }
     }
     Some(Record {
         pid: pid?,
+        start,
         interface: interface?,
     })
 }
 
 fn render_record(record: &Record) -> String {
-    format!("pid {}\ninterface {}\n", record.pid, record.interface)
+    let mut text = format!("pid {}\n", record.pid);
+    if let Some(start) = record.start {
+        text.push_str(&format!("start {start}\n"));
+    }
+    text.push_str(&format!("interface {}\n", record.interface));
+    text
+}
+
+/// A process's start time, in clock ticks since boot, from
+/// `/proc/<pid>/stat`'s 22nd field.
+///
+/// The second field is the executable name in parentheses and may contain
+/// spaces, so the split starts after the last `)` rather than tokenizing the
+/// whole line. Field 3 (`state`) is the first token after it, which makes the
+/// start time the 20th.
+fn proc_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let tail = stat.rsplit_once(')')?.1;
+    tail.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Whether the record still names *our* holder.
+///
+/// A live pid is not enough: after a crash the kernel can reuse it for an
+/// unrelated process, and acting on the record means signalling that pid. When
+/// the record carries a start time it is authoritative; a record from before the
+/// field existed falls back to the device, which only our holder can own.
+fn is_holder(record: &Record) -> bool {
+    if !alive(record.pid) {
+        return false;
+    }
+    match record.start {
+        Some(start) => proc_start(record.pid) == Some(start),
+        None => device_in_namespace(record),
+    }
 }
 
 fn read_record(interface: &str) -> Option<Record> {
@@ -158,10 +213,84 @@ fn write_record(interface: &str, pid: u32) -> Result<(), Box<dyn std::error::Err
         &path,
         render_record(&Record {
             pid,
+            start: proc_start(pid),
             interface: interface.to_owned(),
         }),
     )?;
     Ok(())
+}
+
+/// Whether the tunnel device exists in this process's namespace.
+///
+/// `up` asks this before it starts a daemon: a tunnel that is not there means the
+/// daemon recorded from a previous run cannot serve this config, whatever its pid
+/// file says.
+pub(crate) fn device_present(interface: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", "dev", interface])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Fail, and forget the record, when the device went with its holder.
+///
+/// `attach` runs this before it waits for an interface: waiting is pointless for
+/// a device that no longer exists, and the generic "nothing started the daemon"
+/// message would send the operator looking for a `pre_up` hook instead of
+/// restarting the daemon that lost its interface. The record is removed because
+/// a record naming a namespace that does not exist is a lie every later `app`
+/// repeats.
+pub(crate) fn refuse_if_device_lost(
+    interface: &str,
+    unit: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(record) = read_record(interface) else {
+        return Ok(());
+    };
+    if is_holder(&record) || device_present(&record.interface) {
+        return Ok(());
+    }
+    let _ = fs::remove_file(record_path(interface));
+    Err(holder_lost_message(interface, record.pid, unit).into())
+}
+/// How to get a tunnel interface back once it is gone.
+///
+/// The two remedies are the two ownership models: `up` starts the daemon it
+/// owns, and `attach` (the systemd form) is told which unit to restart. A unit
+/// name is never guessed — see [`crate::session::interface_missing`] for why.
+fn restart_hint(interface: &str, unit: Option<&str>) -> String {
+    match unit {
+        Some(unit) => format!(
+            "restart the daemon (`systemctl restart vallum@{unit}`) so it creates a new \
+             `{interface}`, then attach again"
+        ),
+        None => format!("restart the daemon so it creates a new `{interface}`, then attach again"),
+    }
+}
+
+/// The message for the failure quick cannot fix itself: the holder died and took
+/// the device with it, so the daemon has no interface to move.
+fn holder_lost_message(interface: &str, pid: u32, unit: Option<&str>) -> String {
+    format!(
+        "the member namespace holder (pid {pid}) is gone and `{interface}` went with it: a \
+         network namespace destroys the devices it holds, so the daemon has no interface to \
+         move into a new namespace. {}",
+        restart_hint(interface, unit)
+    )
+}
+
+/// The message for a device that is not here and was never recorded as held by
+/// a namespace: the daemon that owns it is not running, or has lost it.
+fn missing_device_message(interface: &str, unit: Option<&str>) -> String {
+    format!(
+        "`{interface}` is not in this namespace, so there is nothing to move: the daemon \
+         that owns it is not running, or has lost it (a network namespace destroys the \
+         devices it holds when its holder dies). {}",
+        restart_hint(interface, unit)
+    )
 }
 
 /// A pid is alive if its `/proc` entry exists. No `kill -0`, no libc: the mount
@@ -347,26 +476,35 @@ fn teardown(interface: &str, pid: u32) {
 /// Install the member namespace for a config that asked for it.
 ///
 /// Idempotent: a live record whose device is still in the namespace is already
-/// attached. A record whose holder died (a reboot, a killed holder) is cleaned
-/// up and replaced — the device died with the namespace, so the daemon has to
-/// be restarted by its supervisor before this can succeed, and the error says
-/// so.
+/// attached. A record whose holder died is cleaned up, and then the device
+/// decides what happens: if it is still here (a holder can be killed while the
+/// kernel keeps the device, e.g. a namespace whose last process exits but whose
+/// devices are moved out) the attach simply installs a fresh namespace, and if
+/// it is gone the daemon has lost its interface and the error says what to
+/// restart. Nothing is left behind in either case, so the record never claims an
+/// attachment that does not exist.
 pub(crate) fn attach(
     config: &Config,
     interface: &str,
+    unit: Option<&str>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     check_config(config)?;
 
     if let Some(existing) = read_record(interface) {
-        if alive(existing.pid) && device_in_namespace(&existing) {
+        if is_holder(&existing) && device_in_namespace(&existing) {
             return Ok(());
         }
         if !dry_run {
-            if alive(existing.pid) {
+            // Only a pid proven to be the holder is signalled: a crashed run's
+            // pid is quickly reused, and the record outlives it.
+            if is_holder(&existing) {
                 teardown(interface, existing.pid);
             }
             let _ = fs::remove_file(record_path(interface));
+            if !device_present(interface) {
+                return Err(holder_lost_message(interface, existing.pid, unit).into());
+            }
         }
     }
 
@@ -387,6 +525,13 @@ pub(crate) fn attach(
         }
         println!("ip route replace default dev {interface}              # inside the holder");
         return Ok(());
+    }
+
+    // No record (or a record already cleaned), but no device either: the daemon
+    // is not up, or a crash already removed the interface. Spawning a holder here
+    // would only produce a stray `sleep infinity` and a failed move.
+    if !device_present(interface) {
+        return Err(missing_device_message(interface, unit).into());
     }
 
     // Nothing before this point has created the state directory: the route
@@ -425,8 +570,17 @@ pub(crate) fn detach(interface: &str, dry_run: bool) {
         println!("kill -TERM {}", record.pid);
         return;
     }
-    if alive(record.pid) {
+    if is_holder(&record) {
         teardown(&record.interface, record.pid);
+    } else if !device_present(&record.interface) {
+        // The holder died first and the namespace took the device: there is
+        // nothing to move back, and the operator should know the tunnel is not
+        // coming back without a new daemon rather than find it out from silence.
+        eprintln!(
+            "vallum-quick: note   the member namespace holder (pid {}) died and took \
+             `{}` with it; the daemon has lost its interface and must be restarted",
+            record.pid, record.interface
+        );
     }
     let _ = fs::remove_file(record_path(interface));
     let _ = fs::remove_file(resolv_path(interface));
@@ -631,6 +785,7 @@ allowed_ips = ["0.0.0.0/0"]
     fn the_record_round_trips() {
         let record = Record {
             pid: 4242,
+            start: Some(9_876_543),
             interface: "vallum0".to_owned(),
         };
         assert_eq!(parse_record(&render_record(&record)), Some(record));
@@ -641,6 +796,46 @@ allowed_ips = ["0.0.0.0/0"]
         assert!(parse_record("pid 12\n").is_none());
         assert!(parse_record("interface v0\n").is_none());
         assert!(parse_record("pid not-a-pid\ninterface v0\n").is_none());
+    }
+
+    #[test]
+    fn an_old_record_without_a_start_time_still_parses() {
+        // Records written before the field are on disk after an upgrade; they
+        // must keep working, and they are the reason it is optional.
+        let record = parse_record("pid 12\ninterface v0\n").expect("old record");
+        assert_eq!(record.pid, 12);
+        assert_eq!(record.start, None);
+        assert_eq!(record.interface, "v0");
+    }
+
+    #[test]
+    fn the_start_time_is_the_field_after_the_command_name() {
+        // A command name with spaces and parentheses in it is the case that
+        // makes tokenizing the whole line wrong.
+        let stat = "4242 (unshare (net))) S 1 4242 4242 0 -1 4194560 100 0 0 0 0 0 0 0 20 0 \
+                    1 0 9876543 12345 678 18446744073709551615";
+        let tail = stat.rsplit_once(')').expect("a command name").1;
+        let parsed: u64 = tail
+            .split_whitespace()
+            .nth(19)
+            .expect("the 20th field")
+            .parse()
+            .expect("a number");
+        assert_eq!(parsed, 9_876_543);
+    }
+
+    #[test]
+    fn a_lost_holder_message_names_both_remedies() {
+        let named = holder_lost_message("vallum0", 77, Some("laptop"));
+        assert!(named.contains("pid 77"), "{named}");
+        assert!(named.contains("destroys the devices"), "{named}");
+        assert!(named.contains("systemctl restart vallum@laptop"), "{named}");
+
+        // No stem: never invent a unit that may not exist (the lesson from
+        // `interface_missing`).
+        let unnamed = holder_lost_message("vallum0", 77, None);
+        assert!(!unnamed.contains("systemctl restart vallum@"), "{unnamed}");
+        assert!(unnamed.contains("restart the daemon"), "{unnamed}");
     }
 
     #[test]

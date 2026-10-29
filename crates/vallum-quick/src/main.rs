@@ -21,6 +21,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use vallum_config::{Config, ConfigError};
@@ -266,17 +268,88 @@ fn spawn_daemon(binary: &str, config_path: &Path) -> Result<Child, Box<dyn std::
     Ok(child)
 }
 
-/// Stop the daemon recorded in the config's pidfile, if any.
-fn stop_daemon(config_path: &Path, dry_run: bool) {
+/// Whether a `vallum` command line is a `run --config <path>` for this config.
+///
+/// The pidfile holds a number, and numbers are reused; a stale one must be a
+/// no-op rather than a stray kill of whatever now owns the pid.
+fn names_this_daemon(args: &[String], config_path: &Path) -> bool {
+    if !args.iter().any(|arg| arg == "run") {
+        return false;
+    }
+    let declared = args
+        .iter()
+        .position(|arg| arg == "--config")
+        .and_then(|at| args.get(at + 1));
+    let Some(declared) = declared else {
+        return false;
+    };
+    let declared = Path::new(declared);
+    if declared == config_path {
+        return true;
+    }
+    // `up` may have been given a relative path and `down` an absolute one.
+    match (declared.canonicalize(), config_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn daemon_is_ours(pid: &str, config_path: &Path) -> bool {
+    let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let args: Vec<String> = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
+    names_this_daemon(&args, config_path)
+}
+
+/// How long a daemon gets to exit after SIGTERM.
+///
+/// A restart that starts the replacement before the old one let go of the
+/// control socket fails on the socket, which is a confusing way to learn that the
+/// two overlapped.
+const DAEMON_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn wait_for_exit(pid: &str) -> bool {
+    let entry = format!("/proc/{pid}");
+    let deadline = Instant::now() + DAEMON_EXIT_TIMEOUT;
+    while Path::new(&entry).exists() && Instant::now() < deadline {
+        sleep(Duration::from_millis(50));
+    }
+    !Path::new(&entry).exists()
+}
+
+/// Stop the daemon recorded in the config's pidfile, if it is still that daemon,
+/// and wait for it to go.
+///
+/// Returns an error only when a daemon that was signalled is still there: `up`
+/// must not start a second one over it, while `down` and `rollback` have nothing
+/// better to do than report and carry on.
+fn stop_daemon(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     let pidfile = config_path.with_extension("pid");
-    if let Ok(pid) = fs::read_to_string(&pidfile) {
-        let pid = pid.trim();
-        if dry_run {
-            println!("kill -TERM {pid}");
-        } else {
-            let _ = Command::new("kill").arg("-TERM").arg(pid).status();
-            let _ = fs::remove_file(&pidfile);
-        }
+    let Ok(text) = fs::read_to_string(&pidfile) else {
+        return Ok(());
+    };
+    let pid = text.trim();
+    if !daemon_is_ours(pid, config_path) {
+        return Ok(());
+    }
+    if dry_run {
+        println!("kill -TERM {pid}");
+        return Ok(());
+    }
+    let _ = Command::new("kill").arg("-TERM").arg(pid).status();
+    let _ = fs::remove_file(&pidfile);
+    if wait_for_exit(pid) {
+        Ok(())
+    } else {
+        Err(
+            format!("daemon {pid} did not exit after SIGTERM; refusing to start a second one")
+                .into(),
+        )
     }
 }
 
@@ -284,10 +357,15 @@ fn stop_daemon(config_path: &Path, dry_run: bool) {
 /// hooks. A DNS failure takes the routes back out — a full tunnel must not
 /// take the host's traffic while its resolver is unmanaged — and the caller's
 /// `undo` says what that means for it (`up` also stops the daemon).
+///
+/// `unit` is the systemd instance name the config's stem implies, used only in
+/// messages: a recovery instruction that names the wrong unit is worse than one
+/// that names none, so callers pass `None` when the stem is unreadable.
 fn attach_host_side(
     config: &Config,
     interface: &str,
     table: &str,
+    unit: Option<&str>,
     dry_run: bool,
     undo: impl FnOnce(&Config, &str, &str, bool),
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -295,7 +373,7 @@ fn attach_host_side(
     // member namespace and the host keeps its own routes and resolver. Nothing
     // is applied here for the host, so nothing here can leak.
     if config.quick.app_class {
-        if let Err(error) = member::attach(config, interface, dry_run) {
+        if let Err(error) = member::attach(config, interface, unit, dry_run) {
             undo(config, interface, table, dry_run);
             return Err(error);
         }
@@ -395,6 +473,19 @@ fn up_after_pre(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The daemon first: it creates the interface the routes point at.
     let binary = std::env::var("VALLUM_BIN").unwrap_or_else(|_| "vallum".to_owned());
+
+    // A per-app crash leaves the previous daemon without an interface (the
+    // member namespace took the device with it), and only a new daemon can
+    // create another — the old one would also hold the UDP port. `up` owns the
+    // daemon it spawned, so it can be the whole recovery: with no tunnel device
+    // here, whatever the pidfile records is not serving this config, so stop it
+    // (never a process that is not that daemon — see `stop_daemon`) and start a
+    // fresh one. The attach below then installs a namespace around the new
+    // device.
+    if config.quick.app_class && !member::device_present(interface) {
+        stop_daemon(config_path, dry_run)?;
+    }
+
     let mut child = if dry_run {
         println!("{binary} run --config {}", config_path.display());
         None
@@ -407,9 +498,14 @@ fn up_after_pre(
         wait_for_session(config, config_path, interface)?;
     }
 
-    attach_host_side(config, interface, table, dry_run, |c, i, t, d| {
-        rollback(c, config_path, i, t, d)
-    })?;
+    attach_host_side(
+        config,
+        interface,
+        table,
+        config_path.file_stem().and_then(|stem| stem.to_str()),
+        dry_run,
+        |c, i, t, d| rollback(c, config_path, i, t, d),
+    )?;
 
     if let Some(mut child) = child.take() {
         // A short-lived daemon is a failure; report it rather than leaving a
@@ -432,7 +528,7 @@ fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, d
             let _ = unset_dns(interface, dry_run);
         }
     }
-    stop_daemon(config_path, dry_run);
+    let _ = stop_daemon(config_path, dry_run);
 }
 
 pub(crate) fn down(
@@ -442,7 +538,7 @@ pub(crate) fn down(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
     withdraw_host_side(&config, &interface, &table, dry_run, || {
-        stop_daemon(config_path, dry_run)
+        let _ = stop_daemon(config_path, dry_run);
     })
 }
 
@@ -462,18 +558,21 @@ pub(crate) fn attach(
         run_hook(hook, dry_run)?;
     }
 
+    let unit = config_path.file_stem().and_then(|stem| stem.to_str());
     if !dry_run {
-        wait_for_interface(&interface).map_err(|_| {
-            interface_missing(
-                &interface,
-                config.quick.pre_up.len(),
-                config_path.file_stem().and_then(|stem| stem.to_str()),
-            )
-        })?;
+        // The crash case has a better answer than "nothing started the daemon":
+        // the namespace took the device, and the daemon that lost it has to be
+        // restarted before any wait can succeed. `attach` does not own that
+        // daemon (systemd does), so it names the unit instead of restarting it.
+        if config.quick.app_class {
+            member::refuse_if_device_lost(&interface, unit)?;
+        }
+        wait_for_interface(&interface)
+            .map_err(|_| interface_missing(&interface, config.quick.pre_up.len(), unit))?;
         wait_for_session(&config, config_path, &interface)?;
     }
 
-    attach_host_side(&config, &interface, &table, dry_run, remove_routes)
+    attach_host_side(&config, &interface, &table, unit, dry_run, remove_routes)
 }
 
 /// Remove what [`attach`] applied, leaving the daemon running.
@@ -630,6 +729,33 @@ mod tests {
         let config = Config::load(&path).unwrap();
         let routes = managed_routes(&config, "v0", "off", true).unwrap();
         assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn only_a_run_of_this_config_is_the_daemon_to_stop() {
+        let args = |line: &str| -> Vec<String> { line.split(' ').map(str::to_owned).collect() };
+        let path = Path::new("/etc/vallum/vallum0.toml");
+
+        assert!(names_this_daemon(
+            &args("/usr/bin/vallum run --config /etc/vallum/vallum0.toml"),
+            path
+        ));
+        // A reused pid running something else must never be signalled.
+        assert!(!names_this_daemon(
+            &args("/usr/bin/nginx -g daemon off;"),
+            path
+        ));
+        // Same binary, different config: not ours.
+        assert!(!names_this_daemon(
+            &args("/usr/bin/vallum run --config /etc/vallum/laptop.toml"),
+            path
+        ));
+        // `vallum show` on our config is not the daemon either.
+        assert!(!names_this_daemon(
+            &args("/usr/bin/vallum show --config /etc/vallum/vallum0.toml"),
+            path
+        ));
+        assert!(!names_this_daemon(&args("/usr/bin/vallum run"), path));
     }
 
     #[test]

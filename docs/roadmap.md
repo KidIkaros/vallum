@@ -273,12 +273,16 @@ separate approximation of it.
   enters that namespace and carries the tunnel's source address; `detach` moves
   the device home and stops the holder. The gate carries the split (host
   lookup physical, member lookup and DNS inside the tunnel), detach, the
-  refusal when detached, and the re-attach cycle; the lab record is
-  `docs/proof/member-netns.md`.
+  refusal when detached, the re-attach cycle, and the crash-recovery cycle; the
+  lab record is `docs/proof/member-netns.md`.
+
+  Crash recovery is in the same amendment: the kernel destroys the device with
+  the namespace, so the record is dropped, `attach` names the unit to restart,
+  and `up` recovers on its own by restarting the daemon it owns.
 
   **Still out:** per-app DNS beyond the pushed resolver, per-app metrics and
-  alerts, riding a split (prefix-list) tunnel, and crash recovery for a holder
-  that dies with the device inside it. Per ADR-0023's second amendment.
+  alerts, and riding a split (prefix-list) tunnel. Per ADR-0023's second
+  amendment.
 - **NAT traversal and relay.** ADR-0016 is `proposed` and deliberately says what
   Vallum will *not* do. Stays proposed until someone needs it behind a symmetric
   NAT.

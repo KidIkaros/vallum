@@ -1858,6 +1858,65 @@ VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" pr
 grep -q vallum0 "$WORK/full/ns-member2.log" \
     || bad "the re-attached member does not resolve into the tunnel"
 ok "a re-attach restores the member path"
+
+# ── crash recovery: the holder dies and takes the device with it ──────
+#
+# Measured on a real init_net as well (docs/proof/member-netns.md): shutting a
+# network namespace down destroys the devices it holds, so `kill -9` on the
+# holder does not hand the tunnel back — the daemon is left without an interface.
+# Quick cannot recreate a TUN the daemon owns, so the honest behaviour is to say
+# so, forget the stale record, and let a restarted daemon be the recovery. What
+# it must never do is keep a record that claims an attachment which is gone.
+say "crash: the holder dies with the device inside"
+NSPID=$(awk '/^pid /{print $2}' "$NS_RECORD")
+kill -9 "$NSPID"
+sleep 0.5
+if in_ns ip link show vallum0 >/dev/null 2>&1; then
+    bad "the device outlived its namespace on this kernel; this phase cannot measure the crash"
+fi
+if VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" app "$WORK/full/b/vallum0.toml" \
+    probe -- true > "$WORK/full/ns-crash-app.log" 2>&1; then
+    bad "app launched after its namespace was destroyed"
+fi
+grep -q "is gone" "$WORK/full/ns-crash-app.log" \
+    || { cat "$WORK/full/ns-crash-app.log"; bad "the post-crash refusal did not name the lost namespace"; }
+if VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" attach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-crash-attach.log" 2>&1; then
+    bad "attach claimed success while the daemon had no interface"
+fi
+grep -q "went with it" "$WORK/full/ns-crash-attach.log" \
+    || { cat "$WORK/full/ns-crash-attach.log"; bad "attach did not name the lost device as the cause"; }
+grep -q "restart the daemon" "$WORK/full/ns-crash-attach.log" \
+    || bad "attach did not say what recovers the tunnel"
+[ ! -e "$NS_RECORD" ] || bad "the refused attach left a record of a namespace that is gone"
+ok "a dead holder is refused by app and attach, and the stale record is gone"
+
+# The recovery half: a new daemon creates a new device, and the same attach
+# then rebuilds the namespace around it. Restarting the daemon is what
+# `vallum-quick up` does for the daemon it owns; here the lab owns it, so the
+# old daemon (which still holds the UDP port and the control path) stops first.
+OLD_B=$(cat "$WORK/full/b.pid")
+kill -TERM "$OLD_B" 2>/dev/null
+wait_gone "$WORK/full/b.pid" 5 || bad "the interface-less daemon ignored SIGTERM"
+: > "$WORK/full/b.pid"
+in_ns bash -c 'echo $$ > "$2"; exec "$1" run --config "$3"' \
+    _ "$BIN" "$WORK/full/b.pid" "$WORK/full/b/vallum0.toml" >> "$WORK/full/b.log" 2>&1 &
+DEADLINE=$((SECONDS + 10))
+until in_ns ip link show vallum0 >/dev/null 2>&1; do
+    [ "$SECONDS" -ge "$DEADLINE" ] && bad "the restarted daemon created no interface"
+    sleep 0.1
+done
+VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" attach "$WORK/full/b/vallum0.toml" \
+    > "$WORK/full/ns-recover.log" 2>&1 \
+    || { cat "$WORK/full/ns-recover.log"; bad "the recovery attach failed"; }
+[ -s "$NS_RECORD" ] || bad "the recovery attach wrote no record"
+RECOVERED=$(awk '/^pid /{print $2}' "$NS_RECORD")
+case "$(nsenter -t "$RECOVERED" -n ip route get 203.0.113.53 2>&1)" in
+    *vallum0*) ;;
+    *) bad "the recovered namespace does not route into the tunnel" ;;
+esac
+ok "a restarted daemon plus an attach recovers the member path"
+
 VALLUM_STATE_DIR="$WORK/state" in_ns "$QUICK" detach "$WORK/full/b/vallum0.toml" \
     > "$WORK/full/ns-detach2.log" 2>&1 \
     || { cat "$WORK/full/ns-detach2.log"; bad "the final member-namespace detach failed"; }

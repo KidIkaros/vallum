@@ -94,17 +94,31 @@ const SESSION_WAIT: Duration = Duration::from_secs(20);
 /// unit reports success. Gate route installation on a real session: poll
 /// the control socket until a peer reports a handshake, then route. Split
 /// tunnels skip this — a dead /24 hurts only that subnet.
-pub(crate) fn wait_for_session(
-    config: &Config,
-    config_path: &Path,
-    interface: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `[quick] app_class` skips it too, and for the same reason: the gate guards
+/// *host* routing, and the per-app path installs none. There is no host egress to
+/// blackhole, the host's resolver is untouched, and a member outside the tunnel
+/// fails closed by construction. Waiting here would instead break the path it is
+/// meant to protect: the first handshake in per-app mode comes from the first
+/// member, after the namespace exists — so `attach` before any member would
+/// refuse to create the very namespace the handshake needs. It is also what makes
+/// recovery possible, since a crashed holder leaves a daemon whose last handshake
+/// has aged out.
+fn gates_on_session(config: &Config) -> bool {
     let full_tunnel = config.peers.iter().any(|peer| {
         peer.allowed_ips
             .iter()
             .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
     });
-    if !full_tunnel {
+    full_tunnel && !config.quick.app_class
+}
+
+pub(crate) fn wait_for_session(
+    config: &Config,
+    config_path: &Path,
+    interface: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !gates_on_session(config) {
         return Ok(());
     }
     let socket = control_socket(config, config_path, interface);
@@ -172,8 +186,72 @@ pub(crate) fn control_socket(config: &Config, config_path: &Path, interface: &st
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod interface_missing_tests {
-    use super::{interface_missing, INTERFACE_WAIT};
+    use super::{gates_on_session, interface_missing, wait_for_session, INTERFACE_WAIT};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use vallum_config::Config;
+
+    fn config(text: &str) -> Config {
+        // One file per call. The pid alone is shared by every test in this
+        // binary, and keying the name on `text.len()` collided whenever two
+        // configs were the same length: one test's cleanup removed the other's
+        // file between its write and its load, which failed as a parse error in
+        // a test that had nothing to do with it.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "vallum-session-gate-{}-{}.toml",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, text).expect("test config writes");
+        let parsed = Config::load(&path).expect("test config parses");
+        let _ = std::fs::remove_file(&path);
+        parsed
+    }
+
+    #[test]
+    fn the_session_gate_is_for_host_routing_only() {
+        // A full tunnel without the class routes the host, so a dead server
+        // would blackhole it: gated. The same config with `app_class` installs
+        // nothing on the host and is not.
+        let plain = config(
+            "[interface]\nname = \"e\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n\
+             public_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        assert!(gates_on_session(&plain));
+
+        let per_app = config(
+            "[interface]\nname = \"e\"\nprivate_key = \"k\"\naddress = \"10.7.0.2/24\"\n\n\
+             [quick]\napp_class = true\n\n[[peer]]\nname = \"p\"\n\
+             public_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        assert!(!gates_on_session(&per_app));
+
+        // A split tunnel never gated, with or without the class.
+        let split = config(
+            "[interface]\nname = \"e\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n\
+             public_key = \"k\"\nallowed_ips = [\"10.0.0.0/8\"]\n",
+        );
+        assert!(!gates_on_session(&split));
+    }
+
+    #[test]
+    fn a_per_app_attach_never_waits_for_a_handshake() {
+        // The whole point: the first handshake comes from the first member, so
+        // waiting here would deadlock the path — and it returns at once rather
+        // than polling a socket that does not exist.
+        let per_app = config(
+            "[interface]\nname = \"e\"\nprivate_key = \"k\"\naddress = \"10.7.0.2/24\"\n\n\
+             [quick]\napp_class = true\n\n[[peer]]\nname = \"p\"\n\
+             public_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        let started = std::time::Instant::now();
+        assert!(wait_for_session(&per_app, Path::new("/nonexistent.toml"), "e").is_ok());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     #[test]
     fn no_hooks_names_the_unit_to_start() {

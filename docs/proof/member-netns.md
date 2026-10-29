@@ -119,6 +119,61 @@ So the DNS story the ADR deferred is solvable without new product machinery:
 is who owns that mount namespace and when it is created — product work, not a
 kernel question.
 
+## Holder death (measured)
+
+The open lifecycle question was what happens when the holder dies with the device
+inside it. Measured twice, because the answer depends on who owns the namespace
+and the two hosts disagree about the *device*:
+
+- **Real `init_net`** (disposable host, kernel 6.8.0-31, root, `vallum-quick up`
+  owning the daemon):
+
+  ```text
+  holder 849761; member ping                  1 received
+  kill -9 849761
+  vallumhc0 is gone (the namespace destroyed it)
+  old daemon alive: yes   record present: yes
+  app    rc=1  "the member namespace for `vallumhc0` is gone … reattach"
+  attach rc=1  "the member namespace holder (pid 849761) is gone and `vallumhc0`
+                went with it … restart the daemon (`systemctl restart vallum@b`)"
+  record present after attach: no
+  up again rc=0; old daemon alive: no; new daemon 850419; new holder 850471
+  member ping after recovery                  1 received
+  ```
+
+- **The userns lab** (`unshare -Urn`, kernel 7.0.0-38): the same — the device is
+  destroyed with the namespace and does *not* come back to the namespace quick
+  runs in. So the netns gate can assert the same crash case the host does.
+
+Two facts decide the design:
+
+1. **The kernel destroys a dying network namespace's devices.** It does not hand
+   the tunnel back, and a daemon that created the TUN cannot recreate it: quick
+   has no interface to move into a new namespace, and no amount of retrying
+   attach will produce one. Recovery is a new daemon.
+2. **Only the daemon's owner can restart it.** `up` owns the daemon it spawned,
+   so it is the whole recovery in one command: with no device present it stops
+   the recorded daemon (proven to be that daemon by its command line, not by a
+   reused pid), waits for it to exit, starts a fresh one, and the attach that
+   follows installs a new namespace around the new device. `attach` — the systemd
+   form — owns nothing, so it names the unit to restart instead of guessing.
+
+What quick must never do is keep the record: a record naming a namespace that no
+longer exists makes every later `app` fail with advice (`reattach`) that cannot
+work. The record is removed on the refused attach, on the `up` restart, and on
+`detach`, which also says the daemon lost its interface rather than exiting
+silently. Records now carry the holder's `/proc/<pid>/stat` start time, because
+the recovery path signals the pid the record names and pids are reused quickly.
+
+One gate was in the way and is now fixed: `attach` refused a full tunnel until a
+handshake had completed, because installing the host's routes behind a dead peer
+blackholes the host. Per-app installs no host routes at all — the member
+namespace's default is the tunnel, and a dead session there is fail-closed by
+structure — so the gate does not apply, and the first handshake in per-app mode
+comes from the first member, *after* the namespace exists. Waiting for it made
+per-app attach impossible from a cold daemon and made recovery from a crash
+impossible too (the crashed daemon's handshake has aged out).
+
 ## What this prototype did **not** decide
 
 These were the design tasks before an amendment; ADR-0023's second amendment
@@ -134,9 +189,11 @@ marked:
   bookkeeping while the namespace is the boundary. `vallum-quick app` and
   `detach` need to own the namespace's creation, device move, member launches
   and teardown.
-- **Lifecycle and crash recovery.** A device left in a namespace whose holder
-  died, a daemon restart while the device is elsewhere, and `down` moving the
-  device back were not exercised.
+- **Lifecycle and crash recovery.** *Settled above ("Holder death"):* the device
+  dies with the namespace, the record must not outlive it, `up` recovers by
+  restarting the daemon it owns, and `attach` names the unit to restart. A
+  daemon restart while the device is elsewhere and `down` moving the device back
+  are exercised on the operator path.
 - **Sharing semantics.** One namespace means members share loopback and can
   reach each other's local services; a browser's helper processes must live in
   the same namespace to talk to it. This is the cost the ADR's namespace

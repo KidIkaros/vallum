@@ -235,7 +235,38 @@ member lookup and member DNS inside the tunnel, device home on detach, refusal
 when detached, re-attach — and the full-tunnel phase's escape assertions now run
 on a client without `app_class`, where they are true.
 
-Still open, and named in the proof file: crash recovery for a holder that dies
-with the device inside, the systemd lifecycle of the holder, and the sharing
-semantics of one namespace per tunnel.
+### Crash recovery (measured, landed)
+
+A network namespace destroys the devices it holds, so a holder that dies does
+not hand the tunnel back: the daemon is left without an interface, and no
+`attach` can fix that because quick cannot create a TUN the daemon owns. Measured
+on a real `init_net` and in the lab (`docs/proof/member-netns.md`): the device is
+gone, the daemon is alive, and the record still claims an attachment.
+
+Recovery therefore belongs to whoever owns the daemon, and the record must never
+outlive the namespace:
+
+- `up` owns the daemon it spawned. With no tunnel device present it stops that
+daemon — matched by its command line, so a reused pid is never signalled — waits
+for it to exit, starts a fresh one, and attaches around the new device. One
+command, no reboot.
+- `attach` (the systemd form) owns nothing, so it refuses with the truth instead
+of waiting five seconds for an interface that cannot appear: it names the holder
+that died, says the namespace took the device, and gives the unit to restart
+(`systemctl restart vallum@<stem>`), never guessing a unit when the stem is
+unreadable. The stale record is removed first, because a record naming a dead
+namespace makes every later `app` fail with advice that cannot work.
+- `detach` on a lost device says the daemon must be restarted rather than exiting
+silently, and a record now carries the holder's start time so the recovery path
+signals the holder and not whatever inherited its pid.
+
+The session gate also had to move: `attach` waits for a handshake before it
+routes the *host*, which per-app does not do. Waiting made per-app attach
+impossible from a cold daemon (the first handshake comes from the first member,
+after the namespace exists) and made crash recovery impossible (the crashed
+daemon's handshake has aged out). `app_class` skips the gate; the member
+namespace is still fail-closed by structure.
+
+Still open, and named in the proof file: the systemd lifecycle of the holder, and
+the sharing semantics of one namespace per tunnel.
 
