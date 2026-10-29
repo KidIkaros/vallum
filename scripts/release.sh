@@ -143,17 +143,6 @@ fi
 say "building"
 run cargo build --release -p vallum -p vallum-quick
 
-if [ "$DRY" -eq 0 ]; then
-    # Stale completions once shipped a `teardown` nobody could tab-complete.
-    # The packaged file must be the file this binary generates.
-    for shell in bash zsh fish; do
-        ./target/release/vallum completions "$shell" > /tmp/vallum-completions-check
-        diff -q /tmp/vallum-completions-check "packaging/vallum.$shell" >/dev/null \
-            || fail "packaging/vallum.$shell is stale — regenerate: vallum completions $shell > packaging/vallum.$shell"
-    done
-    ok "shell completions match this binary"
-fi
-
 if [ -n "$SKIP_ARM" ]; then
     printf '   skip  aarch64 artifact: %s\n' "$SKIP_ARM"
 else
@@ -181,6 +170,19 @@ say "packaging"
 # filenames so it cannot catch that. Generate before cargo-deb reads the asset
 # table.
 run scripts/gen-completions.sh
+if [ "$DRY" -eq 0 ]; then
+    # Stale completions once shipped a `teardown` nobody could tab-complete.
+    # They are build artifacts now — `packaging/vallum.{bash,zsh,fish}` are
+    # gitignored and written from the release binary just above — so there is
+    # no committed copy left to go stale. What is still possible is an empty
+    # one, which ships a shell that completes nothing, and the tarball check
+    # below looks at names, not contents.
+    for shell in bash zsh fish; do
+        [ -s "packaging/vallum.$shell" ] \
+            || fail "packaging/vallum.$shell is empty; gen-completions.sh produced nothing"
+    done
+    ok "the packaged completions come from this binary and are not empty"
+fi
 run rm -rf target/debian crates/vallum/target/generate-rpm dist
 run cargo deb -p vallum --no-build
 run bash -c "cd crates/vallum && cargo generate-rpm"

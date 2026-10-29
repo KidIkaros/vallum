@@ -26,7 +26,7 @@ tarball missing a unit) to get the artifact right.
 | `scripts/verify-remote.sh` recorded a pass **for this commit** | one host is not the product; two hosts are |
 | `E2E=1 ./scripts/verify.sh` passes | the namespace gate of record |
 | the SSH signing key matches `packaging/vallum-release.pub` | releases are only as trustworthy as what `install.sh` verifies |
-| packaged shell completions diff-clean against this binary | stale completions once shipped a `teardown` nobody could tab-complete |
+| the packaged shell completions were generated from this binary and are not empty | stale completions once shipped a `teardown` nobody could tab-complete; they are build artifacts now, so the remaining failure is an empty file |
 
 After building, the tarballs are inspected for both binaries, all units and
 the man pages before anything is uploaded.
