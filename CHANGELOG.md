@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.3 — 2026-10-29
 
 - **`vallum status` stops calling a dead session `up`.** `up` was decided from
   handshake *presence*, so a host whose server died overnight reported `up` for
