@@ -945,7 +945,9 @@ fn a_removed_control_socket_is_rebound_by_the_daemon() {
     assert!(!ctl_path.exists(), "socket file was removed");
 
     // The daemon ticks at 10 ms (in gate tests) and checks if the socket was removed;
-    // within 500 ms it must notice and recreate the socket file.
+    // within 500 ms it must notice and recreate the socket file. The name is only
+    // published once a listener is behind it, so its appearance is the readiness
+    // signal: the connect below may not be refused for having raced the re-bind.
     let deadline = Instant::now() + Duration::from_millis(500);
     while !ctl_path.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));

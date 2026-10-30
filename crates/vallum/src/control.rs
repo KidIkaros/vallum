@@ -15,7 +15,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::net::Shutdown as NetShutdown;
 use std::net::SocketAddr;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -171,15 +171,18 @@ fn stage_socket(dir: &Path) -> io::Result<(UnixListener, PathBuf)> {
 /// Publish a socket at `path` with its mode already `0600`.
 ///
 /// The socket is bound and chmodded in a `0700` staging directory beside the
-/// final path, then renamed into place — a rename within one directory keeps
-/// the inode and its mode, so the first appearance at `path` is already private.
-/// A permissive umask cannot publish a connectable socket, because the only
-/// umask-derived mode ever exists in a directory no other user can traverse.
+/// final path, then hard-linked into place — a link keeps the inode and its
+/// mode, so the first appearance at `path` is already private. A permissive
+/// umask cannot publish a connectable socket, because the only umask-derived
+/// mode ever exists in a directory no other user can traverse.
 ///
-/// The destination is reserved with `create_new` before the rename. That is the
-/// same refusal `bind` gives, and it is what keeps a daemon that raced in from
-/// being silently replaced: a rename over an occupied path would succeed and
-/// orphan its accept loop.
+/// `link` refuses an occupied path. That is the same refusal `bind` gives, and
+/// it is what keeps a daemon that raced in from being silently replaced: an
+/// unconditional rename over an occupied path would succeed and orphan its
+/// accept loop. Reserving the path with a placeholder file refuses the same way,
+/// but the name then exists for a moment with nothing accepting on it, and a
+/// client that connects as soon as it sees the name is refused. Linking
+/// publishes the name only once a listener is already behind it.
 fn bind_private(path: &Path) -> io::Result<UnixListener> {
     let parent = path
         .parent()
@@ -199,27 +202,13 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
     ));
 
     let (listener, staged) = stage_socket(&staging)?;
-    let reservation = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-    };
-    if let Err(error) = fs::rename(&staged, path) {
-        drop(reservation);
-        let _ = fs::remove_file(path);
+    if let Err(error) = fs::hard_link(&staged, path) {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    drop(reservation);
-    // Empty now that the socket has moved out; a failure here is litter, not a
-    // reason to take the plane down.
+    // The link is the published name now. These leave only litter on failure,
+    // which is not a reason to take the plane down.
+    let _ = fs::remove_file(&staged);
     let _ = fs::remove_dir(&staging);
     Ok(listener)
 }
