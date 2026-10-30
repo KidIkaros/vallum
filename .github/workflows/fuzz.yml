@@ -44,6 +44,17 @@ jobs:
           path: vallum
 
       - uses: dtolnay/rust-toolchain@nightly
+
+      # The fuzz build is a sanitizer, release, single-codegen-unit build of
+      # every crate, and `checkout` cleans the tree between jobs — so without
+      # this each of the six targets recompiles the world from scratch on the
+      # project's two-core runner (~8 minutes a job).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            vallum
+            vallum/fuzz -> target
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 

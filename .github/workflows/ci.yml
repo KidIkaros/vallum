@@ -138,6 +138,12 @@ jobs:
         with:
           path: vallum
 
+      # A toolchain step is not optional here. GitHub's hosted images ship
+      # rustup and cargo; a self-hosted runner ships whatever its owner
+      # installed, and `audit-check` fails at "unable to locate executable
+      # file: cargo" when it finds none.
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
