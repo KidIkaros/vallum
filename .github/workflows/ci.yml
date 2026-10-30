@@ -3,6 +3,14 @@
 # One checkout: the crypto SDK is a git dependency (`origin-crypto-sdk = { git,
 # tag }`), so cargo fetches it itself.
 #
+# Jobs run on the project's own runner (`wingman-vps`, labels self-hosted/
+# linux/x64), not on GitHub-hosted ones: this repository is private, and the
+# account's Actions minutes are refused with "the job was not started because
+# recent account payments have failed or your spending limit needs to be
+# increased" — before a runner is assigned, so no workflow change could fix it.
+# A self-hosted job consumes no hosted minutes. When billing exists, the three
+# `runs-on:` lines are the only thing that has to change back.
+#
 # The e2e job needs unprivileged user namespaces. GitHub's Ubuntu runners
 # normally allow them; where they do not, the step falls back to `sudo`, which
 # the script supports because it creates its own namespaces either way.
@@ -27,7 +35,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     strategy:
       fail-fast: false
       matrix:
@@ -89,7 +97,7 @@ jobs:
 
   e2e:
     name: end-to-end (two namespaces, real kernel)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,7 +129,7 @@ jobs:
 
   audit:
     name: advisories and supply chain
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: read
       checks: write

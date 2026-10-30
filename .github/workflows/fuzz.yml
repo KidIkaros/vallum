@@ -6,6 +6,9 @@
 # reproducible.
 #
 # One checkout: the crypto SDK is a git dependency and cargo fetches it.
+#
+# Runs on the project's own runner: the account's hosted Actions minutes are
+# refused (see ci.yml), and a self-hosted job costs none.
 
 name: fuzz
 
@@ -30,7 +33,7 @@ env:
 jobs:
   fuzz:
     name: ${{ matrix.target }} (${{ github.event_name == 'schedule' && '900s' || '60s' }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     strategy:
       fail-fast: false
       matrix:

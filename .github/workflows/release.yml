@@ -31,7 +31,9 @@ permissions:
 jobs:
   releasable:
     name: the tagged tree is releasable
-    runs-on: ubuntu-latest
+    # The project's own runner: hosted Actions minutes are refused on this
+    # private repository (see ci.yml), and this job needs none of them.
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
         with:
