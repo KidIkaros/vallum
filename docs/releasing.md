@@ -45,6 +45,18 @@ version — by running `release.sh --dry-run`, so the tag is judged by the same
 preflight as the publish rather than by a second copy of it. The signing key and
 the two-host stamp are the publisher's own checks, below.
 
+Those jobs run on the project's own machine, not on GitHub-hosted runners:
+`wingman-vps`, service `actions.runner.KidIkaros-vallum.wingman-vps`, labels
+`self-hosted, linux, x64`. The repository is private, and this account's hosted
+minutes are refused before a runner is ever assigned — "the job was not started
+because recent account payments have failed or your spending limit needs to be
+increased" — so no workflow could have fixed it; a self-hosted job spends none
+of them. Three consequences worth knowing: a push while that machine is down
+*queues* instead of failing, so a tag's check can sit there quietly; the gate
+needs a host where unprivileged user namespaces are allowed, or passwordless
+`sudo` for the runner user, and `ci.yml` says which; and all three workflows
+name the same labels, so moving CI is the same edit in three places.
+
 Publishing stays local because the two things it needs are not CI's to hold: the
 signing key would make the repository's trust anchor depend on a repository
 secret, and the two-host stamp is written by a machine that ran

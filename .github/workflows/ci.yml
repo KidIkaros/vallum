@@ -11,9 +11,11 @@
 # A self-hosted job consumes no hosted minutes. When billing exists, the three
 # `runs-on:` lines are the only thing that has to change back.
 #
-# The e2e job needs unprivileged user namespaces. GitHub's Ubuntu runners
-# normally allow them; where they do not, the step falls back to `sudo`, which
-# the script supports because it creates its own namespaces either way.
+# The e2e job needs unprivileged user namespaces. The runner's host allows them
+# (that is a property of the machine, not of the job); where a host restricts
+# them — Ubuntu 24.04's AppArmor default — the step falls back to `sudo -E`,
+# which needs passwordless sudo for the runner user, and the script creates its
+# own namespaces either way.
 
 name: ci
 
