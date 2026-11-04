@@ -601,6 +601,7 @@ fn apply_peer(device: &mut Device, update: uapi::Peer, expected_key_len: usize) 
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use vallum_tunnel::Randomness;
 
     struct ZeroRng;
@@ -1080,6 +1081,90 @@ mod tests {
         UnixStream::connect(&path).expect("the first daemon's socket survives");
 
         drop(live);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A watcher that samples `path` and counts every state in which the name
+    /// exists as something *other* than a socket.
+    fn watch_for_a_name_without_a_listener(
+        path: &Path,
+    ) -> (Arc<AtomicBool>, Arc<AtomicUsize>, JoinHandle<()>) {
+        use std::os::unix::fs::FileTypeExt;
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let watcher = {
+            let (path, stop, seen) = (path.to_path_buf(), Arc::clone(&stop), Arc::clone(&seen));
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(meta) = fs::symlink_metadata(&path) {
+                        if !meta.file_type().is_socket() {
+                            seen.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            })
+        };
+        (stop, seen, watcher)
+    }
+
+    /// Nothing may appear at the control path until a listener is behind it.
+    ///
+    /// This is the property the gate test
+    /// `a_removed_control_socket_is_rebound_by_the_daemon` lost a request to.
+    /// Reserving the name with a placeholder file — the way publishing first
+    /// refused an occupied path — leaves the path existing as a regular file
+    /// for two syscalls, and a client that connects the moment it appears is
+    /// refused. Linking the bound inode publishes the name already listening,
+    /// which is what the connect below requires of every one of these cycles: no
+    /// retry, no tolerance for `ECONNREFUSED`.
+    #[test]
+    fn the_control_name_is_never_published_without_a_listener_behind_it() {
+        let dir = std::env::temp_dir().join(format!("vallum-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        let (stop, seen, watcher) = watch_for_a_name_without_a_listener(&path);
+        for _ in 0..500 {
+            let listener = bind_private(&path).expect("bind");
+            UnixStream::connect(&path).expect("the name accepts as soon as it exists");
+            drop(listener);
+            fs::remove_file(&path).expect("unpublish");
+        }
+        stop.store(true, Ordering::Relaxed);
+        watcher.join().expect("watcher");
+
+        assert_eq!(
+            seen.load(Ordering::Relaxed),
+            0,
+            "the path existed as something other than a socket"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The watcher above has to be able to see the state it forbids, or the
+    /// assertion in the test above says nothing. A plain file at the path is
+    /// exactly the placeholder the reservation wrote, and it is caught at once.
+    #[test]
+    fn the_watch_notices_a_name_without_a_listener() {
+        let dir = std::env::temp_dir().join(format!("vallum-watch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        let (stop, seen, watcher) = watch_for_a_name_without_a_listener(&path);
+        fs::write(&path, b"a placeholder, not a listener").expect("write");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while seen.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        watcher.join().expect("watcher");
+
+        assert!(
+            seen.load(Ordering::Relaxed) > 0,
+            "the watcher missed a name with no listener behind it"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
