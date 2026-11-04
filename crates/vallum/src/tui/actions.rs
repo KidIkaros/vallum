@@ -34,6 +34,7 @@ pub fn refresh(app: &mut App) {
         }
     }
     app.last_refresh = std::time::Instant::now();
+    app.now = super::app::wall_now();
 }
 
 fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {

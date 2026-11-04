@@ -38,6 +38,11 @@ pub struct TuiArgs {
     #[arg(long)]
     pub ansi: bool,
 
+    /// Read the snapshot's clock as this Unix second, so regenerating the
+    /// published media produces identical bytes.
+    #[arg(long, value_name = "UNIX", requires = "snapshot")]
+    pub at: Option<u64>,
+
     /// Snapshot view mode (dashboard, logs, help, qr, empty, filter, ping).
     #[arg(long, default_value = "dashboard")]
     pub snapshot_view: String,

@@ -288,6 +288,12 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
         _ => {}
     }
 
+    // Ages are the one thing in a frame that a clock decides, so a snapshot can
+    // be taken against a stated instant instead of the moment it runs.
+    if let Some(at) = args.at {
+        app.now = at;
+    }
+
     let backend = TestBackend::new(args.width.max(40), args.height.max(12));
     let mut terminal =
         Terminal::new(backend).map_err(|error| Error::Usage(format!("tui snapshot: {error}")))?;

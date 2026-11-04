@@ -226,6 +226,17 @@ impl Theme {
         }
     }
 
+    /// High-contrast QR module cell: white on black, reversed in mono so the
+    /// code stays scannable without colour.
+    #[must_use]
+    pub fn qr_module(self) -> Style {
+        if self.color {
+            Style::default().fg(Color::White).bg(Color::Black)
+        } else {
+            Style::default().add_modifier(Modifier::REVERSED)
+        }
+    }
+
     /// Selected table row highlight.
     #[must_use]
     pub fn row_selected(self) -> Style {

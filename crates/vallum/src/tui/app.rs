@@ -858,6 +858,9 @@ pub struct App {
     pub editor_backup: Option<PathBuf>,
     pub logs_follow: bool,
     pub last_logs: Instant,
+    /// The wall-clock second this frame is read as. Advanced with the state, and
+    /// pinned by a snapshot so the published media regenerate byte for byte.
+    pub now: u64,
     pub diff: Option<DiffView>,
     pub logs_scroll: usize,
     pub diff_scroll: usize,
@@ -878,6 +881,17 @@ pub enum StatusBar {
     Selection,
     /// Status bar showing all info
     Full,
+}
+
+/// The host's wall-clock second.
+///
+/// The only clock read on the render path: [`App::now`] is set from it when the
+/// state is refreshed, so every age in a frame is computed against one instant.
+#[must_use]
+pub fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 impl App {
@@ -904,6 +918,7 @@ impl App {
             editor_backup: None,
             logs_follow: false,
             last_logs: Instant::now(),
+            now: wall_now(),
             diff: None,
             logs_scroll: 0,
             diff_scroll: 0,
@@ -958,7 +973,7 @@ impl App {
                             .allowed_ips
                             .iter()
                             .any(|ip| ip.to_lowercase().contains(&filter))
-                        || Self::handshake_freshness(peer)
+                        || Self::handshake_freshness_at(peer, self.now)
                             .label()
                             .to_lowercase()
                             .contains(&filter)
@@ -1088,14 +1103,15 @@ impl App {
         }
     }
 
+    /// How long ago the peer's handshake was, at the caller's `now`.
+    ///
+    /// `now` is a parameter rather than a clock read so a frame drawn from a
+    /// pinned clock (a snapshot) and a frame drawn from the host clock agree.
     #[must_use]
-    pub fn handshake_age(peer: &PeerView) -> String {
+    pub fn handshake_age_at(peer: &PeerView, now: u64) -> String {
         let Some((sec, _)) = peer.last_handshake else {
             return "—".to_owned();
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
         let age = now.saturating_sub(sec);
         if age < 60 {
             format!("{age}s")
@@ -1104,14 +1120,6 @@ impl App {
         } else {
             format!("{}h", age / 3600)
         }
-    }
-
-    #[must_use]
-    pub fn handshake_freshness(peer: &PeerView) -> HandshakeFreshness {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        Self::handshake_freshness_at(peer, now)
     }
 
     #[must_use]

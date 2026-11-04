@@ -242,6 +242,24 @@ fn handshake_freshness_labels_use_documented_boundaries() {
 }
 
 #[test]
+fn handshake_age_is_read_against_the_frame_s_clock_not_the_host_s() {
+    let now = 1_800_000_000;
+    let mut peer = super::app::PeerView::default();
+    assert_eq!(App::handshake_age_at(&peer, now), "—");
+
+    peer.last_handshake = Some((now - 14, 0));
+    assert_eq!(App::handshake_age_at(&peer, now), "14s");
+    // The same peer, a minute later on the same pinned clock: the text moves
+    // because the clock did, and not because the wall clock happened to.
+    assert_eq!(App::handshake_age_at(&peer, now + 60), "1m");
+    peer.last_handshake = Some((now - 3600, 0));
+    assert_eq!(App::handshake_age_at(&peer, now), "1h");
+    // A stamp from the future reads as no time at all rather than wrapping.
+    peer.last_handshake = Some((now + 5, 0));
+    assert_eq!(App::handshake_age_at(&peer, now), "0s");
+}
+
+#[test]
 fn service_state_labels_are_limited_to_known_systemd_states() {
     use super::app::ServiceState;
 
@@ -373,7 +391,7 @@ fn disconnected_control_marks_the_retained_snapshot_as_stale() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("CONTROL STALE"));
-    assert!(text.contains("Peers (stale snapshot)"));
+    assert!(text.contains("PEERS (stale snapshot)"));
 }
 
 #[test]
@@ -1703,4 +1721,129 @@ fn device_view_parses_loop_stats_and_stays_honest_when_absent() {
         peers: Vec::new(),
     };
     assert!(DeviceView::from_response(&partial).stats.is_none());
+}
+
+/// Serialises tests that change the process environment.
+static NO_COLOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Restores the environment when the guard drops.
+struct NoColorEnv;
+
+impl NoColorEnv {
+    fn set() -> Self {
+        std::env::set_var("NO_COLOR", "1");
+        Self
+    }
+}
+
+impl Drop for NoColorEnv {
+    fn drop(&mut self) {
+        std::env::remove_var("NO_COLOR");
+    }
+}
+
+/// `NO_COLOR` must apply to the frame, not just to the tokens: one literal
+/// `Color::` anywhere in the render path silently re-colours the screen for an
+/// operator who asked for no colour. This asserts the whole buffer, so the next
+/// hard-coded colour fails here instead of on someone's terminal.
+#[test]
+fn no_color_dashboard_renders_without_ansi_colour() {
+    use ratatui::style::Color;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let _lock = NO_COLOR_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env = NoColorEnv::set();
+
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        listen: "[::]:51820".to_owned(),
+        suite: "0x0003".to_owned(),
+        fingerprint: "0011223344556677".to_owned(),
+        offload: true,
+        peers: vec![super::app::PeerView {
+            name: "build-runner".to_owned(),
+            fingerprint: "8899aabbccddeeff".to_owned(),
+            endpoint: "192.0.2.24:51820".to_owned(),
+            allowed_ips: vec!["10.7.0.2/32".to_owned()],
+            keepalive: Some(25),
+            tx_bytes: 72_000,
+            rx_bytes: 543_210,
+            epoch: 2,
+            preshared_key: true,
+            ..super::app::PeerView::default()
+        }],
+        ..DeviceView::default()
+    });
+    interface.set_service_state(Some(super::app::ServiceState::Active));
+    let dashboard = App::new(vec![interface]);
+    let empty = App::new(Vec::new());
+
+    let mut qr_app = App::new(Vec::new());
+    qr_app.qr = Some(qr::QrState {
+        frames: vec![
+            "VALLUM1:1/1:afa1f7be:sudo vallum join vallum1-join:198.51.100.10:51821/n/charlie"
+                .to_owned(),
+        ],
+        index: 0,
+        last: std::time::Instant::now(),
+        hash: "afa1f7be".to_owned(),
+        path: "/run/vallum/enroll-vallum0-f19e9b24.json".to_owned(),
+        kind: qr::QrKind::Invite,
+    });
+
+    for (name, app) in [("dashboard", dashboard), ("empty", empty), ("qr", qr_app)] {
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).expect("test terminal");
+        terminal
+            .draw(|frame| super::ui::draw(frame, &app))
+            .expect("draw view");
+        let buffer = terminal.backend().buffer();
+        for (index, cell) in buffer.content().iter().enumerate() {
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            assert_eq!(
+                cell.fg,
+                Color::Reset,
+                "{name}: cell {index} sets a foreground colour under NO_COLOR"
+            );
+            assert_eq!(
+                cell.bg,
+                Color::Reset,
+                "{name}: cell {index} sets a background colour under NO_COLOR"
+            );
+        }
+    }
+}
+
+/// The render module takes every colour from `theme()`.
+///
+/// A literal in `ui.rs` is how the `NO_COLOR` guarantee dies: the buffer test
+/// above only covers the views it draws, while a stray `Color::Red` on an
+/// error path reaches a user who asked for no colour at all. The scan is
+/// textual, and it skips comment-only lines, so documenting the rule is still
+/// allowed — adding a new render module means adding it to this list.
+#[test]
+fn render_path_takes_every_colour_from_the_theme() {
+    const UI: &str = include_str!("ui.rs");
+
+    let literals: Vec<String> = UI
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with("//"))
+        .filter(|(_, line)| line.contains("Color::"))
+        .map(|(index, line)| format!("ui.rs:{}: {}", index + 1, line.trim()))
+        .collect();
+
+    assert!(
+        literals.is_empty(),
+        "the TUI render path must take colours from theme(), not from literals:\n{}",
+        literals.join("\n")
+    );
 }
