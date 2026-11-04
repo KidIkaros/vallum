@@ -1,0 +1,318 @@
+/* Vallum site — tokens mirror crates/vallum/src/tui/theme.rs.
+   Accent = the TUI cyan, ok = emerald, warn = amber, danger = crimson,
+   selection = the Rgb(24, 42, 58) row highlight. No gradients, no shadows. */
+
+:root {
+  --bg: #0b1117;
+  --panel: #121b24;
+  --rule: #22313f;
+  --text: #e6edf3;
+  --subtext: #a3b3c2;
+  --muted: #74869a;
+  --accent: #22d3ee;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --selection: #182a3a;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --measure: 70ch;
+  --step: 1.5rem;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f8fafc;
+    --panel: #ffffff;
+    --rule: #d5dee7;
+    --text: #0f1e2b;
+    --subtext: #40566a;
+    --muted: #5c7082;
+    --accent: #0e7490;
+    --ok: #047857;
+    --warn: #9a6700;
+    --danger: #b91c1c;
+    --selection: #e7f1f7;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: dark light;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 1rem/1.65 var(--sans);
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: 1rem;
+  top: 1rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--panel);
+}
+
+.masthead,
+main,
+footer {
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 1.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font: 600 1rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.mark {
+  color: var(--accent);
+}
+
+nav {
+  display: flex;
+  gap: 1.25rem;
+  font: 400 0.875rem/1 var(--mono);
+}
+
+nav a {
+  color: var(--subtext);
+  text-decoration: none;
+}
+
+nav a:hover {
+  color: var(--accent);
+}
+
+main {
+  padding-top: 3rem;
+  padding-bottom: 4rem;
+}
+
+h1 {
+  margin: 0 0 1rem;
+  font: 600 clamp(1.75rem, 4vw, 2.5rem) / 1.15 var(--mono);
+  letter-spacing: -0.01em;
+  max-width: 30ch;
+}
+
+.lede {
+  margin: 0 0 3rem;
+  max-width: 64ch;
+  font-size: 1.0625rem;
+  color: var(--subtext);
+}
+
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 3rem 0 1.25rem;
+  font: 600 0.8125rem/1 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+/* The `── label ──` rule from the TUI, as a hairline that takes the slack. */
+h2::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+pre {
+  margin: 0 0 1rem;
+  padding: 1rem 1.125rem;
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--accent);
+  font: 0.875rem/1.7 var(--mono);
+}
+
+code {
+  font: 0.9em/1.5 var(--mono);
+}
+
+pre code {
+  font-size: inherit;
+}
+
+.cmd {
+  color: var(--text);
+}
+
+.cmt {
+  color: var(--muted);
+}
+
+.note {
+  color: var(--subtext);
+  font-size: 0.9375rem;
+}
+
+.facts {
+  margin: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+}
+
+.facts > div {
+  background: var(--bg);
+  padding: 0.875rem 1rem;
+  display: grid;
+  gap: 0.25rem;
+  grid-template-columns: 15rem 1fr;
+}
+
+@media (max-width: 40rem) {
+  .facts > div {
+    grid-template-columns: 1fr;
+  }
+}
+
+.facts dt {
+  font: 600 0.875rem/1.5 var(--mono);
+  color: var(--ok);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--subtext);
+  font-size: 0.9375rem;
+}
+
+figure {
+  margin: 0;
+}
+
+figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+figcaption {
+  margin-top: 0.625rem;
+  font: 0.8125rem/1.6 var(--mono);
+  color: var(--muted);
+}
+
+.flat {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.flat li {
+  padding-left: 1.25rem;
+  position: relative;
+  color: var(--subtext);
+  font-size: 0.9375rem;
+}
+
+.flat li::before {
+  content: "—";
+  position: absolute;
+  left: 0;
+  color: var(--muted);
+}
+
+.groups {
+  display: grid;
+  gap: 2.5rem;
+}
+
+.group h2 {
+  margin-top: 0;
+}
+
+.doc-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--rule);
+}
+
+.doc-list li {
+  border-bottom: 1px solid var(--rule);
+  padding: 0.75rem 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.doc-list a {
+  font: 500 0.9375rem/1.4 var(--mono);
+  text-decoration: none;
+}
+
+.doc-list a:hover {
+  text-decoration: underline;
+}
+
+.doc-list span {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+footer {
+  padding-top: 1.5rem;
+  padding-bottom: 3rem;
+  border-top: 1px solid var(--rule);
+  font: 0.8125rem/1.6 var(--mono);
+  color: var(--muted);
+}
+
+footer p {
+  margin: 0;
+}
