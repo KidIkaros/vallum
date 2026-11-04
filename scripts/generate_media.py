@@ -64,7 +64,7 @@ SPARK_LEVELS = {
 }
 
 
-def run_mock_uapi_server(sock_path, stop_event):
+def run_mock_uapi_server(sock_path, stop_event, now):
     if os.path.exists(sock_path):
         os.unlink(sock_path)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -72,7 +72,6 @@ def run_mock_uapi_server(sock_path, stop_event):
     server.listen(5)
     server.settimeout(0.5)
 
-    now = int(time.time())
     response = f"""vallum_interface=vallum0
 vallum_listen=0.0.0.0:51820
 listen_port=51820
@@ -165,7 +164,7 @@ errno=0
         os.unlink(sock_path)
 
 
-def capture_snapshot(sock_path, view="dashboard", width=120, height=32):
+def capture_snapshot(sock_path, view="dashboard", width=120, height=32, at=None):
     cmd = [
         "cargo",
         "run",
@@ -185,6 +184,13 @@ def capture_snapshot(sock_path, view="dashboard", width=120, height=32):
         "--snapshot-view",
         view,
     ]
+    # The frames carry handshake ages, which the renderer would otherwise read
+    # from the clock at capture time: two runs seconds apart differ by a few
+    # characters, and every PNG, SVG and video frame with them. --at states the
+    # instant instead, matching the one the mock server's timestamps are
+    # relative to, so a regeneration reproduces the committed bytes.
+    if at is not None:
+        cmd += ["--at", str(at)]
     res = subprocess.run(cmd, cwd=ROOT_DIR, capture_output=True, text=True, check=True)
     return res.stdout
 
@@ -702,7 +708,12 @@ def main():
     os.makedirs(ASSETS_DIR, exist_ok=True)
     sock_path = "/tmp/vallum_media.sock"
     stop_event = threading.Event()
-    server_thread = threading.Thread(target=run_mock_uapi_server, args=(sock_path, stop_event))
+    # The instant the mock's handshake timestamps are relative to, and the one
+    # each frame is rendered as, so ages do not depend on when the run started.
+    now = int(time.time())
+    server_thread = threading.Thread(
+        target=run_mock_uapi_server, args=(sock_path, stop_event, now)
+    )
     server_thread.daemon = True
     server_thread.start()
     time.sleep(0.3)
@@ -724,7 +735,7 @@ def main():
 
     for view, png_rel, svg_rel, title in frames_spec:
         print(f"  Rendering view '{view}' -> {png_rel}")
-        ansi_out = capture_snapshot(sock_path, view=view, width=120, height=32)
+        ansi_out = capture_snapshot(sock_path, view=view, width=120, height=32, at=now)
 
         # PNG
         img = render_to_image(ansi_out, title=title)
