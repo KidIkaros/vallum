@@ -3,19 +3,28 @@
 # One checkout: the crypto SDK is a git dependency (`origin-crypto-sdk = { git,
 # tag }`), so cargo fetches it itself.
 #
-# Jobs run on the project's own runner (`wingman-vps`, labels self-hosted/
-# linux/x64), not on GitHub-hosted ones: this repository is private, and the
-# account's Actions minutes are refused with "the job was not started because
-# recent account payments have failed or your spending limit needs to be
-# increased" — before a runner is assigned, so no workflow change could fix it.
-# A self-hosted job consumes no hosted minutes. When billing exists, the three
-# `runs-on:` lines are the only thing that has to change back.
+# The runner is chosen by repository visibility, and that choice is the fork
+# guard:
 #
-# The e2e job needs unprivileged user namespaces. The runner's host allows them
-# (that is a property of the machine, not of the job); where a host restricts
-# them — Ubuntu 24.04's AppArmor default — the step falls back to `sudo -E`,
-# which needs passwordless sudo for the runner user, and the script creates its
-# own namespaces either way.
+#   private  → `self-hosted, linux, x64` (this account's machine, `wingman-vps`)
+#   public   → `ubuntu-latest`, always
+#
+# Self-hosting exists because hosted Actions minutes are refused on this
+# account — "the job was not started because recent account payments have failed
+# or your spending limit needs to be increased" — before a runner is even
+# assigned, so `ubuntu-latest` alone would queue every push until the repository
+# is public (public minutes are free). Self-hosting is safe only while the
+# repository is private, because a private repository has no forks: there is no
+# untrusted `pull_request` to execute on a persistent machine. The moment it is
+# public, every job moves to a disposable runner with no secrets, which is what
+# makes outside PRs safe to run at all. Do not hard-code `self-hosted` anywhere:
+# a public repository with a self-hosted label in a `pull_request` workflow
+# executes a stranger's code on that machine.
+#
+# The e2e job needs unprivileged user namespaces. The self-hosted host allows
+# them; where an image does not — Ubuntu 24.04's AppArmor default — the step
+# falls back to `sudo -E` (passwordless on both runner types), and the script
+# creates its own namespaces either way.
 
 name: ci
 
@@ -37,7 +46,8 @@ env:
 jobs:
   test:
     name: test (${{ matrix.toolchain }})
-    runs-on: [self-hosted, linux, x64]
+    # Public ⇒ hosted, always. See the header for why this is the fork guard.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -99,7 +109,7 @@ jobs:
 
   e2e:
     name: end-to-end (two namespaces, real kernel)
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,7 +141,10 @@ jobs:
 
   audit:
     name: advisories and supply chain
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
+    # A fork PR's token is read-only, so `audit-check`'s check run would fail
+    # there for a reason that says nothing about the change.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
       checks: write
@@ -140,10 +153,9 @@ jobs:
         with:
           path: vallum
 
-      # A toolchain step is not optional here. GitHub's hosted images ship
-      # rustup and cargo; a self-hosted runner ships whatever its owner
-      # installed, and `audit-check` fails at "unable to locate executable
-      # file: cargo" when it finds none.
+      # A toolchain step is not optional here: `audit-check` fails at "unable to
+      # locate executable file: cargo" if the image ships none, and naming the
+      # toolchain keeps this job independent of the image's Rust version.
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: rustsec/audit-check@v2

@@ -7,8 +7,9 @@
 #
 # One checkout: the crypto SDK is a git dependency and cargo fetches it.
 #
-# Runs on the project's own runner: the account's hosted Actions minutes are
-# refused (see ci.yml), and a self-hosted job costs none.
+# The runner follows repository visibility: self-hosted while private (no forks
+# exist, so no untrusted code), GitHub-hosted the moment it is public (see
+# ci.yml's header for why that is the fork guard).
 
 name: fuzz
 
@@ -33,7 +34,7 @@ env:
 jobs:
   fuzz:
     name: ${{ matrix.target }} (${{ github.event_name == 'schedule' && '900s' || '60s' }})
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,8 +48,7 @@ jobs:
 
       # The fuzz build is a sanitizer, release, single-codegen-unit build of
       # every crate, and `checkout` cleans the tree between jobs — so without
-      # this each of the six targets recompiles the world from scratch on the
-      # project's two-core runner (~8 minutes a job).
+      # this each of the six targets recompiles the world from scratch.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |

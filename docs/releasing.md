@@ -45,17 +45,26 @@ version — by running `release.sh --dry-run`, so the tag is judged by the same
 preflight as the publish rather than by a second copy of it. The signing key and
 the two-host stamp are the publisher's own checks, below.
 
-Those jobs run on the project's own machine, not on GitHub-hosted runners:
-`wingman-vps`, service `actions.runner.KidIkaros-vallum.wingman-vps`, labels
-`self-hosted, linux, x64`. The repository is private, and this account's hosted
-minutes are refused before a runner is ever assigned — "the job was not started
-because recent account payments have failed or your spending limit needs to be
-increased" — so no workflow could have fixed it; a self-hosted job spends none
-of them. Three consequences worth knowing: a push while that machine is down
-*queues* instead of failing, so a tag's check can sit there quietly; the gate
-needs a host where unprivileged user namespaces are allowed, or passwordless
-`sudo` for the runner user, and `ci.yml` says which; and all three workflows
-name the same labels, so moving CI is the same edit in three places.
+The runner is chosen by repository visibility, in all three workflows:
+private gets `self-hosted, linux, x64` — this account's machine (`wingman-vps`,
+service `actions.runner.KidIkaros-vallum.wingman-vps`) — and public gets
+`ubuntu-latest`. Self-hosting is not a preference: hosted minutes are refused on
+this account before a runner is ever assigned ("the job was not started because
+recent account payments have failed or your spending limit needs to be
+increased"), so a hard-coded `ubuntu-latest` would queue every push until the
+repository is public, where minutes are free.
+
+The rule is the fork guard. A private repository has no forks, so there is no
+untrusted `pull_request` to execute on a persistent machine. A public one does,
+which is why self-hosting is only selected while the repository is private: the
+expression in each workflow's `runs-on:` makes that a property of the
+configuration instead of a thing to remember. Three consequences worth knowing:
+while CI is on that machine, a push during its downtime *queues* instead of
+failing, so a tag's check can sit there quietly; the e2e gate needs a
+host where unprivileged user namespaces are allowed, or passwordless `sudo` for
+the runner user, and `ci.yml` says which; and the visibility expression appears
+in five places (three jobs in `ci.yml`, one in `fuzz.yml`, one in `release.yml`),
+so changing the rule is the same edit in three files.
 
 Publishing stays local because the two things it needs are not CI's to hold: the
 signing key would make the repository's trust anchor depend on a repository

@@ -36,9 +36,9 @@
 # setup flags (`--endpoint`, `--address`, `--no-nat`, `--dry-run`, ...) works
 # here without being repeated in this script.
 #
-# `--from-release` tries the public download URL first — on a public repo it
-# needs nothing but curl. While the repo is private it falls back to `gh`
-# (run as the invoking user, not root) or to `GH_TOKEN`/`GITHUB_TOKEN`.
+# `--from-release` tries the public download URL first, which needs nothing but
+# curl. Installing from a private fork falls back to `gh` (run as the invoking
+# user, not root) or to `GH_TOKEN`/`GITHUB_TOKEN`.
 set -euo pipefail
 
 REPO="KidIkaros/vallum"
@@ -275,12 +275,13 @@ download_asset() {
     if curl -fsSL -o "$out" "$url" 2>/dev/null; then
         return
     fi
-    # Private repo: the user's gh login is the fallback, never a gate.
+    # A private fork (or an anonymous-download outage): the user's gh login is
+    # the fallback, never a gate.
     if command -v gh >/dev/null 2>&1; then
         gh_as_user release download "$tag" --repo "$REPO" --pattern "$name" --dir "$(dirname "$out")" --clobber
         return
     fi
-    echo "cannot download $name — repo may be private; set GH_TOKEN or run gh auth login" >&2
+    echo "cannot download $name — for a private fork, set GH_TOKEN or run gh auth login" >&2
     return 1
 }
 

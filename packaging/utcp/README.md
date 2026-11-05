@@ -1,6 +1,6 @@
 # Vallum UTCP (Universal Tool Calling Protocol) Manual
 
-This directory contains the **Universal Tool Calling Protocol (UTCP)** manual for Vallum: [`vallum.utcp.json`](file:///home/ikaaros/Coding/Gold/vallum/packaging/utcp/vallum.utcp.json).
+This directory contains the **Universal Tool Calling Protocol (UTCP)** manual for Vallum: [`vallum.utcp.json`](vallum.utcp.json).
 
 ## Why UTCP for Vallum?
 

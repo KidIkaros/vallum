@@ -25,8 +25,9 @@ curl -fsSL https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/insta
   | sudo bash -s -- --from-release --install-only
 ```
 
-The repository is private, so set `GH_TOKEN` (or `GITHUB_TOKEN`) first unless the
-release assets are reachable anonymously.
+The release assets are public, so this needs nothing but `curl`. Installing from
+a private fork is the only case that wants a token: set `GH_TOKEN` (or
+`GITHUB_TOKEN`) and the installer falls back to `gh`.
 
 Prefer the `.deb`/`.rpm`? Route it through the installer so the package gets the
 same signature check as the tarball — `dpkg -i`/`rpm -i` verify nothing on their

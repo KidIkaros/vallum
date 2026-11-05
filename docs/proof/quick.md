@@ -86,8 +86,8 @@ a release (or a local build) into `/usr/bin` with the two units, the man pages
 and the completion, then hands off to `vallum server init`:
 
 - `--from-release [TAG]` downloads the tarball and `SHA256SUMS`, verifies the
-  checksum, and installs it. The repository is private, so this needs `GH_TOKEN`
-  unless the assets are reachable anonymously.
+  checksum, and installs it. Needs only `curl`; installing from a private fork is
+  the one case that falls back to `gh` with `GH_TOKEN`.
 - `--local` installs `target/release` (or `target/debug`); this is the developer
   path.
 - `--install-only` stops after the files are in place.

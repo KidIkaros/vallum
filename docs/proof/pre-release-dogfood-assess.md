@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-19
 **Version under test:** 0.1.4 (release binary `target/release/vallum`, `cargo --version` 0.1.4)
-**Test artifact:** `/home/ikaaros/.hermes/cache/scratch/vallum-dogfood-*` (removed after session)
+**Test artifact:** a throwaway directory outside the repository, created with `mktemp -d` (removed after the session)
 **Gate of record:** `scripts/verify.sh` — PASS (fmt, clippy --all-targets --all-features, tests, lean-daemon tests, supply-chain, TUI snapshot)
 
 ## Test account
@@ -10,7 +10,7 @@
 Built a real test home with `mktemp -d` (not `rm -rf`):
 
 ```
-/home/ikaaros/.hermes/cache/scratch/vallum-dogfood-j515xbg9/
+<scratch>/                       # one `mktemp -d`, not a real home directory
   keys/server.key        # generated via `vallum keygen --suite 3`
   peers/laptop.key        # generated via `vallum keygen --suite 3`
   server.toml             # interface + 1 peer, control socket `vallum.sock`

@@ -342,14 +342,19 @@ separate approximation of it.
   conditions above closed, a hosted run of `ci.yml`, `fuzz.yml` and
   `release.yml` green on `main`, and one install path a stranger can follow
   (`scripts/install.sh` from source today; an artifact once the next item stops
-  being deferred). What publication is meant to produce is the part the private
-  repository cannot: outside deployments and review, which are what the audit and
-  the `experimental-pq` status wait on, and a second maintainer. Status: the
-  triggers are enabled and hosted runs now fire on every push to `main`, but no
-  job has started — GitHub answers each one with "recent account payments have
-  failed or your spending limit needs to be increased", which is the private
-  plan's billing wall rather than a workflow defect: a public repository's
-  Actions minutes are free. The criterion above is therefore still unproved.
+  being deferred). Each condition, and the checks that prove it, is written down
+  in [`publication-checklist.md`](publication-checklist.md). What publication is
+  meant to produce is the part the private repository cannot: outside
+  deployments and review, which are what the audit and the `experimental-pq`
+  status wait on, and a second maintainer. Status: the
+  workflows now choose their runner by repository visibility — self-hosted while
+  private, `ubuntu-latest` once public, which is also what keeps a stranger's
+  pull request off a machine of ours (`.github/workflows/ci.yml`'s header) — so
+  publication is no longer blocked on billing. What is still unproved is the
+  first hosted run on `main`: GitHub refused hosted minutes on the private plan
+  ("recent account payments have failed or your spending limit needs to be
+  increased"), and free minutes for a public repository cannot be tested from
+  here.
   Every job's commands pass locally via `scripts/verify.sh`, and the first run
   whose jobs actually start is what proves the hosted wiring. One unexplained
   failure stands between here and a confident first run: `e2e-netns.sh` failed

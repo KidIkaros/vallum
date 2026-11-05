@@ -31,9 +31,10 @@ permissions:
 jobs:
   releasable:
     name: the tagged tree is releasable
-    # The project's own runner: hosted Actions minutes are refused on this
-    # private repository (see ci.yml), and this job needs none of them.
-    runs-on: [self-hosted, linux, x64]
+    # Same visibility rule as every job (see ci.yml), though a tag push is
+    # trusted input either way. The signing key this job deliberately does not
+    # have is what publishing needs.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
