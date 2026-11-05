@@ -25,3 +25,4 @@
 | [0021](0021-live-rotation-syncconf.md) | A live `set` names the rotation window, not a replacement peer | accepted | 2026-10-23 |
 | [0022](0022-shaping-policy-in-core.md) | Traffic shaping is a passive policy machine in `vallum-core`; the `Device` is its single driver | accepted | 2026-10-23 |
 | [0023](0023-per-app-split-tunnelling.md) | Per-app split tunnelling rides the tunnel's mark tables, with launch-bound membership | implemented (classifier only; exclusive path deferred — 2026-10-28 amendment) | 2026-10-23 |
+| [0024](0024-desktop-ui.md) | A Tauri v2 desktop UI that reuses the Rust control client; x86_64 only | proposed | 2026-11-05 |
