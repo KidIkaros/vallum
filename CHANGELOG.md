@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.6.4 — 2026-11-05
+
+- **The control socket's name is published only once something listens on it.**
+  Publishing reserved the path with a placeholder file and renamed the socket
+  over it, so for the width of those two calls the name existed with no listener
+  behind it — a client that saw the socket and connected lost its request, which
+  is how the gate test found it: the daemon had logged "re-binding", the file
+  was there, and the connect was refused. `link` now makes the entry appear
+  already listening, because the inode is bound and chmodded in the staging
+  directory first, and it refuses an occupied path the way the reservation did —
+  a daemon that raced in keeps its socket.
+
+- **The TUI's colours come from the theme, and its ages from one clock.** The
+  render path carried 201 literal ratatui colours, so restyling meant editing
+  the widgets, and a bare `NO_COLOR=1` still emitted colour escapes from a
+  quarter of the frames. Every colour now names a token in `theme.rs`; a test
+  fails the build if `ui.rs` reaches for a literal again, and another pins all
+  nine views to `Color::Reset` when colour is off. Handshake ages were read from
+  the wall clock at the point of formatting, in five places, so one frame could
+  straddle a second boundary and a published snapshot could never be reproduced —
+  the age is now computed against `App::now`, which `refresh` sets and `--at`
+  can state outright.
+
+- **Release artifacts stop carrying the builder's paths.** `strip = "symbols"`
+  removes debug info, not the `file!()` literals inside panic and assertion
+  messages, so 1.6.3 shipped 288 `/home/…` strings in `vallum` and 43 in
+  `vallum-quick`: `strings` on a download named the maintainer's home directory
+  and cargo layout. Builds now remap both roots to `/build` and `/cargo`, which
+  also makes two builders' string tables comparable, and the release refuses to
+  package a binary that still names `$HOME` — a stale `target/` puts the paths
+  back even with the environment set.
+
+- **The end-to-end harness asserts the peer table the TUI actually draws.** The
+  check looked for the lower-case section title the theme pass had upper-cased,
+  so it could not fail for the right reason: it would have stopped the next tag
+  on a name, not on a fault. It now asserts the title with its peer count and the
+  peer's own row.
+
 ## 1.6.3 — 2026-10-29
 
 - **`vallum status` stops calling a dead session `up`.** `up` was decided from
