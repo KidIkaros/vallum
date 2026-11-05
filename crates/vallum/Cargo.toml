@@ -27,7 +27,7 @@ ipnet.workspace = true
 # Configuration is the operator's surface, so the parser is a hard dependency
 # rather than a hand-rolled one: a mis-parse here is a security bug.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # The CLI. A binary may exit on a bad argument; `clap` does that and prints why.
 clap = { version = "4", features = ["derive"] }
