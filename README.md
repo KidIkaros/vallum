@@ -70,6 +70,9 @@ Both static operations are **MEX-bound** (`KDF1(σ, r)`) and key confirmation is
 
 ## Deploy
 
+New here? **[Quickstart](docs/quickstart.md)** has the prerequisites and all
+three topologies — client, server, site-to-site — on one page.
+
 Install from the latest release (or `--local` from a checkout), then run `vallum setup`:
 
 ```sh
@@ -102,7 +105,8 @@ sudo vallum server teardown --dry-run           # cleanly reverse server init
 sudo vallum client teardown --name laptop       # cleanly remove a client tunnel
 ```
 
-Guides: [server](docs/deployment/server.md) ·
+Guides: [quickstart](docs/quickstart.md) ·
+[server](docs/deployment/server.md) ·
 [client](docs/deployment/client.md) ·
 [site-to-site](docs/deployment/site-to-site.md) ·
 [automation](docs/deployment/automation.md) ·
