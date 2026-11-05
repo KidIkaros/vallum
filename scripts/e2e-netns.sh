@@ -532,8 +532,12 @@ ok "show --json is secret-free"
 
 "$BIN" tui --control "$WORK/control.sock" --snapshot --width 120 --height 36 \
     > "$WORK/tui.txt" 2>&1 || bad "tui --snapshot failed"
+# Section titles are upper-case since the theme pass, and the count is part of
+# the title, so this asserts the table *and* that it holds exactly one peer.
 grep -q 'Vallum' "$WORK/tui.txt" || bad "the TUI snapshot has no header"
-grep -q 'Peers' "$WORK/tui.txt" || bad "the TUI snapshot has no peer table"
+grep -q 'PEERS \[1\]' "$WORK/tui.txt" || bad "the TUI snapshot has no peer table"
+grep -q "$INNER_B/32" "$WORK/tui.txt" \
+    || bad "the TUI snapshot's peer table does not list the peer"
 grep -q 'listen' "$WORK/tui.txt" || bad "the TUI snapshot has no device state"
 ok "the TUI renders the live device and peer table headlessly"
 
