@@ -141,6 +141,16 @@ else
 fi
 
 say "building"
+# `strip = "symbols"` in Cargo.toml removes debug info, not the `file!()`
+# literals inside panic and assertion messages — so an unmapped release ships
+# the builder's own layout (`/home/…/.cargo/registry/…`) to every downloader.
+# Remapping both roots makes those paths anonymous and makes two builders
+# produce the same strings. It is exported rather than written into
+# `.cargo/config.toml` because `$HOME` cannot be expanded there, and exported
+# rather than passed per-command because the aarch64 leg must inherit it.
+BUILD_HOME=${HOME:?}
+BUILD_CARGO=${CARGO_HOME:-$HOME/.cargo}
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$BUILD_HOME=/build --remap-path-prefix=$BUILD_CARGO=/cargo"
 run cargo build --release -p vallum -p vallum-quick
 
 if [ -n "$SKIP_ARM" ]; then
@@ -162,6 +172,22 @@ else
     else
         echo "   would cross-build aarch64 (cargo zigbuild)"
     fi
+fi
+
+# The remap above is only worth having if it is checked: a dependency built
+# without it (a stale `target/`, a wrapper that drops RUSTFLAGS) puts the paths
+# straight back. Refuse to package a binary that names the builder.
+if [ "$DRY" -eq 0 ]; then
+    for bin in vallum vallum-quick; do
+        # `|| true`: grep exits 1 on no match, and `set -e` would end the release
+        # on the case this check exists to confirm.
+        leak=$(grep -aoF "$BUILD_HOME" "target/release/$bin" | head -1 || true)
+        [ -z "$leak" ] \
+            || fail "target/release/$bin still names $BUILD_HOME — rebuild without a cached copy (cargo clean -p, then retry)"
+    done
+    ok "no build path in either binary"
+else
+    echo "   would grep both release binaries for $BUILD_HOME"
 fi
 
 say "packaging"

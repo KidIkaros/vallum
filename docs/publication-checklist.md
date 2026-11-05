@@ -80,9 +80,16 @@ Not settled by editing a file:
 - [ ] **The shipped binaries, not just the tree.** `strings vallum | grep /home/`
       on the `v1.6.3` tarball returns the build machine's layout (288 strings in
       `vallum`, 43 in `vallum-quick`) because `file!()` literals survive
-      `strip = "symbols"`; nothing in the tree sets `--remap-path-prefix`. See
-      `docs/dogfood/2026-11-05-release-artifact.md` §5. Only a new tag with the
-      remap in place can clear this item.
+      `strip = "symbols"`. `scripts/release.sh` now remaps both roots — measured
+      288 → 0 and 43 → 0 on a rebuild — but the published asset predates that, so
+      this clears only when the next tag's tarball is checked:
+
+      ```sh
+      gh release download <tag> --repo KidIkaros/vallum --pattern '*x86_64-linux.tar.gz'
+      tar xzf vallum-*.tar.gz && grep -aoF "/home/" vallum-*/vallum vallum-*/vallum-quick | wc -l   # expect 0
+      ```
+
+      See `docs/dogfood/2026-11-05-release-artifact.md` §5.
 - [ ] Spot-check the proof and dogfood documents for hostnames or addresses that
       are not documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
       `203.0.113.0/24`): `git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" docs/proof docs/dogfood`.

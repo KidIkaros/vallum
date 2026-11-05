@@ -27,9 +27,16 @@ tarball missing a unit) to get the artifact right.
 | `E2E=1 ./scripts/verify.sh` passes | the namespace gate of record |
 | the SSH signing key matches `packaging/vallum-release.pub` | releases are only as trustworthy as what `install.sh` verifies |
 | the packaged shell completions were generated from this binary and are not empty | stale completions once shipped a `teardown` nobody could tab-complete; they are build artifacts now, so the remaining failure is an empty file |
+| neither release binary names the builder's `$HOME` | panic and assertion messages carry `file!()` literals, which `strip = "symbols"` does not remove: `v1.6.3` shipped 288 `/home/…` strings in `vallum` and 43 in `vallum-quick`, so `strings` told every downloader the maintainer's username and layout |
 
 After building, the tarballs are inspected for both binaries, all units and
 the man pages before anything is uploaded.
+
+Builds export `--remap-path-prefix=$HOME=/build --remap-path-prefix=$CARGO_HOME=/cargo`,
+so those paths read `/build/…` and `/cargo/…` instead: anonymous, and the same on
+two machines, which is what makes the string tables comparable between builds.
+Rebuilding a cached `target/` does not re-apply it, which is why the check greps
+the built binaries rather than trusting the environment.
 
 `--dry-run` runs the cheap checks and prints the rest. `--skip-remote "reason"`
 releases without the two-host pass, and `--skip-arm "reason"` releases without
