@@ -40,7 +40,7 @@ jobs:
       matrix:
         target: [message_parse, handshake_decode, replay, shaping, enroll_parse, epoch_open]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: vallum
 
