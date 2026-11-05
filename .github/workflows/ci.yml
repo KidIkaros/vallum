@@ -28,8 +28,15 @@
 
 name: ci
 
+# `push` is `main` only, deliberately. Dependabot pushes its own branches too,
+# and on a single self-hosted runner each dependency update queued a full matrix
+# that sat in front of `main` for hours — `test (stable)` on 89d7213 never
+# started. Nothing is lost by narrowing it: dependency branches are covered by
+# `pull_request`, and tags by `release.yml` plus the `main` push that carries the
+# tagged commit (a tag's commit has already been tested as a branch head).
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

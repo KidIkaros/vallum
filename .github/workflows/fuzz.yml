@@ -13,8 +13,14 @@
 
 name: fuzz
 
+# `push` is `main` only for the same reason as ci.yml: a fuzz run is six
+# targets, and dependabot's branches would queue them on the one self-hosted
+# runner ahead of `main`. `pull_request` still covers dependency branches, the
+# schedule still covers the long run, and a tag's commit is covered by the
+# `main` push that carried it.
 on:
   push:
+    branches: [main]
   pull_request:
   schedule:
     # A long run every week: 900s per target instead of the 60s smoke.
