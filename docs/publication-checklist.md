@@ -77,6 +77,12 @@ Not settled by editing a file:
       separate, later decision.
 - [ ] The signing key used for releases is in no commit and no workflow — only
       its public half (`packaging/vallum-release.pub`, `allowed_signers`) is.
+- [ ] **The shipped binaries, not just the tree.** `strings vallum | grep /home/`
+      on the `v1.6.3` tarball returns the build machine's layout (288 strings in
+      `vallum`, 43 in `vallum-quick`) because `file!()` literals survive
+      `strip = "symbols"`; nothing in the tree sets `--remap-path-prefix`. See
+      `docs/dogfood/2026-11-05-release-artifact.md` §5. Only a new tag with the
+      remap in place can clear this item.
 - [ ] Spot-check the proof and dogfood documents for hostnames or addresses that
       are not documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
       `203.0.113.0/24`): `git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" docs/proof docs/dogfood`.
