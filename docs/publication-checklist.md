@@ -89,7 +89,7 @@ Not settled by editing a file:
       tar xzf vallum-*.tar.gz && grep -aoF "/home/" vallum-*/vallum vallum-*/vallum-quick | wc -l   # expect 0
       ```
 
-      See `docs/dogfood/2026-11-05-release-artifact.md` §5.
+      The measurement itself: `docs/dogfood/2026-11-05-release-1.6.4.md` §2.
 - [ ] Spot-check the proof and dogfood documents for hostnames or addresses that
       are not documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
       `203.0.113.0/24`): `git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" docs/proof docs/dogfood`.
