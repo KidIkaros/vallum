@@ -10,7 +10,7 @@ maintainer. Those are **outputs** of publication, not inputs — no item below c
 manufacture them, and none should pretend to.
 
 Current state, for orientation: the repository is private, Apache-2.0, default
-branch `main`, latest tag `v1.6.3` with signed tarballs, deb, rpm and an SBOM.
+branch `main`, latest tag `v1.6.4` with signed tarballs, deb, rpm and an SBOM.
 The tree-level work in §2 and §3 is **done** — it cost nothing to do while
 private — and §1's runner rule is now configuration rather than a plan. What
 cannot be proved from a private repository is the first hosted run (§1) and the
@@ -77,12 +77,12 @@ Not settled by editing a file:
       separate, later decision.
 - [ ] The signing key used for releases is in no commit and no workflow — only
       its public half (`packaging/vallum-release.pub`, `allowed_signers`) is.
-- [ ] **The shipped binaries, not just the tree.** `strings vallum | grep /home/`
-      on the `v1.6.3` tarball returns the build machine's layout (288 strings in
-      `vallum`, 43 in `vallum-quick`) because `file!()` literals survive
-      `strip = "symbols"`. `scripts/release.sh` now remaps both roots — measured
-      288 → 0 and 43 → 0 on a rebuild — but the published asset predates that, so
-      this clears only when the next tag's tarball is checked:
+- [x] **The shipped binaries, not just the tree.** `v1.6.3` shipped the build
+      machine's layout — 288 `/home/…` strings in `vallum`, 43 in `vallum-quick`
+      — because `file!()` literals survive `strip = "symbols"`. `scripts/release.sh`
+      remaps both roots now, and refuses to package a binary that still names
+      `$HOME`. **Checked on the `v1.6.4` tarball: 0 and 0**, reading `/cargo/…`
+      instead. Re-run per release:
 
       ```sh
       gh release download <tag> --repo KidIkaros/vallum --pattern '*x86_64-linux.tar.gz'
