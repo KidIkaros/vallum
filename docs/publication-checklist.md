@@ -59,14 +59,14 @@ clean (§2, §3) *before* the flip could be the test.
 ## 2. The tree carries nothing private (scrubbed)
 
 **Done**: the two absolute paths found in the tree are gone — a proof artefact
-now says "a throwaway directory created with `mktemp -d`" instead of
-`/home/ikaaros/.hermes/…`, and the UTCP manual links `vallum.utcp.json`
-relatively. Agent tooling state (`.agents/`, `.claude/`, `.freebuff/`,
+now says "a throwaway directory created with `mktemp -d`" instead of naming a
+home directory, and the UTCP manual links `vallum.utcp.json` relatively. Agent tooling state (`.agents/`, `.claude/`, `.freebuff/`,
 `skills-lock.json`) is not tracked and is ignored by `.gitignore`.
 
 Already true — run them as the regression test, not as a to-do:
 
-- [x] `git grep -n "/home/"` returns nothing.
+- [x] `git grep -n "/home/" -- ':!docs/publication-checklist.md'` returns
+      nothing. (This file has to quote the command, so it excludes itself.)
 - [x] `git ls-files | grep -E "^\.(freebuff|agents|claude|codex)"` is empty.
 
 Not settled by editing a file:
@@ -169,7 +169,7 @@ So these are post-flip steps, and they need the flip to be safe already:
 ## Re-checking this list
 
 ```sh
-git grep -n "/home/"                                   # §2
+git grep -n "/home/" -- ':!docs/publication-checklist.md'   # §2
 git ls-files | grep -E "^\.(freebuff|agents|claude)"    # §2
 grep -rn --exclude=publication-checklist.md "repo is private\|repository is private" docs scripts README.md   # §3
 grep -n "runs-on" .github/workflows/*.yml              # §1
