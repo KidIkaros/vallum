@@ -45,8 +45,17 @@ with the table and the daemon-level test recorded in
 `ShapingSpec::FrontPadding { count, interval_ms, size }`, with the count clamped
 at 60 packets and the interval at 1 000 ms. It is a count rather than a rate: 60
 packets at a 1 400-byte target cost 85 KiB once, against 100 MiB for a 100 ms
-floor over the same two hours. Volume padding and parameter noise are not
-implemented.
+floor over the same two hours.
+
+**Third and fourth shapes taken.** Volume padding is
+`ShapingSpec::VolumePadding { window_ms, max_packets, size }`: a window closes on
+a pause or on a full run of packets, and closing injects until the count is a
+power of two. Parameter noise did not become a fifth shape; it became a field on
+the floor — `jitter_ms` — because the thing worth randomising is the interval the
+floor emits, and a per-firing draw is stronger than the per-circuit draw MOOR
+makes: a value chosen once per peer is stable for the life of the daemon, which
+is the same window an observer measures in. All four techniques in the research
+note's order are now implemented.
 
 ## Alternatives Considered
 

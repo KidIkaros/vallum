@@ -338,6 +338,34 @@ pub enum ShapingSpec {
         interval_ms: u64,
         /// The sealed-plaintext length of each injected packet.
         size: u16,
+        /// How far each drawn interval may wander from `interval_ms`.
+        ///
+        /// Zero — the default — is a metronome, which is a signature of its own.
+        /// With noise, every interval is drawn from `interval_ms - jitter_ms`,
+        /// `interval_ms` and `interval_ms + jitter_ms` (weights 1, 2, 1), so the
+        /// mean rate is unchanged and the gaps are no longer a constant. Clamped
+        /// to half the interval, so no draw can approach zero.
+        #[serde(default)]
+        jitter_ms: u64,
+    },
+    /// Normalise each window of outgoing packets up to the next power of two.
+    ///
+    /// Volume is the channel size and timing leave open: nine packets and eleven
+    /// are different flows even when every packet is the same length. A window
+    /// closes on a pause of `window_ms` or on a run of `max_packets`, and closing
+    /// injects padding until the count is a power of two.
+    ///
+    /// `max_packets` is clamped to 32 and rounded down to a power of two, so the
+    /// configured value bounds the cost rather than describing a target, and
+    /// `window_ms` is clamped up to 1 000 ms. For the measured prices, see
+    /// `docs/proof/traffic-shaping.md`.
+    VolumePadding {
+        /// The pause that ends a window, in milliseconds.
+        window_ms: u64,
+        /// The most packets a window may contain.
+        max_packets: u32,
+        /// The sealed-plaintext length of each injected packet.
+        size: u16,
     },
     /// Inject a bounded burst of padding at the front of the peer's life.
     ///
@@ -376,9 +404,22 @@ impl ShapingSpec {
         match *self {
             Self::PadToSize { size } => Machine::pad_to_size(size),
             Self::MinInterval { interval_ms } => Machine::min_interval(interval_ms),
-            Self::ConstantRateFloor { interval_ms, size } => {
-                Machine::constant_rate_floor(interval_ms, size)
+            Self::ConstantRateFloor {
+                interval_ms,
+                size,
+                jitter_ms,
+            } => {
+                if jitter_ms == 0 {
+                    Machine::constant_rate_floor(interval_ms, size)
+                } else {
+                    Machine::jittered_floor(interval_ms, jitter_ms, size)
+                }
             }
+            Self::VolumePadding {
+                window_ms,
+                max_packets,
+                size,
+            } => Machine::volume_padding(window_ms, max_packets, size),
             Self::FrontPadding {
                 count,
                 interval_ms,
@@ -583,6 +624,99 @@ pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shaping_kinds_parse_and_build_the_machine_they_name() {
+        let text = r#"
+[interface]
+name = "v0"
+private_key = "k"
+
+[[peer]]
+name = "p"
+public_key = "k"
+allowed_ips = ["10.0.0.2/32"]
+
+[[peer.shaping]]
+kind = "pad_to_size"
+size = 1400
+
+[[peer.shaping]]
+kind = "min_interval"
+interval_ms = 20
+
+[[peer.shaping]]
+kind = "constant_rate_floor"
+interval_ms = 1000
+size = 1400
+
+[[peer.shaping]]
+kind = "constant_rate_floor"
+interval_ms = 1000
+jitter_ms = 250
+size = 1400
+
+[[peer.shaping]]
+kind = "front_padding"
+count = 8
+interval_ms = 200
+size = 1400
+
+[[peer.shaping]]
+kind = "volume_padding"
+window_ms = 200
+max_packets = 16
+size = 1400
+
+[[peer.shaping]]
+kind = "respond_with_padding"
+size = 300
+injections = 1
+cap = 4
+"#;
+        let config: Config = toml::from_str(text).expect("parses");
+        let machines: Vec<_> = config.peers[0]
+            .shaping
+            .iter()
+            .map(ShapingSpec::machine)
+            .collect();
+        assert_eq!(machines.len(), 7);
+
+        // A plain floor is armed for its own interval; the noisy one is armed for
+        // the shortest of its drawn intervals, which is what the transport uses.
+        let shaper = vallum_core::Shaper::new(vec![machines[2].clone()]);
+        assert_eq!(shaper.wake_after(), Some(1000));
+        let shaper = vallum_core::Shaper::new(vec![machines[3].clone()]);
+        assert_eq!(shaper.wake_after(), Some(750));
+        // And the window's own pause: clamped up from 200 ms to the rail.
+        let shaper = vallum_core::Shaper::new(vec![machines[5].clone()]);
+        assert_eq!(shaper.wake_after(), Some(vallum_core::VOLUME_MIN_WINDOW_MS));
+    }
+
+    #[test]
+    fn a_floor_without_jitter_still_parses() {
+        // The field is defaulted so a config written before noise existed keeps
+        // its meaning: a metronome, not a silent upgrade to a noisier shape.
+        let text = r#"
+[interface]
+name = "v0"
+private_key = "k"
+
+[[peer]]
+name = "p"
+public_key = "k"
+allowed_ips = ["10.0.0.2/32"]
+
+[[peer.shaping]]
+kind = "constant_rate_floor"
+interval_ms = 500
+size = 1400
+"#;
+        let config: Config = toml::from_str(text).expect("parses");
+        let machine = config.peers[0].shaping[0].machine();
+        let shaper = vallum_core::Shaper::new(vec![machine]);
+        assert_eq!(shaper.wake_after(), Some(500));
+    }
 
     #[test]
     fn with_outer_mtu_inserts_when_absent() {

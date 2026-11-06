@@ -160,6 +160,27 @@ started. It is not the front of each session — padding a rekey would cost
 `count` packets per rekey, which is a rate wearing a burst's name, and the floor
 is the shape for a rate.
 
+* `Machine::volume_padding(window_ms, max_packets, size)` — one state per packet
+  count (state `i` means "`i` packets in this window"), each armed with
+  `wake(window_ms)`. A `NormalSent` advances the count; reaching the cap wraps it
+  to a fresh window. `Timeout` closes the window and injects
+  `next_pow2(count) - count` packets in one action, so the window's volume is a
+  power of two and no other window size is visible. Both rails are on the count:
+  `max_packets` is clamped to `VOLUME_MAX_PACKETS` (32) and rounded **down** to a
+  power of two, so a configured cap is an upper bound; `window_ms` is clamped up
+  to `VOLUME_MIN_WINDOW_MS` (1 000 ms), because a shorter window pads on every
+  conversational pause and is a floor with extra steps.
+* `Machine::jittered_floor(interval_ms, jitter_ms, size)` — the floor, with its
+  interval drawn per firing: three states (short, configured, long), each armed
+  for its own interval, and a `Timeout` picks the next one with weights 1, 2, 1.
+  The mean is the configured interval, so noise costs what the plain floor costs
+  in bandwidth, and the gaps become a distribution instead of a constant. The
+  noise is per *firing* rather than per session deliberately: a draw taken once
+  when the peer is built is stable for the life of the daemon, which is exactly
+  the window an observer measures in. `jitter_ms` is clamped to half the interval
+  and every interval to `FLOOR_MIN_INTERVAL_MS`, so a noisy floor cannot be
+  configured into a flood either.
+
 An injected padding packet is an **empty payload padded to `size`** — an ordinary
 keepalive. It needs no message type, and an observer cannot pick it out of the
 stream by form (`an_injected_padding_packet_is_an_openable_keepalive`).
@@ -272,6 +293,23 @@ establishes the tunnel, the other two filled out of silence at the configured
 size, the payloads discarded on receipt, and ten further intervals of silence
 producing nothing at all.
 
+**Volume** (`volume_padding`, 1 000 ms, cap 8): on the page load, 10 packets /
+**5 558 bytes** / 3 injected / +367.1 % — three windows closed during the trace and
+three packets made them powers of two. On a two-pause trace whose windows hold
+three and six packets, the same machine injects exactly three (1 + 2), and an
+open window adds nothing at all: `a_volume_window_pads_the_burst_to_a_power_of_two`
+shows the three payloads leaving unpadded and one packet following the pause,
+with the daemon's peer discarding it.
+
+**Noise** (`jittered_floor(500, 200)`): 7 176 injections over an idle hour
+against 7 200 for the plain floor at the same interval — a 0.3 % difference in
+*rate*, which is the sampler over 7 200 draws, not a cost. Jitter moves the gaps
+and leaves the bill where it was; `a_jittered_floor_costs_what_a_plain_floor_costs`
+asserts the rate stays within 10 % of the plain one and that no second packet size
+appears. The unit test `a_noisy_floor_varies_the_interval_and_keeps_the_mean`
+shows the three intervals actually being drawn (400 / 500 / 600 ms) and the mean
+landing on the configured 500 within 2 ms over 400 draws.
+
 **Padding is authenticated.** `padding_is_stripped_so_the_payload_arrives_unchanged`
 pads payloads from 0 to 1398 bytes to 1400 and recovers each one byte-for-byte,
 and the unit test `a_forged_length_prefix_fails_the_tag` flips a ciphertext byte
@@ -306,18 +344,24 @@ and confirms the tag — not the length field — is what rejects it.
    could not usefully be one: the property is statistical, not symbolic. The
    durable output is the framework, the documented privacy parameter, and the
    measured cost table.
-7. **The floor is a constant, not noise.** It makes an idle tunnel speak at a
-   known rate, which removes the coarse "nothing is happening" signal and
-   replaces it with a metronome — evenly spaced packets are themselves a
-   signature, and the floor does nothing about volume. Making gaps *shaped*
-   rather than *regular* needs the rest of ADR-0025's techniques, which are not
-   implemented.
-8. **The front burst is a burst, not a disguise.** It spends its packets where the
+7. **The plain floor is a constant, and the noisy one is a small distribution.**
+   A floor at a fixed interval removes the coarse "nothing is happening" signal
+   and replaces it with a metronome: evenly spaced packets are themselves a
+   signature. `jittered_floor` answers that with three intervals drawn 1:2:1, so
+   an observer has to estimate a distribution rather than read a constant — but a
+   three-point distribution is still a signature, and it is a *local* one: it says
+   nothing about the volume the floor emits, which is one packet per interval
+   whatever the gaps are.
+8. **Volume padding normalises counts, not bytes.** A window of nine 40-byte
+   packets and one of nine 1400-byte packets both pad to sixteen packets and
+   still differ in bytes. Closing that needs byte-bucket accounting and a target
+   size, which is a different machine with a much larger bill.
+9. **The front burst is a burst, not a disguise.** It spends its packets where the
    front is most revealing and then the tunnel is as silent as it was before. An
    observer that watches past the first minute learns nothing it would not have
    learned without it, and a front that begins with real traffic spends its slots
    *accompanied* by that traffic rather than hiding its shape.
-9. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
+10. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
    Vallum's conventions (no RNG in the crate, caller-supplied draws, errors not
    panics); no crate dependency was added.
 
@@ -367,6 +411,14 @@ and confirms the tag — not the length field — is what rejects it.
 | the front cannot be configured past its count or its window | `shaping.rs::{FRONT_MAX_PACKETS, FRONT_MAX_INTERVAL_MS}` | `a_front_burst_cannot_be_configured_past_its_rails` (unit) |
 | **a front burst costs a count, not a rate** | `Machine::front_padding` | `the_front_burst_is_a_one_off_and_the_floor_is_a_rate` |
 | **the daemon spends a configured front burst and then stops** | `device/{timer,data,state}.rs` (`shape_wake_ms`) | `a_front_padded_session_spends_its_burst_and_then_stops` |
+| a volume window pads up to the next power of two, and an open window adds nothing | `shaping.rs::Machine::volume_padding` | `a_volume_window_pads_up_to_the_next_power_of_two`, `a_volume_window_that_is_already_a_power_of_two_costs_nothing` (unit) |
+| a full window closes itself and starts the next | `shaping.rs::Machine::volume_padding` | `a_full_volume_window_closes_itself` (unit) |
+| the window's cap and interval are clamped | `shaping.rs::{VOLUME_MAX_PACKETS, VOLUME_MIN_WINDOW_MS}` | `a_volume_window_cannot_be_configured_past_its_rails` (unit) |
+| **a volume window costs at most the cap per window** | `Machine::volume_padding` | `volume_padding_tops_a_window_up_to_the_next_power_of_two` |
+| **the daemon normalises a window when it closes, and not before** | `device/{timer,data}.rs` | `a_volume_window_pads_the_burst_to_a_power_of_two` |
+| a noisy floor draws its interval per packet and keeps the mean | `shaping.rs::Machine::jittered_floor` | `a_noisy_floor_varies_the_interval_and_keeps_the_mean` (unit) |
+| the noisy floor is rail-bounded like the plain one | `shaping.rs::{FLOOR_MIN_INTERVAL_MS}` | `a_noisy_floor_is_rail_bounded_like_the_plain_one` (unit) |
+| **noise costs no bandwidth** | `Machine::jittered_floor` | `a_jittered_floor_costs_what_a_plain_floor_costs` |
 | a hand-written machine costs what the built-in one costs | `Machine::new`/`State`/`Branch` | `the_same_padding_target_costs_the_same_bytes_however_it_is_reached` |
 
 ---

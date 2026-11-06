@@ -627,7 +627,90 @@ fn a_busy_front_spends_the_burst_on_traffic() {
     assert_eq!(front.injected, COUNT as usize, "{front}");
 }
 
-// ── 5. padding is indistinguishable in kind ──────────────────────────
+// ── 5. volume, and a floor without a signature ───────────────────────
+
+/// Three packets, a pause, six packets, a pause: two windows whose counts are
+/// deliberately not powers of two.
+const TWO_WINDOWS: &[(bool, usize, u64)] = &[
+    (false, 40, 0),
+    (false, 40, 5),
+    (false, 40, 5),
+    (false, 40, 2000),
+    (false, 40, 5),
+    (false, 40, 5),
+    (false, 40, 5),
+    (false, 40, 5),
+    (false, 40, 5),
+    (false, 40, 2000),
+];
+
+#[test]
+fn volume_padding_tops_a_window_up_to_the_next_power_of_two() {
+    const WINDOW_MS: u64 = 1000;
+    const CAP: u32 = 8;
+
+    let front_of = simulate(
+        vec![Machine::volume_padding(WINDOW_MS, CAP, 1400)],
+        TWO_WINDOWS,
+        1,
+    );
+    let baseline = simulate(Vec::new(), TWO_WINDOWS, 1);
+    println!("volume 8 / {WINDOW_MS} ms: {front_of}");
+    println!("baseline:                {baseline}");
+
+    // Three packets pad to four and six pad to eight: three injections over the
+    // two windows, which is the arithmetic the counts promise. Six pad two
+    // because the window sizes differ — the point of the shape is that the two
+    // windows are indistinguishable afterwards, not that they cost the same.
+    assert_eq!(front_of.injected, 3, "{front_of}");
+    assert_eq!(front_of.packets, baseline.packets + 3);
+    // The cap bounds a single window, so no window can spend more than CAP.
+    assert!(front_of.injected <= (CAP as usize) * 2);
+
+    // On the page load the windows are whatever its pauses make them: two long
+    // gaps close one window each, so this cannot cost more than the cap either.
+    let page = simulate(
+        vec![Machine::volume_padding(WINDOW_MS, CAP, 1400)],
+        PAGE_LOAD,
+        1,
+    );
+    println!("volume over a page load: {page}");
+    assert!(page.injected > 0, "the trace has windows to normalise");
+    assert!(page.injected <= CAP as usize, "{page}");
+}
+
+#[test]
+fn a_jittered_floor_costs_what_a_plain_floor_costs() {
+    const INTERVAL_MS: u64 = 500;
+    const SIZE: u16 = 1400;
+
+    let plain = simulate(
+        vec![Machine::constant_rate_floor(INTERVAL_MS, SIZE)],
+        IDLE_HOUR,
+        1,
+    );
+    let noisy = simulate(
+        vec![Machine::jittered_floor(INTERVAL_MS, 200, SIZE)],
+        IDLE_HOUR,
+        1,
+    );
+    println!("plain: {plain}");
+    println!("noisy: {noisy}");
+
+    // The mean rate is the configured one, so noise is free in bandwidth: the
+    // difference here is the sampler's draw over one hour, not a different cost.
+    let ratio = noisy.injected as f64 / plain.injected as f64;
+    assert!(
+        (0.9..=1.1).contains(&ratio),
+        "jitter changed the rate: plain {} vs noisy {}",
+        plain.injected,
+        noisy.injected
+    );
+    // And every packet is one size, so the noise is in the gaps and nowhere else.
+    assert_eq!(noisy.sizes.len(), 2, "sizes: {:?}", noisy.sizes);
+}
+
+// ── 6. padding is indistinguishable in kind ──────────────────────────
 
 #[test]
 fn an_injected_padding_packet_is_an_openable_keepalive() {

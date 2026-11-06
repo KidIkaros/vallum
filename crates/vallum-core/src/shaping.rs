@@ -96,6 +96,22 @@ pub const FLOOR_MIN_INTERVAL_MS: u64 = 100;
 /// the burst: unlike the floor, this machine ends.
 pub const FRONT_MAX_PACKETS: u32 = 60;
 
+/// The most packets one volume window may normalise.
+///
+/// A window is padded up to the next power of two, so the cap is also the point
+/// at which a window needs no padding at all: a run of `VOLUME_MAX_PACKETS`
+/// closes itself. It is clamped here because the state chain is one state per
+/// count, and because a window of 4 096 is not a window a VPN's traffic has.
+pub const VOLUME_MAX_PACKETS: u32 = 32;
+
+/// The shortest volume window.
+///
+/// Below a second, a window closes on every conversational pause and the
+/// machine pads constantly, which is a floor with extra steps and a worse story.
+/// One second is also the scale at which a burst under observation stops being
+/// a burst.
+pub const VOLUME_MIN_WINDOW_MS: u64 = 1_000;
+
 /// The longest spacing between the packets of a front burst.
 ///
 /// A burst spread over more than a minute is not a front: it is a floor with a
@@ -403,6 +419,121 @@ impl Machine {
         Self::new(states)
     }
 
+    /// A constant-rate floor whose interval is drawn afresh on every tick.
+    ///
+    /// A floor at a fixed interval removes the "nothing is happening" signal and
+    /// replaces it with a metronome — and a metronome is a signature of its own:
+    /// an observer measures the gap once and knows the defence for as long as it
+    /// runs. This machine draws one of three intervals per packet, from
+    /// `base - jitter`, `base` and `base + jitter` with weights 1, 2 and 1, so the
+    /// gaps vary around the configured rate while the mean stays there.
+    ///
+    /// The noise is per *firing* rather than per session on purpose: a draw taken
+    /// once when the peer is built is stable for the life of the daemon, which is
+    /// exactly the window an observer measures in. Drawing each gap means the
+    /// signature is a distribution, and an observer who wants it has to estimate
+    /// one from the traffic rather than read a constant out of it.
+    ///
+    /// `jitter_ms` is clamped to half the interval, so no drawn interval can
+    /// reach zero, and every interval is clamped up to [`FLOOR_MIN_INTERVAL_MS`],
+    /// so the noisy floor cannot be configured into a flood any more than the
+    /// plain one. `jitter_ms = 0` is the plain floor, expressed the same way.
+    #[must_use]
+    pub fn jittered_floor(interval_ms: u64, jitter_ms: u64, size: u16) -> Self {
+        let base = interval_ms.max(FLOOR_MIN_INTERVAL_MS);
+        let jitter = jitter_ms.min(base / 2);
+        let intervals = [
+            base.saturating_sub(jitter).max(FLOOR_MIN_INTERVAL_MS),
+            base,
+            base.saturating_add(jitter).max(FLOOR_MIN_INTERVAL_MS),
+        ];
+        // 1, 2, 1: the configured interval is the mode and the mean, so a noisy
+        // floor costs what the plain one costs. A flat draw would put the mean
+        // at the configured value while making every interval equally likely,
+        // which reads as a wider band than it is.
+        const WEIGHTS: [u32; 3] = [1, 2, 1];
+        let mut states = Vec::with_capacity(intervals.len());
+        for (index, interval) in intervals.iter().enumerate() {
+            let on_timeout = WEIGHTS
+                .iter()
+                .enumerate()
+                .map(|(next, weight)| {
+                    let next = u16::try_from(next).unwrap_or(0);
+                    Branch::act(*weight, Action::Inject { count: 1, size }, next)
+                })
+                .collect();
+            let here = u16::try_from(index).unwrap_or(0);
+            states.push(
+                State::new(UNLIMITED)
+                    .wake(*interval)
+                    .on(Event::NormalSent, vec![Branch::pass(1, here)])
+                    .on(Event::NormalRecv, vec![Branch::pass(1, here)])
+                    .on(Event::TunnelSent, vec![Branch::pass(1, here)])
+                    .on(Event::TunnelRecv, vec![Branch::pass(1, here)])
+                    .on(Event::Timeout, on_timeout),
+            );
+        }
+        Self::new(states)
+    }
+
+    /// Normalise each window of packets up to the next power of two.
+    ///
+    /// Volume is the channel the size and timing shapes leave open: a page load
+    /// that takes eleven packets and one that takes nine are different flows
+    /// even when every packet is the same length and no gap is outstanding. This
+    /// machine counts the packets in a window, and when the window closes it
+    /// injects padding until the count is a power of two — so an observer can
+    /// tell a ``busy'' window from a quieter one, but not 9 from 11.
+    ///
+    /// A window closes on either of two events, and both are things the transport
+    /// already tells a machine:
+    ///
+    /// * a pause of `window_ms` (the armed wake), which is where a burst ends in
+    ///   practice; and
+    /// * a run of `max_packets` packets, which needs no padding — it is already a
+    ///   power of two — so the count simply resets.
+    ///
+    /// The cost is therefore bounded twice over: at most `next_pow2(n) - n`
+    /// packets per window, and no window larger than the cap. `max_packets` is
+    /// clamped to [`VOLUME_MAX_PACKETS`] and rounded **down** to a power of two,
+    /// so the configured value is an upper bound rather than a target; the
+    /// interval is clamped up to [`VOLUME_MIN_WINDOW_MS`].
+    #[must_use]
+    pub fn volume_padding(window_ms: u64, max_packets: u32, size: u16) -> Self {
+        let window = window_ms.max(VOLUME_MIN_WINDOW_MS);
+        let cap = round_down_power_of_two(max_packets.clamp(2, VOLUME_MAX_PACKETS));
+        let mut states = Vec::with_capacity(cap as usize + 1);
+        for count in 0..=cap {
+            // A full window is a power of two already: nothing to add when it
+            // closes, and the packet after it opens the next window rather than
+            // falling outside every window.
+            let settled = if count == cap {
+                1
+            } else {
+                u16::try_from(count + 1).unwrap_or(MACHINE_END)
+            };
+            let missing = next_power_of_two(count).saturating_sub(count);
+            let close = match u16::try_from(missing) {
+                Ok(0) | Err(_) => vec![Branch::pass(1, 0)],
+                Ok(missing) => vec![Branch::act(
+                    1,
+                    Action::Inject {
+                        count: missing,
+                        size,
+                    },
+                    0,
+                )],
+            };
+            states.push(
+                State::new(UNLIMITED)
+                    .wake(window)
+                    .on(Event::NormalSent, vec![Branch::pass(1, settled)])
+                    .on(Event::Timeout, close),
+            );
+        }
+        Self::new(states)
+    }
+
     /// Hold further outgoing packets for `interval_ms` after each normal send.
     ///
     /// A crude rate limiter: it turns a burst into a train, which is what makes
@@ -424,6 +555,24 @@ impl Machine {
             State::new(UNLIMITED).on(Event::Timeout, vec![Branch::pass(1, 0)]),
         ])
     }
+}
+
+/// The next power of two at or above `count`, or `count` itself at the top of
+/// its range. `0` stays `0`: an empty window needs no padding.
+fn next_power_of_two(count: u32) -> u32 {
+    if count <= 1 {
+        return count;
+    }
+    count.checked_next_power_of_two().unwrap_or(count)
+}
+
+/// The largest power of two at or below `value`, never less than 2.
+fn round_down_power_of_two(value: u32) -> u32 {
+    let mut cap: u32 = 2;
+    while cap.saturating_mul(2) <= value {
+        cap *= 2;
+    }
+    cap
 }
 
 /// An action, and the machine that produced it.
@@ -864,6 +1013,157 @@ mod tests {
         assert_eq!(shaper.wake_after(), None);
         assert!(shaper.handle(Event::NormalSent, 0).is_empty());
         assert!(shaper.handle(Event::Timeout, 0).is_empty());
+    }
+
+    #[test]
+    fn a_volume_window_pads_up_to_the_next_power_of_two() {
+        // A window of at most 8 packets, closing on a pause.
+        let mut shaper = Shaper::new(vec![Machine::volume_padding(1000, 8, 1400)]);
+        let inject = |count| {
+            vec![Effect {
+                machine: 0,
+                action: Action::Inject { count, size: 1400 },
+            }]
+        };
+
+        // Three packets in the window, then the pause: one packet takes the
+        // window from 3 to 4.
+        for _ in 0..3 {
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        }
+        assert_eq!(shaper.state_of(0), Some(3), "the state is the count");
+        assert_eq!(shaper.handle(Event::Timeout, 0), inject(1));
+        assert_eq!(shaper.state_of(0), Some(0), "the window resets");
+
+        // Five packets: three are missing to reach 8.
+        for _ in 0..5 {
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        }
+        assert_eq!(shaper.handle(Event::Timeout, 0), inject(3));
+    }
+
+    #[test]
+    fn a_volume_window_that_is_already_a_power_of_two_costs_nothing() {
+        let mut shaper = Shaper::new(vec![Machine::volume_padding(1000, 4, 1400)]);
+
+        for _ in 0..2 {
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        }
+        assert!(
+            shaper.handle(Event::Timeout, 0).is_empty(),
+            "two packets is already a power of two"
+        );
+        assert!(
+            shaper.handle(Event::Timeout, 0).is_empty(),
+            "an empty window needs nothing either"
+        );
+    }
+
+    #[test]
+    fn a_full_volume_window_closes_itself() {
+        let mut shaper = Shaper::new(vec![Machine::volume_padding(1000, 4, 1400)]);
+
+        // Four packets fill the window, and a full window is a power of two, so
+        // closing it adds nothing and the fifth packet opens the next window.
+        // This is what bounds a flow that never pauses.
+        for count in 0..4u16 {
+            assert_eq!(shaper.state_of(0), Some(count));
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        }
+        assert_eq!(shaper.state_of(0), Some(4), "a full window");
+        assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        assert_eq!(shaper.state_of(0), Some(1), "the next window starts here");
+        assert!(shaper.handle(Event::Timeout, 0).is_empty());
+    }
+
+    #[test]
+    fn a_volume_window_cannot_be_configured_past_its_rails() {
+        // A cap past the rail is clamped, and rounded down to a power of two, so
+        // the configured value is an upper bound: 1 000 becomes 32 packets, not
+        // 1 000.
+        let mut shaper = Shaper::new(vec![Machine::volume_padding(1, 1_000, 1400)]);
+        for count in 0..VOLUME_MAX_PACKETS {
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+            assert_eq!(
+                shaper.state_of(0),
+                Some(u16::try_from(count + 1).expect("a small count")),
+                "counted, not capped"
+            );
+        }
+        assert!(
+            shaper.handle(Event::Timeout, 0).is_empty(),
+            "nothing missing"
+        );
+        assert_eq!(
+            shaper.wake_after(),
+            Some(VOLUME_MIN_WINDOW_MS),
+            "a window shorter than a second is a floor with extra steps"
+        );
+
+        // A cap between two powers of two rounds down: 20 is 16.
+        let mut shaper = Shaper::new(vec![Machine::volume_padding(1000, 20, 1400)]);
+        for _ in 0..16 {
+            assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        }
+        assert_eq!(shaper.state_of(0), Some(16), "20 rounded down to 16");
+    }
+
+    #[test]
+    fn a_noisy_floor_varies_the_interval_and_keeps_the_mean() {
+        const BASE: u64 = 1_000;
+        const JITTER: u64 = 400;
+
+        let mut shaper = Shaper::new(vec![Machine::jittered_floor(BASE, JITTER, 1400)]);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0u64;
+        const DRAWS: u64 = 400;
+
+        for draw in 0..DRAWS {
+            let interval = shaper.wake_after().expect("always armed");
+            seen.insert(interval);
+            total += interval;
+            assert_eq!(
+                shaper.handle(Event::Timeout, draw),
+                vec![Effect {
+                    machine: 0,
+                    action: Action::Inject {
+                        count: 1,
+                        size: 1400,
+                    },
+                }],
+                "every interval injects"
+            );
+        }
+
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            vec![BASE - JITTER, BASE, BASE + JITTER],
+            "three intervals, drawn per packet"
+        );
+        // Weights 1, 2, 1 over the four draws of the sampler: the mean is the
+        // configured interval, so noise costs what the plain floor costs.
+        let mean = total / DRAWS;
+        assert!(mean.abs_diff(BASE) <= 2, "mean {mean} should sit at {BASE}");
+    }
+
+    #[test]
+    fn a_noisy_floor_is_rail_bounded_like_the_plain_one() {
+        let mut shaper = Shaper::new(vec![Machine::jittered_floor(1, 60_000, 1400)]);
+        // Interval clamped up to the floor's minimum, and jitter to half of it:
+        // the drawn intervals are 100 ms and 150 ms, never faster than the rail.
+        for draw in 0..32u64 {
+            let interval = shaper.wake_after().expect("always armed");
+            assert!(
+                (FLOOR_MIN_INTERVAL_MS..=FLOOR_MIN_INTERVAL_MS * 2).contains(&interval),
+                "drawn interval {interval} is outside the rail"
+            );
+            assert_eq!(shaper.handle(Event::Timeout, draw).len(), 1);
+        }
+
+        // Zero jitter is the plain floor, not a slower one.
+        let plain = Shaper::new(vec![Machine::constant_rate_floor(2_000, 1400)]);
+        let noisy = Shaper::new(vec![Machine::jittered_floor(2_000, 0, 1400)]);
+        assert_eq!(plain.wake_after(), noisy.wake_after());
     }
 
     #[test]

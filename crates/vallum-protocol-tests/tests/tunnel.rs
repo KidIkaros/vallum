@@ -1099,6 +1099,62 @@ fn a_front_padded_session_spends_its_burst_and_then_stops() {
     );
 }
 
+/// A window's volume is normalised when the window closes, and only then.
+///
+/// The volume machine needs two things the machine alone cannot show: that an
+/// open window adds nothing to the packets going out, and that the pause which
+/// closes it is what triggers the padding.
+#[test]
+fn a_volume_window_pads_the_burst_to_a_power_of_two() {
+    const WINDOW_MS: u64 = 1_000;
+    const SIZE: u16 = 400;
+
+    let mut net = net_with(
+        vec![Machine::volume_padding(WINDOW_MS, 8, SIZE)],
+        Shape::ROAMING,
+    );
+    // Establish: this is the window's first packet.
+    net.outbound(0, ipv4(A_IP, B_IP, b"first"));
+    net.settle();
+    let opened = net.hosts[0].stats();
+
+    // Two more in the same window. Nothing is padded while the window is open,
+    // because until it closes the count is still moving.
+    net.outbound(0, ipv4(A_IP, B_IP, b"second"));
+    net.outbound(0, ipv4(A_IP, B_IP, b"third"));
+    net.pump(4);
+    let three = net.hosts[0].stats();
+    assert_eq!(
+        three.sent - opened.sent,
+        2,
+        "an open window must add nothing: {three:?}"
+    );
+
+    // The pause closes the window, and three packets are padded to four.
+    net.settle_over(WINDOW_MS, 3);
+    let closed = net.hosts[0].stats();
+    assert_eq!(
+        closed.sent - three.sent,
+        1,
+        "three packets should be topped up to four: {closed:?}"
+    );
+    let tag = suite().sizes().aead_tag;
+    let expected = HEADER_LEN + 4 + 8 + 4 + usize::from(SIZE) + tag;
+    assert_eq!(
+        (closed.tx_bytes - three.tx_bytes) as usize,
+        expected,
+        "the padding is not the size it was configured to be"
+    );
+
+    // The peer received the three payloads and discarded the padding.
+    assert_eq!(net.hosts[1].delivered.len(), 3);
+
+    // And the next window starts from zero: more silence adds nothing, because
+    // there is no volume to normalise.
+    net.settle_over(WINDOW_MS, 3);
+    assert_eq!(net.hosts[0].stats().sent, closed.sent);
+}
+
 // ── keepalive policy ─────────────────────────────────────────────────
 
 /// A configured interval is a *cadence*: due at the interval, twice the
