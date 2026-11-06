@@ -604,6 +604,36 @@ pub fn issue_invite(
     Ok((token, id, path))
 }
 
+/// Where a new peer should dial this node, as `host:port`.
+///
+/// The config is the operator's statement about reachability, so it wins: the
+/// `[enroll] port` answers enrolment and the `[interface] public_endpoint`
+/// names the address peers can reach. Without a config the best available guess
+/// is the interface's listen port plus one, and `<server>` marks a host nobody
+/// has declared.
+#[must_use]
+pub fn join_target(config: Option<&crate::config::Config>, listen: Option<&str>) -> String {
+    let port = config
+        .and_then(|config| config.enroll.port)
+        .unwrap_or_else(|| {
+            listen
+                .and_then(|listen| listen.rsplit_once(':'))
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .unwrap_or(51820)
+                .saturating_add(1)
+        });
+    let host = config
+        .and_then(|config| config.interface.public_endpoint.clone())
+        .and_then(|endpoint| {
+            endpoint
+                .rsplit_once(':')
+                .map(|(host, _)| host.to_owned())
+                .or(Some(endpoint))
+        })
+        .unwrap_or_else(|| "<server>".to_owned());
+    format!("{host}:{port}")
+}
+
 fn load_invite(interface: &str, id: &str) -> Option<Invite> {
     if !valid_id(id) {
         return None;

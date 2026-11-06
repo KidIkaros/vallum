@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod snapshot;
 
 use std::path::PathBuf;
@@ -23,7 +24,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
+use actions::{Done, InviteFields, PeerFields};
 use snapshot::Snapshot;
+
+/// Where the daemon's configs live, the same default the TUI uses.
+const CONFIG_DIR: &str = "/etc/vallum";
 
 /// Cadence while the window has focus. One request a second is one connection a
 /// second on a serial accept loop, which is the budget the ADR sets.
@@ -133,6 +138,99 @@ fn select(console: State<'_, Arc<Console>>, path: String) {
     });
 }
 
+/// The socket the console is pointed at.
+fn selected(console: &Console) -> Result<PathBuf, String> {
+    console
+        .lock()
+        .socket
+        .clone()
+        .ok_or_else(|| "no interface selected".to_owned())
+}
+
+/// The config that owns the selected socket, when this process can read it.
+fn config_of(socket: &std::path::Path) -> Option<PathBuf> {
+    actions::config_for(socket, std::path::Path::new(CONFIG_DIR))
+}
+
+#[tauri::command]
+fn add_peer(console: State<'_, Arc<Console>>, fields: PeerFields) -> Result<Done, String> {
+    actions::add(&selected(&console)?, &fields)
+}
+
+#[tauri::command]
+fn edit_peer(console: State<'_, Arc<Console>>, fields: PeerFields) -> Result<Done, String> {
+    actions::edit(&selected(&console)?, &fields)
+}
+
+#[tauri::command]
+fn remove_peer(console: State<'_, Arc<Console>>, public_line: String) -> Result<Done, String> {
+    actions::remove(&selected(&console)?, &public_line)
+}
+
+#[tauri::command]
+fn apply_device(
+    console: State<'_, Arc<Console>>,
+    listen_port: String,
+    fwmark: String,
+) -> Result<Done, String> {
+    actions::apply_device(&selected(&console)?, &listen_port, &fwmark)
+}
+
+#[tauri::command]
+fn rotate_peer(
+    console: State<'_, Arc<Console>>,
+    name: String,
+    new_line: String,
+) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    let config = config_of(&socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to rotate the stored identity"
+        )
+    })?;
+    let suite = snapshot::fetch(&socket)
+        .ok()
+        .map(|snapshot| snapshot.suite_id());
+    actions::rotate(&config, &name, &new_line, suite)
+}
+
+#[tauri::command]
+fn finalize_peer(console: State<'_, Arc<Console>>, name: String) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    let config = config_of(&socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to finalise"
+        )
+    })?;
+    actions::finalize(&config, &name)
+}
+
+#[tauri::command]
+fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0")
+        .to_owned();
+    let device = snapshot::fetch(&socket).ok();
+    let config = config_of(&socket);
+    let listen = device
+        .as_ref()
+        .and_then(|snapshot| snapshot.listen_port)
+        .map(|port| format!("0.0.0.0:{port}"));
+    let public_line = device
+        .as_ref()
+        .map_or_else(String::new, |snapshot| snapshot.public_line.clone());
+    actions::invite(
+        &interface,
+        config.as_deref(),
+        listen.as_deref(),
+        &public_line,
+        &fields,
+    )
+}
+
 /// Tell the poller how the window is behaving, so it can pick a cadence.
 #[tauri::command]
 fn window_state(console: State<'_, Arc<Console>>, focused: bool, visible: bool) {
@@ -224,7 +322,14 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_interfaces,
             select,
-            window_state
+            window_state,
+            add_peer,
+            edit_peer,
+            remove_peer,
+            apply_device,
+            rotate_peer,
+            finalize_peer,
+            invite_peer
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

@@ -26,7 +26,10 @@
       </p>
 
       <section class="panel" aria-labelledby="device-heading">
-        <h2 id="device-heading">Device</h2>
+        <div class="panel-head">
+          <h2 id="device-heading">Device</h2>
+          <button id="edit-device" type="button" class="ghost">Runtime settings</button>
+        </div>
         <dl class="fields">
           <div><dt>Interface</dt><dd id="f-interface">—</dd></div>
           <div><dt>Addresses</dt><dd id="f-addresses">—</dd></div>
@@ -46,9 +49,15 @@
       </section>
 
       <section class="panel" aria-labelledby="peers-heading">
-        <h2 id="peers-heading">
-          Peers <span id="peer-count" class="count">0</span>
-        </h2>
+        <div class="panel-head">
+          <h2 id="peers-heading">
+            Peers <span id="peer-count" class="count">0</span>
+          </h2>
+          <div class="actions">
+            <button id="invite-peer" type="button" class="ghost">Invite</button>
+            <button id="add-peer" type="button" class="primary">Add peer</button>
+          </div>
+        </div>
         <table class="peers">
           <thead>
             <tr>
@@ -58,6 +67,7 @@
               <th scope="col" class="num">Handshake</th>
               <th scope="col" class="num">Tx</th>
               <th scope="col" class="num">Rx</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody id="peers"></tbody>
@@ -65,6 +75,11 @@
         <p id="no-peers" class="empty" hidden>No peers configured.</p>
       </section>
     </main>
+
+    <dialog id="dialog" aria-labelledby="dialog-title">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body"></div>
+    </dialog>
 
     <script src="main.js"></script>
   </body>

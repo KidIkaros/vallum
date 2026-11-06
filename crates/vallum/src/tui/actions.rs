@@ -3,11 +3,9 @@
 //! Side effects: UAPI writes, key generation, service control, logs.
 
 use std::io::Write;
-use std::net::{SocketAddr, ToSocketAddrs};
+
 use std::path::PathBuf;
 use std::process::Command;
-
-use vallum_tunnel::Prefix;
 
 use crate::control;
 use crate::entropy;
@@ -129,27 +127,12 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
             .current()
             .and_then(|iface| iface.config_path.as_deref())
             .and_then(|cfg| crate::config::Config::load(cfg).ok());
-        let port = config
-            .as_ref()
-            .and_then(|cfg| cfg.enroll.port)
-            .unwrap_or_else(|| {
-                device
-                    .listen
-                    .rsplit_once(':')
-                    .and_then(|(_, p)| p.parse::<u16>().ok())
-                    .unwrap_or(51820)
-                    .saturating_add(1)
-            });
-        let host = config
-            .and_then(|cfg| cfg.interface.public_endpoint)
-            .and_then(|ep| ep.rsplit_once(':').map(|(h, _)| h.to_owned()).or(Some(ep)))
-            .unwrap_or_else(|| "<server>".to_owned());
         (
-            format!("{host}:{port}"),
+            crate::enroll::join_target(config.as_ref(), Some(&device.listen)),
             keys::fingerprint(&device.public_line),
         )
     } else {
-        ("<server>:51821".to_owned(), "?".to_owned())
+        (crate::enroll::join_target(None, None), "?".to_owned())
     };
     let ticket = crate::enroll::JoinTicket {
         server: host_port,
@@ -1263,26 +1246,10 @@ fn optional_name(text: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-pub(crate) fn parse_endpoint(text: &str) -> Result<Option<SocketAddr>, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(None);
-    }
-    if let Ok(address) = text.parse() {
-        return Ok(Some(address));
-    }
-    if !text.contains(':') || (text.starts_with('[') && !text.contains("]:")) {
-        return Err(
-            "endpoint must include a port (e.g. 198.51.100.1:51820 or vpn.example.com:51820)"
-                .to_owned(),
-        );
-    }
-    text.to_socket_addrs()
-        .map_err(|error| format!("endpoint: {error} (check hostname and port)"))?
-        .next()
-        .map(Some)
-        .ok_or_else(|| "endpoint resolved to nothing".to_owned())
-}
+// The form-field parsers are shared with the desktop console, so they live in
+// `crate::form` rather than here; the names are re-exported for the call sites
+// below and for `tui::tests`.
+pub(crate) use crate::form::{parse_endpoint, parse_keepalive, parse_prefixes, parse_psk};
 
 /// Answer the first-run question: this machine is a server, or a client.
 ///
@@ -1525,49 +1492,6 @@ pub(crate) fn base64_encode(input: &[u8]) -> String {
         }
     }
     out
-}
-
-pub(crate) fn parse_prefixes(text: &str) -> Result<Vec<Prefix>, String> {
-    text.split([',', ' '])
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let normalized = if !part.contains('/') {
-                if part.parse::<std::net::Ipv4Addr>().is_ok() {
-                    format!("{part}/32")
-                } else if part.parse::<std::net::Ipv6Addr>().is_ok() {
-                    format!("{part}/128")
-                } else {
-                    part.to_owned()
-                }
-            } else {
-                part.to_owned()
-            };
-            normalized
-                .parse::<Prefix>()
-                .map_err(|error| format!("{part}: {error}"))
-        })
-        .collect()
-}
-
-fn parse_keepalive(text: &str) -> Result<Option<u16>, String> {
-    let value = text.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let seconds: u16 = value
-        .parse()
-        .map_err(|_| "keepalive is not a number".to_owned())?;
-    Ok((seconds > 0).then_some(seconds))
-}
-
-fn parse_psk(text: &str) -> Result<Option<[u8; 32]>, String> {
-    let value = text.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    keys::parse_psk(value)
-        .map(|psk| Some(*psk.as_bytes()))
-        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

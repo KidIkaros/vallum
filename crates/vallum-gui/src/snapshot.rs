@@ -66,6 +66,21 @@ pub struct Peer {
 }
 
 impl Snapshot {
+    /// The suite the daemon reported, as an id.
+    ///
+    /// The UAPI renders it as `0x0003`. An unparseable value reads as `0`, which
+    /// matches no real suite — a form validated against it fails closed rather
+    /// than accepting a peer of another suite.
+    #[must_use]
+    pub fn suite_id(&self) -> u16 {
+        let text = self.suite.trim();
+        let hex = text
+            .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            .unwrap_or(text);
+        u16::from_str_radix(hex, 16).unwrap_or(0)
+    }
+
     /// Decode a `get=1` reply into the allowlisted shape.
     ///
     /// Unknown fields are dropped; a malformed number is absent rather than zero

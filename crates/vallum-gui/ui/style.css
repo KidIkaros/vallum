@@ -294,3 +294,157 @@ code {
 .stale {
   color: var(--warn);
 }
+
+/* ------------------------------------------------------------------ */
+/* Controls                                                            */
+/* ------------------------------------------------------------------ */
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.actions,
+.row-actions,
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.row-actions {
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+button {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 7px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-edge);
+  background: #171c26;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: #3a4252;
+  background: #1c2230;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.primary {
+  border-color: rgba(94, 234, 212, 0.4);
+  background: rgba(94, 234, 212, 0.12);
+  color: var(--accent);
+}
+
+button.danger {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--bad);
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* ------------------------------------------------------------------ */
+/* Dialogs                                                             */
+/* ------------------------------------------------------------------ */
+
+dialog {
+  border: 1px solid var(--panel-edge);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 20px;
+  width: min(560px, calc(100vw - 48px));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+dialog::backdrop {
+  background: rgba(4, 6, 9, 0.65);
+}
+
+dialog h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.note {
+  margin: 0 0 14px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.field input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-edge);
+  background: #0e1219;
+  color: var(--ink);
+  user-select: text;
+}
+
+.field input:read-only {
+  color: var(--ink-dim);
+  background: #0b0e14;
+}
+
+.field input.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: rgba(94, 234, 212, 0.45);
+}
+
+.form-error {
+  margin: 0 0 12px;
+  color: var(--bad);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.command {
+  display: block;
+  padding: 10px;
+  border-radius: 6px;
+  background: #0e1219;
+  border: 1px solid var(--panel-edge);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
