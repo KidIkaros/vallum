@@ -49,7 +49,7 @@ getrandom = "0.4"
 
 # Signal handling, so a `SIGTERM` stops the loop rather than killing the process
 # mid-write. The handler sets one flag and does nothing else.
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 # Linux only, for now. `tun2` is the TUN backend behind this crate's own trait;
 # default features are off so no async runtime is pulled in.
