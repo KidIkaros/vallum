@@ -65,7 +65,7 @@ jobs:
         run: cargo install cargo-fuzz --locked
 
       - name: Restore the corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vallum/fuzz/corpus/${{ matrix.target }}
           key: fuzz-${{ matrix.target }}-${{ github.run_id }}
