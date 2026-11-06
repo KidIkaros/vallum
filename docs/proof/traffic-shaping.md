@@ -255,11 +255,11 @@ same page load, and then two idle hours.
 | two idle hours, *floor* at 100 ms | — | 72 000 | 72 001 | 104 832 098 | 1 456 B per packet |
 
 The last two rows are the reason both shapes exist. Over the same two hours the
-front burst spends 87 KiB once and then stops; the floor at the same interval
+front burst spends 85 KiB once and then stops; the floor at the same interval
 spends 100 MiB and keeps going. Neither is a better defence — a burst says
 nothing about the second hour — but they are priced on different curves, and a
 deployment that wants chirp at the start of a peer's life and silence afterwards
-pays 87 KiB for the privilege, not a monthly bill.
+pays 85 KiB for the privilege, not a monthly bill.
 
 The count is exact, which is the whole cost bound:
 `a_busy_front_spends_the_burst_on_traffic` shows four injections over a trace

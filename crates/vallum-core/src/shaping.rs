@@ -91,7 +91,7 @@ pub const FLOOR_MIN_INTERVAL_MS: u64 = 100;
 ///
 /// Front padding is spent at the front of a peer's life, where the traffic is
 /// most revealing and also least voluminous. Sixty packets against a 1400-byte
-/// target is roughly 87 KiB, once — a cost a user notices in a monthly total
+/// target is roughly 85 KiB, once — a cost a user notices in a monthly total
 /// and nowhere else. The rail exists because `count` is the only thing bounding
 /// the burst: unlike the floor, this machine ends.
 pub const FRONT_MAX_PACKETS: u32 = 60;

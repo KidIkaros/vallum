@@ -44,7 +44,7 @@ with the table and the daemon-level test recorded in
 **Second shape taken.** Front padding is implemented as
 `ShapingSpec::FrontPadding { count, interval_ms, size }`, with the count clamped
 at 60 packets and the interval at 1 000 ms. It is a count rather than a rate: 60
-packets at a 1 400-byte target cost 87 KiB once, against 100 MiB for a 100 ms
+packets at a 1 400-byte target cost 85 KiB once, against 100 MiB for a 100 ms
 floor over the same two hours. Volume padding and parameter noise are not
 implemented.
 
