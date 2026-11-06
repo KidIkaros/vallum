@@ -27,3 +27,4 @@
 | [0023](0023-per-app-split-tunnelling.md) | Per-app split tunnelling rides the tunnel's mark tables, with launch-bound membership | implemented (classifier only; exclusive path deferred — 2026-10-28 amendment) | 2026-10-23 |
 | [0024](0024-desktop-ui.md) | A Tauri v2 desktop UI that reuses the Rust control client; x86_64 only | accepted | 2026-11-05 |
 | [0025](0025-moor-techniques-not-code.md) | Take MOOR's padding and scheduling techniques as bounded shapes, not its code | proposed | 2026-11-06 |
+| [0026](0026-censorship-resistance.md) | Censorship resistance is a separate surface from traffic shaping | proposed | 2026-11-06 |
