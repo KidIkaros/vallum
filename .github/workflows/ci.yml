@@ -81,12 +81,23 @@ jobs:
         # development files. Checked rather than installed unconditionally: a
         # runner that already has them pays nothing, and a runner that does not
         # fails here with the package names instead of at a link step later.
+        #
+        # The flags are about the *shared* runner rather than about the packages:
+        # `DEBIAN_FRONTEND` keeps a debconf prompt from blocking a job that has
+        # nobody to answer it, and `DPkg::Lock::Timeout` turns an unattended
+        # upgrade holding the lock into a wait instead of an immediate failure.
+        # `timeout-minutes` bounds that wait, since apt will retry a lock for as
+        # long as it is told to and a stuck lock is not worth a hung job.
+        timeout-minutes: 15
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           if pkg-config --exists webkit2gtk-4.1 gtk+-3.0 libsoup-3.0; then
             echo "WebKitGTK development files already present"
           else
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends \
+            sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
+            sudo apt-get -o DPkg::Lock::Timeout=60 install -y \
+              --no-install-recommends \
               libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
               libjavascriptcoregtk-4.1-dev libxdo-dev librsvg2-dev \
               libayatana-appindicator3-dev patchelf
