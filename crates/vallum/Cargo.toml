@@ -33,7 +33,7 @@ toml = "1.1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4.6"
 serde_json = "1"
-toml_edit = "0.22"
+toml_edit = "0.25"
 similar = "3"
 
 # The terminal operations console. Optional so `--no-default-features` keeps a
