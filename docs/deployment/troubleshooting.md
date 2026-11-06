@@ -27,6 +27,7 @@ deployment.
 | `control` | the control socket is not there | `systemctl start vallum@<instance>`; the daemon creates it |
 | `forwarding` | `ip_forward` is off | `vallum server init` enables it, or `sysctl -w net.ipv4.ip_forward=1` |
 | `firewall` | the UDP port is not open | `ufw allow 51820/udp`, or the nftables chain that drops it |
+| *(nothing — no check exists)* | the path blocks UDP between the hosts | out of scope: there is no TCP fallback ([ADR-0026](../adr/0026-censorship-resistance.md)) |
 | `service` | the unit is inactive or failed | `journalctl -u vallum@<instance>` |
 | `config mode` | the config is group/world readable | `chmod 600`, because it can name a PSK file |
 | `rotation` | a peer still accepts a previous key | `vallum peer finalize <name>` once the device has the new one |
@@ -70,6 +71,14 @@ Check in this order:
 
 - **Endpoint wrong or unreachable.** `nc -u -z <server> 51820`, or watch the
   server's `journalctl -u vallum@vallum0` for a rejected handshake.
+- **UDP is blocked somewhere on the path.** Vallum speaks UDP and nothing else:
+  a network — a hotel, a campus, a corporate egress, some mobile carriers — that
+  drops UDP drops the tunnel, and no setting changes that. It is a decision, not
+  an omission, and it is [ADR-0026](../adr/0026-censorship-resistance.md). Test the
+  path from the client, not from the server: `nc -u -z <server> 51820` succeeds
+  against a filter that silently drops, so compare `vallum show` on both ends — a
+  client whose handshake is `never` and a server with no rejected handshake at all
+  is a path problem, not a key problem.
 - **Suite mismatch.** A peer key generated with `--suite 2` on a `0x0003` server
   is refused at load time with the two suites named. Regenerate with the server's
   suite.

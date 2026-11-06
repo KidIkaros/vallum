@@ -164,6 +164,7 @@ scripts/
 
 - **Tri-hybrid KEM:** Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking session confidentiality requires compromising all three algorithms simultaneously.
 - **Dependency Status:** Post-quantum algorithms are implemented via `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`). The implementations have not undergone external third-party audit; deployments should weigh risk accordingly.
+- **Reachability:** UDP only, by decision. Shaping makes the traffic harder to classify; it does nothing about a network that blocks the port, and there is no TCP fallback ([ADR-0026](docs/adr/0026-censorship-resistance.md)).
 
 ## Build & Verify
 

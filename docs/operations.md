@@ -192,5 +192,10 @@ Stated here so it is not discovered during an incident:
   monitoring system at all is dark from there.
 - **No package repository.** Upgrades and rollbacks are manual `.deb` handling.
 - **No independent crypto audit.** Recorded in the README.
-- **No HA.** One daemon owns one interface. There is no failover, and two
-  daemons on one host would fight for the same TUN.
+- **No transport fallback.** UDP is the only carrier. A path that drops UDP
+  — a hotel, a campus, a locked-down egress — is a dead tunnel, and the daemon
+  cannot tell that apart from a server that stopped answering. Shaping raises the
+  cost of *analysing* the traffic and does nothing about blocking it; that
+  boundary is [ADR-0026](adr/0026-censorship-resistance.md), and the symptom and
+  its test are in
+  [troubleshooting](deployment/troubleshooting.md#handshake-never-completes).

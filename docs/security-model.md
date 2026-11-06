@@ -45,12 +45,20 @@ operator must guarantee. The proofs behind the claims live in
   units (`vallum-enroll@` runs with no capabilities, a syscall filter, and
   `MemoryDenyWriteExecute`); the kernel is out of scope.
 - **Endpoint reachability** — UDP only. A network that blocks UDP blocks
-  Vallum; there is no TCP fallback by design.
+  Vallum; there is no TCP fallback, and that is a decision rather than an
+  unfinished piece ([ADR-0026](adr/0026-censorship-resistance.md)). Whether the
+  path carries UDP is outside Vallum's control and outside what it can detect:
+  a filter that drops in silence looks, from the client, exactly like a server
+  that is not answering.
 
 ## What is explicitly NOT claimed
 
 - **Traffic-analysis resistance** — packet sizes and timing are real;
   optional shaping exists but this is not a Tor-grade anonymity system.
+- **Censorship resistance** — separate from traffic analysis, and not claimed at
+  all. Shaping makes a tunnel's traffic harder to *classify*; nothing here makes
+  it easier to *reach* where UDP is blocked. A censor that does not need to look
+  at your packets is not inconvenienced by padding them ([ADR-0026](adr/0026-censorship-resistance.md)).
 - **Identity hiding (IK)** — documented non-claim in `docs/proof/`; an
   observer learns that two peers talk to each other.
 - **Third-party audit** — the assessment in `docs/proof/pentest.md` is
