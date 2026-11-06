@@ -34,6 +34,14 @@ with bounded parameters, never as a raw state-machine description. Censorship
 resistance (transports) is deferred to its own ADR because it is a product
 decision, not a shaping change.
 
+**First shape taken.** The constant-rate floor is implemented as
+`ShapingSpec::ConstantRateFloor { interval_ms, size }`, off by default, with the
+interval clamped at 100 ms so the configuration cannot describe a flood. It
+measures 5.82 kbit/s at 2 000 ms and 116.48 kbit/s at the clamp, per tunnel,
+with the table and the daemon-level test recorded in
+`docs/proof/traffic-shaping.md`. Front padding, volume padding and parameter
+noise are not implemented.
+
 ## Alternatives Considered
 
 ### Alternative 1: Vendor its code

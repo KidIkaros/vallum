@@ -105,6 +105,13 @@ pub(super) struct Peer {
     pub(super) timestamp_guard: Tai64nGuard,
     pub(super) shaper: Shaper,
     pub(super) blocked_until: Option<u64>,
+    /// When the next shaping wake-up is due, if a machine is armed for one.
+    ///
+    /// Distinct from [`Self::blocked_until`]: a block holds traffic that wants
+    /// to go out, while a wake-up asks to be told that time has passed. The
+    /// constant-rate floor needs the second, because the case it exists for is
+    /// the one where nothing is queued.
+    pub(super) shape_wake_ms: Option<u64>,
     /// When the peer's *persistent* keepalive is next due, if it has one.
     ///
     /// Separate from [`Timers`] on purpose: the reactive keepalive there answers
@@ -240,6 +247,9 @@ impl Peer {
             })
             .collect();
         let shaper = Shaper::new(config.shaping().to_vec());
+        let shape_wake_ms = shaper
+            .wake_after()
+            .map(|interval| now_ms.saturating_add(interval));
         // A configured endpoint is where we dial; roaming may replace it later,
         // but only with an address authenticated traffic arrived from.
         let endpoint = config.endpoint();
@@ -259,6 +269,7 @@ impl Peer {
             timestamp_guard: Tai64nGuard::new(),
             shaper,
             blocked_until: None,
+            shape_wake_ms,
             next_keepalive_ms,
             pending: VecDeque::new(),
             pending_bytes: 0,

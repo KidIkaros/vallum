@@ -986,6 +986,63 @@ fn a_min_interval_machine_holds_and_then_releases_traffic() {
     assert_eq!(net.hosts[0].stats().queued, 0);
 }
 
+/// The floor speaks when nothing else does.
+///
+/// This is the test the machine alone cannot pass: `Shaper` has no clock, so the
+/// device is what turns `wake_after` into a deadline and a `Timeout`. Without
+/// that plumbing a configured floor is inert, and its measured cost is zero.
+#[test]
+fn a_constant_rate_floor_keeps_speaking_through_silence() {
+    const INTERVAL_MS: u64 = 100;
+    const SIZE: u16 = 400;
+
+    let mut net = net_with(
+        vec![Machine::constant_rate_floor(INTERVAL_MS, SIZE)],
+        Shape::ROAMING,
+    );
+    net.outbound(0, ipv4(A_IP, B_IP, b"first"));
+    net.settle();
+    let after_traffic = net.hosts[0].stats();
+
+    // Ten intervals of nothing at all.
+    net.settle_over(INTERVAL_MS, 10);
+    let idle = net.hosts[0].stats();
+
+    assert_eq!(
+        idle.sent - after_traffic.sent,
+        10,
+        "one packet per interval of silence: {idle:?}"
+    );
+    // Each is the same size, so the observer cannot count intervals shorter than
+    // the interval — and the peer opens them as empty data, not as a new type.
+    let tag = suite().sizes().aead_tag;
+    let expected = HEADER_LEN + 4 + 8 + 4 + usize::from(SIZE) + tag;
+    assert_eq!(
+        (idle.tx_bytes - after_traffic.tx_bytes) as usize,
+        10 * expected,
+        "the floor is not the size it was configured to be"
+    );
+    assert_eq!(
+        net.hosts[1].delivered.len(),
+        1,
+        "padding must not be delivered as traffic"
+    );
+
+    // Traffic restarts the interval instead of adding to it: a packet inside the
+    // window leaves the count at one, which is what keeps a busy tunnel from
+    // paying for silence it does not have.
+    net.outbound(0, ipv4(A_IP, B_IP, b"second"));
+    net.pump(2);
+    net.advance(INTERVAL_MS / 2);
+    net.pump(2);
+    let busy = net.hosts[0].stats();
+    assert_eq!(
+        busy.sent - idle.sent,
+        1,
+        "one user packet and no padding: {busy:?}"
+    );
+}
+
 // ── keepalive policy ─────────────────────────────────────────────────
 
 /// A configured interval is a *cadence*: due at the interval, twice the

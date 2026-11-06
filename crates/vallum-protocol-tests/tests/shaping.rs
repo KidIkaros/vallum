@@ -218,18 +218,49 @@ fn simulate(machines: Vec<Machine>, trace: &[(bool, usize, u64)], seed: u64) -> 
     let mut now = 0u64;
     let mut blocked_until: Option<u64> = None;
     let mut waiting: Vec<(u64, usize, usize)> = Vec::new();
+    // When an armed machine wants a `Timeout`. The daemon keeps this per peer
+    // (`Peer::shape_wake_ms`) and re-arms it after every event; a simulator that
+    // did not would leave a time-driven machine inert, and would measure its
+    // cost as zero.
+    let mut wake_due: Option<u64> = shaper.wake_after();
 
     for &(inbound, size, gap) in trace {
         now += gap;
 
-        // A block ends at its deadline; everything it held is released then, and
-        // its latency is the wait it actually served.
-        if let Some(until) = blocked_until {
-            if now >= until {
-                release_held(&suite, &mut a_send, &mut report, &mut waiting, until);
+        // Time passing is itself an event: a block ends at its deadline, and an
+        // armed machine — the constant-rate floor — is told the clock moved
+        // whether or not anything else happened. Both are served from one
+        // `Timeout`, in deadline order, because acting can arm the next one.
+        loop {
+            let nearest = blocked_until
+                .into_iter()
+                .chain(wake_due)
+                .filter(|&at| now >= at)
+                .min();
+            let Some(at) = nearest else { break };
+            if blocked_until == Some(at) {
+                release_held(&suite, &mut a_send, &mut report, &mut waiting, at);
                 blocked_until = None;
-                shaper.handle(Event::Timeout, draws.next());
             }
+            for effect in shaper.handle(Event::Timeout, draws.next()) {
+                if let Action::Inject { count, size } = effect.action {
+                    inject_padding(
+                        &suite,
+                        &mut a_send,
+                        &mut shaper,
+                        &mut draws,
+                        &mut report,
+                        count,
+                        size,
+                    );
+                }
+            }
+            // Re-arm from the deadline rather than from `now`: a floor that
+            // came due while the trace was idle keeps its cadence instead of
+            // bunching its packets at the instant something else happened.
+            wake_due = shaper
+                .wake_after()
+                .map(|interval| at.saturating_add(interval));
         }
 
         if inbound {
@@ -252,45 +283,48 @@ fn simulate(machines: Vec<Machine>, trace: &[(bool, usize, u64)], seed: u64) -> 
                     );
                 }
             }
-            continue;
-        }
-
-        // Outbound: the machine sees the event before the seal, so a `Pad`
-        // applies to this very packet.
-        let mut target = size + PAYLOAD_LEN_SIZE;
-        let mut asked_to_block = false;
-        for effect in shaper.handle(Event::NormalSent, draws.next()) {
-            match effect.action {
-                Action::Pad { target: padded } => target = usize::from(padded),
-                Action::Inject { count, size } => inject_padding(
-                    &suite,
-                    &mut a_send,
-                    &mut shaper,
-                    &mut draws,
-                    &mut report,
-                    count,
-                    size,
-                ),
-                Action::Block { timeout_ms } => {
-                    asked_to_block = true;
-                    if blocked_until.is_none() {
-                        blocked_until = Some(now.saturating_add(timeout_ms));
+        } else {
+            // Outbound: the machine sees the event before the seal, so a `Pad`
+            // applies to this very packet.
+            let mut target = size + PAYLOAD_LEN_SIZE;
+            let mut asked_to_block = false;
+            for effect in shaper.handle(Event::NormalSent, draws.next()) {
+                match effect.action {
+                    Action::Pad { target: padded } => target = usize::from(padded),
+                    Action::Inject { count, size } => inject_padding(
+                        &suite,
+                        &mut a_send,
+                        &mut shaper,
+                        &mut draws,
+                        &mut report,
+                        count,
+                        size,
+                    ),
+                    Action::Block { timeout_ms } => {
+                        asked_to_block = true;
+                        if blocked_until.is_none() {
+                            blocked_until = Some(now.saturating_add(timeout_ms));
+                        }
                     }
                 }
             }
+
+            // A block holds packets, whether it was requested for this one or is
+            // still running from an earlier one.
+            if asked_to_block || blocked_until.is_some() {
+                waiting.push((now, size, target));
+            } else {
+                let packet = a_send
+                    .seal_padded(&suite, &payload(size), target)
+                    .expect("seal");
+                report.record(packet.len());
+            }
         }
 
-        // A block holds packets, whether it was requested for this one or is
-        // still running from an earlier one.
-        if asked_to_block || blocked_until.is_some() {
-            waiting.push((now, size, target));
-            continue;
-        }
-
-        let packet = a_send
-            .seal_padded(&suite, &payload(size), target)
-            .expect("seal");
-        report.record(packet.len());
+        // Every event restarts an armed interval, so the deadline moves with it.
+        wake_due = shaper
+            .wake_after()
+            .map(|interval| now.saturating_add(interval));
     }
 
     // Flush a block still running when the trace ends: the packets were delayed
@@ -485,8 +519,58 @@ fn a_bigger_machine_budget_lasts_longer() {
     assert!(uncapped.injected > capped.injected);
 }
 
-// ── 4. padding is indistinguishable in kind ──────────────────────────
+/// An idle hour: one small packet, then nothing for 3 600 s.
+///
+/// The floor is the only defence whose cost does not depend on the traffic, so
+/// the trace that prices it is the empty one.
+const IDLE_HOUR: &[(bool, usize, u64)] = &[(false, 40, 3_600_000)];
 
+#[test]
+fn the_constant_rate_floor_costs_a_flat_rate_per_hour() {
+    const INTERVAL_MS: u64 = 500;
+    const SIZE: u16 = 1400;
+
+    let floor = simulate(
+        vec![Machine::constant_rate_floor(INTERVAL_MS, SIZE)],
+        IDLE_HOUR,
+        1,
+    );
+    let expected = 3_600_000 / INTERVAL_MS;
+    let per_packet = floor.bytes / floor.packets;
+    // `bytes` is already one hour's worth, so the rate is a plain division.
+    let kbit_s = floor.bytes as f64 * 8.0 / 3600.0 / 1000.0;
+    let mb_hour = floor.bytes as f64 / 1_048_576.0;
+    println!("floor {INTERVAL_MS} ms / {SIZE} B: {floor}");
+    println!("  {per_packet} bytes per packet, {kbit_s:.2} kbit/s, {mb_hour:.1} MiB/h");
+
+    // One packet per interval, exactly: the rate is the parameter, not traffic.
+    assert_eq!(floor.injected as u64, expected, "{floor}");
+    // The cost is entirely the injections: nothing else was sent for an hour.
+    assert_eq!(floor.packets, expected as usize + 1, "{floor}");
+    // And it is the same size every time: a floor whose packets varied would be
+    // a different defence, and a worse one.
+    assert_eq!(floor.sizes.len(), 2, "sizes: {:?}", floor.sizes);
+}
+
+#[test]
+fn a_shorter_floor_interval_costs_more_bandwidth() {
+    let mut previous = 0usize;
+    for interval in [2000u64, 500, 100] {
+        let floor = simulate(
+            vec![Machine::constant_rate_floor(interval, 1400)],
+            IDLE_HOUR,
+            1,
+        );
+        println!("interval {interval:>4} ms: {floor}");
+        assert!(
+            floor.bytes > previous,
+            "a shorter interval cannot cost less"
+        );
+        previous = floor.bytes;
+    }
+}
+
+// ── 4. padding is indistinguishable in kind ──────────────────────────
 #[test]
 fn an_injected_padding_packet_is_an_openable_keepalive() {
     let (suite, mut a_send, _, _, mut b_recv) = link();

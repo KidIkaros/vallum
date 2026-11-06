@@ -240,6 +240,7 @@ impl Device {
                 self.inject(index, count, size, clock, out);
             }
         }
+        self.rearm_shape_wake(index, clock);
     }
 
     /// Act on a shaper's effects: hold the queue, or inject padding.
@@ -267,6 +268,25 @@ impl Device {
                 ShapingAction::Pad { .. } => {}
             }
         }
+        // Every event fed to a machine restarts its armed interval, so the
+        // deadline is recomputed here rather than only when one acts.
+        self.rearm_shape_wake(index, clock);
+    }
+
+    /// Point the peer's shaping wake-up at `now` plus the shortest interval any
+    /// armed machine asks for.
+    ///
+    /// The machines have no clock, so every event fed to one restarts its
+    /// interval and the transport is what turns that into a deadline. Calling
+    /// this after each [`Shaper::handle`] — not only when a machine acts — is
+    /// what makes the constant-rate floor fill silence rather than add to
+    /// traffic that is already moving.
+    pub(super) fn rearm_shape_wake(&mut self, index: usize, clock: Clock) {
+        let deadline = self.peers[index]
+            .shaper
+            .wake_after()
+            .map(|interval| clock.monotonic_ms.saturating_add(interval));
+        self.peers[index].shape_wake_ms = deadline;
     }
 
     /// Emit `count` padding packets carrying `size` sealed bytes each.

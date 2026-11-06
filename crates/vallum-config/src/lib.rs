@@ -305,9 +305,9 @@ pub struct PeerEntry {
 
 /// One entry in a peer's `shaping` list.
 ///
-/// The three shapes are the ones P5 measured; a raw state machine is deliberately
-/// not expressible from a config file, because a config file that can describe
-/// arbitrary machines is a config file that can describe a flood.
+/// The shapes are named ones rather than raw machines; a raw state machine is
+/// deliberately not expressible from a config file, because a config file that
+/// can describe arbitrary machines is a config file that can describe a flood.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ShapingSpec {
@@ -320,6 +320,24 @@ pub enum ShapingSpec {
     MinInterval {
         /// The hold, in milliseconds.
         interval_ms: u64,
+    },
+    /// Inject one padding packet after every `interval_ms` of silence.
+    ///
+    /// The constant-rate floor: the tunnel says something even when it has
+    /// nothing to say, so silence stops being the cheapest thing to classify.
+    /// Every packet that crosses the tunnel restarts the interval, so this only
+    /// fills gaps and never adds to traffic that is already moving.
+    ///
+    /// It is off unless configured, and it costs bandwidth continuously —
+    /// including at 3 a.m. with nobody using the tunnel. `interval_ms` below
+    /// 100 ms is clamped up to 100 ms, which is the safety rail: the floor is
+    /// the one shape whose rate is limited only by its own parameter. For the
+    /// measured prices, see `docs/proof/traffic-shaping.md`.
+    ConstantRateFloor {
+        /// The silence to allow before injecting, in milliseconds.
+        interval_ms: u64,
+        /// The sealed-plaintext length of each injected packet.
+        size: u16,
     },
     /// Answer received packets with padding, probabilistically.
     RespondWithPadding {
@@ -339,6 +357,9 @@ impl ShapingSpec {
         match *self {
             Self::PadToSize { size } => Machine::pad_to_size(size),
             Self::MinInterval { interval_ms } => Machine::min_interval(interval_ms),
+            Self::ConstantRateFloor { interval_ms, size } => {
+                Machine::constant_rate_floor(interval_ms, size)
+            }
             Self::RespondWithPadding {
                 size,
                 injections,

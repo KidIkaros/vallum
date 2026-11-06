@@ -41,15 +41,21 @@ impl Device {
             .window
             .roll(now, crate::device::DELIVERY_WINDOW_MS);
 
-        // (1) A shaping block whose window has closed releases its queue.
-        let released = match self.peers[index].blocked_until {
-            Some(deadline) if now >= deadline => {
-                self.peers[index].blocked_until = None;
-                true
-            }
-            _ => false,
-        };
-        if released {
+        // (1) Time has passed for the shaping machines: a block whose window has
+        //     closed releases its queue, and an armed wake-up gets its timeout.
+        //     One `Timeout` covers both, because a machine that is blocked and
+        //     armed at once would otherwise act twice on one clock reading.
+        let block_closed = self.peers[index]
+            .blocked_until
+            .is_some_and(|deadline| now >= deadline);
+        if block_closed {
+            self.peers[index].blocked_until = None;
+        }
+        let wake_due = self.peers[index]
+            .shape_wake_ms
+            .is_some_and(|deadline| now >= deadline);
+        if block_closed || wake_due {
+            self.peers[index].shape_wake_ms = None;
             let draw = rng.draw_u64();
             let effects = self.peers[index].shaper.handle(ShapingEvent::Timeout, draw);
             self.apply_effects(index, effects, clock, out);

@@ -77,6 +77,16 @@ pub const MACHINE_END: u16 = u16::MAX;
 /// A state limit meaning "no limit".
 pub const UNLIMITED: u32 = u32::MAX;
 
+/// The shortest interval a constant-rate floor may be built with.
+///
+/// The floor is the one machine whose cost is unbounded by construction — it
+/// injects for as long as the tunnel is idle — so the bound has to be in the
+/// interval. 100 ms against a 1400-byte padding packet is a ceiling of roughly
+/// 114 kbit/s per tunnel per direction, which is expensive but survivable; the
+/// value is a safety rail, not a recommendation. `docs/proof/traffic-shaping.md`
+/// measures what the useful settings cost.
+pub const FLOOR_MIN_INTERVAL_MS: u64 = 100;
+
 /// What the transport tells the framework.
 ///
 /// Events are the transport's, not the protocol's: nothing here is on the wire.
@@ -187,6 +197,19 @@ impl Branch {
 /// One state: what to do per event, and how often it may act at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
+    /// How long the state stays armed for [`Event::Timeout`], if at all.
+    ///
+    /// This is the timer a [`Action::Block`] cannot express: a block *holds*
+    /// outgoing traffic, whereas a wake-up only asks to be told when time has
+    /// passed, so the transport can act on an idle tunnel it has nothing to
+    /// hold. The transport resets the deadline whenever it feeds the machine an
+    /// event, so a machine in an armed state measures *silence*: the clock
+    /// starts at the last thing that happened.
+    ///
+    /// The shaper itself keeps no clock — it is still a pure function of
+    /// `(state, event, draw)` — and reports the armed interval through
+    /// [`Shaper::wake_after`].
+    pub wake_after_ms: Option<u64>,
     /// How many actions this state may produce before it goes quiet.
     ///
     /// The state keeps transitioning — only the *action* is suppressed. Use
@@ -203,9 +226,19 @@ impl State {
     #[must_use]
     pub const fn new(limit: u32) -> Self {
         Self {
+            wake_after_ms: None,
             limit,
             on: Vec::new(),
         }
+    }
+
+    /// Arm [`Event::Timeout`] for `after_ms` of silence.
+    ///
+    /// See [`Self::wake_after_ms`] for what "silence" means.
+    #[must_use]
+    pub const fn wake(mut self, after_ms: u64) -> Self {
+        self.wake_after_ms = Some(after_ms);
+        self
     }
 
     /// Add the branches taken on `event`.
@@ -270,6 +303,40 @@ impl Machine {
         )])
     }
 
+    /// Inject one padding packet after every `interval_ms` of silence.
+    ///
+    /// This is the constant-rate floor: a tunnel that says nothing still emits
+    /// something, so an observer cannot read "nothing to say" from a gap. It is
+    /// the defence a VPN needs most, because a VPN is idle far more than a web
+    /// session is, and silence is the cheapest thing to classify.
+    /// Every event the transport feeds a machine restarts the interval, so
+    /// traffic of any kind — a normal packet, a keepalive, one the floor itself
+    /// injected — keeps the floor from adding to a burst that is already moving.
+    /// Only silence is filled.
+    ///
+    /// The cost is flat and continuous: one packet of `size` sealed bytes per
+    /// interval, whether or not anyone is using the tunnel. `interval_ms` is
+    /// clamped to [`FLOOR_MIN_INTERVAL_MS`], because this is the one machine
+    /// whose rate is limited only by its own parameter, and a config file must
+    /// not be able to describe a flood.
+    #[must_use]
+    pub fn constant_rate_floor(interval_ms: u64, size: u16) -> Self {
+        let interval = interval_ms.max(FLOOR_MIN_INTERVAL_MS);
+        // The self-loop on `Timeout` re-enters this state, so the floor re-arms
+        // itself: no second state and no accumulating counter is needed.
+        let state = State::new(UNLIMITED)
+            .wake(interval)
+            .on(Event::NormalSent, vec![Branch::pass(1, 0)])
+            .on(Event::NormalRecv, vec![Branch::pass(1, 0)])
+            .on(Event::TunnelSent, vec![Branch::pass(1, 0)])
+            .on(Event::TunnelRecv, vec![Branch::pass(1, 0)])
+            .on(
+                Event::Timeout,
+                vec![Branch::act(1, Action::Inject { count: 1, size }, 0)],
+            );
+        Self::new(vec![state])
+    }
+
     /// Hold further outgoing packets for `interval_ms` after each normal send.
     ///
     /// A crude rate limiter: it turns a burst into a train, which is what makes
@@ -324,6 +391,14 @@ impl Running {
     /// Whether the machine has reached [`MACHINE_END`].
     fn ended(&self) -> bool {
         self.state == MACHINE_END
+    }
+
+    /// The current state's armed wake-up interval, if it has one.
+    fn wake_armed(&self) -> bool {
+        self.machine
+            .states
+            .get(usize::from(self.state))
+            .is_some_and(|state| state.wake_after_ms.is_some())
     }
 
     /// Take one step, returning the action to take if any.
@@ -421,6 +496,26 @@ impl Shaper {
         (!running.ended()).then_some(running.state)
     }
 
+    /// The shortest armed wake-up interval across the machines, if any.
+    ///
+    /// The transport owns the clock, so it asks this after feeding an event and
+    /// sets its deadline to `now + interval`. `None` means no machine is waiting
+    /// on time at all, and the transport can leave its timer unarmed.
+    #[must_use]
+    pub fn wake_after(&self) -> Option<u64> {
+        self.machines
+            .iter()
+            .filter(|running| !running.ended())
+            .filter_map(|running| {
+                running
+                    .machine
+                    .states
+                    .get(usize::from(running.state))
+                    .and_then(|state| state.wake_after_ms)
+            })
+            .min()
+    }
+
     /// Feed one event, returning everything the machines want done.
     ///
     /// `draw` is the caller's randomness: one uniform `u64` is enough for every
@@ -428,14 +523,17 @@ impl Shaper {
     /// draw for two machines correlates them; the transport should draw once per
     /// event from a source an observer cannot predict.
     ///
-    /// [`Event::Timeout`] reaches only the machines that are blocked.
+    /// [`Event::Timeout`] reaches the machines that are blocked and the ones
+    /// whose state is armed for a wake-up ([`State::wake_after_ms`]); a machine
+    /// that is neither never sees time pass.
     pub fn handle(&mut self, event: Event, draw: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
 
         for index in 0..self.machines.len() {
             let blocked = self.awaiting.get(index).copied().unwrap_or(false);
             if event == Event::Timeout {
-                if !blocked {
+                let armed = self.machines.get(index).is_some_and(Running::wake_armed);
+                if !blocked && !armed {
                     continue;
                 }
                 if let Some(slot) = self.awaiting.get_mut(index) {
@@ -581,6 +679,69 @@ mod tests {
         assert!(shaper.is_empty());
         assert!(shaper.handle(Event::NormalSent, 7).is_empty());
         assert!(shaper.handle(Event::Timeout, 7).is_empty());
+    }
+
+    #[test]
+    fn the_floor_injects_after_silence_and_rearms_itself() {
+        let mut shaper = Shaper::new(vec![Machine::constant_rate_floor(1000, 1400)]);
+
+        assert_eq!(shaper.wake_after(), Some(1000), "armed from the start");
+
+        let injected = Action::Inject {
+            count: 1,
+            size: 1400,
+        };
+        assert_eq!(
+            shaper.handle(Event::Timeout, 0),
+            vec![Effect {
+                machine: 0,
+                action: injected,
+            }]
+        );
+        assert_eq!(
+            shaper.handle(Event::Timeout, 0),
+            vec![Effect {
+                machine: 0,
+                action: injected,
+            }],
+            "the self-loop keeps the floor running while the tunnel stays idle"
+        );
+        assert_eq!(shaper.wake_after(), Some(1000), "still armed");
+    }
+
+    #[test]
+    fn the_floor_says_nothing_when_traffic_is_moving() {
+        let mut shaper = Shaper::new(vec![Machine::constant_rate_floor(1000, 1400)]);
+
+        for event in [
+            Event::NormalSent,
+            Event::NormalRecv,
+            Event::TunnelSent,
+            Event::TunnelRecv,
+        ] {
+            assert!(
+                shaper.handle(event, 0).is_empty(),
+                "{event} is traffic, not silence"
+            );
+        }
+        assert_eq!(
+            shaper.wake_after(),
+            Some(1000),
+            "the transport restarts the interval on every event"
+        );
+    }
+
+    #[test]
+    fn the_floor_interval_cannot_be_shortened_into_a_flood() {
+        let mut shaper = Shaper::new(vec![Machine::constant_rate_floor(1, 1400)]);
+        assert_eq!(shaper.wake_after(), Some(FLOOR_MIN_INTERVAL_MS));
+        assert_eq!(shaper.handle(Event::Timeout, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_shaper_with_no_armed_machine_has_no_deadline() {
+        let shaper = Shaper::new(vec![Machine::pad_to_size(1400)]);
+        assert_eq!(shaper.wake_after(), None);
     }
 
     #[test]

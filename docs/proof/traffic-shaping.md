@@ -103,11 +103,12 @@ sealed plaintext := u16 BE length ‖ payload ‖ 0x00 …
 
 | item | meaning |
 |---|---|
-| `Event` | what the transport reports: `NormalSent` (fires **before** the seal, so a `Pad` applies to that packet), `NormalRecv`, `TunnelSent`/`TunnelRecv` (padding packets), `Timeout` (a `Block`'s deadline elapsed) |
+| `Event` | what the transport reports: `NormalSent` (fires **before** the seal, so a `Pad` applies to that packet), `NormalRecv`, `TunnelSent`/`TunnelRecv` (padding packets), `Timeout` (time passed: a `Block`'s deadline elapsed, or an armed state's wake-up came due) |
 | `Branch { weight, action, next }` | one weighted choice out of a state: what to do, and where to go. `next = MACHINE_END` ends the machine |
 | `State { limit, on }` | transitions keyed by event, plus a cap on how many actions the state may produce. `UNLIMITED` opts out |
 | `Machine` | a list of states; state `0` is the start |
 | `Shaper::handle(event, draw) -> Vec<Effect>` | the driver. `Effect` carries the producing machine's index, so the transport can tell which defence asked for what |
+| `State::wake(after_ms)` / `Shaper::wake_after()` | a state that wants to be told time passed. The transport owns the clock, so it turns the interval into a deadline (`now + interval`) and leaves it unarmed when there is none |
 | `Shaper::state_of` | the current state, for introspection and tests |
 
 Three properties are worth stating because they are what a reviewer will look for:
@@ -115,14 +116,18 @@ Three properties are worth stating because they are what a reviewer will look fo
 * **The limit suppresses the action, not the transition.** A machine past its
   budget still tracks the traffic; it simply stops acting on it. A defence that
   silently stopped *observing* would resume from a stale picture.
-* **`Timeout` is delivered only to machines that are blocked**, and it is
-  addressed by the `Shaper` rather than by the machine, so a machine never needs
-  to know its own index. One clock, one wake-up.
+* **`Timeout` is delivered only to machines that asked for it** — blocked ones,
+  and ones whose current state is armed with `State::wake` — and it is addressed
+  by the `Shaper` rather than by the machine, so a machine never needs to know its
+  own index. One clock, one wake-up. `Shaper` holds no clock of its own: the
+  transport reads `wake_after()` after every event and re-arms its deadline, so
+  every event restarts an armed interval. That is what makes the floor fill
+  silence rather than add to a burst that is already moving.
 * **`NormalSent` fires before the seal.** This is the one deliberate deviation
   from Maybenot's `NormalSent`, which is a post-send notification; Vallum's
   ordering is what lets a `Pad` action actually apply to the packet in flight.
 
-### 2.3 The two reference machines
+### 2.3 The reference machines
 
 * `Machine::pad_to_size(target)` — one unlimited state: every `NormalSent` yields
   `Pad { target }`. The size set becomes a singleton.
@@ -134,6 +139,13 @@ Three properties are worth stating because they are what a reviewer will look fo
   the timeout, then wait for `Timeout`. A crude rate limiter: it turns a burst
   into a train. It exists because it is the smallest machine that exercises the
   `Block`/`Timeout` pair.
+* `Machine::constant_rate_floor(interval_ms, size)` — one unlimited state, armed
+  with `wake(interval_ms)`, that injects one `size`-byte packet on `Timeout` and
+  re-enters itself. Every other event passes through the same state, which does
+  nothing but restart the interval. The floor therefore says something only when
+  nothing else does, and its rate is limited by its own parameter — so the
+  interval is clamped up to `FLOOR_MIN_INTERVAL_MS` (100 ms) at construction. A
+  config file must not be able to describe a flood.
 
 An injected padding packet is an **empty payload padded to `size`** — an ordinary
 keepalive. It needs no message type, and an observer cannot pick it out of the
@@ -193,6 +205,32 @@ with **7 packets held for 136 ms total** (mean 19.4 ms, bounded above by the
 and byte count are *unchanged* and that the lost time is exactly what was
 measured. Timing obscurity is bought with latency and nothing else.
 
+**The constant-rate floor** (`constant_rate_floor`): the one defence whose cost
+is independent of the traffic, so it is priced on an idle hour — one 40-byte
+packet, then nothing for 3 600 s.
+
+| interval | injected | bytes per hour | rate | bytes per packet |
+|---|---|---|---|---|
+| 2 000 ms | 1 800 | 2 620 898 | 5.82 kbit/s | 1 455 |
+| 500 ms | 7 200 | 10 483 298 | **23.30 kbit/s** | 1 455 |
+| 100 ms | 36 000 | 52 416 098 | **116.48 kbit/s** | 1 455 |
+
+The count is exactly `3 600 000 / interval`, so the cost of a floor is
+arithmetic a deployment can do before it enables one: it buys a fixed number of
+packets per second and pays for it whether or not anybody is using the tunnel.
+1 455 bytes is a 1 400-byte sealed plaintext with its framing (header, counter,
+plaintext, tag), and it is the same on every injection, so the floor adds volume
+at one known size rather than a second size channel. 100 ms is the clamp, so
+116.48 kbit/s is the most expensive floor the framework can express.
+`the_constant_rate_floor_costs_a_flat_rate_per_hour` pins the count and
+`a_shorter_floor_interval_costs_more_bandwidth` asserts monotonicity. The
+daemon-level proof is separate, because the machine alone cannot pass it:
+`a_constant_rate_floor_keeps_speaking_through_silence` runs two real `Device`s
+and checks that a configured floor puts ten packets on the wire over ten
+intervals of silence, at the configured size, that the peer opens them as empty
+data, and that a user packet inside the window restarts the interval rather than
+adding to it.
+
 **Padding is authenticated.** `padding_is_stripped_so_the_payload_arrives_unchanged`
 pads payloads from 0 to 1398 bytes to 1400 and recovers each one byte-for-byte,
 and the unit test `a_forged_length_prefix_fails_the_tag` flips a ciphertext byte
@@ -227,7 +265,13 @@ and confirms the tag — not the length field — is what rejects it.
    could not usefully be one: the property is statistical, not symbolic. The
    durable output is the framework, the documented privacy parameter, and the
    measured cost table.
-7. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
+7. **The floor is a constant, not noise.** It makes an idle tunnel speak at a
+   known rate, which removes the coarse "nothing is happening" signal and
+   replaces it with a metronome — evenly spaced packets are themselves a
+   signature, and the floor does nothing about volume. Making gaps *shaped*
+   rather than *regular* needs the rest of ADR-0025's techniques, which are not
+   implemented.
+8. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
    Vallum's conventions (no RNG in the crate, caller-supplied draws, errors not
    panics); no crate dependency was added.
 
@@ -261,13 +305,18 @@ and confirms the tag — not the length field — is what rejects it.
 | a machine acts only on its event; unknown events are no-ops | `shaping.rs::Running::step` | `a_machine_acts_only_on_its_own_event` (unit) |
 | weighted branches are exact and draw-driven | `shaping.rs::Running::step` | `the_weights_are_exact_and_draw_driven` (unit) |
 | the state limit suppresses the action, not the transition | `shaping.rs::Running::step` | `a_state_limit_caps_the_actions_it_can_produce` (unit) |
-| `Timeout` reaches only blocked machines | `shaping.rs::Shaper::handle` | `a_block_arms_and_only_a_timeout_disarms_it` (unit) |
+| `Timeout` reaches only machines that asked for it | `shaping.rs::Shaper::handle` | `a_block_arms_and_only_a_timeout_disarms_it` (unit) |
 | `MACHINE_END` stops a machine | `shaping.rs::Running::ended` | `a_machine_that_reaches_the_end_stops` (unit) |
 | an empty shaper changes nothing | `shaping.rs::Shaper::new` | `an_empty_shaper_is_a_no_op` (unit), `unshaped_traffic_exposes_every_payload_length` |
 | **the length channel closes** | `Machine::pad_to_size` | `pad_to_size_collapses_the_size_set_to_one_value` |
 | **the bandwidth cost is monotone in the target** | — | `bandwidth_cost_grows_with_the_padding_target` |
 | **injection costs bytes and respects the cap** | `Machine::respond_with_padding` | `injected_padding_costs_bandwidth_and_is_counted`, `a_bigger_machine_budget_lasts_longer` |
 | **blocking costs latency and loses nothing** | `Machine::min_interval` | `min_interval_trades_latency_for_timing_obscurity` |
+| an armed state is woken by `Timeout` and re-arms itself | `shaping.rs::{State::wake, Shaper::wake_after}` | `the_floor_injects_after_silence_and_rearms_itself` (unit) |
+| traffic restarts the interval, so the floor fills only silence | `shaping.rs::Machine::constant_rate_floor` | `the_floor_says_nothing_when_traffic_is_moving` (unit) |
+| the floor's rate cannot be configured into a flood | `shaping.rs::FLOOR_MIN_INTERVAL_MS` | `the_floor_interval_cannot_be_shortened_into_a_flood` (unit) |
+| **the floor costs a flat rate per hour** | `Machine::constant_rate_floor` | `the_constant_rate_floor_costs_a_flat_rate_per_hour`, `a_shorter_floor_interval_costs_more_bandwidth` |
+| **the daemon turns a configured floor into packets** | `device/{timer,data,state}.rs` (`shape_wake_ms`) | `a_constant_rate_floor_keeps_speaking_through_silence` |
 | a hand-written machine costs what the built-in one costs | `Machine::new`/`State`/`Branch` | `the_same_padding_target_costs_the_same_bytes_however_it_is_reached` |
 
 ---
