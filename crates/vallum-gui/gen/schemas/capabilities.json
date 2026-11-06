@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"The console's only capability: the core IPC surface, no filesystem, shell or http access.","local":true,"windows":["main"],"permissions":["core:default"]}}

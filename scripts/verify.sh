@@ -9,6 +9,18 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+# The desktop console links the system WebView, so `--workspace` needs its
+# development files. Say that here rather than let it surface as a `-sys` build
+# failure halfway through clippy.
+if ! pkg-config --exists webkit2gtk-4.1 gtk+-3.0 libsoup-3.0; then
+    echo "vallum-gui needs the WebKitGTK development files:" >&2
+    echo "  sudo apt install -y --no-install-recommends \\" >&2
+    echo "    libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \\" >&2
+    echo "    libjavascriptcoregtk-4.1-dev libxdo-dev librsvg2-dev \\" >&2
+    echo "    libayatana-appindicator3-dev patchelf" >&2
+    exit 1
+fi
+
 echo "== fmt"
 cargo fmt --all -- --check
 echo "== clippy (all features)"

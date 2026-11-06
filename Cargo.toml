@@ -10,6 +10,7 @@ members = [
     "crates/vallum-quick",
     "crates/vallum-config",
     "crates/vallum",
+    "crates/vallum-gui",
 ]
 
 [workspace.package]

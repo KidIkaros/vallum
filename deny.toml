@@ -23,6 +23,12 @@ ignore = [
     # its CLI.
     "RUSTSEC-2021-0139", # ansi_term
     "RUSTSEC-2024-0375", # atty
+    # `proc-macro-error` 1.0 is unmaintained, not vulnerable, and is a *build*
+    # dependency: it arrives through `glib-macros`, which Tauri's GTK stack uses
+    # to generate code at compile time. Nothing of it is linked into the shipped
+    # binary. There is no safe upgrade until gtk-rs moves off it, so this is a
+    # dependency we are watching rather than one we can patch.
+    "RUSTSEC-2024-0370",
 ]
 
 [licenses]
@@ -45,6 +51,15 @@ allow = [
     # P6.4 artefact as a distribution consideration, and confined behind the
     # TUN trait so replacing it is one backend.
     "WTFPL",
+    # The desktop console's WebView stack. `cssparser`, `cssparser-macros`,
+    # `selectors` and `dtoa-short` arrive through Tauri's `dom_query` (HTML and
+    # CSP handling in `tauri-utils`); `option-ext` through `dirs`. MPL-2.0 is
+    # file-level copyleft: it obliges us to publish changes to *those files*, not
+    # to license Vallum's own code differently, and every one of them is an
+    # unmodified crates.io release whose source is published there. Recorded
+    # here, and in the ADR-0024 consequences, as a distribution decision rather
+    # than a default.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.9
 

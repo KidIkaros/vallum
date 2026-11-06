@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vallum",
+  "version": "1.6.4",
+  "identifier": "com.ikaros.vallum",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Vallum",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 820,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-ancestors 'none'; object-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": []
+  }
+}

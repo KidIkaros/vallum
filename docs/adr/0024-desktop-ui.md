@@ -1,7 +1,7 @@
 # ADR-0024: A desktop UI for the operations console
 
 **Date**: 2026-11-05
-**Status**: proposed
+**Status**: accepted
 **Deciders**: Vallum maintainers
 
 ## Context
