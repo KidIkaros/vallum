@@ -339,6 +339,25 @@ pub enum ShapingSpec {
         /// The sealed-plaintext length of each injected packet.
         size: u16,
     },
+    /// Inject a bounded burst of padding at the front of the peer's life.
+    ///
+    /// A flow's opening seconds are its most revealing, so this spends a fixed
+    /// number of padding packets there and then stops for good: one per normal
+    /// packet while the burst lasts, or one per `interval_ms` of silence if the
+    /// front is quiet. It is the one shape whose cost is a one-off rather than a
+    /// rate, which is why it is the cheapest thing to leave enabled.
+    ///
+    /// `count` is clamped to 60 packets and `interval_ms` to 1 000 ms, so the
+    /// burst cannot be turned into a slow floor by configuration. For the
+    /// measured prices, see `docs/proof/traffic-shaping.md`.
+    FrontPadding {
+        /// How many padding packets the burst may contain.
+        count: u32,
+        /// The silence to fill between them, in milliseconds.
+        interval_ms: u64,
+        /// The sealed-plaintext length of each injected packet.
+        size: u16,
+    },
     /// Answer received packets with padding, probabilistically.
     RespondWithPadding {
         /// The payload size of an injected packet.
@@ -360,6 +379,11 @@ impl ShapingSpec {
             Self::ConstantRateFloor { interval_ms, size } => {
                 Machine::constant_rate_floor(interval_ms, size)
             }
+            Self::FrontPadding {
+                count,
+                interval_ms,
+                size,
+            } => Machine::front_padding(count, interval_ms, size),
             Self::RespondWithPadding {
                 size,
                 injections,

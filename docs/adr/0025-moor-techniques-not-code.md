@@ -39,8 +39,14 @@ decision, not a shaping change.
 interval clamped at 100 ms so the configuration cannot describe a flood. It
 measures 5.82 kbit/s at 2 000 ms and 116.48 kbit/s at the clamp, per tunnel,
 with the table and the daemon-level test recorded in
-`docs/proof/traffic-shaping.md`. Front padding, volume padding and parameter
-noise are not implemented.
+`docs/proof/traffic-shaping.md`.
+
+**Second shape taken.** Front padding is implemented as
+`ShapingSpec::FrontPadding { count, interval_ms, size }`, with the count clamped
+at 60 packets and the interval at 1 000 ms. It is a count rather than a rate: 60
+packets at a 1 400-byte target cost 87 KiB once, against 100 MiB for a 100 ms
+floor over the same two hours. Volume padding and parameter noise are not
+implemented.
 
 ## Alternatives Considered
 

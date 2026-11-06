@@ -146,6 +146,19 @@ Three properties are worth stating because they are what a reviewer will look fo
   nothing else does, and its rate is limited by its own parameter — so the
   interval is clamped up to `FLOOR_MIN_INTERVAL_MS` (100 ms) at construction. A
   config file must not be able to describe a flood.
+* `Machine::front_padding(count, interval_ms, size)` — a chain of `count` states,
+  each armed with `wake(interval_ms)`, each injecting one `size`-byte packet and
+  moving on. Two things spend it: a `NormalSent`, which is accompanied by one
+  padding packet, and `interval_ms` of silence, which is filled by one. After the
+  last state the machine reaches `MACHINE_END` and is inert for good. `count` is
+  clamped to `FRONT_MAX_PACKETS` (60) and the interval to `FRONT_MAX_INTERVAL_MS`
+  (1 000 ms), so the window cannot be stretched into a long-lived floor.
+
+**Where "the front" is.** The front of this machine's life, which the transport
+starts when it builds the peer: for the daemon, a peer added or the daemon
+started. It is not the front of each session — padding a rekey would cost
+`count` packets per rekey, which is a rate wearing a burst's name, and the floor
+is the shape for a rate.
 
 An injected padding packet is an **empty payload padded to `size`** — an ordinary
 keepalive. It needs no message type, and an observer cannot pick it out of the
@@ -231,6 +244,34 @@ intervals of silence, at the configured size, that the peer opens them as empty
 data, and that a user packet inside the window restarts the interval rather than
 adding to it.
 
+**The front burst** (`front_padding`): the one defence whose cost is a *count*
+rather than a rate, so it is priced on the trace where that difference shows — the
+same page load, and then two idle hours.
+
+| trace | config | injected | packets | bytes | vs baseline |
+|---|---|---|---|---|---|
+| page load | `count = 4` | 4 | 11 | 7 014 | **+489.4 %** |
+| two idle hours | `count = 60`, 100 ms, 1 400 B | 60 | 61 | 87 458 | 1 456 B per packet |
+| two idle hours, *floor* at 100 ms | — | 72 000 | 72 001 | 104 832 098 | 1 456 B per packet |
+
+The last two rows are the reason both shapes exist. Over the same two hours the
+front burst spends 87 KiB once and then stops; the floor at the same interval
+spends 100 MiB and keeps going. Neither is a better defence — a burst says
+nothing about the second hour — but they are priced on different curves, and a
+deployment that wants chirp at the start of a peer's life and silence afterwards
+pays 87 KiB for the privilege, not a monthly bill.
+
+The count is exact, which is the whole cost bound:
+`a_busy_front_spends_the_burst_on_traffic` shows four injections over a trace
+with more outbound packets than that, and
+`a_front_burst_cannot_be_configured_past_its_rails` caps both rails — 10 000
+configured packets yield 60, and a 60 000 ms interval is cut to 1 000 ms. The
+daemon-level proof is `a_front_padded_session_spends_its_burst_and_then_stops`:
+two real `Device`s, a burst of three, one slot spent on the packet that
+establishes the tunnel, the other two filled out of silence at the configured
+size, the payloads discarded on receipt, and ten further intervals of silence
+producing nothing at all.
+
 **Padding is authenticated.** `padding_is_stripped_so_the_payload_arrives_unchanged`
 pads payloads from 0 to 1398 bytes to 1400 and recovers each one byte-for-byte,
 and the unit test `a_forged_length_prefix_fails_the_tag` flips a ciphertext byte
@@ -271,7 +312,12 @@ and confirms the tag — not the length field — is what rejects it.
    signature, and the floor does nothing about volume. Making gaps *shaped*
    rather than *regular* needs the rest of ADR-0025's techniques, which are not
    implemented.
-8. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
+8. **The front burst is a burst, not a disguise.** It spends its packets where the
+   front is most revealing and then the tunnel is as silent as it was before. An
+   observer that watches past the first minute learns nothing it would not have
+   learned without it, and a front that begins with real traffic spends its slots
+   *accompanied* by that traffic rather than hiding its shape.
+9. **`maybenot` is not vendored.** The FSM semantics were reimplemented to
    Vallum's conventions (no RNG in the crate, caller-supplied draws, errors not
    panics); no crate dependency was added.
 
@@ -317,6 +363,10 @@ and confirms the tag — not the length field — is what rejects it.
 | the floor's rate cannot be configured into a flood | `shaping.rs::FLOOR_MIN_INTERVAL_MS` | `the_floor_interval_cannot_be_shortened_into_a_flood` (unit) |
 | **the floor costs a flat rate per hour** | `Machine::constant_rate_floor` | `the_constant_rate_floor_costs_a_flat_rate_per_hour`, `a_shorter_floor_interval_costs_more_bandwidth` |
 | **the daemon turns a configured floor into packets** | `device/{timer,data,state}.rs` (`shape_wake_ms`) | `a_constant_rate_floor_keeps_speaking_through_silence` |
+| the front burst is spent on traffic or on silence, and ends | `shaping.rs::Machine::front_padding` | `a_front_burst_spends_its_count_and_then_ends`, `a_busy_front_spends_the_burst_on_traffic` (unit) |
+| the front cannot be configured past its count or its window | `shaping.rs::{FRONT_MAX_PACKETS, FRONT_MAX_INTERVAL_MS}` | `a_front_burst_cannot_be_configured_past_its_rails` (unit) |
+| **a front burst costs a count, not a rate** | `Machine::front_padding` | `the_front_burst_is_a_one_off_and_the_floor_is_a_rate` |
+| **the daemon spends a configured front burst and then stops** | `device/{timer,data,state}.rs` (`shape_wake_ms`) | `a_front_padded_session_spends_its_burst_and_then_stops` |
 | a hand-written machine costs what the built-in one costs | `Machine::new`/`State`/`Branch` | `the_same_padding_target_costs_the_same_bytes_however_it_is_reached` |
 
 ---

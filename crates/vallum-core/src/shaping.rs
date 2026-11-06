@@ -87,6 +87,22 @@ pub const UNLIMITED: u32 = u32::MAX;
 /// measures what the useful settings cost.
 pub const FLOOR_MIN_INTERVAL_MS: u64 = 100;
 
+/// The most padding packets a front burst may contain.
+///
+/// Front padding is spent at the front of a peer's life, where the traffic is
+/// most revealing and also least voluminous. Sixty packets against a 1400-byte
+/// target is roughly 87 KiB, once — a cost a user notices in a monthly total
+/// and nowhere else. The rail exists because `count` is the only thing bounding
+/// the burst: unlike the floor, this machine ends.
+pub const FRONT_MAX_PACKETS: u32 = 60;
+
+/// The longest spacing between the packets of a front burst.
+///
+/// A burst spread over more than a minute is not a front: it is a floor with a
+/// fixed lifetime, which is a different machine with a different cost story.
+/// Capping the interval also caps the window at `FRONT_MAX_PACKETS` seconds.
+pub const FRONT_MAX_INTERVAL_MS: u64 = 1_000;
+
 /// What the transport tells the framework.
 ///
 /// Events are the transport's, not the protocol's: nothing here is on the wire.
@@ -335,6 +351,56 @@ impl Machine {
                 vec![Branch::act(1, Action::Inject { count: 1, size }, 0)],
             );
         Self::new(vec![state])
+    }
+
+    /// Inject up to `count` padding packets at the front of the peer's life.
+    ///
+    /// A flow's first seconds carry the most information — the size and timing
+    /// of its opening packets are what a classifier keys on — so this machine
+    /// spends a fixed burst there and then ends for good. Two things spend it:
+    /// a normal packet leaving, which is accompanied by one padding packet, and
+    /// `interval_ms` of silence, which is filled by one. A busy front spends the
+    /// burst on its own traffic; an idle front is filled like a short floor.
+    ///
+    /// The bound is `count`, and it is exact: the machine walks a chain of
+    /// `count` states and reaches [`MACHINE_END`] after the last one, so no
+    /// amount of traffic can make it emit more. `count` is clamped to
+    /// [`FRONT_MAX_PACKETS`] and `interval_ms` to [`FRONT_MAX_INTERVAL_MS`],
+    /// because a config file must not be able to describe a longer front than
+    /// the mechanism is meant to cover.
+    ///
+    /// "The front" is the front of this machine's life, which the transport
+    /// gives it: for a daemon, that is the start of the peer rather than the
+    /// start of each session. Padding a rekey would be a per-session burst, and
+    /// every session is a fresh chance for a classifier, so that shape would
+    /// cost `count` packets per rekey — a rate, not a front.
+    #[must_use]
+    pub fn front_padding(count: u32, interval_ms: u64, size: u16) -> Self {
+        let burst = count.min(FRONT_MAX_PACKETS);
+        if burst == 0 {
+            // A burst of zero is a defence written down and disabled, which the
+            // config allows: an inert machine rather than a panic or a silent
+            // fallback to some default burst nobody asked for.
+            return Self::new(vec![State::new(0)]);
+        }
+        let interval = interval_ms.min(FRONT_MAX_INTERVAL_MS);
+        let mut states = Vec::with_capacity(burst as usize);
+        for index in 0..burst {
+            let next = if index + 1 == burst {
+                MACHINE_END
+            } else {
+                // `burst` is at most `FRONT_MAX_PACKETS`, so this fits.
+                u16::try_from(index + 1).unwrap_or(MACHINE_END)
+            };
+            let inject = vec![Branch::act(1, Action::Inject { count: 1, size }, next)];
+            states.push(
+                State::new(1)
+                    .wake(interval)
+                    .on(Event::Timeout, inject.clone())
+                    .on(Event::NormalSent, inject),
+            );
+        }
+        Self::new(states)
     }
 
     /// Hold further outgoing packets for `interval_ms` after each normal send.
@@ -736,6 +802,68 @@ mod tests {
         let mut shaper = Shaper::new(vec![Machine::constant_rate_floor(1, 1400)]);
         assert_eq!(shaper.wake_after(), Some(FLOOR_MIN_INTERVAL_MS));
         assert_eq!(shaper.handle(Event::Timeout, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_front_burst_spends_its_count_and_then_ends() {
+        let mut shaper = Shaper::new(vec![Machine::front_padding(3, 200, 1400)]);
+        let injected = vec![Effect {
+            machine: 0,
+            action: Action::Inject {
+                count: 1,
+                size: 1400,
+            },
+        }];
+
+        assert_eq!(shaper.wake_after(), Some(200), "the front is armed");
+        for expected_state in 0..3u16 {
+            assert_eq!(shaper.state_of(0), Some(expected_state));
+            assert_eq!(shaper.handle(Event::Timeout, 0), injected);
+        }
+        assert_eq!(shaper.state_of(0), None, "the burst is over");
+        assert!(shaper.handle(Event::Timeout, 0).is_empty(), "and it ends");
+        assert_eq!(shaper.wake_after(), None, "an ended machine has no clock");
+    }
+
+    #[test]
+    fn a_busy_front_spends_the_burst_on_traffic_instead_of_silence() {
+        let mut shaper = Shaper::new(vec![Machine::front_padding(2, 1000, 300)]);
+
+        // The first two packets out are each accompanied by padding; the third
+        // is not, because the burst was two packets and it is spent.
+        for _ in 0..2 {
+            assert_eq!(shaper.handle(Event::NormalSent, 0).len(), 1);
+        }
+        assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        // Silence afterwards is not filled either: this machine is bounded, and
+        // the floor is the machine for a tunnel that stays quiet.
+        assert!(shaper.handle(Event::Timeout, 0).is_empty());
+        assert_eq!(shaper.state_of(0), None);
+    }
+
+    #[test]
+    fn a_front_burst_cannot_be_configured_past_its_rails() {
+        // A count past the rail is clamped, not honoured: count is the only
+        // thing bounding this machine.
+        let mut shaper = Shaper::new(vec![Machine::front_padding(10_000, 1, 1400)]);
+        let mut injected = 0u32;
+        for _ in 0..(FRONT_MAX_PACKETS * 4) {
+            injected += shaper.handle(Event::Timeout, 0).len() as u32;
+        }
+        assert_eq!(injected, FRONT_MAX_PACKETS);
+
+        // And the interval is clamped too, so the window cannot be stretched
+        // into a long-lived floor by a config file.
+        let shaper = Shaper::new(vec![Machine::front_padding(2, 60_000, 1400)]);
+        assert_eq!(shaper.wake_after(), Some(FRONT_MAX_INTERVAL_MS));
+    }
+
+    #[test]
+    fn a_front_burst_of_zero_is_inert() {
+        let mut shaper = Shaper::new(vec![Machine::front_padding(0, 100, 1400)]);
+        assert_eq!(shaper.wake_after(), None);
+        assert!(shaper.handle(Event::NormalSent, 0).is_empty());
+        assert!(shaper.handle(Event::Timeout, 0).is_empty());
     }
 
     #[test]

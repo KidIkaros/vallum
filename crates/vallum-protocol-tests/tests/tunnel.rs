@@ -1043,6 +1043,62 @@ fn a_constant_rate_floor_keeps_speaking_through_silence() {
     );
 }
 
+/// The front burst is spent once, then the tunnel is as quiet as it was.
+///
+/// The device-side half of front padding: the machine's chain has to be walked
+/// by a real `Timeout` deadline, and the burst has to stop on its own. A machine
+/// alone cannot show either — it has no clock, and "it ended" is only visible in
+/// the packets that do not follow.
+#[test]
+fn a_front_padded_session_spends_its_burst_and_then_stops() {
+    const COUNT: u32 = 3;
+    const INTERVAL_MS: u64 = 100;
+    const SIZE: u16 = 400;
+
+    let mut net = net_with(
+        vec![Machine::front_padding(COUNT, INTERVAL_MS, SIZE)],
+        Shape::ROAMING,
+    );
+    // Establish, and spend one slot of the burst on the packet that does it.
+    net.outbound(0, ipv4(A_IP, B_IP, b"first"));
+    net.settle();
+    let after_traffic = net.hosts[0].stats();
+
+    // The rest of the burst is filled out of silence, one per interval, and
+    // then the tunnel says nothing at all.
+    net.settle_over(INTERVAL_MS, 10);
+    let idle = net.hosts[0].stats();
+    assert_eq!(
+        idle.sent - after_traffic.sent,
+        u64::from(COUNT - 1),
+        "the burst has COUNT slots and one was spent on traffic: {idle:?}"
+    );
+
+    // Each of them is the configured size, so the burst is not a size signal of
+    // its own, and the peer discards them rather than delivering payloads.
+    let tag = suite().sizes().aead_tag;
+    let expected = HEADER_LEN + 4 + 8 + 4 + usize::from(SIZE) + tag;
+    assert_eq!(
+        (idle.tx_bytes - after_traffic.tx_bytes) as usize,
+        (COUNT as usize - 1) * expected,
+        "the burst is not the size it was configured to be"
+    );
+    assert_eq!(
+        net.hosts[1].delivered.len(),
+        1,
+        "padding must not be delivered as traffic"
+    );
+
+    // Ten more intervals of silence, and nothing follows: a front is a count,
+    // not a rate. Leaving the floor for the case where someone wants a rate.
+    net.settle_over(INTERVAL_MS, 10);
+    assert_eq!(
+        net.hosts[0].stats().sent,
+        idle.sent,
+        "an ended machine must not keep speaking"
+    );
+}
+
 // ── keepalive policy ─────────────────────────────────────────────────
 
 /// A configured interval is a *cadence*: due at the interval, twice the

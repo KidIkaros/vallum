@@ -570,7 +570,65 @@ fn a_shorter_floor_interval_costs_more_bandwidth() {
     }
 }
 
-// ── 4. padding is indistinguishable in kind ──────────────────────────
+// ── 4. the front is spent once ──────────────────────────────────────
+
+/// Two idle hours: one small packet at the start, then nothing.
+///
+/// The floor and the front burst are the two time-driven shapes, and this is the
+/// trace that separates them: one costs a rate that never stops, the other a
+/// count that is over in a minute.
+const TWO_IDLE_HOURS: &[(bool, usize, u64)] = &[(false, 40, 7_200_000)];
+
+#[test]
+fn the_front_burst_is_a_one_off_and_the_floor_is_a_rate() {
+    const COUNT: u32 = 60;
+    const INTERVAL_MS: u64 = 100;
+    const SIZE: u16 = 1400;
+
+    let front = simulate(
+        vec![Machine::front_padding(COUNT, INTERVAL_MS, SIZE)],
+        TWO_IDLE_HOURS,
+        1,
+    );
+    let floor = simulate(
+        vec![Machine::constant_rate_floor(INTERVAL_MS, SIZE)],
+        TWO_IDLE_HOURS,
+        1,
+    );
+    println!("front, 2 idle h: {front}");
+    println!("floor, 2 idle h: {floor}");
+
+    // Exactly the configured count, and it does not grow with the idle time:
+    // that is the difference between a burst and a rate.
+    assert_eq!(front.injected, COUNT as usize, "{front}");
+    assert!(
+        floor.injected > front.injected * 100,
+        "an hour of floor is thousands of packets, a front is sixty: {floor}"
+    );
+    // The burst went out at the configured size, so it is indistinguishable
+    // from what a padded tunnel would have sent anyway.
+    assert_eq!(front.sizes.len(), 2, "sizes: {:?}", front.sizes);
+}
+
+#[test]
+fn a_busy_front_spends_the_burst_on_traffic() {
+    const COUNT: u32 = 4;
+
+    let front = simulate(vec![Machine::front_padding(COUNT, 100, 1400)], PAGE_LOAD, 1);
+    println!("front over a page load: {front}");
+
+    // The trace has more outbound packets than the burst has slots, and the
+    // count is still exact: the machine walks a chain of states and ends.
+    let outbound = PAGE_LOAD.iter().filter(|(inbound, _, _)| !inbound).count();
+    assert!(
+        outbound > COUNT as usize,
+        "the trace must outlast the burst"
+    );
+    assert_eq!(front.injected, COUNT as usize, "{front}");
+}
+
+// ── 5. padding is indistinguishable in kind ──────────────────────────
+
 #[test]
 fn an_injected_padding_packet_is_an_openable_keepalive() {
     let (suite, mut a_send, _, _, mut b_recv) = link();
