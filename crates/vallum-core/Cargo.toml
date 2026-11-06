@@ -24,3 +24,4 @@ test-internals = []
 
 [dependencies]
 vallum-crypto.workspace = true
+ipnet.workspace = true

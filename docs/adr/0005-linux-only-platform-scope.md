@@ -1,7 +1,7 @@
 # ADR-0005: Linux-only platform scope for this release
 
 **Date**: 2026-10-19
-**Status**: accepted
+**Status**: superseded by ADR-0011
 **Deciders**: Vallum maintainers
 
 ## Context

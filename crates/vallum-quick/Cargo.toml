@@ -17,6 +17,9 @@ workspace = true
 
 [dependencies]
 vallum-config = { path = "../vallum-config" }
-vallum-tunnel = { path = "../vallum-tunnel" }
+vallum-core.workspace = true
 ipnet = "2.12"
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.6"

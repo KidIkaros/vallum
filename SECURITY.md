@@ -2,14 +2,16 @@
 
 ## Supported versions
 
-The current release line is `0.1.x`. Security fixes land on `main` and are
-released as a patch tag.
+The current release line is `1.x`. Security fixes land on `main` and are
+released as a patch tag. The trust model and explicit non-claims are in
+[docs/security-model.md](docs/security-model.md).
 
 ## Reporting a vulnerability
 
 Use GitHub's **private vulnerability reporting** on this repository
-(Security → Advisories → Report a vulnerability). Do not open a public issue
-with exploit details, keys, or packet captures containing secrets.
+(Security → Advisories → Report a vulnerability). If that feature is not
+available on the repository plan, open a minimal issue asking for a private
+channel and do not include exploit details, keys, or packet captures.
 
 Please include:
 

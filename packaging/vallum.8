@@ -1,4 +1,4 @@
-.TH VALLUM 8 "2026-10-19" "vallum 0.1.0" "System Administration"
+.TH VALLUM 8 "2026-10-19" "vallum 0.1.4" "System Administration"
 .SH NAME
 vallum \- hybrid post-quantum layer-3 tunnel
 .SH SYNOPSIS
@@ -11,6 +11,27 @@ runs a layer-3 tunnel with a tri-hybrid KEM handshake and an explicit,
 mutually authenticated key confirmation. It is configured by a TOML file; the
 daemon owns the tunnel, the TUN interface and the UDP socket, and nothing else.
 .SH COMMANDS
+.TP
+.B "setup [--server | --client FILE | --remote USER@HOST | --join TICKET|HOST:PORT [--invite-id HEX --token TOKEN]]"
+The one entry point: asks what this machine is and runs only that role's
+steps. \fB--server\fR is \fBserver init\fR plus the offer to enrol a first
+client; \fB--client FILE\fR is \fBimport-bundle --install\fR. With no flags
+it prompts, and without a terminal it prints the paths and changes nothing.
+.PP
+\fB--remote\fR and \fB--join\fR enrol without a bundle and without ever
+sending this machine's private key: \fB--remote\fR uses SSH, \fB--join\fR
+uses a single-use token. \fB--token -\fR reads the token from stdin so it
+stays out of shell history. \fB--expect FINGERPRINT\fR refuses a server whose
+fingerprint does not match the invite. Either way, enrolment finishes by
+waiting for a real handshake and pinging the server's tunnel address.
+.TP
+.B "join TICKET"
+The shortest enrolment: one argument carries the responder endpoint, invite
+id, single-use token, peer name, and pinned server fingerprint
+(\fBvallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>\fR). The client
+generates its own key, proves the fingerprint before writing, and finishes by
+verifying the handshake. \fBpeer invite\fR prints exactly this command. The
+same ticket is accepted by \fBsetup --join\fR.
 .TP
 .B run --config FILE
 Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
@@ -43,11 +64,116 @@ Export a config; secrets are omitted unless explicitly requested.
 .B bench [--suite ID] [--bytes N] [--iterations N]
 Measure the data plane's seal/open cost.
 .TP
-.B doctor [--config FILE | --control SOCKET] [--json]
-Check the platform, config, control socket, and helper tools.
+.B doctor [--config FILE | --control SOCKET] [--probe-mtu HOST] [--json]
+Check the platform, config, control socket, forwarding, the firewall port, the
+unit state, and the config's permissions. `--probe-mtu` is the one active
+check: it bisects the path to HOST with `ping -M do` and compares the result
+with `outer_mtu`.
 .TP
 .B completions SHELL
 Print a completion script for bash, zsh, fish, or PowerShell.
+.TP
+.B server init [--config FILE] [--endpoint HOST:PORT] [--address CIDR] [--listen ADDR:PORT]
+.PP
+Prepare this host as a tunnel server: generate or reuse the key, write the
+config, enable IP forwarding, open the UDP port, install the masquerade rule,
+and install and start the systemd units. Idempotent. `--dry-run` prints the
+plan; `--no-nat`, `--no-firewall`, `--no-forward`, `--no-host`, and
+`--no-service` disable individual steps; `--json` is the machine interface.
+.TP
+.B peer add NAME (--public-key LINE | --public-key-file FILE | --ship-key --bundle-out FILE) [--address CIDR] [--allowed-ips LIST] [--endpoint HOST:PORT] [--keepalive SECS] [--psk] [--client-config-out FILE] [--forget-key] [--json]
+.PP
+Enrol a peer. Allocates an address from the interface's subnets unless one is
+given, refuses an overlapping prefix, writes the config without reformatting it,
+and applies it to a running daemon. `--public-key` keeps the private key on the
+device; `--bundle-out` (with `--ship-key`) generates it here and writes a client bundle — that key then exists on the server, so prefer a public line or `peer invite`.
+.TP
+.B peer list | show NAME | remove NAME [--json]
+Manage the configured peers. `list` prints a fingerprint rather than the 4.7 KB
+public line; `show --full` prints the line.
+.TP
+.B peer rotate NAME (--public-key LINE | --public-key-file FILE | --bundle-out FILE | --identity FILE) [--endpoint HOST:PORT] [--no-apply] [--json]
+.PP
+Install a new identity for a peer and keep the old one as
+.BR previous_public_key .
+The peer accepts both until
+.BR "peer finalize" ,
+so the server can rotate before the device has the new key. A rotation is only
+zero-downtime when the rotating peer is the responder: an initiator dials with
+its current key.
+.TP
+.B peer finalize NAME [--no-apply] [--json]
+Retire the previous identity a rotation kept. The old key is refused afterwards.
+.TP
+.B metrics [--config FILE | --control SOCKET] [--prefix PREFIX] [--output FILE]
+Print the daemon's state as Prometheus text exposition. One
+.B get=1
+is one scrape; there is no listener. Labels carry the interface, the peer name
+and its fingerprint, never the public line. `--output` writes atomically
+(temp + rename) so a textfile collector never reads a torn scrape; on a failed
+scrape it still writes `up 0` while the command exits nonzero.
+.TP
+.B identity issue --ca-key FILE (--peer-public LINE | --peer-public-file FILE) --label NAME --days N [--output FILE] [--json]
+Issue an identity document signed by a CA key that carries a signing half. The
+document binds the peer's KEM key and signing key to a label and a validity
+window.
+.TP
+.B identity self-sign --key FILE --label NAME --days N [--output FILE] [--json]
+Issue a self-signed document. It is a key binding with a window, not an
+authorisation: with
+.B interface.identity_issuer
+set, a self-signed document is refused.
+.TP
+.B identity verify [--issuer FILE | --issuer-public LINE] [--suite ID] --document FILE [--json]
+Check a document's signature and window. Without an issuer, a self-signed
+document is checked against its own key.
+.TP
+.B identity show [--suite ID] --document FILE [--json]
+Print a document's label, key sizes, window and fingerprint without verifying it.
+.TP
+.B client teardown (--name NAME | --config FILE) [--purge] [--dry-run]
+Undo the host changes `setup` installed for a client: stop and disable
+`vallum@` and `vallum-quick@` for the tunnel, and remove the stale control
+socket. Keeps `/etc/vallum/<name>.toml` and its key unless `--purge` is given,
+so the tunnel can be brought back up without re-enrolling.
+.TP
+.B server teardown [--config FILE] [--purge] [--dry-run]
+Undo the host changes `server init` installed: stop and disable the units,
+remove the `inet vallum` NAT table, remove the firewall and FORWARD rules, and
+delete `/etc/sysctl.d/90-vallum.conf`. Keeps `/etc/vallum` unless `--purge` is
+given.
+.TP
+.B uninstall [--dry-run] [--purge]
+Remove everything the installer and setup put on this host: every
+`vallum{,-quick,-enroll,-metrics}` unit stopped and disabled, per-config
+firewall and sysctl state, unit files, man pages, shell completions,
+`/run/vallum`, and finally the binaries (a running process can unlink
+itself). `/etc/vallum` — configs and private keys — is kept unless
+`--purge`, matching the `apt remove`/`apt purge` convention. `--dry-run`
+prints the whole plan without root.
+.PP
+.B peer invites [--config FILE] [--json]
+List live one-time invites and their remaining TTL (tokens are never printed),
+automatically pruning expired invite files from `/run/vallum`.
+.PP
+.B peer invite NAME [--public-key LINE | --public-key-file FILE] [--config FILE] [--ttl MINUTES] [--json]
+Mint a single-use token so a device can enrol without SSH access. Prints the
+exact `vallum join <ticket>` the client runs — one argument carrying the
+invite id, token, and the server's fingerprint. With `--public-key`, the invite is pinned to that
+device's key: a stolen token then enrols nothing. Needs `[enroll] enabled =
+true` and `vallum-enroll@<iface>` running.
+.PP
+.B peer enroll NAME --public-key LINE|--public-key-file FILE [--address CIDR] [--json]
+Enrol a device that generated its own key; the primitive both transports call.
+Idempotent: the same line returns the same config; a different key is refused.
+.PP
+.B enroll-serve [--config FILE]
+Answer token-gated enrolment requests on `listen + 1`, running as the
+`vallum-enroll@.service` unit. Off unless `[enroll] enabled = true`.
+.PP
+.B import-bundle FILE [--output-dir DIR] [--force] [--install]
+Import a client `.vallum-bundle` as a config and a 0600 key file. `--install`
+writes to `/etc/vallum`, installs the units, and starts the tunnel.
 .TP
 .B tui [--config FILE | --control SOCKET | --config-dir DIR] [--snapshot]
 Open the terminal operations console. `--snapshot` renders one frame headlessly.
@@ -58,6 +184,16 @@ Configuration files.
 .TP
 .I /run/vallum/*.sock
 Control sockets, mode 0600.
+.SH SERVICES
+.BR vallum@.service
+is `Type=notify` with `WatchdogSec=30s`: the daemon sends `READY=1` once the
+interface serves and `WATCHDOG=1` while the run loop turns, so a wedged loop
+is restarted by systemd rather than hanging silently.
+.BR vallum-metrics.service
+and
+.BR vallum-metrics.timer
+scrape metrics into `node_exporter`'s textfile directory every 15 seconds;
+the timer is enabled by `install.sh` only when that directory exists.
 .SH SECURITY
 The private key is refused if its file is group- or world-readable, unless
 .B --allow-insecure-key-permissions

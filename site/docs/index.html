@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vallum documentation</title>
+<meta name="description" content="Deploy, operate and understand a Vallum tunnel: server and client setup, security model, architecture decisions.">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <a class="brand" href="../"><span class="mark" aria-hidden="true">◆</span> Vallum</a>
+  <nav aria-label="Primary">
+    <a href="../">Overview</a>
+    <a href="https://github.com/KidIkaros/vallum">Source</a>
+  </nav>
+</header>
+
+<main id="main">
+  <h1>Documentation</h1>
+  <p class="lede">Every page here is a markdown file in the repository, so the source of truth is the
+    file next to the code it describes. Start with the deploy guide for your side of the tunnel.</p>
+
+  <div class="groups">
+    <section class="group">
+      <h2>Deploy</h2>
+      <ul class="doc-list">
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/server.md">Setting up a Vallum server</a>
+          <span>Key, config, forwarding, firewall, NAT, systemd units.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/client.md">Connecting a Linux client</a>
+          <span>SSH enrolment, invite tickets, offline bundles.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/site-to-site.md">Site-to-site: two networks, one tunnel</a>
+          <span>Two gateways, one tunnel, routes on both sides.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/automation.md">Automating Vallum</a>
+          <span>Unattended installs and repeatable provisioning.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/upgrades.md">Upgrading Vallum</a>
+          <span>Signature-checked upgrades and the deliberate rollback switch.</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="group">
+      <h2>Operate</h2>
+      <ul class="doc-list">
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/operations.md">Operations</a>
+          <span>Day-to-day lifecycle: rotation, teardown, routine checks.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/tui.md"><code>vallum tui</code> — the operations console</a>
+          <span>Keys, views, mouse affordances, and the design tokens behind them.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/monitoring.md">Monitoring Vallum</a>
+          <span><code>vallum metrics</code> and what the Prometheus output means.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/troubleshooting.md">Troubleshooting a deployment</a>
+          <span>Where to look when the tunnel comes up but traffic does not.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/backup.md">Backup and disaster recovery</a>
+          <span>What must survive a rebuild, and what must not be copied.</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="group">
+      <h2>Understand</h2>
+      <ul class="doc-list">
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/security-model.md">The Vallum security model</a>
+          <span>Threat model, key custody, and the guarantees the handshake does and does not make.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/requirements.md">Requirements</a>
+          <span>The properties the implementation is held to.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/roadmap.md">Roadmap</a>
+          <span>What is planned, what is deliberately out of scope.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/README.md">Architecture Decision Records</a>
+          <span>Every non-obvious choice, with the alternative that was rejected.</span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="group">
+      <h2>Build and contribute</h2>
+      <ul class="doc-list">
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/CONTRIBUTING.md">Contributing</a>
+          <span>The gate of record, and what a change has to pass before it lands.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/SECURITY.md">Security policy</a>
+          <span>How to report a vulnerability.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/docs/releasing.md">Releasing</a>
+          <span>Versioning, signing, and the release checklist.</span>
+        </li>
+        <li>
+          <a href="https://github.com/KidIkaros/vallum/blob/main/CHANGELOG.md">Changelog</a>
+          <span>What changed, release by release.</span>
+        </li>
+      </ul>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <p>Apache-2.0 · Ikaros Digital × Atomguard · <a href="https://github.com/KidIkaros/vallum">source</a></p>
+</footer>
+</body>
+</html>

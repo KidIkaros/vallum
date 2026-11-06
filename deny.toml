@@ -5,8 +5,9 @@
 # (`cargo deny check`). Licenses and sources are the parts `cargo audit` does
 # not cover at all.
 #
-# The SDK is a path dependency and is not in the crates.io graph; its own
-# `deny.toml` governs it.
+# The SDK is a git dependency pinned by tag (see crates/vallum-crypto-sdk).
+# Only that exact repository may appear as a git source; the tag and the
+# resolved commit live in Cargo.lock. Its own `deny.toml` governs it.
 
 [graph]
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
@@ -35,6 +36,8 @@ allow = [
     "BSD-3-Clause",
     "CC0-1.0",
     "MIT",
+    # `untrusted`, pulled by the SDK's `ring` dependency. Permissive.
+    "ISC",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
@@ -57,3 +60,4 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/KidIkaros/OriginSDK"]

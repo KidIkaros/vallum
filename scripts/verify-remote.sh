@@ -1,0 +1,1501 @@
+#!/usr/bin/env bash
+#
+# verify-remote.sh — the two-machine test: a real client, a real server, over
+# the real network.
+#
+# What verify.sh cannot prove and a same-host test cannot either: that a client
+# on another machine completes a handshake, reaches the server's tunnel address,
+# forwards traffic to the internet through the server's NAT, and resolves DNS
+# through the tunnel.
+#
+#   ./scripts/verify-remote.sh user@vps.example.com            # client in a remote namespace (default)
+#   ./scripts/verify-remote.sh --host-direct user@vps.example.com   # client on this machine (needs local root)
+#   ./scripts/verify-remote.sh --product --keep user@vps.example.com
+#   ./scripts/verify-remote.sh --upgrade user@vps.example.com
+#   ./scripts/verify-remote.sh --transports token user@vps.example.com
+#   ./scripts/verify-remote.sh --app-class user@vps.example.com
+#   ./scripts/verify-remote.sh --clean-remote user@vps.example.com
+#
+# A host that already runs Vallum is refused, because the test installs its own
+# deployment and would otherwise delete a working one. `--clean-remote` is the
+# explicit override: it removes an existing Vallum deployment (listed below) and
+# then proceeds. It removes *Vallum's* files, never anyone else's.
+#
+# Two modes, by where the client half runs:
+#
+#   --namespaced (the default) runs the client daemon inside a network
+#     namespace on the *SSH target*: a veth pair bridges the namespace to the
+#     host's own routing, so the client dials the server's public endpoint the
+#     same way a laptop would. Nothing on the invoking machine is touched —
+#     no local TUN, no local routes, no local sudo — which is what makes this
+#     a contract any contributor can reproduce against any disposable root
+#     Linux host they can SSH into, rather than the maintainer's laptop.
+#
+#   --host-direct runs the client daemon on the invoking machine against its
+#     real interfaces, which exercises a true second host but rewrites this
+#     machine's routing for the run and needs local root. Keep it for a
+#     release-day pass after protocol-affecting changes; never let it become
+#     the only way the tree can be proved.
+#
+# The remote half runs as root over SSH (the invoking user's key is used),
+# so the local half needs only the built binaries:
+#
+#   ./scripts/verify-remote.sh user@vps.example.com
+#
+# It enrols one client per enrolment transport — bundle, ssh (`setup --remote`),
+# token (`peer invite` + `setup --join`) — and proves each carries traffic. A
+# pass records the commit in ~/.local/state/vallum/remote-verified, which
+# scripts/release.sh requires before it will build a release.
+#
+# Default is a *scratch* server: binaries and config live in /tmp on the remote,
+# no systemd units, no /etc/vallum, nothing installed. The only host changes are
+# one UDP port, `net.ipv4.ip_forward`, and an nftables table of its own — all
+# removed on exit.
+#
+# --product instead runs `vallum server init` with every host step on: it
+# installs /usr/bin/vallum{,-quick}, /etc/vallum, both units, and the firewall
+# rules the product would add. That is the honest test of `server init` on a
+# real host, and it needs a disposable one.
+#
+# Everything is removed on exit, pass or fail, unless --keep is given. Use it
+# when the point of the run is a deployment to dogfood rather than a gate to
+# record: without it a --product run proves `server init` and then uninstalls
+# what it just proved, leaving a host with no Vallum and no keys.
+#
+# --app-class adds the per-app launch path (ADR-0023) after the transports:
+# the bundle client is rebuilt as a full tunnel, the product's own attach moves
+# the device into a member namespace, and a launched member must route, resolve
+# and carry traffic through the tunnel while the client keeps its own path and
+# resolver. It is opt-in because it moves a device and starts a holder process
+# on the target, and it needs `unshare`/`nsenter` there. Namespaced mode only.
+# No cgroup, mark or nft rule is involved: the namespace is the boundary.
+#
+# Every namespaced run also stops the *server* once and waits it out
+# (--no-outage to skip): about four minutes of wall clock, because the client's
+# verdict may not be trusted as not-`up` until its last handshake is older than
+# the 180 s reject window, and the recovery that follows must come without
+# touching the client. That leg is the only place `always-on` is asserted on a
+# real link instead of in-process.
+#
+# --keep skips cleanup entirely, so it keeps whatever the run left running. In
+# the default scratch mode that is a test daemon still listening on the port,
+# with its config in /tmp — not a deployment. The script says what it kept on
+# exit; on a host that does anything else, stop it when you are done.
+#
+# The local half needs root for the TUN; the SSH half runs as the invoking user
+# so its keys work.
+
+set -u
+cd "$(dirname "$0")/.." || exit 1
+
+VALLUM=${VALLUM:-target/release/vallum}
+QUICK=${QUICK:-target/release/vallum-quick}
+PORT=${PORT:-51921}
+SUBNET=${SUBNET:-10.99.90.0/24}
+SRV_IP=${SRV_IP:-10.99.90.1}
+CLI_IP=${CLI_IP:-10.99.90.2}
+PREFIX=${PREFIX:-24}
+REMOTE_DIR=/tmp/vallum-remote-test
+LOCAL_DIR=/tmp/vallum-remote-client
+CIFACE=vallumrc0
+# The remote client namespace (--namespaced) and its host-side veth.
+CLI_NS=vallum-cli
+CLI_VETH=vallum-cli-h
+# Every client-side action happens on the target, inside the namespace.
+# Arguments are joined because they are all literals this script controls.
+cli_put(){ rsh "sudo ip netns exec $CLI_NS $*"; }
+PRODUCT=0
+KEEP=0
+CLEAN=0
+UPGRADE=0
+APP_CLASS=0
+# The outage leg runs once per run, not once per transport: it costs minutes and
+# proves a property of the client, not of the enrolment path that produced it.
+OUTAGE_DONE=0
+OUTAGE=1
+OUTAGE_PINGS=1300
+# The protocol's own reject window, in seconds (`REJECT_AFTER_TIME_MS`). Copied
+# rather than read from the crate because this script has no cargo; the daemon
+# is the authority, and the leg fails loudly if the two ever disagree.
+REJECT_WINDOW=180
+# How long the client is given to carry again once the server has returned. It
+# is one number in two places on purpose: the `VallumClientStale` alert
+# (`packaging/vallum-alerts.yml`) waits exactly this long before paging, so a
+# client is never paged for taking the time this gate allows it. Change both or
+# neither.
+RECOVERY_BUDGET=150
+NAMESPACED=1
+TRANSPORTS="bundle ssh token"
+TARGET=""
+
+say(){ printf '── %s\n' "$*"; }
+ok(){ printf '   ok    %s\n' "$*"; }
+bad(){ printf '   FAIL  %s\n' "$*"; exit 1; }
+note(){ printf '   note  %s\n' "$*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --product) PRODUCT=1 ;;
+        # An upgrade is the product install plus a swap: previous release in,
+        # client enrolled and proved, new binaries+units over the top, tunnel
+        # proved again. Only the bundle transport runs — it is the one stable
+        # across every release's CLI.
+        --upgrade) UPGRADE=1; PRODUCT=1; TRANSPORTS="bundle" ;;
+        --keep) KEEP=1 ;;
+        # The per-app launch path (ADR-0023), on the real link: a full tunnel,
+        # the product's own attach moving the device into a member namespace,
+        # and one launched member that routes, resolves and carries traffic
+        # through the tunnel. Off by default because it moves a device on the
+        # target and starts a holder process.
+        --app-class) APP_CLASS=1 ;;
+        # Skip the server-outage leg: for a host whose provider rate-limits a
+        # restart, or a quick pass where the recovery claim is not what changed.
+        --no-outage) OUTAGE=0 ;;
+        # Where the client half runs. Default is a remote namespace (no local
+        # root, no local routes touched); --host-direct keeps the old behaviour
+        # of installing the client on the invoking machine.
+        --namespaced) NAMESPACED=1 ;;
+        --host-direct) NAMESPACED=0 ;;
+        --clean-remote) CLEAN=1 ;;
+        --transports) shift; TRANSPORTS=$1 ;;
+        --port) shift; PORT=$1 ;;
+        --subnet) shift; SUBNET=$1; PREFIX=${SUBNET#*/}; NET=${SUBNET%/*}; SRV_IP="${NET%.*}.1"; CLI_IP="${NET%.*}.2" ;;
+        -h|--help)
+            # The header block itself: a line range here silently truncated the
+            # help whenever the block grew.
+            awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+            exit 0
+            ;;
+        -*) echo "unknown flag: $1" >&2; exit 1 ;;
+        *) TARGET=$1 ;;
+    esac
+    shift
+done
+[ -n "$TARGET" ] || { echo "usage: $0 [--product] user@host" >&2; exit 1; }
+# Namespaced mode touches nothing on this machine: the client daemon runs on
+# the SSH target inside a network namespace, so no local TUN is needed.
+# --host-direct installs the client on this machine, which needs root.
+if [ "$NAMESPACED" != 1 ] && [ "$(id -u)" != 0 ]; then
+    echo "run with sudo: --host-direct runs the client on this machine and needs a TUN" >&2
+    exit 1
+fi
+
+# The remote half must run as the invoking user: root's SSH keys are not theirs.
+# `rsh "<script>"` hands ssh a *double-quoted* string, so everything in it
+# expands here before it is sent. A backtick in a remote comment is a local
+# command substitution whose output becomes remote script lines — a comment
+# reading `ufw allow` ran ufw on this machine and sent its usage text to the
+# target's shell. No backticks inside an rsh argument: quote words with ' or ".
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    OWNER_HOME=$(eval echo "~$SUDO_USER")
+    rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh -o BatchMode=yes "$TARGET" "$@"; }
+    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -q "$@"; }
+else
+    rsh() { ssh -o BatchMode=yes "$TARGET" "$@"; }
+    rscp() { scp -q "$@"; }
+fi
+
+CLIENT_PID=""
+REMOTE_STARTED=0
+FORWARD_WAS=""
+# How the server half is stopped and started again for the outage leg: the unit
+# in --product mode, the process in scratch mode. One of the two is set by the
+# server setup below; `server_stop`/`server_start` pick by $PRODUCT.
+SERVER_UNIT=""
+SERVER_PATTERN=""
+
+cleanup() {
+    set +e
+    say "cleanup"
+    [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null
+    [ -f "$LOCAL_DIR/client.toml" ] && "$QUICK" detach "$LOCAL_DIR/client.toml" >/dev/null 2>&1
+    if [ "$REMOTE_STARTED" = 1 ]; then
+        rsh "set +e
+            sudo pkill -f '^$REMOTE_DIR/vallum run' 2>/dev/null
+            sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
+            sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
+            sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
+            sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                       /etc/systemd/system/vallum-quick-watch@.service \
+                       /etc/systemd/system/vallum-enroll@.service
+            sudo systemctl daemon-reload >/dev/null 2>&1
+            sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
+            sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+            sudo ufw delete allow $((PORT+1))/udp >/dev/null 2>&1
+            sudo iptables -D FORWARD -i vallumrc -j ACCEPT 2>/dev/null
+            sudo iptables -D FORWARD -o vallumrc -j ACCEPT 2>/dev/null
+            sudo iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
+            sudo nft delete table inet vallum 2>/dev/null
+            sudo nft delete table inet vallumtest 2>/dev/null
+            sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick
+            sudo rm -rf $REMOTE_DIR
+            # The client namespace (--namespaced) and its veth. The veth is
+            # deleted by name on the host first: deleting the namespace alone
+            # would orphan the host-side peer.
+            sudo ip netns pids $CLI_NS 2>/dev/null | xargs -r kill 2>/dev/null
+            sudo ip netns del $CLI_NS 2>/dev/null
+            sudo ip link del $CLI_VETH 2>/dev/null" >/dev/null 2>&1
+        if [ -n "$FORWARD_WAS" ]; then
+            rsh "sudo sysctl -q -w net.ipv4.ip_forward=$FORWARD_WAS" >/dev/null 2>&1
+        fi
+    fi
+    rm -rf "$LOCAL_DIR"
+    ok "both ends restored"
+}
+kept() {
+    say "kept (--keep) — nothing was cleaned up"
+    echo "   remote daemon   $TARGET, UDP $PORT, config $REMOTE_DIR/server.toml"
+    echo "   remote files    $REMOTE_DIR and /usr/bin/vallum{,-quick}"
+    echo "   stop it         ssh $TARGET \"sudo pkill -f '^$REMOTE_DIR/vallum run'\""
+    echo "   local client    $LOCAL_DIR"
+    echo "   remote client   still inside ns $CLI_NS — ssh $TARGET \"sudo ip netns del $CLI_NS; sudo ip link del $CLI_VETH\" when done"
+}
+[ "$KEEP" = 1 ] && trap kept EXIT || trap cleanup EXIT
+
+[ -x "$VALLUM" ] || bad "build first: cargo build --release -p vallum -p vallum-quick"
+# Absolute, because the client half runs with a working directory of its own.
+VALLUM=$(cd "$(dirname "$VALLUM")" && pwd)/$(basename "$VALLUM")
+QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
+
+say "remote checks ($TARGET)"
+rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
+if rsh "test -e /etc/vallum" 2>/dev/null; then
+    if [ "$CLEAN" != 1 ]; then
+        bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.
+   Re-run with --clean-remote to remove it first, or pick a host with no Vallum."
+    fi
+    say "removing the existing deployment (--clean-remote)"
+    echo "   units:      vallum@*, vallum-quick@*, vallum-enroll@*"
+    echo "   files:      /etc/vallum, /etc/sysctl.d/90-vallum.conf, /usr/bin/vallum{,-quick}"
+    echo "   firewall:   the UDP port rule, the vallum FORWARD rules, table inet vallum"
+    rsh "set +e
+        sudo systemctl stop 'vallum@*' 'vallum-quick@*' 'vallum-enroll@*' >/dev/null 2>&1
+        sudo rm -rf /etc/systemd/system/multi-user.target.wants/vallum*@*
+        sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                   /etc/systemd/system/vallum-quick-watch@.service \
+                   /etc/systemd/system/vallum-enroll@.service
+        sudo systemctl daemon-reload >/dev/null 2>&1
+        sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
+        sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+        sudo nft delete table inet vallum >/dev/null 2>&1
+        sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
+    rsh "test ! -e /etc/vallum" || bad "could not remove the existing deployment"
+    ok "existing deployment removed"
+fi
+FORWARD_WAS=$(rsh "cat /proc/sys/net/ipv4/ip_forward" 2>/dev/null | tr -d '[:space:]')
+[ -n "$FORWARD_WAS" ] || bad "cannot read the remote's ip_forward"
+ok "passwordless sudo, no existing deployment, ip_forward=$FORWARD_WAS"
+
+# The target may be an ssh alias, so ask ssh what it would connect to — as the
+# invoking user, because `ssh` reads `~/.ssh/config` from the passwd entry and
+# root's home has none of their aliases.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    HOSTNAME=$(sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh -G "$TARGET" 2>/dev/null \
+        | awk '/^hostname /{print $2; exit}')
+else
+    HOSTNAME=$(ssh -G "$TARGET" 2>/dev/null | awk '/^hostname /{print $2; exit}')
+fi
+[ -n "$HOSTNAME" ] || HOSTNAME=${TARGET#*@}
+PUBLIC=$(getent hosts "$HOSTNAME" 2>/dev/null | awk '{print $1; exit}')
+if [ -z "$PUBLIC" ]; then
+    # `ssh -G` may already have given us an address.
+    case "$HOSTNAME" in
+        *[0-9].[0-9]*) PUBLIC=$HOSTNAME ;;
+    esac
+fi
+[ -n "$PUBLIC" ] || bad "cannot resolve $HOSTNAME (checked the invoking user's ssh config and DNS)"
+ok "the client will dial $PUBLIC:$PORT"
+
+say "copying the binaries"
+rsh "sudo rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR" || bad "mkdir on the remote"
+rscp "$VALLUM" "$QUICK" "$TARGET:$REMOTE_DIR/" || bad "scp"
+ok "binaries on the remote"
+
+if [ "$NAMESPACED" = 1 ]; then
+    say "client namespace on the target (nothing changes on this machine)"
+    # A stale namespace from a previous killed run would poison every later
+    # `ip netns exec`, so remove it first — its veth is deleted with it.
+    rsh "sudo ip netns del $CLI_NS 2>/dev/null; sudo ip link del $CLI_VETH 2>/dev/null; true"
+    rsh "sudo ip netns add $CLI_NS" || bad "cannot create netns $CLI_NS on the target"
+    rsh "set -e
+         sudo ip link add $CLI_VETH type veth peer name vallum-cli-n
+         sudo ip link set vallum-cli-n netns $CLI_NS
+         sudo ip addr add 10.99.91.1/24 dev $CLI_VETH
+         sudo ip link set $CLI_VETH up
+         sudo ip netns exec $CLI_NS ip link set lo up
+         sudo ip netns exec $CLI_NS ip link set vallum-cli-n up
+         sudo ip netns exec $CLI_NS ip addr add 10.99.91.2/24 dev vallum-cli-n
+         sudo ip netns exec $CLI_NS ip route add default via 10.99.91.1" \
+        || bad "the veth bridge into $CLI_NS did not come up"
+    # Prove the namespace can reach the host's public endpoint before anything
+    # depends on it: a veth misconfigured here would surface as 'no handshake'
+    # minutes from now, pointing at the tunnel instead of the bridge.
+    rsh "sudo ip netns exec $CLI_NS ping -c1 -W2 $PUBLIC" >/dev/null 2>&1 \
+        || bad "$CLI_NS cannot reach $PUBLIC — the veth bridge is wrong"
+    ok "$CLI_NS bridges to the host and can reach $PUBLIC:$PORT"
+fi
+
+REMOTE_STARTED=1
+
+if [ "$UPGRADE" = 1 ]; then
+    # Install the previous *release* first: the point of this mode is that a
+    # daemon written by an older tree must be upgraded by this one, with the
+    # config and peers it wrote still valid.
+    say "installing the previous release on the remote"
+    # This script runs as root for the local TUN, but `gh` credentials live
+    # with the invoking user — run it as them, which also makes drafts
+    # (which have assets but no public API entry) usable as the base. Fall
+    # back to the public API when gh is absent or unauthenticated.
+    gh_as_user() {
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+            sudo -u "$SUDO_USER" gh "$@"
+        else
+            gh "$@"
+        fi
+    }
+    prev=""
+    if command -v gh >/dev/null 2>&1 && gh_as_user auth status >/dev/null 2>&1; then
+        prev=$(gh_as_user release list --repo KidIkaros/vallum --limit 20 \
+            --json tagName --jq '.[0].tagName' 2>/dev/null)
+    fi
+    if [ -z "$prev" ]; then
+        prev=$(curl -fsSL "https://api.github.com/repos/KidIkaros/vallum/releases" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    [ -n "$prev" ] || bad "cannot list releases — no published releases, and gh is not authenticated"
+    asset="vallum-$prev-x86_64-linux.tar.gz"
+    mkdir -p "$LOCAL_DIR"
+    # gh runs as the invoking user, so the download dir must be writable by
+    # them — the script itself is root and `mkdir` made it root's.
+    chown "${SUDO_USER:-root}" "$LOCAL_DIR" 2>/dev/null || true
+    if ! curl -fsSL "https://github.com/KidIkaros/vallum/releases/download/$prev/$asset" \
+        -o "$LOCAL_DIR/$asset" 2>/dev/null; then
+        # A draft has no public download URL; gh reaches it with auth.
+        gh_as_user release download "$prev" --repo KidIkaros/vallum \
+            --pattern "$asset" --dir "$LOCAL_DIR" --clobber \
+            || bad "cannot download $prev"
+    fi
+    rscp "$LOCAL_DIR/$asset" "$TARGET:$REMOTE_DIR/" || bad "scp previous release"
+    rsh "cd $REMOTE_DIR && tar -xzf $asset && \
+         sudo install -m0755 vallum-$prev-x86_64-linux/vallum /usr/bin/vallum && \
+         sudo install -m0755 vallum-$prev-x86_64-linux/vallum-quick /usr/bin/vallum-quick && \
+         for u in vallum@.service vallum-quick@.service vallum-enroll@.service; do \
+             sudo install -m0644 vallum-$prev-x86_64-linux/\$u /etc/systemd/system/\$u; \
+         done && sudo systemctl daemon-reload" || bad "install previous release"
+    ok "previous release $prev installed"
+    rscp packaging/vallum@.service packaging/vallum-quick@.service \
+        packaging/vallum-quick-watch@.service \
+        packaging/vallum-enroll@.service "$TARGET:$REMOTE_DIR/" || bad "scp new units"
+fi
+
+if [ "$PRODUCT" = 1 ]; then
+    say "server init, every host step on (--product)"
+    if [ "$UPGRADE" = 1 ]; then
+        rsh "sudo /usr/bin/vallum server init --config /etc/vallum/vallumrc.toml --name vallumrc \
+             --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT --endpoint $PUBLIC" \
+            | tail -6 || bad "server init (previous release)"
+    else
+        rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
+         sudo install -m0755 $REMOTE_DIR/vallum-quick /usr/bin/vallum-quick && \
+         sudo /usr/bin/vallum server init --config /etc/vallum/vallumrc.toml --name vallumrc \
+              --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT --endpoint $PUBLIC" \
+            | tail -6 || bad "server init"
+    fi
+    for unit in vallum@vallumrc vallum-quick@vallumrc; do
+        rsh "systemctl is-active $unit" | grep -q '^active$' || bad "$unit is not active"
+    done
+    ok "both units active"
+    SERVER_CMD="sudo /usr/bin/vallum"
+    CONFIG=/etc/vallum/vallumrc.toml
+    SERVER_UNIT=vallum@vallumrc
+else
+    say "scratch server (no systemd, no /etc)"
+    rsh "sudo $REMOTE_DIR/vallum server init --config $REMOTE_DIR/server.toml --name vallumrc \
+            --no-host --no-service --address $SRV_IP/$PREFIX --listen 0.0.0.0:$PORT \
+            --endpoint $PUBLIC --control $REMOTE_DIR/server.sock" >/dev/null || bad "server init"
+    # Every host step fails loudly. These were once run with 2>/dev/null and a
+    # final `sleep 2`, so one killed step — the masquerade rule, say — still
+    # printed `ok`, and the lost symptom showed up minutes later as a
+    # 100%-loss egress ping that points at the wrong layer.
+    rsh "set -e
+         sudo nft delete table inet vallumtest 2>/dev/null || true
+         sudo sysctl -q -w net.ipv4.ip_forward=1
+         # Only an *active* ufw filters anything, and only then is an allow rule
+         # needed. A host with ufw installed but inactive (the default on many
+         # images) made 'ufw allow' fail — 'ERROR: Invalid syntax' — and took the
+         # whole setup down over a rule that would have changed nothing. The
+         # check is the status line, not the binary's presence.
+         if sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+             sudo ufw allow $PORT/udp >/dev/null
+         else
+             echo 'note: ufw is not active on the target; no allow rule is needed'
+         fi
+         # Forwarding acceptance is not optional. ufw's before-forward chain
+         # accepts ICMP echo, so a tunnel with no FORWARD rule pings happily
+         # and drops every TCP and UDP packet — the trap in
+         # docs/deployment/troubleshooting.md, found here the first time this
+         # script ran a DNS query through the tunnel.
+         sudo iptables -I FORWARD 1 -i vallumrc -j ACCEPT
+         sudo iptables -I FORWARD 1 -o vallumrc -j ACCEPT
+         sudo nft add table inet vallumtest
+         sudo nft 'add chain inet vallumtest postrouting { type nat hook postrouting priority srcnat; }'
+         sudo nft add rule inet vallumtest postrouting ip saddr $SUBNET masquerade
+         sudo nohup $REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml > $REMOTE_DIR/server.log 2>&1 &
+         sleep 2" || bad "remote host setup"
+    # Assert the forwarding plane took the state, not just that no step
+    # reported an error: a masquerade table with zero rules or an nft binary
+    # that silently dropped the rule would pass the block above.
+    rsh "sudo nft list table inet vallumtest | grep -q masquerade &&
+         sudo iptables -C FORWARD -i vallumrc -j ACCEPT &&
+         sudo iptables -C FORWARD -o vallumrc -j ACCEPT" \
+        || bad "the forwarding-plane rules did not take"
+    rsh "test -S $REMOTE_DIR/server.sock" || { rsh "sudo tail -5 $REMOTE_DIR/server.log"; bad "the remote daemon did not start"; }
+    ok "forwarding, NAT, one UDP port, daemon up"
+    SERVER_CMD="sudo $REMOTE_DIR/vallum"
+    CONFIG=$REMOTE_DIR/server.toml
+    # The config, not just the binary: the client daemon is started from the
+    # same directory and its command line begins identically, so `^<dir>/vallum
+    # run` stopped both. The outage leg measured a client that had been killed
+    # along with its server, and the verdict read `down` for the wrong reason.
+    SERVER_PATTERN="^$REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml"
+fi
+
+say "server ready for enrolment"
+
+# ── the three transports ─────────────────────────────────────────────────
+# Each one ends with a client config on this machine. What they prove is that
+# *provisioning* works three ways; the tunnel that follows is the same for all.
+
+ENROLL_READY=0
+ensure_enroll() {
+    [ "$ENROLL_READY" = 1 ] && return 0
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo /usr/bin/vallum server enroll --config $CONFIG --enable" >/dev/null || bad "server enroll --enable"
+    else
+        rsh "sudo sh -c 'grep -q \"^\\[enroll\\]\" $CONFIG || printf \"\\n[enroll]\\nenabled = true\\nport = $((PORT+1))\\n\" >> $CONFIG'"
+        rsh "sudo ufw allow $((PORT+1))/udp >/dev/null 2>&1
+             sudo nohup $REMOTE_DIR/vallum enroll-serve --config $CONFIG >> $REMOTE_DIR/enroll.log 2>&1 &
+             sleep 1"
+    fi
+    ENROLL_READY=1
+}
+
+# Run a command as the invoking user, in a directory, so `setup` writes there
+# instead of /etc/vallum.
+as_owner() {
+    local dir=$1
+    shift
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" sh -c "cd '$dir' && $*"
+    else
+        sh -c "cd '$dir' && $*"
+    fi
+}
+
+enrol_bundle() {
+    local name=$1 dir=$2
+    # No --endpoint here: this is the SERVER-side peer entry, whose connect
+    # address must be learned from datagrams, like any responder side. The
+    # server's own public_endpoint only names where the CLIENT dials (it is
+    # baked into the bundle below); passing it as the peer's endpoint made
+    # rotation's passive re-initiation dial the server itself.
+    rsh "$SERVER_CMD peer add $name --config $CONFIG \
+            --ship-key --bundle-out $REMOTE_DIR/$name.bundle" >/dev/null || bad "peer add ($name)"
+    rsh "sudo chmod 644 $REMOTE_DIR/$name.bundle" || bad "chmod bundle"
+    rscp "$TARGET:$REMOTE_DIR/$name.bundle" "$dir/$name.vallum-bundle" || bad "fetch bundle"
+    "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" >/dev/null || bad "import-bundle"
+}
+
+enrol_ssh() {
+    local name=$1 dir=$2
+    # `setup --remote` runs `sudo vallum peer enroll` over there, so the binary
+    # must be installed. Cleanup removes it again.
+    if [ "$PRODUCT" != 1 ]; then
+        rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum" || bad "install vallum on the remote"
+        note "installed vallum to /usr/bin on the remote for the ssh transport"
+    fi
+    as_owner "$dir" "$VALLUM setup --remote $TARGET --remote-config $CONFIG --name $name" > "$dir/setup.log" 2>&1 \
+        || { cat "$dir/setup.log"; bad "setup --remote ($name)"; }
+}
+
+enrol_token() {
+    local name=$1 dir=$2
+    ensure_enroll
+    local invite id token fingerprint
+    invite=$(rsh "$SERVER_CMD peer invite $name --config $CONFIG --json") || bad "peer invite ($name)"
+    id=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+    token=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+    fingerprint=$(printf '%s' "$invite" | python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])')
+    as_owner "$dir" "$VALLUM setup --join $PUBLIC:$((PORT+1)) --name $name \
+            --invite-id $id --token $token --expect $fingerprint" > "$dir/setup.log" 2>&1 \
+        || { cat "$dir/setup.log"; bad "setup --join ($name)"; }
+    grep -q "server fingerprint $fingerprint" "$dir/setup.log" || bad "the fingerprint was not verified"
+}
+
+# A client config from any transport, rewritten to a split tunnel so this
+# machine's default route and resolver are never touched, then run and proved.
+# A client config from any transport, proved in whichever mode the run uses:
+# prove_client_ns consumes the config on the SSH target inside $CLI_NS;
+# prove_client_host consumes it on this machine. What they prove is the same
+# set of assertions; only the address space differs.
+prove_client() {
+    if [ "$NAMESPACED" = 1 ]; then prove_client_ns "$@"; else prove_client_host "$@"; fi
+}
+
+# ── stopping and starting the server ─────────────────────────────────────
+# By unit in --product mode, by process in scratch mode. `stop` rather than
+# kill in the product case on purpose: the shipped unit is `Restart=always`, so
+# a killed process would come straight back and there would be no outage.
+server_stop() {
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo systemctl stop $SERVER_UNIT" || return 1
+        for _ in $(seq 1 20); do
+            rsh "sudo systemctl is-active $SERVER_UNIT" 2>/dev/null | grep -q '^inactive$' && return 0
+            sleep 0.5
+        done
+        return 1
+    fi
+    rsh "sudo pkill -f '$SERVER_PATTERN'" || return 1
+    # The process, not the socket: a killed daemon can leave its socket file
+    # behind, and waiting on the file would report a stop that did not happen.
+    for _ in $(seq 1 20); do
+        rsh "sudo pgrep -f '$SERVER_PATTERN' >/dev/null" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+server_start() {
+    if [ "$PRODUCT" = 1 ]; then
+        rsh "sudo systemctl start $SERVER_UNIT" || return 1
+        for _ in $(seq 1 30); do
+            rsh "sudo test -S /run/vallum/vallumrc.sock" 2>/dev/null && return 0
+            sleep 0.5
+        done
+        return 1
+    fi
+    rsh "sudo nohup $REMOTE_DIR/vallum run --config $REMOTE_DIR/server.toml \
+         >> $REMOTE_DIR/server.log 2>&1 &" || return 1
+    for _ in $(seq 1 30); do
+        rsh "test -S $REMOTE_DIR/server.sock" 2>/dev/null && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+# ── the outage, and recovery without a human ─────────────────────────────
+# Roadmap item 5's last piece. Recovery is pinned in-process by protocol tests
+# and in the namespace lab, but nowhere on the real link: this stops the server
+# while the client stays attached and untouched, and requires four things.
+#
+#   1. The client's verdict stops saying `up` while it is dead — including past
+#      the reject window, which is the case an idle laptop sat in for hours.
+#   2. Nothing crosses. The route into the tunnel is still there (so this is not
+#      fail-open) and every datagram sent dies in it.
+#   3. The tunnel returns with nobody touching the client.
+#   4. It does not hammer once it is back.
+#
+# A ping stream, not a single ping, keeps the delivery window full for the whole
+# outage: the verdict is only allowed to judge 100 datagrams in the window, and
+# an idle window would let `up` be explained away. It is also what a user with a
+# dead browser actually does.
+prove_outage_recovery() {
+    local name=$1 dir=$2 rdir=$3 iface=$CIFACE
+    local vallum_r="$REMOTE_DIR/vallum"
+    local word="" deadline sent took e0 e1
+
+    [ "$OUTAGE" = 1 ] || { note "--no-outage: the server-outage leg was skipped"; return 0; }
+    [ "$OUTAGE_DONE" = 1 ] && return 0
+    OUTAGE_DONE=1
+
+    say "outage: the server goes away, and the client must not lie, leak or need a hand"
+
+    # The baseline, so a later `stale` cannot be a client that was already dead.
+    cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1 \
+        || bad "$name: the tunnel did not carry before the outage"
+    cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-before.json" 2>&1
+    grep -q '"verdict": "up"' "$dir/status-before.json" \
+        || { cat "$dir/status-before.json"; bad "$name: the verdict was not up before the outage"; }
+    ok "$name: carrying and reported up before the outage"
+
+    server_stop || { rsh "sudo tail -5 $REMOTE_DIR/server.log" >&2; bad "$name: the server could not be stopped, so nothing was measured"; }
+    # Only the *server* stopped. A pattern that also matched the client's daemon
+    # would make every later assertion about a client that is not running, and
+    # `down` would look like an outage verdict instead of a dead process.
+    cli_put "$vallum_r show --control $rdir/c.sock" > /dev/null 2>&1 \
+        || { rsh "sudo tail -5 $rdir/client.log" >&2; bad "$name: the client daemon stopped too — the server-stop pattern matches it"; }
+    cli_put "nohup ping -c $OUTAGE_PINGS -i 0.2 -W 1 1.1.1.1 > $rdir/outage-ping.log 2>&1 &"
+
+    # 1a. The delivery verdict stops saying up. With the stream running the
+    # window is full within seconds, so a bounded poll cannot be excused by a
+    # sample that is still too small.
+    for _ in $(seq 1 30); do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-outage.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-outage.json" | head -1)
+        case "$word" in up|"") sleep 2 ;; *) break ;; esac
+    done
+    case "$word" in
+        up|"") cat "$dir/status-outage.json"; bad "$name: the verdict still said up with the server stopped" ;;
+    esac
+    ok "$name: a dead server reads as $word, not up"
+
+    # 1b. Past the reject window the daemon itself has declared the session
+    # dead, and the verdict must say so rather than falling back to `up` when
+    # the delivery window drains.
+    deadline=$(( $(date +%s) + REJECT_WINDOW + 80 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-stale.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-stale.json" | head -1)
+        [ "$word" = stale ] && break
+        sleep 5
+    done
+    [ "$word" = stale ] \
+        || { cat "$dir/status-stale.json"; bad "$name: the verdict never reached stale past the ${REJECT_WINDOW} s reject window (last read: ${word:-none})"; }
+    ok "$name: past ${REJECT_WINDOW} s the verdict is stale — the daemon answers, the session is dead"
+
+    # 2. Nothing crossed, and the reason is that the tunnel held rather than
+    # that the route quietly reverted to the physical link.
+    local dev
+    dev=$(cli_put "ip route get 1.1.1.1" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+    case "$dev" in
+        vallum*) : ;;
+        *) bad "$name: during the outage egress to 1.1.1.1 went via ${dev:-no device}, not the tunnel — that is fail-open" ;;
+    esac
+
+    # The bracket keeps pkill from matching the shell that runs it: its own
+    # command line contains the pattern, and killing itself would never reach
+    # ping — the same trap `[v]allum` breaks everywhere else in this script.
+    rsh "sudo pkill -INT -f '[p]ing -c $OUTAGE_PINGS' >/dev/null 2>&1; true"
+    sleep 2
+    rsh "cat $rdir/outage-ping.log" > "$dir/outage-ping.log" 2>/dev/null
+    if grep -qE '[0-9]+ packets transmitted, [1-9][0-9]* (packets )?received' "$dir/outage-ping.log"; then
+        cat "$dir/outage-ping.log"
+        bad "$name: traffic crossed while the server was stopped"
+    fi
+    sent=$(sed -n 's/^\([0-9]*\) packets transmitted.*/\1/p' "$dir/outage-ping.log" | tail -1)
+    [ "${sent:-0}" -ge 100 ] \
+        || { cat "$dir/outage-ping.log"; bad "$name: the outage probe sent ${sent:-0} datagrams, too few for the window to judge anything"; }
+    ok "$name: $sent datagrams into a dead tunnel, none answered, and the route still pointed at it"
+
+    # 3. Recovery, with every client-side process left exactly as it was: what
+    # is restarted here is the server, and nothing else.
+    say "recovery: the server returns; the client is not touched"
+    took=$(date +%s)
+    server_start || { rsh "sudo tail -10 $REMOTE_DIR/server.log" >&2; bad "$name: the server did not come back"; }
+    # Carrying again is the recovery claim, and it is measured separately from
+    # the verdict: the verdict cannot say `up` until the 60 s delivery window
+    # has drained of the outage's failed datagrams, which is the window's own
+    # latency and not the tunnel's. Reporting one number for both would credit
+    # the window drain to the protocol.
+    local carried=0
+    deadline=$(( $(date +%s) + RECOVERY_BUDGET ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        # Traffic is what makes recovery observable: neither side dials an idle
+        # peer, and the re-initiation needs a stale datagram to be triggered by.
+        cli_put "ping -c1 -W1 1.1.1.1" > /dev/null 2>&1 && { carried=1; break; }
+        sleep 2
+    done
+    [ "$carried" = 1 ] \
+        || { rsh "sudo tail -20 $rdir/client.log" >&2; bad "$name: traffic did not cross again within ${RECOVERY_BUDGET} s of the server returning"; }
+    took=$(( $(date +%s) - took ))
+    ok "$name: carried again ${took}s after the server returned, with the client daemon untouched"
+
+    word=""
+    deadline=$(( $(date +%s) + 120 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        cli_put "$vallum_r status --config $rdir/client.toml --json" > "$dir/status-recovered.json" 2>&1
+        word=$(sed -n 's/.*"verdict": "\([^"]*\)".*/\1/p' "$dir/status-recovered.json" | head -1)
+        [ "$word" = up ] && break
+        cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1
+        sleep 3
+    done
+    [ "$word" = up ] \
+        || { cat "$dir/status-recovered.json"; bad "$name: the tunnel carried again but the verdict stayed ${word:-unknown} for 120 s"; }
+    cli_put "ping -c2 -W3 1.1.1.1" > "$dir/recovered-ping.log" 2>&1 \
+        || { cat "$dir/recovered-ping.log"; bad "$name: the verdict said up but traffic still did not cross"; }
+    ok "$name: the verdict is back to up once the delivery window drained"
+
+    # 4. Recovering once is not the same as recovering stably: a client that
+    # handshakes in a loop looks healthy in any single reading.
+    e0=$(_established "$vallum_r" "$rdir")
+    sleep 30
+    cli_put "ping -c2 -W3 1.1.1.1" > /dev/null 2>&1
+    e1=$(_established "$vallum_r" "$rdir")
+    [ $((e1 - e0)) -le 2 ] \
+        || bad "$name: $((e1 - e0)) handshakes in 30 s of steady traffic — recovery is looping, not settling"
+    ok "$name: $((e1 - e0)) handshake(s) in 30 s of steady traffic — the recovered tunnel is not thrashing"
+}
+
+# `vallum_loop_handshakes_established_total`, or 0 when the scrape cannot say.
+_established() {
+    local vallum_r=$1 rdir=$2 value
+    value=$(cli_put "$vallum_r metrics --config $rdir/client.toml" 2>/dev/null \
+        | awk '/^vallum_loop_handshakes_established_total/ { print $2; exit }')
+    case "$value" in ''|*[!0-9]*) echo 0 ;; *) echo "$value" ;; esac
+}
+
+# ── the namespaced proof ─────────────────────────────────────────────────
+# The caller's machine is never touched: the config is rewritten for the
+# remote directory while it is still here, then scp'd over, and the daemon,
+# vallum-quick and every assertion run inside the namespace via `ip netns
+# exec`. Egress is still real: the namespace's veth hangs off the host's own
+# routing, so the client dials the server's public endpoint exactly as a
+# laptop would.
+prove_client_ns() {
+    local name=$1 dir=$2 iface=$CIFACE rdir="$REMOTE_DIR/cli/$1" config
+    local vallum_r="$REMOTE_DIR/vallum" quick_r="$REMOTE_DIR/vallum-quick"
+
+    config=$(ls "$dir"/*.toml | head -1)
+    [ -n "$config" ] || bad "$name: no client config was produced"
+
+    # Same split-tunnel rewrite as --host-direct — but "control" already points
+    # at the remote directory, because the config is consumed over there.
+    # The large-response target must not need to be resolved inside the
+    # namespace, which has no working resolver — and pinning it also keeps
+    # the flow tunnel-carried in --host-direct, where an unpinned name would
+    # silently ride the physical link instead of proving the tunnel works.
+    # Resolved here, on the invoking machine, over its ordinary DNS, before
+    # anything is touched; empty means the size check below is skipped.
+    local edge
+    edge=$(getent ahostsv4 speed.cloudflare.com 2>/dev/null | awk '{print $1; exit}')
+    python3 - "$config" "$iface" "$SRV_IP" "$rdir" "$edge" <<'PY'
+import re, sys
+path, iface, srv, workdir, edge = sys.argv[1:6]
+text = open(path).read()
+text = re.sub(r'^name = ".*?"', f'name = "{iface}"', text, count=1, flags=re.M)
+text = re.sub(r'^control = .*$', f'control = "{workdir}/c.sock"', text, flags=re.M)
+allowed = [f'"{srv}/32"', '"1.1.1.1/32"']
+if edge:
+    allowed.append(f'"{edge}/32"')  # pin the large-response target so the flow is tunnel-carried
+text = re.sub(r'allowed_ips = \[.*?\]', 'allowed_ips = [' + ', '.join(allowed) + ']', text)
+text = re.sub(r'^dns = .*\n', '', text, flags=re.M)
+open(path, 'w').write(text)
+PY
+
+    # Fresh dir, not `mkdir -p`: a dir left behind by a sudo-run step (the
+    # server's bundle-out, for instance) is root-owned, and `mkdir -p` would
+    # silently keep it — then the scp below fails on an open it cannot own.
+    rsh "sudo rm -rf $rdir && mkdir -p $rdir" || bad "$name: no scratch dir on the target"
+    rscp "$config" "$TARGET:$rdir/client.toml" || bad "$name: scp the config"
+    # The config references its private key by relative name (the daemon
+    # resolves it against the config's directory), and every transport bundles
+    # a key with the config — on the local dir it sat next to the .toml and the
+    # reference just worked; over here it has to travel too or the daemon dies
+    # with a No such file on its key.
+    for key in "$dir"/*.key; do
+        [ -e "$key" ] || continue
+        rscp "$key" "$TARGET:$rdir/" || bad "$name: scp $(basename "$key")"
+    done
+
+    # Before running it, check the config as the server produced it:
+    # `attach --dry-run` prints the plan and refuses a config it could not
+    # install — the same gate --host-direct runs, but inside the namespace
+    # where it will actually attach.
+    cli_put "$quick_r attach $rdir/client.toml --dry-run" > "$dir/attach-dry.log" 2>&1 \
+        || { cat "$dir/attach-dry.log"; bad "$name: the config as produced cannot be attached"; }
+
+    # The daemon lives in the namespace for the whole proof; `nohup` keeps it
+    # past the ssh session, and the pkill below reaps it per transport.
+    # Start the daemon within this session and verify it by *effect*: the TUN
+    # appearing inside the namespace, not by pgrep. pgrep -f matches any
+    # process whose command line contains the pattern — and the remote shell
+    # running this very command contains it too, so a plain spelling matches
+    # that shell, not the daemon, and a dead daemon sails under a green check
+    # straight into attach's timeout. `[v]allum` breaks the literal match.
+    cli_put "nohup $vallum_r run --config $rdir/client.toml > $rdir/client.log 2>&1 &"
+    local iface_up=0
+    for _ in $(seq 1 20); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 && { iface_up=1; break; }
+        sleep 0.5
+    done
+    if [ "$iface_up" != 1 ]; then
+        rsh "cat $rdir/client.log 2>/dev/null" >&2
+        bad "$name: the client daemon did not create $iface"
+    fi
+    cli_put "$quick_r attach $rdir/client.toml" > "$dir/attach.log" 2>&1 \
+        || { cat "$dir/attach.log"; rsh "cat $rdir/client.log 2>/dev/null" >&2; bad "$name: attach"; }
+
+    local established=0
+    for _ in $(seq 1 20); do
+        # Traffic drives the handshake — the daemon does not dial an idle peer
+        # on its own, exactly as WireGuard does not. The ping is what starts it.
+        cli_put "ping -c1 -W1 $SRV_IP" >/dev/null 2>&1
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    [ "$established" = 1 ] || bad "$name: no handshake (is UDP $PORT reachable?)"
+
+    cli_put "ping -c2 -W3 $SRV_IP" > "$dir/tunnel.log" 2>&1 || { cat "$dir/tunnel.log"; bad "$name: the tunnel does not ping"; }
+    cli_put "ping -c3 -W4 1.1.1.1" > "$dir/egress.log" 2>&1 || {
+        cat "$dir/egress.log"
+        say "server forwarding state at the moment of the egress failure"
+        rsh "sudo iptables -L FORWARD -n -v | head -8
+             sudo nft list table inet vallumtest 2>/dev/null
+             sudo tail -n 8 $REMOTE_DIR/server.log" || true
+        bad "$name: no egress through the server"
+    }
+    local dig_r curl_r
+    dig_r=$(rsh "command -v dig >/dev/null 2>&1 && echo 1")
+    if [ "${dig_r:-0}" = 1 ]; then
+        cli_put "dig +time=3 +tries=1 @1.1.1.1 example.com A" > "$dir/dig.log" 2>&1
+        if ! grep -q "ANSWER SECTION" "$dir/dig.log"; then
+            cat "$dir/dig.log"
+            note "ICMP crossed but UDP did not, which is the signature of a"
+            note "FORWARD policy that drops everything except echo — see"
+            note "docs/deployment/troubleshooting.md, \"ping works, nothing else\""
+            bad "$name: DNS through the tunnel did not answer"
+        fi
+    fi
+    ok "$name: handshake, tunnel, egress$([ "${dig_r:-0}" = 1 ] && printf ', DNS')"
+
+    # A 1 MiB HTTPS response exercises the path MTU end to end, as in
+    # --host-direct: a wrong MTU is reported by users as "the VPN is up but
+    # some sites hang", so the size that arrived matters.
+    curl_r=$(rsh "command -v curl >/dev/null 2>&1 && echo 1")
+    if [ "${curl_r:-0}" = 1 ] && [ -n "$edge" ]; then
+        local got
+        got=$(cli_put "curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+            --resolve speed.cloudflare.com:443:$edge \
+            'https://speed.cloudflare.com/__down?bytes=1000000'" 2>"$dir/curl.log" || true)
+        if [ "${got:-0}" -ge 900000 ]; then
+            ok "$name: a 1 MiB HTTPS response arrives intact"
+        else
+            [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
+            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+        fi
+    else
+        note "curl absent on the target, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
+    fi
+
+    # A leak is a routing decision, and inside the namespace it is readable the
+    # same way: the lookup for an outside address must land on the tunnel.
+    local v4dev
+    v4dev=$(cli_put "ip route get 1.1.1.1" 2>/dev/null | sed -n 's/.*dev \\([^ ]*\\).*/\\1/p' | head -1)
+    case "$v4dev" in
+        vallum*) ok "$name: IPv4 egress routes into the tunnel ($v4dev)" ;;
+        "")      note "could not determine the IPv4 route" ;;
+        *)       bad "$name: IPv4 egress escapes via $v4dev, not the tunnel" ;;
+    esac
+
+    # The namespace is IPv4-only by construction: it has no global v6 address
+    # (the veth carries no v6), so the strict v6 assertion cannot apply — same
+    # decide-not-assert rule as --host-direct, stated for the same reason.
+    note "$name: this client is IPv4-only, so the IPv6 route assertion does not apply"
+    note "   on a dual-stack host a v4-only split tunnel leaves IPv6 on the physical"
+    note "   link — that is split-tunnel semantics. For a full-tunnel posture the"
+    note "   fail-closed guard blocks it: vallum policy on (see ADR-0018/ADR-0020)"
+
+    # ── no foreign source may enter the tunnel ──
+    # Both directions as in --host-direct: nothing foreign during normal
+    # traffic, then a foreign source attempted on purpose, which must be
+    # refused and named. Link-local traffic is excluded — a link-local source
+    # means nothing across a link boundary.
+    refusals() {
+        rsh "grep 'does not own that address' $rdir/client.log 2>/dev/null" | grep -v 'from fe80:'
+    }
+    if [ -n "$(refusals | head -1)" ]; then
+        refusals | head -3
+        bad "$name: ordinary traffic was refused for a routable foreign source"
+    else
+        ok "$name: no routable foreign source during normal traffic"
+    fi
+
+    # The positive control, inside the namespace: an address the config does
+    # not declare is added to the tunnel interface and a packet is sourced from
+    # it; the daemon must refuse it.
+    local foreign=192.0.2.99
+    if cli_put "ip addr add $foreign/32 dev $iface" 2>/dev/null; then
+        cli_put "ping -I $foreign -c1 -W1 $SRV_IP" >/dev/null 2>&1
+        sleep 1
+        if rsh "grep 'does not own that address' $rdir/client.log 2>/dev/null" | grep -q "from $foreign"; then
+            ok "$name: a foreign source is refused locally and named"
+        else
+            bad "$name: a packet sourced from $foreign was sealed, not refused"
+        fi
+        cli_put "ip addr del $foreign/32 dev $iface" 2>/dev/null
+    else
+        note "could not add $foreign to $iface: foreign-source control skipped"
+    fi
+
+    # The server-outage leg (roadmap item 5 / ADR-0019), on the real link and
+    # with the client left exactly as it is. Runs once per invocation: it costs
+    # minutes and proves a property of the client, not of the transport.
+    prove_outage_recovery "$name" "$dir" "$rdir"
+
+    if [ "$kind" = "bundle" ]; then
+        say "rotation live across the network"
+        local new_key="$dir/new.key" new_pub="$dir/new.pub"
+        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        # The CLI reads a public-line file, not a `-` alias for stdin — see the
+        # note in prove_client_host.
+        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file /dev/stdin" < "$new_pub" \
+            || bad "$name: remote peer rotate"
+        cli_put "ping -c2 -W3 1.1.1.1" >/dev/null 2>&1 || bad "$name: rotation broke active tunnel egress"
+        ok "$name: tunnel survives rotation across the network"
+        rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
+        ok "$name: rotated and finalized on remote server"
+
+        # Finalize retires the old key on the server. The live session carries
+        # on, which is all the assertion above sees — but the client's config
+        # still names the retired key, so the *next* handshake is refused, and
+        # nothing in the log says why. (The per-app case below restarts the
+        # daemon, and a restarted daemon must handshake: that is how this was
+        # found.) Adopt the rotated key and prove a fresh handshake with it, so
+        # the run does not end on a deployment that only works until the next
+        # rekey.
+        rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+        for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+        rscp "$new_key" "$TARGET:$rdir/client.key" || bad "$name: scp the rotated key"
+        rsh "sudo python3 - $rdir/client.toml <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r'^private_key = .*$', 'private_key = \"client.key\"', text, count=1, flags=re.M)
+open(path, 'w').write(text)
+PY" || bad "$name: pointing the config at the rotated key failed"
+        cli_put "nohup $vallum_r run --config $rdir/client.toml > $rdir/client.log 2>&1 &"
+        local fresh=0
+        # The restart took the routes attach had installed with the old device,
+        # and the attach that puts them back is the caller's next step — so put
+        # the one route this probe needs back by hand. Without it the ping has no
+        # route to the server, nothing enters the TUN, and the failure looks
+        # like a rejected key.
+        for _ in $(seq 1 20); do cli_put "ip link show $iface" >/dev/null 2>&1 && break; sleep 0.5; done
+        cli_put "ip route replace $SRV_IP/32 dev $iface" >/dev/null 2>&1 || true
+        for _ in $(seq 1 20); do
+            cli_put "ping -4 -c1 -W1 -I $CLI_IP $SRV_IP" >/dev/null 2>&1
+            cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { fresh=1; break; }
+            sleep 0.5
+        done
+        cli_put "ip route del $SRV_IP/32 dev $iface" >/dev/null 2>&1 || true
+        if [ "$fresh" != 1 ]; then
+            rsh "sudo tail -5 $rdir/client.log" >&2
+            bad "$name: the rotated key did not handshake"
+        fi
+        ok "$name: the rotated key handshakes a fresh session"
+    fi
+
+    # ── the client verdict, on the real link ──
+    # What pages must be what was tested: the same three endings the netns
+    # gate (e2e-netns.sh) proves, here against a daemon on the real live
+    # network over the server's real NAT. The scrape runs inside the namespace
+    # the way a real exporter would see it, and the dead endings are proven
+    # against the namespace's own guard tables — which is why this leg sits
+    # inside prove_client_ns and not prove_client_host: the script never
+    # installs or removes a guard on the invoking machine's tables.
+    say "client verdict: the scrape carries the status verdict"
+    cli_put "$vallum_r metrics --config $rdir/client.toml > $rdir/metrics-live.txt 2>&1" \
+        || { rsh "cat $rdir/metrics-live.txt"; bad "$name: the scrape failed while the daemon lived"; }
+    rsh "cat $rdir/metrics-live.txt" > "$dir/metrics-live.txt"
+    grep -q '^# TYPE vallum_client_verdict gauge$' "$dir/metrics-live.txt" \
+        || bad "$name: the scrape has no client-verdict family"
+    grep -q "client_verdict{interface=\"$iface\",verdict=\"up\"} 1" "$dir/metrics-live.txt" \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the live scrape did not read verdict=up"; }
+    grep -q '^vallum_up 1$' "$dir/metrics-live.txt" \
+        || bad "$name: the live scrape did not report up=1"
+    ok "$name: the live scrape carries the verdict the status verb would print"
+
+    # The endings that page. The transported config runs as a deliberate
+    # split tunnel — where a dead daemon without a guard is `down` by design,
+    # not a leak — so the leaked ending needs the config to state a full
+    # -tunnel posture. The provisioning writer already ships a `[quick]`
+    # section (`table = "auto"`, optional `dns`), so the policy is set inside
+    # it, in place — the same thing the netns gate writes for its own config
+    # before the same ending. The final state is asserted, and anything else
+    # fails loudly rather than faking the alert.
+    rsh "if grep -q '^policy = ' $rdir/client.toml; then
+             sed -i 's/^policy\\(\s*=\\).*$/policy = \"on\"/' $rdir/client.toml
+         else
+             sed -i '/^\\[quick\\]/a policy = \"on\"' $rdir/client.toml
+         fi
+         grep -q '^policy = \"on\"$' $rdir/client.toml" \
+        || bad "$name: the config did not end with policy = on; the verdict leg's rewrite broke in that config shape"
+
+    rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    cli_put "rm -f $rdir/c.sock"
+    # `ip netns exec` execs binaries, not a shell, so a `command -v` builtin is
+    # a "no such file" here — the check must go through a shell.
+    cli_put "sh -c 'command -v nft'" >/dev/null 2>&1 \
+        || bad "$name: the target has no nft; the verdict leg cannot read the guard state"
+
+    cli_put "$vallum_r policy on --config $rdir/client.toml" > "$dir/policy-dead-on.log" 2>&1 \
+        || { cat "$dir/policy-dead-on.log"; bad "$name: policy on failed with the daemon dead"; }
+    grep -q 'is blocked' "$dir/policy-dead-on.log" \
+        || { cat "$dir/policy-dead-on.log"; bad "$name: dead-daemon policy on did not report a guard"; }
+    # The dead scrape must exit nonzero — scripts gate on that — yet still
+    # write the file: silence would hide the state instead of naming it.
+    if cli_put "$vallum_r metrics --config $rdir/client.toml --output $rdir/metrics-blocked.prom" \
+        >/dev/null 2>&1; then
+        bad "$name: the scrape exited 0 while the daemon was dead"
+    fi
+    rsh "cat $rdir/metrics-blocked.prom" > "$dir/metrics-blocked.prom" 2>/dev/null
+    grep -q 'verdict="blocked"' "$dir/metrics-blocked.prom" \
+        || { cat "$dir/metrics-blocked.prom" 2>/dev/null; bad "$name: a dead daemon under a guard did not read blocked"; }
+    grep -q '^vallum_up 0$' "$dir/metrics-blocked.prom" \
+        || bad "$name: the dead-daemon scrape did not report up=0"
+    ok "$name: a dead daemon under an installed guard scrapes as blocked, the scrape failing"
+
+    cli_put "$vallum_r policy off --config $rdir/client.toml" > "$dir/policy-dead-off.log" 2>&1 \
+        || { cat "$dir/policy-dead-off.log"; bad "$name: policy off failed with the daemon dead"; }
+    if cli_put "$vallum_r metrics --config $rdir/client.toml --output $rdir/metrics-leaking.prom" \
+        >/dev/null 2>&1; then
+        bad "$name: the scrape exited 0 with a dead daemon and no guard"
+    fi
+    rsh "cat $rdir/metrics-leaking.prom" > "$dir/metrics-leaking.prom" 2>/dev/null
+    grep -q 'verdict="LEAKING"' "$dir/metrics-leaking.prom" \
+        || { cat "$dir/metrics-leaking.prom" 2>/dev/null; bad "$name: a dead daemon with no guard did not read LEAKING"; }
+    ok "$name: a dead daemon with no guard scrapes as LEAKING — the state the pager names"
+
+    # Teardown for the next transport: detach, then reap the daemon whose
+    # command line names this transport's config directory.
+    cli_put "$quick_r detach $rdir/client.toml" >/dev/null 2>&1
+    # Same literal-match trap as above, mirrored for the kill: the parent
+    # shell of this pkill contains the pattern, so it must not match itself.
+    rsh "sudo pkill -f '[v]allum run --config $rdir/client.toml'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+}
+
+# ── the host-direct proof ────────────────────────────────────────────────
+# The old behaviour, kept deliberately: the client runs on the invoking
+# machine against its real interfaces, which is the closest a test gets to a
+# real second laptop. It rewrites this machine's routes for the run and needs
+# local root, which is why it is opt-in rather than the default.
+prove_client_host() {
+    local name=$1 dir=$2 config iface=$CIFACE
+    config=$(ls "$dir"/*.toml | head -1)
+    # The outage leg is namespaced-only: it stops the real server and waits out
+    # the reject window, which is fine against a client in a namespace and is
+    # not something to do while this machine's own routes are rewritten. Stated
+    # rather than silently skipped, because it is the one production claim a
+    # --host-direct run does not cover.
+    note "$name: the server-outage leg runs in namespaced mode only (see --namespaced)"
+    [ -n "$config" ] || bad "$name: no client config was produced"
+
+    # Before rewriting it into a split tunnel, check the config as the server
+    # produced it: `attach --dry-run` prints the plan and refuses a config it
+    # could not install (a full tunnel without a fwmark, for instance).
+    "$QUICK" attach "$config" --dry-run > "$dir/attach-dry.log" 2>&1 \
+        || { cat "$dir/attach-dry.log"; bad "$name: the config as produced cannot be attached"; }
+    # The large-response target is resolved here and pinned two ways: into
+    # this config's allowed set, so the flow is carried by the tunnel instead
+    # of the physical link (an unpinned name would silently travel outside
+    # the interface and make the size pass vacuously), and with --resolve on
+    # the curl below. Empty means the size check is skipped, not ignored.
+    local edge
+    edge=$(getent ahostsv4 speed.cloudflare.com 2>/dev/null | awk '{print $1; exit}')
+    python3 - "$config" "$iface" "$SRV_IP" "$dir" "$edge" <<'PY'
+import re, sys
+path, iface, srv, workdir, edge = sys.argv[1:6]
+text = open(path).read()
+text = re.sub(r'^name = ".*?"', f'name = "{iface}"', text, count=1, flags=re.M)
+text = re.sub(r'^control = .*$', f'control = "{workdir}/c.sock"', text, flags=re.M)
+allowed = [f'"{srv}/32"', '"1.1.1.1/32"']
+if edge:
+    allowed.append(f'"{edge}/32"')  # pin the large-response target so the flow is tunnel-carried
+text = re.sub(r'allowed_ips = \[.*?\]', 'allowed_ips = [' + ', '.join(allowed) + ']', text)
+text = re.sub(r'^dns = .*\n', '', text, flags=re.M)
+open(path, 'w').write(text)
+PY
+
+    "$VALLUM" run --config "$config" > "$dir/client.log" 2>&1 &
+    CLIENT_PID=$!
+    sleep 2
+    kill -0 "$CLIENT_PID" 2>/dev/null || { cat "$dir/client.log"; bad "$name: the client daemon exited"; }
+    "$QUICK" attach "$config" > "$dir/attach.log" 2>&1 || { cat "$dir/attach.log"; bad "$name: attach"; }
+
+    local established=0
+    for _ in $(seq 1 20); do
+        # Traffic drives the handshake — the daemon does not dial an idle peer
+        # on its own, exactly as WireGuard does not. The ping is what starts it.
+        ping -c1 -W1 "$SRV_IP" >/dev/null 2>&1
+        "$VALLUM" show --control "$dir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    [ "$established" = 1 ] || bad "$name: no handshake (is UDP $PORT reachable?)"
+
+    ping -c2 -W3 "$SRV_IP" > "$dir/tunnel.log" 2>&1 || { cat "$dir/tunnel.log"; bad "$name: the tunnel does not ping"; }
+    ping -c3 -W4 1.1.1.1 > "$dir/egress.log" 2>&1 || {
+        cat "$dir/egress.log"
+        say "server forwarding state at the moment of the egress failure"
+        rsh "sudo iptables -L FORWARD -n -v | head -8
+             sudo nft list table inet vallumtest 2>/dev/null
+             sudo tail -n 8 $REMOTE_DIR/server.log" || true
+        bad "$name: no egress through the server"
+    }
+    if command -v dig >/dev/null 2>&1; then
+        dig +time=3 +tries=1 @1.1.1.1 example.com A > "$dir/dig.log" 2>&1
+        if ! grep -q "ANSWER SECTION" "$dir/dig.log"; then
+            cat "$dir/dig.log"
+            note "ICMP crossed but UDP did not, which is the signature of a"
+            note "FORWARD policy that drops everything except echo — see"
+            note "docs/deployment/troubleshooting.md, \"ping works, nothing else\""
+            bad "$name: DNS through the tunnel did not answer"
+        fi
+    fi
+    ok "$name: handshake, tunnel, egress$(command -v dig >/dev/null 2>&1 && printf ', DNS')"
+
+    # ── what a browser would notice ──
+    # A 1 MiB HTTPS response exercises the path MTU end to end. A wrong MTU is
+    # reported by users as "the VPN is up but some sites hang", so the size that
+    # arrived matters more than the fact that something did.
+    if command -v curl >/dev/null 2>&1 && [ -n "$edge" ]; then
+        local got
+        got=$(curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+            --resolve speed.cloudflare.com:443:$edge \
+            "https://speed.cloudflare.com/__down?bytes=1000000" 2>"$dir/curl.log" || true)
+        if [ "${got:-0}" -ge 900000 ]; then
+            ok "$name: a 1 MiB HTTPS response arrives intact"
+        else
+            [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
+            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+        fi
+    else
+        note "curl absent, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
+    fi
+
+    # A leak is a routing decision: with a full tunnel attached, the lookup for
+    # an outside address must land on the tunnel, not on the physical link.
+    local v4dev
+    v4dev=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+    case "$v4dev" in
+        vallum*) ok "$name: IPv4 egress routes into the tunnel ($v4dev)" ;;
+        "")      note "could not determine the IPv4 route" ;;
+        *)       bad "$name: IPv4 egress escapes via $v4dev, not the tunnel" ;;
+    esac
+
+    if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+        # The strict assertion is about a tunnel that carries IPv6. A config
+        # rewritten to a split tunnel around $SRV_IP is IPv4-only by
+        # construction, so a dual-stack host would fail `not wlp0s20f3`
+        # every run by construction too. Decide instead of asserting: for a
+        # config that carries v6, egress must route into the tunnel; for one
+        # that does not, v6 staying on the physical link is split-tunnel
+        # semantics, and the fail-closed guard (ADR-0018) is the control for
+        # a full-tunnel posture. This gate never installs that guard on the
+        # invoking machine — it would block every other v4 destination's
+        # browsing for the run's duration.
+        local allowed_line
+        allowed_line=$(grep '^allowed_ips' "$config" 2>/dev/null || true)
+        case "$allowed_line" in
+            *:*)
+                local v6dev
+                v6dev=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null \
+                    | sed -n 's/.*dev \([^ ]*\).*/\1/p' | head -1)
+                case "$v6dev" in
+                    vallum*) ok "$name: IPv6 egress routes into the tunnel ($v6dev)" ;;
+                    "")      note "could not determine the IPv6 route" ;;
+                    *)       bad "$name: IPv6 egress escapes via $v6dev, not the tunnel" ;;
+                esac
+                ;;
+            *)
+                note "$name: this client is IPv4-only, so the IPv6 route assertion does not apply"
+                note "   on a dual-stack host a v4-only split tunnel leaves IPv6 on the physical"
+                note "   link — that is split-tunnel semantics. For a full-tunnel posture the"
+                note "   fail-closed guard blocks it: vallum policy on (see ADR-0018/ADR-0020)"
+                ;;
+        esac
+    else
+        note "no global IPv6 on this host: the IPv6 leak check does not apply"
+    fi
+    # ── no foreign source may enter the tunnel ──
+    # The peer refuses an inner source outside its allowed_ips, and it is right
+    # to: that check is what stops one peer claiming another's address. The
+    # consequence is that a packet with a foreign source is not misrouted, it is
+    # *unacceptable*, so the sender must decline it where the cause is visible
+    # rather than seal it and lose it at the far end. Both directions are
+    # asserted: nothing foreign during normal traffic, then a foreign source
+    # attempted on purpose, which must be refused and named.
+    # Link-local traffic reaches the tunnel at startup on every host — MLD and
+    # neighbour discovery for the interface's own addresses — and refusing it is
+    # correct, since a link-local source means nothing across a link boundary.
+    # So the clean-run assertion is about *routable* foreign sources only; a
+    # check that failed on the expected case would be red on every run and
+    # ignored within a week.
+    refusals() {
+        grep "does not own that address" "$dir/client.log" 2>/dev/null | grep -v 'from fe80:'
+    }
+
+    if [ -n "$(refusals | head -1)" ]; then
+        refusals | head -3
+        bad "$name: ordinary traffic was refused for a routable foreign source"
+    else
+        ok "$name: no routable foreign source during normal traffic"
+    fi
+
+    # The positive control. An address the config does not declare is added to
+    # the interface and a packet is sourced from it; the daemon must refuse it.
+    # Without this the assertion above could never be shown to be capable of
+    # failing, which is how a suite that only passes gets mistaken for coverage.
+    local foreign=192.0.2.99
+    if ip addr add "$foreign/32" dev "$iface" 2>/dev/null; then
+        ping -I "$foreign" -c1 -W1 "$SRV_IP" >/dev/null 2>&1
+        sleep 1
+        if grep -q "does not own that address" "$dir/client.log" &&
+            grep "does not own that address" "$dir/client.log" | grep -q "from $foreign"; then
+            ok "$name: a foreign source is refused locally and named"
+        else
+            bad "$name: a packet sourced from $foreign was sealed, not refused"
+        fi
+        ip addr del "$foreign/32" dev "$iface" 2>/dev/null
+    else
+        note "could not add $foreign to $iface: foreign-source control skipped"
+    fi
+
+    # DNS "nowhere else" is the remaining half, and it cannot be asserted yet:
+    # resolution outside the tunnel only leaks once the tunnel is *down*, which
+    # is what the fail-closed policy changes. See docs/roadmap.md items 2 and 3.
+
+    if [ "$kind" = "bundle" ]; then
+        say "rotation live across the network"
+        local new_key="$dir/new.key" new_pub="$dir/new.pub"
+        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        # The CLI reads a public-line file, not a `-` alias for stdin: `-` is
+        # stdin for --token only (`setup.rs read_token_arg`), and the product's
+        # own convention for piped keys is the literal /dev/stdin — the same
+        # path `setup --remote` offers for `peer enroll`. A literal `-` here
+        # failed with "No such file or directory" and stopped the run.
+        rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file /dev/stdin" < "$new_pub" \
+            || bad "$name: remote peer rotate"
+        ping -c2 -W3 1.1.1.1 >/dev/null 2>&1 || bad "$name: rotation broke active tunnel egress"
+        ok "$name: tunnel survives rotation across the network"
+        rsh "$SERVER_CMD peer finalize $name --config $CONFIG" || bad "$name: remote peer finalize"
+        ok "$name: rotated and finalized on remote server"
+    fi
+
+    # ── the client verdict, live ending only ──
+    # The same series the netns gate and the namespaced leg assert. Only the
+    # live ending proves here: the dead endings are guard manipulations, and
+    # this script never installs or removes a guard on the invoking machine
+    # (the same rule that keeps --host-direct from applying the egress
+    # policy). The namespace leg owns the dead endings.
+    say "client verdict: the live scrape carries the status verdict"
+    "$VALLUM" metrics --config "$config" > "$dir/metrics-live.txt" 2>&1 \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the scrape failed while the daemon lived"; }
+    grep -q '^# TYPE vallum_client_verdict gauge$' "$dir/metrics-live.txt" \
+        || bad "$name: the scrape has no client-verdict family"
+    grep -q "client_verdict{interface=\"$iface\",verdict=\"up\"} 1" "$dir/metrics-live.txt" \
+        || { cat "$dir/metrics-live.txt"; bad "$name: the live scrape did not read verdict=up"; }
+    grep -q '^vallum_up 1$' "$dir/metrics-live.txt" \
+        || bad "$name: the live scrape did not report up=1"
+    ok "$name: the live scrape carries the verdict the status verb would print"
+
+    kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null
+    CLIENT_PID=""
+    "$QUICK" detach "$config" >/dev/null 2>&1
+    # The next transport reuses this interface name; wait for the kernel to
+    # release it rather than failing on "device exists".
+    for _ in $(seq 1 25); do
+        ip link show "$iface" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+}
+
+# ── the per-app launch path, on the real link (ADR-0023) ─────────────────
+# Opt-in (--app-class), and namespaced mode only: it rebuilds the bundle
+# transport's client as a *full* tunnel with `app_class`, attaches, and checks
+# what the namespace alone makes possible — the client keeps its own path, the
+# device leaves its namespace, and a launched member routes, resolves and
+# carries traffic from inside the tunnel's while the client's own resolver is
+# untouched. State lives under the scratch dir.
+prove_app_class_ns() {
+    local name=$1 dir="$LOCAL_DIR/bundle" config rdir
+    rdir="$REMOTE_DIR/cli/$1"
+    config="$rdir/client.toml"
+    local quick_r="$REMOTE_DIR/vallum-quick" vallum_r="$REMOTE_DIR/vallum"
+    local iface=$CIFACE
+
+    [ "$NAMESPACED" = 1 ] || { note "--app-class needs the namespaced client: skipped"; return 0; }
+    # The local config keeps the name the bundle gave it (the interface), while
+    # `prove_client_ns` copies it over as `client.toml` — so the local half is
+    # "any .toml" and the remote half is that fixed name. Testing for
+    # `client.toml` locally skipped this whole case on every run.
+    [ -n "$(ls "$dir"/*.toml 2>/dev/null | head -1)" ] \
+        || { note "the bundle transport did not run: the per-app case is skipped"; return 0; }
+    rsh "test -f $config" 2>/dev/null || { note "no remote bundle config: the per-app case is skipped"; return 0; }
+    cli_put "sh -c 'command -v unshare && command -v nsenter'" >/dev/null 2>&1 \
+        || { note "the target has no unshare/nsenter: the per-app case is skipped"; return 0; }
+
+    say "per-app: a member rides the tunnel; the client keeps its own path"
+    # The transport proof left a split tunnel with host routes. The per-app path
+    # installs none — the member namespace decides — so the config is rewritten
+    # and the daemon restarted to read it.
+    rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+
+    rsh "sudo python3 - $config <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(r'^allowed_ips = .*$', 'allowed_ips = [\"0.0.0.0/0\"]', text, flags=re.M)
+if re.search(r'^\\[quick\\]', text, flags=re.M):
+    text = re.sub(r'^\\[quick\\]$', '[quick]\\napp_class = true', text, count=1, flags=re.M)
+else:
+    text += '\\n[quick]\\napp_class = true\\n'
+open(path, 'w').write(text)
+PY" || bad "$name: rewriting the class config failed"
+
+    local resolv_before
+    resolv_before=$(cli_put "sha256sum /etc/resolv.conf 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+
+    cli_put "nohup $vallum_r run --config $config > $rdir/app-class.log 2>&1 &"
+    local up=0
+    for _ in $(seq 1 20); do
+        cli_put "ip link show $iface" >/dev/null 2>&1 && { up=1; break; }
+        sleep 0.5
+    done
+    if [ "$up" != 1 ]; then
+        rsh "cat $rdir/app-class.log 2>/dev/null" >&2
+        bad "$name: the class daemon did not create $iface"
+    fi
+
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r attach $config" \
+        > "$dir/app-class-attach.log" 2>&1 \
+        || { cat "$dir/app-class-attach.log"; bad "$name: class attach failed"; }
+
+    rsh "sudo test -f $rdir/state/$iface.quick-ns" \
+        || bad "$name: attach reported success but wrote no member-namespace record"
+
+    # The device left the client's namespace, and the client kept its own path:
+    # the split this mechanism exists for, asserted directly.
+    if cli_put "ip link show $iface" >/dev/null 2>&1; then
+        bad "$name: attach left $iface in the client's namespace"
+    fi
+    if cli_put "ip route get 1.1.1.1" 2>/dev/null | grep -q "dev $iface"; then
+        bad "$name: the client's own traffic was routed into the tunnel"
+    fi
+    ok "$name: the device left the client's namespace; the client kept its own path"
+
+    # A launcher with no member: the namespace must be reachable and must not
+    # borrow the client's route table.
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config lookup -- sh -c 'ip route get 1.1.1.1; cat /etc/resolv.conf'" \
+        > "$dir/app-lookup.log" 2>&1 \
+        || { cat "$dir/app-lookup.log"; bad "$name: the launched member's lookup failed"; }
+    grep -q "dev $iface" "$dir/app-lookup.log" \
+        || { cat "$dir/app-lookup.log"; bad "$name: the launched member did not route through $iface"; }
+
+    # Traffic through the member's path: the server's outer address is inside
+    # the full tunnel's allowed_ips, so this ping leaves from the tunnel address
+    # and is also the traffic that finishes the handshake.
+    local established=0
+    for _ in $(seq 1 20); do
+        cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config gateway -- ping -c1 -W1 $SRV_IP" \
+            > "$dir/app-gateway.log" 2>&1 || true
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>/dev/null | grep -q "last_handshake_time_sec=[1-9]" && { established=1; break; }
+        sleep 0.5
+    done
+    # A silent member proves nothing: the launcher's own output and the daemon's
+    # log are the only record of why a packet did not reach the tunnel.
+    [ "$established" = 1 ] || {
+        cat "$dir/app-gateway.log"
+        rsh "sudo tail -20 $rdir/app-class.log 2>/dev/null" >&2
+        cli_put "$vallum_r show --control $rdir/c.sock" 2>&1 >&2 || true
+        bad "$name: the member's traffic did not establish the tunnel"
+    }
+    ok "$name: a launched member's traffic carried the tunnel"
+
+    local resolv_after
+    resolv_after=$(cli_put "sha256sum /etc/resolv.conf 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+    [ "$resolv_before" = "$resolv_after" ] \
+        || bad "$name: attach rewrote the client's /etc/resolv.conf"
+    ok "$name: the client's resolver is untouched"
+
+    # Detach returns the device and refuses further launches: a member started
+    # after detach would run outside the tunnel, which is the leak the verb
+    # exists to prevent.
+    cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r detach $config" >/dev/null 2>&1 || true
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 && break; sleep 0.2; done
+    cli_put "ip link show $iface" >/dev/null 2>&1 \
+        || bad "$name: detach did not return $iface to the client namespace"
+    if cli_put "env VALLUM_STATE_DIR=$rdir/state $quick_r app $config late -- true" \
+        > "$dir/app-late.log" 2>&1; then
+        bad "$name: app launched after detach"
+    fi
+    ok "$name: detach returned the device and the verb refuses to launch"
+
+    # The daemon is left stopped on purpose: the next transport starts its own,
+    # and a live one would hold the device this case moved around.
+    rsh "sudo pkill -f '[v]allum run --config $config'" >/dev/null 2>&1
+    for _ in $(seq 1 25); do cli_put "ip link show $iface" >/dev/null 2>&1 || break; sleep 0.2; done
+}
+
+for kind in $TRANSPORTS; do
+    name="laptop-$kind"
+    dir="$LOCAL_DIR/$kind"
+    rm -rf "$dir" && mkdir -p "$dir"
+    # The enrolment half runs as the invoking user (their SSH keys, and `setup`
+    # writes here instead of /etc/vallum). Only needed when the script itself
+    # was invoked under sudo; without sudo the directories are already theirs.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        chown "$SUDO_USER" "$LOCAL_DIR" "$dir"
+    fi
+    say "transport: $kind"
+    case "$kind" in
+        bundle) enrol_bundle "$name" "$dir" ;;
+        ssh)    enrol_ssh "$name" "$dir" ;;
+        token)  enrol_token "$name" "$dir" ;;
+        *) bad "unknown transport: $kind (bundle, ssh, token)" ;;
+    esac
+    ok "$kind: client config produced"
+    prove_client "$name" "$dir"
+done
+
+if [ "$UPGRADE" = 1 ]; then
+    name="laptop-bundle"
+    dir="$LOCAL_DIR/bundle"
+    say "upgrading the remote to this tree"
+    rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum && \
+         sudo install -m0755 $REMOTE_DIR/vallum-quick /usr/bin/vallum-quick && \
+         for u in vallum@.service vallum-quick@.service vallum-quick-watch@.service vallum-enroll@.service; do \
+             sudo install -m0644 $REMOTE_DIR/\$u /etc/systemd/system/\$u; \
+         done && sudo systemctl daemon-reload && \
+         sudo systemctl restart vallum@vallumrc vallum-quick@vallumrc vallum-quick-watch@vallumrc" || bad "binary+unit upgrade"
+    # /run/vallum is 0750 root:root — an unprivileged stat never sees the
+    # socket even when the daemon is healthy. Probe as root, and on failure
+    # show the journal rather than a bare FAIL.
+    for _ in $(seq 1 20); do
+        rsh "sudo test -S /run/vallum/vallumrc.sock" 2>/dev/null && break
+        sleep 0.5
+    done
+    rsh "sudo test -S /run/vallum/vallumrc.sock" \
+        || { rsh "sudo journalctl -u vallum@vallumrc -u vallum-quick@vallumrc --since '-3min' --no-pager | tail -20"
+             bad "the upgraded daemon did not come up over the old config"; }
+    rsh "sudo /usr/bin/vallum peer list --config $CONFIG" | grep -q "$name" \
+        || bad "peer state lost in the upgrade"
+    ok "new binaries run the old config; peers intact"
+    say "proving the tunnel again on the upgraded daemon"
+    prove_client "$name" "$dir"
+    ok "the tunnel survives an in-place upgrade"
+fi
+
+if [ "$APP_CLASS" = 1 ]; then
+    prove_app_class_ns "laptop-bundle"
+fi
+
+if [ "$NAMESPACED" = 1 ]; then
+    say "PASS — a real server, real egress, a client proved inside a remote namespace, three enrolment transports"
+else
+    say "PASS — a real client, a real server, real egress, three enrolment transports"
+fi
+
+# The stamp scripts/release.sh requires. It lives outside the repository and
+# names the commit it proved, so an old pass cannot vouch for a new tree.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    OWNER_STATE=$(sudo -u "$SUDO_USER" sh -c 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}"')
+else
+    OWNER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
+fi
+mkdir -p "$OWNER_STATE/vallum"
+printf '%s\n' "$(git rev-parse HEAD)" > "$OWNER_STATE/vallum/remote-verified"
+chown -R "${SUDO_USER:-root}" "$OWNER_STATE/vallum" 2>/dev/null
+if [ "$NAMESPACED" = 1 ]; then
+    say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced)"
+else
+    say "recorded $(git rev-parse --short HEAD) as verified on two hosts"
+fi

@@ -23,6 +23,15 @@ path = "../crates/vallum-tunnel"
 [dependencies.vallum-crypto-sdk]
 path = "../crates/vallum-crypto-sdk"
 
+# The epoch target builds its key schedule directly, so it names the suite trait.
+[dependencies.vallum-crypto]
+path = "../crates/vallum-crypto"
+
+# The enrolment framing lives with the CLI crate; the fuzzer needs its parser.
+[dependencies.vallum]
+path = "../crates/vallum"
+default-features = false
+
 [[bin]]
 name = "message_parse"
 path = "fuzz_targets/message_parse.rs"
@@ -40,6 +49,20 @@ bench = false
 [[bin]]
 name = "replay"
 path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "enroll_parse"
+path = "fuzz_targets/enroll_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epoch_open"
+path = "fuzz_targets/epoch_open.rs"
 test = false
 doc = false
 bench = false

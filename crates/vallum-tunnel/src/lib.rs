@@ -73,7 +73,7 @@ pub mod routing;
 pub mod segment;
 
 pub use device::{
-    Action, Clock, Device, Event, PeerStats, MAX_INJECTION_BURST, MAX_QUEUED_BYTES,
+    Action, Clock, Device, Event, PeerStats, Refusal, MAX_INJECTION_BURST, MAX_QUEUED_BYTES,
     MAX_QUEUED_PACKETS,
 };
 pub use error::ConfigError;

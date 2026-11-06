@@ -1,0 +1,25 @@
+[Unit]
+Description=Vallum route watchdog for %i (withdraws routes from a dead peer)
+Documentation=man:vallum-quick(8) man:vallum.toml(5)
+Requires=vallum-quick@%i.service
+After=vallum-quick@%i.service
+PartOf=vallum-quick@%i.service
+
+[Service]
+# A full tunnel owns the host's default route. If the peer stops answering the
+# daemon and the interface both stay up, so the routes stay in and every packet
+# goes into a tunnel with nothing behind it — the host loses its internet until
+# someone reboots it. This process asks the control socket how old the newest
+# handshake is and takes the routes back out when it goes stale.
+Type=simple
+ExecStart=/usr/bin/vallum-quick watch /etc/vallum/%i.toml
+Restart=on-failure
+RestartSec=5s
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -46,8 +46,56 @@ impl Device {
     /// lookup, not a conclusion: [`responder_accept`] re-derives the hint for the
     /// chosen peer and refuses if they disagree. A collision costs a failed
     /// handshake, never a session under the wrong peer.
-    pub(super) fn peer_with_hint(&self, hint: &[u8; PEER_HINT_SIZE]) -> Option<usize> {
-        self.peers.iter().position(|peer| &peer.hint == hint)
+    /// The peer a hint resolves to, and which of its identities matched.
+    ///
+    /// `0` is the current identity; `n > 0` is the `n`th identity still accepted
+    /// during a rotation. The caller must use the matched identity for the
+    /// responder's encapsulation, or a rotating peer's old key would be answered
+    /// with the new one and the handshake would fail.
+    pub(super) fn peer_with_hint(&self, hint: &[u8; PEER_HINT_SIZE]) -> Option<(usize, usize)> {
+        for (index, peer) in self.peers.iter().enumerate() {
+            if &peer.hint == hint {
+                return Some((index, 0));
+            }
+            if let Some(offset) = peer
+                .previous
+                .iter()
+                .position(|(previous, _, _)| previous == hint)
+            {
+                return Some((index, offset + 1));
+            }
+        }
+        None
+    }
+
+    /// Whether a handshake from `source` may be believed for this peer.
+    ///
+    /// An unpinned peer roams: any authenticated source becomes its address.
+    /// A pinned peer accepts only the configured endpoint.
+    pub(super) fn endpoint_allowed(&self, index: usize, source: SocketAddr) -> bool {
+        let config = &self.peers[index].config;
+        !config.pin_endpoint() || config.endpoint() == Some(source)
+    }
+
+    /// Why the peer's identity window forbids a handshake at `now_unix`.
+    ///
+    /// A peer with no document has no window and never refuses. The check is
+    /// made at every handshake rather than at load, so a credential that
+    /// expires while the daemon runs fails closed at the next rekey.
+    pub(super) fn validity_refusal(
+        &self,
+        index: usize,
+        which: usize,
+        now_unix: u64,
+    ) -> Option<Refusal> {
+        let validity = self.peers[index].validity_at(which)?;
+        if now_unix < validity.not_before {
+            Some(Refusal::IdentityNotYetValid)
+        } else if now_unix >= validity.not_after {
+            Some(Refusal::IdentityExpired)
+        } else {
+            None
+        }
     }
 
     /// Reserve a session index that nothing else owns.

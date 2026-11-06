@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vallum — a post-quantum layer-3 tunnel for Linux</title>
+<meta name="description" content="Vallum is a Linux server and client VPN whose handshake combines X25519, sntrup761 and ML-KEM-768. You run the server; you hold the keys.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="masthead">
+  <a class="brand" href="./"><span class="mark" aria-hidden="true">◆</span> Vallum</a>
+  <nav aria-label="Primary">
+    <a href="docs/">Documentation</a>
+    <a href="https://github.com/KidIkaros/vallum">Source</a>
+  </nav>
+</header>
+
+<main id="main">
+  <h1>A tunnel whose handshake is built for the day the quantum computer arrives.</h1>
+  <p class="lede">Vallum is a layer-3 VPN for Linux: a server and a client you deploy, not a reference
+    crate. Every handshake combines X25519, sntrup761 and ML-KEM-768, and every identity is signed with
+    Ed25519 and Falcon-1024 under a CA-issued validity window.</p>
+
+  <h2>Install</h2>
+  <pre><code><span class="cmd">sudo ./scripts/install.sh --from-release</span>
+
+<span class="cmt"># server: key, config, IP forwarding, firewall, NAT, systemd units</span>
+sudo vallum setup --server
+
+<span class="cmt"># client with SSH access: it generates its own key, only the public line crosses</span>
+sudo vallum setup --remote you@vpn.example.com</code></pre>
+  <p class="note">A client without SSH takes one invite ticket instead
+    (<code>sudo vallum peer invite laptop</code>, then <code>sudo vallum join vallum1-join:…</code>) —
+    the private key never leaves the machine. See the
+    <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/client.md">client guide</a>.</p>
+
+  <h2>What the handshake does</h2>
+  <dl class="facts">
+    <div>
+      <dt>Suite 0x0003</dt>
+      <dd>X25519 + sntrup761 + ML-KEM-768, combined with HKDF-SHA3-256. Three messages, three hybrid
+        KEM operations, one round trip.</dd>
+    </div>
+    <div>
+      <dt>Signed identities</dt>
+      <dd>Ed25519 + Falcon-1024 over the transcript, with a signed validity window so a key can
+        expire without being revoked by hand.</dd>
+    </div>
+    <div>
+      <dt>Epoch discipline</dt>
+      <dd>Rekey is a fresh hybrid handshake, not a re-use of the old one; the superseded epoch is
+        erased after <code>REJECT_AFTER_TIME</code>.</dd>
+    </div>
+    <div>
+      <dt>Rotation without an outage</dt>
+      <dd><code>vallum peer rotate</code> accepts the old and the new key at once, and
+        <code>peer finalize</code> retires the old identity when the client has switched.</dd>
+    </div>
+  </dl>
+
+  <h2>The cockpit</h2>
+  <figure>
+    <img src="assets/vallum-cockpit.png" width="1200" height="720"
+         alt="The Vallum terminal cockpit: an interface panel with service state and suite, a peers table with handshake age and rx/tx totals, and a peer detail pane.">
+    <figcaption><code>vallum tui</code> — a real frame rendered from the binary, not a mockup.</figcaption>
+  </figure>
+
+  <h2>What it is not</h2>
+  <ul class="flat">
+    <li>Not cross-platform. Linux is the supported target
+      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0005-linux-only-platform-scope.md">ADR-0005</a>),
+      and macOS is out of scope
+      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0011-macos-out-of-scope.md">ADR-0011</a>).</li>
+    <li>Not a hosted service. You run the server, and you hold the keys; there is no account to create.</li>
+    <li>Not a relay. NAT traversal and relaying are bounded by a written list of what we will and will
+      not do
+      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0016-nat-traversal.md">ADR-0016</a>).</li>
+  </ul>
+</main>
+
+<footer>
+  <p>Apache-2.0 · Ikaros Digital × Atomguard · <a href="https://github.com/KidIkaros/vallum">source</a></p>
+</footer>
+</body>
+</html>

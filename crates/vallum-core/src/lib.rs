@@ -149,3 +149,6 @@ pub(crate) fn scrub(buf: &mut [u8]) {
     }
     core::hint::black_box(buf);
 }
+
+mod prefix;
+pub use prefix::Prefix;

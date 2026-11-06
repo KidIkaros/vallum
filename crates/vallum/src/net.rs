@@ -18,10 +18,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A connectionless, unreliable-ish datagram transport.
 ///
@@ -438,6 +438,223 @@ fn poisoned<T>(_: T) -> io::Error {
     io::Error::other("memory network lock poisoned")
 }
 
+/// The path MTU the kernel currently believes leads to `endpoint`.
+///
+/// A connected UDP socket carries the route's MTU, so this reads the routing
+/// table rather than probing: no packet is sent and no state is disturbed.
+///
+/// The daemon sizes its datagrams before the first handshake, and a handshake
+/// cut to a budget the path cannot carry is dropped by the kernel — the tunnel
+/// then never comes up at all. `interface.outer_mtu` prevents that only for an
+/// operator who already knew the number, which is not the same as discovering
+/// it.
+#[cfg(target_os = "linux")]
+pub fn path_mtu(endpoint: SocketAddr) -> io::Result<u16> {
+    let any = SocketAddr::new(
+        if endpoint.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        },
+        0,
+    );
+    let socket = UdpSocket::bind(any)?;
+    socket.connect(endpoint)?;
+    let mtu = if endpoint.is_ipv4() {
+        rustix::net::sockopt::ip_mtu(&socket)
+    } else {
+        rustix::net::sockopt::ipv6_mtu(&socket)
+    }
+    .map_err(|e| io::Error::other(format!("path MTU: {e}")))?;
+    u16::try_from(mtu).map_err(|_| io::Error::other(format!("path MTU {mtu} does not fit in u16")))
+}
+
+/// The largest ICMP payload that crosses the path, by bisection.
+///
+/// Bisects between `min` and `max`. Nine probes at most.
+pub fn bisect_mtu_bounds(min: u16, max: u16, mut fits: impl FnMut(u16) -> bool) -> Option<u16> {
+    if !fits(min) {
+        return None;
+    }
+    if fits(max) {
+        return Some(max);
+    }
+    let mut good = min;
+    let mut bad = max;
+    while bad - good > 1 {
+        let middle = good + (bad - good) / 2;
+        if fits(middle) {
+            good = middle;
+        } else {
+            bad = middle;
+        }
+    }
+    Some(good)
+}
+
+/// The largest ICMP payload that crosses the path, by bisection on standard IPv4 bounds.
+///
+/// Bounds are the IPv4 minimum reassembly buffer (576 - 28 = 548) and a
+/// 1500-byte Ethernet path (1500 - 28 = 1472). Nine probes at most.
+pub fn bisect_mtu(fits: impl FnMut(u16) -> bool) -> Option<u16> {
+    const MIN: u16 = 548;
+    const MAX: u16 = 1472;
+    bisect_mtu_bounds(MIN, MAX, fits)
+}
+
+/// Parse `mtu=<digits>` from ping output if reported by kernel or router ICMP error.
+fn parse_reported_mtu(output: &str) -> Option<u16> {
+    let tag = "mtu=";
+    let idx = output.find(tag)?;
+    let rest = &output[idx + tag.len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Test whether an ICMP packet with `payload` bytes fits the path to `host` with DF set.
+///
+/// Returns `(fits, reported_mtu)`.
+fn default_ping_probe(host: &str, payload: u16) -> (bool, Option<u16>) {
+    let output = std::process::Command::new("ping")
+        .args([
+            "-M",
+            "do",
+            "-s",
+            &payload.to_string(),
+            "-c",
+            "1",
+            "-W",
+            "1",
+            host,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return (false, None);
+    };
+    if output.status.success() {
+        return (true, None);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stderr}\n{stdout}");
+    (false, parse_reported_mtu(&combined))
+}
+
+/// Probe the path MTU to `host` using PMTUD with a custom probe function.
+///
+/// Returns `Some(mtu)` if the path was measured, or `None` if inconclusive (all probes failed).
+pub fn probe_path_mtu_with(
+    host: &str,
+    is_ipv6: bool,
+    mut prober: impl FnMut(&str, u16) -> (bool, Option<u16>),
+) -> Option<u16> {
+    let (min, max, overhead) = if is_ipv6 {
+        (1232u16, 1452u16, 48u16)
+    } else {
+        (548u16, 1472u16, 28u16)
+    };
+
+    // 1. Probe the ceiling first (1500 byte path).
+    let (fits_max, reported_mtu) = prober(host, max);
+    if fits_max {
+        return Some(max + overhead);
+    }
+
+    // 2. If the kernel or an intermediate router reported the next-hop MTU directly,
+    // verify it with a single probe rather than bisecting.
+    if let Some(reported) = reported_mtu {
+        if reported >= min + overhead && reported <= max + overhead {
+            let target_payload = reported - overhead;
+            let (verified, _) = prober(host, target_payload);
+            if verified {
+                return Some(reported);
+            }
+        }
+    }
+
+    // 3. Probe the floor. If the minimum packet also fails, ICMP is blocked or
+    // the host is unreachable.
+    let (fits_min, _) = prober(host, min);
+    if !fits_min {
+        return None;
+    }
+
+    // 4. Bisect between min and max.
+    let payload = bisect_mtu_bounds(min, max, |size| prober(host, size).0)?;
+    Some(payload + overhead)
+}
+
+/// Parse a destination host string or endpoint, stripping brackets and port if present.
+pub fn parse_probe_host(host_or_endpoint: &str) -> (String, bool) {
+    let trimmed = host_or_endpoint.trim();
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return (addr.ip().to_string(), addr.is_ipv6());
+    }
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return (ip.to_string(), ip.is_ipv6());
+    }
+    if trimmed.starts_with('[') {
+        if let Some(end) = trimmed.find(']') {
+            let inner = &trimmed[1..end];
+            return (inner.to_owned(), true);
+        }
+    }
+    if let Some((h, _)) = trimmed.split_once(':') {
+        if !h.contains(':') {
+            return (h.to_owned(), false);
+        }
+    }
+    let is_v6 = trimmed.contains(':');
+    (trimmed.to_owned(), is_v6)
+}
+
+/// Probe the path MTU to an IP address / socket destination.
+pub fn probe_path_mtu(destination: SocketAddr) -> Option<u16> {
+    probe_path_mtu_with(
+        &destination.ip().to_string(),
+        destination.is_ipv6(),
+        within_budget(default_ping_probe),
+    )
+}
+
+/// Total time a path-MTU probe may spend before settling for what it has proved.
+///
+/// Each ICMP probe costs up to a second when the path silently swallows it, and
+/// the bisection needs about ten. `run` probes before the TUN interface exists,
+/// so an unreachable endpoint would otherwise delay every daemon start by ~10 s,
+/// and N endpoints by N times that — against systemd's 90 s `TimeoutStartSec`.
+///
+/// When the budget runs out the prober stops probing and reports "does not
+/// fit", so the bisection converges on the largest size it actually confirmed.
+/// Conservative, and never a stall: an unmeasured path keeps the configured
+/// default rather than blocking the interface from coming up.
+pub const PROBE_BUDGET: Duration = Duration::from_secs(3);
+
+fn within_budget(
+    prober: impl FnMut(&str, u16) -> (bool, Option<u16>),
+) -> impl FnMut(&str, u16) -> (bool, Option<u16>) {
+    within_budget_with(PROBE_BUDGET, prober)
+}
+
+fn within_budget_with(
+    budget: Duration,
+    mut prober: impl FnMut(&str, u16) -> (bool, Option<u16>),
+) -> impl FnMut(&str, u16) -> (bool, Option<u16>) {
+    let start = Instant::now();
+    move |host, payload| {
+        if start.elapsed() >= budget {
+            return (false, None);
+        }
+        prober(host, payload)
+    }
+}
+
+/// Probe the path MTU to a host name, IP, or endpoint string.
+pub fn probe_path_mtu_host(host_or_endpoint: &str) -> Option<u16> {
+    let (host, is_ipv6) = parse_probe_host(host_or_endpoint);
+    probe_path_mtu_with(&host, is_ipv6, within_budget(default_ping_probe))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -477,5 +694,111 @@ mod tests {
             rustix::net::sockopt::Ipv4PathMtuDiscovery::DO.as_raw(),
             "a v4 socket must report an oversize datagram, not fragment it"
         );
+    }
+
+    #[test]
+    fn the_path_mtu_of_loopback_is_the_loopback_mtu() {
+        // 65536 is what the kernel reports for `lo`; the point is that the
+        // function reads a real number out of the routing table rather than
+        // failing or guessing.
+        let mtu = path_mtu("127.0.0.1:9".parse().expect("a v4 address"))
+            .expect("loopback has a path MTU");
+        assert!(mtu >= 1500, "loopback reported an implausible MTU of {mtu}");
+    }
+
+    #[test]
+    fn parse_probe_host_handles_various_formats() {
+        assert_eq!(
+            parse_probe_host("198.51.100.1:51820"),
+            ("198.51.100.1".to_owned(), false)
+        );
+        assert_eq!(
+            parse_probe_host("198.51.100.1"),
+            ("198.51.100.1".to_owned(), false)
+        );
+        assert_eq!(
+            parse_probe_host("vpn.example.com:51820"),
+            ("vpn.example.com".to_owned(), false)
+        );
+        assert_eq!(
+            parse_probe_host("vpn.example.com"),
+            ("vpn.example.com".to_owned(), false)
+        );
+        assert_eq!(
+            parse_probe_host("[2001:db8::1]:51820"),
+            ("2001:db8::1".to_owned(), true)
+        );
+        assert_eq!(
+            parse_probe_host("2001:db8::1"),
+            ("2001:db8::1".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn probe_mtu_discovers_full_1500_in_single_probe() {
+        let mut count = 0;
+        let mtu = probe_path_mtu_with("host", false, |_host, _payload| {
+            count += 1;
+            (true, None)
+        });
+        assert_eq!(mtu, Some(1500));
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn probe_mtu_uses_reported_icmp_ptb_mtu() {
+        let mut probed = Vec::new();
+        let mtu = probe_path_mtu_with("host", false, |_host, payload| {
+            probed.push(payload);
+            if payload == 1472 {
+                (false, Some(1400))
+            } else if payload == 1400 - 28 {
+                (true, None)
+            } else {
+                (false, None)
+            }
+        });
+        assert_eq!(mtu, Some(1400));
+        assert_eq!(probed, vec![1472, 1372]);
+    }
+
+    #[test]
+    fn probe_mtu_bisects_pppoe_when_drops_are_silent() {
+        // Silent drop above 1464 (1492 MTU) without ICMP error
+        let mtu = probe_path_mtu_with("host", false, |_host, payload| (payload <= 1464, None));
+        assert_eq!(mtu, Some(1492));
+    }
+
+    #[test]
+    fn an_exhausted_budget_stops_probing_rather_than_stalling() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let calls = Rc::new(Cell::new(0u32));
+        let seen = Rc::clone(&calls);
+        let mut prober = within_budget_with(Duration::ZERO, move |_host, _payload| {
+            seen.set(seen.get() + 1);
+            (true, None)
+        });
+
+        // A probe past the budget must not shell out, and must not claim the
+        // size fits: "unknown" has to read as "not confirmed" so the bisection
+        // settles on what it actually proved.
+        assert_eq!(prober("192.0.2.1", 1400), (false, None));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn probe_mtu_returns_none_when_inconclusive() {
+        // Complete block of ICMP
+        let mtu = probe_path_mtu_with("host", false, |_host, _payload| (false, None));
+        assert_eq!(mtu, None);
+    }
+
+    #[test]
+    fn probe_mtu_ipv6_discovers_1400() {
+        // IPv6 min 1232 (1280), max 1452 (1500)
+        let mtu = probe_path_mtu_with("host", true, |_host, payload| (payload <= 1352, None));
+        assert_eq!(mtu, Some(1400));
     }
 }

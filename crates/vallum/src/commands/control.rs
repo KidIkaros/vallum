@@ -17,6 +17,7 @@ use crate::control;
 use crate::keys;
 use crate::uapi::{errno, field as uapi_field};
 use crate::Error;
+use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct ShowArgs {
@@ -81,10 +82,12 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
         return Ok(path.to_path_buf());
     }
     let Some(config_path) = config else {
-        return Err(Error::Invalid {
-            path: PathBuf::from("-"),
-            what: "give --control <socket>, or --config <file> with a `control` field".to_owned(),
-        });
+        // Nothing was attempted and retrying cannot help: the documented
+        // automation contract calls that a precondition (exit 2), and `metrics`
+        // already reports this same condition that way.
+        return Err(Error::Precondition(
+            "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+        ));
     };
     let config = Config::load(config_path)?;
     config
@@ -98,37 +101,188 @@ fn control_path(config: Option<&Path>, explicit: Option<&Path>) -> Result<PathBu
         })
 }
 
+// A config-derived device view, used when no daemon is reachable.
+// This is the Gulf of execution fix for finding A: ` Vallum show` does the
+// prerequisite (reading the config) itself, rather than dying with
+// "no daemon". See docs/proof/pre-release-dogfood-assess.md.
+#[derive(Debug, Clone, Serialize)]
+struct ConfigDevice {
+    config: PathBuf,
+    interface: String,
+    listen: String,
+    addresses: Vec<String>,
+    fwmark: u32,
+    peers: Vec<PeerRow>,
+    next: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PeerRow {
+    name: String,
+    endpoint: String,
+    allowed_ips: Vec<String>,
+    preshared_key: bool,
+}
+
+impl ConfigDevice {
+    fn from_resolved(resolved: &config::Resolved, config_path: &Path) -> Self {
+        let peers = resolved
+            .peers
+            .iter()
+            .map(|peer| PeerRow {
+                name: peer.name().to_owned(),
+                endpoint: peer.endpoint().map(|s| s.to_string()).unwrap_or_default(),
+                allowed_ips: peer
+                    .allowed_ips()
+                    .nets()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect(),
+                preshared_key: peer.preshared_key().is_some(),
+            })
+            .collect();
+        ConfigDevice {
+            config: config_path.to_path_buf(),
+            interface: resolved
+                .interface_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            listen: resolved.listen.to_string(),
+            addresses: resolved.addresses.iter().map(|p| p.to_string()).collect(),
+            fwmark: resolved.fwmark,
+            peers,
+            next: format!("vallum run --config {}", config_path.display()),
+        }
+    }
+}
+
+impl std::fmt::Display for ConfigDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "config: {}", self.config.display())?;
+        writeln!(f, "interface: {}", self.interface)?;
+        writeln!(f, "listen: {}", self.listen)?;
+        writeln!(f, "addresses: {}", self.addresses.join(", "))?;
+        writeln!(f, "fwmark: {}", self.fwmark)?;
+        writeln!(f, "peers: {}", self.peers.len())?;
+        for peer in &self.peers {
+            let endpoint = if peer.endpoint.is_empty() {
+                "roaming".to_owned()
+            } else {
+                peer.endpoint.clone()
+            };
+            writeln!(
+                f,
+                "  {} — {} via {}",
+                peer.name,
+                peer.allowed_ips.join(", "),
+                endpoint
+            )?;
+        }
+        writeln!(f, "next: {}", self.next)
+    }
+}
+
 pub fn show(args: &ShowArgs) -> Result<(), Error> {
     if args.json && args.watch {
         return Err(Error::Usage(
             "`--json` and `--watch` are different modes; choose one".to_owned(),
         ));
     }
-    let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    // An explicit --control wins; otherwise the socket comes from the config's
+    // `control` field. The config itself is also loaded so an unreachable
+    // daemon can still yield the configured-device view (finding A in
+    // docs/proof/pre-release-dogfood-assess.md).
+    let config_path = args.config.as_deref();
+    let cfg = match config_path {
+        Some(path) => Some(Config::load(path)?),
+        None => None,
+    };
+    let socket_path = match (args.control.as_deref(), config_path) {
+        (Some(socket), _) => Some(socket.to_path_buf()),
+        (None, Some(path)) => cfg
+            .as_ref()
+            .and_then(|config| config.interface.control.as_ref())
+            .map(|declared| config::resolve_key_path(path, declared)),
+        (None, None) => None,
+    };
+
     if args.watch {
-        return watch(&path, args);
+        let socket = match (socket_path, config_path) {
+            (Some(socket), _) => socket,
+            (None, Some(path)) => {
+                return Err(Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: "interface.control is not set, so there is no socket to query".to_owned(),
+                })
+            }
+            (None, None) => {
+                return Err(Error::Precondition(
+                    "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+                ))
+            }
+        };
+        return watch(&socket, args);
     }
-    let reply = control::request(&path, "get=1\n")?;
-    if args.dump {
-        print!("{reply}");
-        return Ok(());
-    }
-    if args.json {
-        let response = crate::uapi::parse_response(&reply);
-        let value = crate::uapi::response_json(&response);
-        println!(
+
+    let reply = socket_path
+        .as_deref()
+        .map(|socket| control::request(socket, "get=1\n"));
+
+    if let Some(Ok(reply)) = reply {
+        if args.dump {
+            print!("{reply}");
+            return Ok(());
+        }
+        if args.json {
+            let response = crate::uapi::parse_response(&reply);
+            let value = crate::uapi::response_json(&response);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|e| Error::Usage(e.to_string()))?
+            );
+            return Ok(());
+        }
+        if let Some(field) = args.field.as_deref() {
+            print_field(&reply, field);
+            return Ok(());
+        }
+        print!(
             "{}",
-            serde_json::to_string_pretty(&value).map_err(|e| Error::Usage(e.to_string()))?
+            crate::uapi::render_human(&crate::uapi::parse_response(&reply))
         );
         return Ok(());
     }
-    if let Some(field) = args.field.as_deref() {
-        print_field(&reply, field);
-        return Ok(());
+
+    // The daemon is unreachable — or no socket was configured. With a config,
+    // show the configured device; without one, report the original failure.
+    let (Some(cfg), Some(config_path)) = (cfg.as_ref(), config_path) else {
+        return match reply {
+            Some(Err(error)) => Err(error),
+            _ => Err(Error::Precondition(
+                "give --control <socket>, or --config <file> with a `control` field".to_owned(),
+            )),
+        };
+    };
+    let suite =
+        SdkSuite::from_id(cfg.suite_id(config_path).map_err(|e| {
+            Error::Suite(format!("key file names a suite this build cannot use: {e}"))
+        })?)
+        .map_err(|e| Error::Suite(format!("key file names a suite this build cannot use: {e}")))?;
+    let resolved = cfg
+        .resolve(config_path, &suite)
+        .map_err(|e| Error::Usage(e.to_string()))?;
+    let device = ConfigDevice::from_resolved(&resolved, config_path);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&device).map_err(|e| Error::Usage(e.to_string()))?
+        );
+    } else {
+        println!("{device}");
     }
-    print!(
-        "{}",
-        crate::uapi::render_human(&crate::uapi::parse_response(&reply))
+    eprintln!(
+        "note: no daemon connected; showing the configured device from {}",
+        device.config.display()
     );
     Ok(())
 }
@@ -197,6 +351,31 @@ fn peer_lines(peer: &vallum_tunnel::PeerConfig) -> String {
     out.push_str(&format!(
         "public_key={}\n",
         keys::hex_encode(peer.identity().kem().as_bytes())
+    ));
+    // The rotation window is part of the row's full state (ADR-0021): the set
+    // names the identity the row rotates from, or `(none)` when the config
+    // claims no window. Emitting it unconditionally makes every `set` a
+    // complete statement — a config that says nothing about rotation closes
+    // the window, exactly the state a cold restart of the same config would
+    // land on.
+    let previous = peer
+        .previous_identities()
+        .first()
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()))
+        .unwrap_or_else(|| "(none)".to_owned());
+    out.push_str(&format!(
+        "{}={previous}\n",
+        uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY
+    ));
+    // The name is the only human handle on a peer, and every surface that
+    // reports traffic — `show`, the metrics exporter, the TUI — reads it from
+    // the running daemon rather than from the config. Omitting it here made the
+    // daemon fall back to `peer-<key prefix>`, so per-peer telemetry identified
+    // traffic by an opaque hash and could not be mapped to a device.
+    out.push_str(&format!(
+        "{}={}\n",
+        crate::uapi::field::VALLUM_NAME,
+        peer.name()
     ));
     if let Some(psk) = peer.preshared_key() {
         out.push_str(&format!(
@@ -268,10 +447,99 @@ pub fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {
     expect_ok(path.as_path(), &reply)
 }
 
-pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
+fn peer_entry_field<'a>(peer: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    peer.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+fn peer_differs(peer: &vallum_tunnel::PeerConfig, current: &[(String, String)]) -> bool {
+    let current_name = peer_entry_field(current, uapi_field::VALLUM_NAME).unwrap_or("");
+    if peer.name() != current_name {
+        return true;
+    }
+    let current_endpoint = peer_entry_field(current, uapi_field::ENDPOINT);
+    let desired_endpoint = peer.endpoint().map(|e| e.to_string());
+    if desired_endpoint.as_deref() != current_endpoint && current_endpoint != Some("(none)") {
+        return true;
+    }
+    if desired_endpoint.is_some() && current_endpoint == Some("(none)") {
+        return true;
+    }
+    let current_psk = peer_entry_field(current, uapi_field::PRESHARED_KEY);
+    let desired_psk = peer.preshared_key().map(|p| keys::hex_encode(p.as_bytes()));
+    if desired_psk.as_deref() != current_psk {
+        return true;
+    }
+    let current_keepalive = peer_entry_field(current, uapi_field::PERSISTENT_KEEPALIVE_INTERVAL)
+        .and_then(|v| v.parse::<u64>().ok());
+    let desired_keepalive = peer.persistent_keepalive().map(|d| d.as_secs());
+    if desired_keepalive != current_keepalive {
+        return true;
+    }
+    // The window is compared as part of the row: a config that still names a
+    // previous must not be read as satisfied by a daemon that closed it, and
+    // `peer finalize` (the config drops the window) must reach the daemon even
+    // when every other field agrees.
+    let current_previous = peer_entry_field(current, uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY)
+        .filter(|value| *value != "(none)");
+    let desired_previous = peer
+        .previous_identities()
+        .first()
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()));
+    if desired_previous.as_deref() != current_previous {
+        return true;
+    }
+    let current_ips: Vec<&str> = current
+        .iter()
+        .filter(|(k, _)| k == uapi_field::ALLOWED_IP)
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let desired_ips: Vec<String> = peer
+        .allowed_ips()
+        .nets()
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    if current_ips.len() != desired_ips.len()
+        || !desired_ips
+            .iter()
+            .all(|ip| current_ips.contains(&ip.as_str()))
+    {
+        return true;
+    }
+    false
+}
+
+/// The outcome of applying configuration differences to the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SyncReport {
+    /// Peers in the config that were not yet in the daemon.
+    pub added_peers: usize,
+    /// Existing peers whose attributes differed and were refreshed.
+    pub updated_peers: usize,
+    /// Peers running in the daemon that were absent from the config.
+    pub removed_peers: usize,
+    /// Whether interface-level attributes (listen port, mark, key) changed.
+    pub device_changed: bool,
+}
+
+impl SyncReport {
+    /// Whether the config matches the running daemon exactly.
+    #[must_use]
+    pub fn is_noop(&self) -> bool {
+        !self.device_changed
+            && self.added_peers == 0
+            && self.updated_peers == 0
+            && self.removed_peers == 0
+    }
+}
+
+pub fn syncconf(args: &SetconfArgs) -> Result<SyncReport, Error> {
     let path = control_path(Some(args.config.as_path()), args.control.as_deref())?;
     let resolved = resolve_config(args.config.as_path())?;
     let current = control::request(&path, "get=1\n")?;
+    let parsed_current = crate::uapi::parse_response(&current);
 
     // The first `public_key` is the device's; every later one is a peer.
     let mut current_peers = Vec::new();
@@ -292,18 +560,128 @@ pub fn syncconf(args: &SetconfArgs) -> Result<(), Error> {
         .collect();
 
     let mut body = String::from("set=1\n");
-    body.push_str(&device_lines(&resolved, &resolved.seed, &current));
+    let dev_diff = device_lines(&resolved, &resolved.seed, &current);
+    let device_changed = !dev_diff.is_empty();
+    body.push_str(&dev_diff);
+
+    // A key the config keeps as a rotation window belongs to the row that
+    // rotates from it: it must not be removed as "absent from the config"
+    // (ADR-0021). Until `peer finalize` closes the window, the row answers to
+    // both its keys.
+    let previous_desired: Vec<String> = resolved
+        .peers
+        .iter()
+        .flat_map(|peer| peer.previous_identities())
+        .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()))
+        .collect();
+
+    let mut removed_peers = 0;
     for key in &current_peers {
-        if !desired.contains(key) {
-            body.push_str(&format!("public_key={key}\nremove=true\n"));
+        if desired.contains(key) || previous_desired.contains(key) {
+            continue;
         }
+        body.push_str(&format!("public_key={key}\nremove=true\n"));
+        removed_peers += 1;
     }
+
+    let mut added_peers = 0;
+    let mut updated_peers = 0;
     for peer in &resolved.peers {
+        let key_hex = keys::hex_encode(peer.identity().kem().as_bytes());
+        let previous_hex = peer
+            .previous_identities()
+            .first()
+            .map(|accepted| keys::hex_encode(accepted.identity().kem().as_bytes()));
+        // A rotated row on the daemon is keyed by the replaced key until the
+        // swap applies; match by either key, or the row reads as "absent" and
+        // a remove/add pair — never the rotation the config asked for.
+        if let Some(curr) = parsed_current.peers.iter().find(|p| {
+            p.iter().any(|(k, v)| {
+                k == uapi_field::PUBLIC_KEY
+                    && (v == &key_hex || Some(v.as_str()) == previous_hex.as_deref())
+            })
+        }) {
+            if peer_differs(peer, curr) {
+                updated_peers += 1;
+            }
+        } else {
+            added_peers += 1;
+        }
         body.push_str(&peer_lines(peer));
         body.push_str("replace_allowed_ips=true\n");
     }
     let reply = control::request(&path, &body)?;
-    expect_ok(path.as_path(), &reply)
+    expect_ok(path.as_path(), &reply)?;
+    Ok(SyncReport {
+        added_peers,
+        updated_peers,
+        removed_peers,
+        device_changed,
+    })
+}
+
+/// What an attempt to push a config to the running daemon did, and if it did
+/// nothing, why.
+///
+/// The distinction is the point: a missing socket has at least three causes —
+/// the daemon is down, it is up and its socket was removed, or it is up in a
+/// mount namespace this process cannot see — and the caller must not pick one.
+/// See ADR-0017.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The running daemon accepted the configuration.
+    Applied,
+    /// `--no-apply`: the config was written and nothing was pushed.
+    Skipped,
+    /// The config declares no `control` path, so there is nothing to reach.
+    NoControlDeclared,
+    /// A `control` path is declared but no socket exists there.
+    NoControlSocket(PathBuf),
+}
+
+impl ApplyOutcome {
+    /// Whether the running daemon accepted the configuration.
+    #[must_use]
+    pub fn applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    /// The text to print after `applied`: what was observed, not what it is
+    /// assumed to mean.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Applied => "yes".to_owned(),
+            Self::Skipped => "no — --no-apply was given".to_owned(),
+            Self::NoControlDeclared => "no — the config declares no control socket".to_owned(),
+            Self::NoControlSocket(path) => {
+                format!("no — no control socket at {}", path.display())
+            }
+        }
+    }
+}
+
+/// Apply a config to the daemon its own `control` field names.
+///
+/// This is the `vallum peer` path: the config was just edited, and the running
+/// daemon should learn about it without a restart. A socket that is not there
+/// is not an error — the config is written, and the service will read it when it
+/// starts. The returned outcome says which of those happened, so the caller can
+/// report it without inventing a cause.
+pub fn syncconf_running(config: &Path) -> Result<ApplyOutcome, Error> {
+    let loaded = Config::load(config)?;
+    let Some(declared) = loaded.interface.control.as_ref() else {
+        return Ok(ApplyOutcome::NoControlDeclared);
+    };
+    let socket = config::resolve_key_path(config, declared);
+    if !socket.exists() {
+        return Ok(ApplyOutcome::NoControlSocket(socket));
+    }
+    syncconf(&SetconfArgs {
+        config: config.to_path_buf(),
+        control: Some(socket),
+    })?;
+    Ok(ApplyOutcome::Applied)
 }
 
 fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
@@ -333,4 +711,133 @@ fn expect_ok(path: &Path, reply: &str) -> Result<(), Error> {
         path: path.to_path_buf(),
         what,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use vallum_core::identity::PeerIdentity;
+    use vallum_crypto::KemPublicKey;
+
+    const KEM_KEY_LEN: usize = 2374;
+
+    fn peer_with_previous(name: &str, previous: Option<&[u8]>) -> vallum_tunnel::PeerConfig {
+        let config = vallum_tunnel::PeerConfig::new(
+            name,
+            PeerIdentity::kem_only(KemPublicKey::new(vec![0x11; KEM_KEY_LEN])),
+        );
+        match previous {
+            Some(key) => config.with_previous_identity(
+                PeerIdentity::kem_only(KemPublicKey::new(key.to_vec())),
+                None,
+            ),
+            None => config,
+        }
+    }
+
+    fn current_block(name: &str, previous_hex: Option<&&str>) -> Vec<(String, String)> {
+        let mut block = vec![
+            (uapi_field::PUBLIC_KEY.to_owned(), "00".repeat(KEM_KEY_LEN)),
+            (uapi_field::VALLUM_NAME.to_owned(), name.to_owned()),
+        ];
+        if let Some(hex) = previous_hex {
+            block.push((
+                uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY.to_owned(),
+                (*hex).to_owned(),
+            ));
+        } else {
+            block.push((
+                uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY.to_owned(),
+                "(none)".to_owned(),
+            ));
+        }
+        block
+    }
+
+    #[test]
+    fn a_peer_lines_statement_names_the_window() {
+        // With a window open the set names the replaced key; without one it
+        // closes it explicitly. Either way the statement is complete.
+        let previous = [0x22u8; KEM_KEY_LEN];
+        let open = peer_lines(&peer_with_previous("laptop", Some(&previous)));
+        // The set names the replaced identity; with no window it says so
+        // explicitly — every statement is complete, never "field omitted".
+        assert!(open.contains(&format!(
+            "{}={}",
+            uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY,
+            keys::hex_encode(&previous)
+        )));
+        let closed = peer_lines(&peer_with_previous("laptop", None));
+        assert!(closed.contains(&format!(
+            "{}=(none)",
+            uapi_field::VALLUM_PREVIOUS_PUBLIC_KEY
+        )));
+    }
+
+    #[test]
+    fn a_window_the_config_closed_or_opened_is_seen_by_the_diff() {
+        // The daemon still accepts the replaced key, but the config's window
+        // is gone: `peer finalize` must not be swallowed by an "everything
+        // agrees" diff.
+        let old_key = [0x22u8; KEM_KEY_LEN];
+        let old_hex = keys::hex_encode(&old_key);
+        assert!(peer_differs(
+            &peer_with_previous("laptop", None),
+            &current_block("laptop", Some(&old_hex.as_str()))
+        ));
+        // And the reverse: the config rotates (window names the old key) but
+        // the daemon row has no window yet — that is a rotate to apply, not a
+        // row to re-add.
+        assert!(peer_differs(
+            &peer_with_previous("laptop", Some(&old_key)),
+            &current_block("laptop", None)
+        ));
+        // An installed rotation matches its config: read as "satisfied".
+        assert!(!peer_differs(
+            &peer_with_previous("laptop", Some(&old_key)),
+            &current_block("laptop", Some(&old_hex.as_str()))
+        ));
+        assert!(!peer_differs(
+            &peer_with_previous("laptop", None),
+            &current_block("laptop", None)
+        ));
+    }
+
+    fn show_args(config: Option<PathBuf>, control: Option<PathBuf>) -> ShowArgs {
+        ShowArgs {
+            config,
+            control,
+            dump: false,
+            json: false,
+            watch: false,
+            interval: 1000,
+            field: None,
+        }
+    }
+
+    #[test]
+    fn a_dead_control_socket_is_an_error_not_a_panic() {
+        // Regression: the config-fallback path used to panic when --control
+        // was given without --config and the daemon was unreachable.
+        let result = show(&show_args(
+            None,
+            Some(PathBuf::from("/nonexistent/vallum-dead.sock")),
+        ));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_and_control_together_are_accepted() {
+        // --control overrides the socket but must not be rejected.
+        let result = show(&show_args(
+            Some(PathBuf::from("/nonexistent/missing-config.toml")),
+            Some(PathBuf::from("/nonexistent/dead.sock")),
+        ));
+        // It fails on the missing config file, not on argument validation.
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(!message.contains("give --control"));
+    }
 }

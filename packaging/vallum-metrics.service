@@ -1,0 +1,33 @@
+[Unit]
+Description=Scrape Vallum metrics into node_exporter's textfile directory
+Documentation=man:vallum(8)
+
+[Service]
+Type=oneshot
+# One instance per tunnel is supported: drop a snippet in
+# vallum-metrics.service.d/ named for the config, or run a second copy of this
+# unit under a different name. The default covers the usual /etc/vallum/vallum0.toml.
+ExecStart=/usr/bin/vallum metrics --config /etc/vallum/vallum0.toml --output /var/lib/node_exporter/textfile_collector/vallum.prom
+# A failed scrape still writes `vallum_up 0`, which is the signal the alert
+# rules look for; exiting nonzero marks the unit failed so `systemctl status`
+# shows the scrape broke.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# The textfile directory and the control socket are the only things this unit
+# can legitimately write or read.
+ReadWritePaths=/var/lib/node_exporter/textfile_collector

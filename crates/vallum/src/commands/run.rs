@@ -66,10 +66,62 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let clock = Arc::new(SystemClock::new());
     let mut rng = entropy::OsRng::new();
 
+    // The config can only guess the path MTU; probing it discovers what the path actually carries.
+    // If `interface.outer_mtu` was not explicitly configured, probe the configured peer endpoints
+    // (with kernel route cache fallback) before opening the TUN interface, so both the TUN interface
+    // MTU (governing TCP MSS) and the outer segmentation budget are sized correctly from the start.
+    let explicit_outer_mtu = config.interface.outer_mtu.is_some();
+    let floor_budget = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
+    let min_outer_mtu = floor_budget + usize::from(config::OUTER_HEADER_LEN);
+
+    let discovered_path_mtu = resolved
+        .peers
+        .iter()
+        .filter_map(|peer| peer.endpoint())
+        .filter_map(|endpoint| {
+            crate::net::probe_path_mtu(endpoint).or_else(|| crate::net::path_mtu(endpoint).ok())
+        })
+        .min();
+
+    let mut outer_budget = resolved.outer_budget;
+    let mut inner_mtu = resolved.mtu;
+
+    if let Some(discovered) = discovered_path_mtu {
+        if (discovered as usize) < min_outer_mtu {
+            log_warn!(
+                log,
+                "discovered path MTU {discovered} is below the minimum supported outer MTU of \
+                 {min_outer_mtu} bytes; tunnel packets will likely fail on this link"
+            );
+        }
+        if !explicit_outer_mtu && discovered < config::DEFAULT_OUTER_MTU {
+            let clamped_mtu = (discovered as usize).max(min_outer_mtu);
+            let derived_budget = clamped_mtu.saturating_sub(usize::from(config::OUTER_HEADER_LEN));
+            outer_budget = outer_budget.min(derived_budget);
+            let mut derived_inner =
+                u16::try_from(outer_budget.saturating_sub(crate::tun::DATA_OVERHEAD))
+                    .unwrap_or(crate::tun::DEFAULT_MTU)
+                    .min(crate::tun::DEFAULT_MTU);
+            let has_v6 = resolved
+                .addresses
+                .iter()
+                .any(|prefix| prefix.as_ipnet().addr().is_ipv6());
+            if has_v6 && derived_inner < config::IPV6_MIN_MTU {
+                derived_inner = config::IPV6_MIN_MTU;
+            }
+            inner_mtu = inner_mtu.min(derived_inner);
+            log_info!(
+                log,
+                "path MTU discovered as {discovered} bytes (PPPoE/DS-Lite link); \
+                 outer budget set to {outer_budget}, inner MTU set to {inner_mtu}"
+            );
+        }
+    }
+
     let spec = InterfaceSpec {
         name: resolved.interface_name.clone(),
         addresses: resolved.addresses.clone(),
-        mtu: resolved.mtu,
+        mtu: inner_mtu,
     };
     let mut interface_warnings = Vec::new();
     let parts =
@@ -97,6 +149,8 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         privileges::drop_to(privileges)?;
         log_info!(log, "dropped privileges to {}", privileges.describe());
     }
+
+    let budget = outer_budget;
 
     let suite: Arc<dyn vallum_crypto::CryptoSuite> = Arc::new(suite);
 
@@ -130,18 +184,22 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
             parts,
             socket: Arc::clone(&shared),
             clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
-            budget: resolved.outer_budget,
+            budget,
+            addresses: resolved.addresses.clone(),
+            forward: resolved.forward,
             control: resolved.control.clone().map(|path| control::ControlServer {
-                path,
+                path: path.clone(),
                 context: control::ControlContext {
                     interface: interface_name,
                     addresses: resolved.addresses.clone(),
                     private_key: resolved.seed.clone(),
                     private_key_path: key_path.clone(),
+                    control_path: Some(path),
                     listen: bound,
                     fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),
                     suite,
+                    stats: Arc::new(run::SharedStats::default()),
                 },
             }),
         },

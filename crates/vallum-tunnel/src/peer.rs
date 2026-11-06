@@ -18,7 +18,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use vallum_core::identity::PeerIdentity;
+use vallum_core::identity::{PeerIdentity, Validity};
 use vallum_core::shaping::Machine;
 use vallum_crypto::SharedSecret;
 
@@ -80,7 +80,40 @@ pub struct PeerConfig {
     /// The configured PSK, if any. A peer secret, not part of the identity.
     preshared_key: Option<SharedSecret>,
     persistent_keepalive: Option<Duration>,
+    /// Refuse a handshake from any address other than `endpoint`.
+    pin_endpoint: bool,
+    /// The window an identity document asserts, if this peer was configured
+    /// with one. Checked at every handshake, so an expired credential fails
+    /// closed even while the daemon runs.
+    validity: Option<Validity>,
+    /// Identities still accepted during a rotation, each with its own window.
+    ///
+    /// A rotation installs the new key here while the device still presents the
+    /// old one, so there is no window in which the peer cannot connect. The
+    /// entry is dropped by `peer finalize`.
+    previous: Vec<AcceptedIdentity>,
     shaping: Vec<Machine>,
+}
+
+/// An identity a peer still accepts, besides its current one.
+#[derive(Debug, Clone)]
+pub struct AcceptedIdentity {
+    identity: PeerIdentity,
+    validity: Option<Validity>,
+}
+
+impl AcceptedIdentity {
+    /// The identity itself.
+    #[must_use]
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+
+    /// The window its document asserted, if it came from one.
+    #[must_use]
+    pub fn validity(&self) -> Option<Validity> {
+        self.validity
+    }
 }
 
 impl PeerConfig {
@@ -99,8 +132,51 @@ impl PeerConfig {
             endpoint: None,
             preshared_key: None,
             persistent_keepalive: None,
+            pin_endpoint: false,
+            validity: None,
+            previous: Vec::new(),
             shaping: Vec::new(),
         }
+    }
+
+    /// Rename the peer without changing its identity or sessions.
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
+    /// Rotate the configured identity: the replaced one stays accepted as a
+    /// previous identity until [`Self::clear_previous`] retires it.
+    ///
+    /// Idempotent both ways: rotating onto the identity already in place does
+    /// nothing, and a window that already holds an identity is not duplicated.
+    /// Returns whether the configuration changed.
+    pub(crate) fn rotate_identity(&mut self, identity: PeerIdentity) -> bool {
+        let replaced = std::mem::replace(&mut self.identity, identity);
+        if replaced.kem().as_bytes() == self.identity.kem().as_bytes() {
+            return false;
+        }
+        let already = self
+            .previous
+            .iter()
+            .any(|accepted| accepted.identity().kem().as_bytes() == replaced.kem().as_bytes());
+        if already {
+            return false;
+        }
+        self.previous.push(AcceptedIdentity {
+            identity: replaced,
+            validity: self.validity,
+        });
+        true
+    }
+
+    /// Retire every accepted previous identity (`peer finalize`).
+    /// Returns whether a window was open.
+    pub(crate) fn clear_previous(&mut self) -> bool {
+        if self.previous.is_empty() {
+            return false;
+        }
+        self.previous.clear();
+        true
     }
 
     /// The addresses this peer may send from and receive to.
@@ -115,6 +191,53 @@ impl PeerConfig {
     pub fn with_endpoint(mut self, endpoint: SocketAddr) -> Self {
         self.endpoint = Some(endpoint);
         self
+    }
+
+    /// Refuse to roam: only a handshake from `endpoint` is accepted.
+    ///
+    /// Pinning without an endpoint is incoherent — there would be no address to
+    /// pin to — so this leaves the flag off and the caller is expected to have
+    /// validated the pair.
+    #[must_use]
+    pub fn with_pinned_endpoint(mut self) -> Self {
+        self.pin_endpoint = self.endpoint.is_some();
+        self
+    }
+
+    /// Whether this peer refuses to roam.
+    #[must_use]
+    pub fn pin_endpoint(&self) -> bool {
+        self.pin_endpoint
+    }
+
+    /// Attach the validity window an identity document asserted.
+    #[must_use]
+    pub fn with_validity(mut self, validity: Validity) -> Self {
+        self.validity = Some(validity);
+        self
+    }
+
+    /// The identity window, if this peer was configured with a document.
+    #[must_use]
+    pub fn validity(&self) -> Option<Validity> {
+        self.validity
+    }
+
+    /// Accept one more identity while a rotation is in progress.
+    #[must_use]
+    pub fn with_previous_identity(
+        mut self,
+        identity: PeerIdentity,
+        validity: Option<Validity>,
+    ) -> Self {
+        self.previous.push(AcceptedIdentity { identity, validity });
+        self
+    }
+
+    /// The identities still accepted besides the current one.
+    #[must_use]
+    pub fn previous_identities(&self) -> &[AcceptedIdentity] {
+        &self.previous
     }
 
     /// Require this peer to use a configured preshared key (G1).

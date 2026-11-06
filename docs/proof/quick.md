@@ -69,6 +69,9 @@ the explicit trade: the operator asked for a shell; a packet did not.
 - `packaging/vallum@.service`: a template unit, `ExecStart=/usr/bin/vallum run
   --config /etc/vallum/%i.toml`, with `CAP_NET_ADMIN`, `NoNewPrivileges`, and a
   writable `/run/vallum` only.
+- `packaging/vallum-tmpfiles.conf`: owns `/run/vallum` (`d /run/vallum 0750 root
+  root -`), so the directory exists before any unit starts and outlives any unit
+  stopping. It is not a unit's `RuntimeDirectory` — see ADR-0017.
 - `packaging/vallum.8`, `vallum-quick.8`, `vallum.toml.5`: man pages.
 - `packaging/vallum.bash`: completion for both binaries.
 - `[package.metadata.deb]`/`[package.metadata.rpm]` in `crates/vallum`: the
@@ -78,17 +81,30 @@ the explicit trade: the operator asked for a shell; a packet did not.
 
 ## 4. The installer
 
-`scripts/install.sh` supports Debian/Ubuntu and Fedora/RHEL:
+`scripts/install.sh` is a **bootstrap**, not the provisioning logic. It installs
+a release (or a local build) into `/usr/bin` with the two units, the man pages
+and the completion, then hands off to `vallum server init`:
 
-- installs `qrencode` and `nftables`, the binaries, and `/etc/vallum`;
-- generates the server key and a config with a control socket and `fwmark`;
-- installs and enables the template unit;
-- adds a NAT table for the tunnel subnet;
-- `--add-client NAME` allocates the next address, appends the peer, runs
-  `syncconf`, writes the client config, and prints a QR;
-- `--remove-client NAME` removes the peer block and the client files;
-- `--uninstall` reverses it;
-- `--dry-run` prints every command without running it.
+- `--from-release [TAG]` downloads the tarball and `SHA256SUMS`, verifies the
+  checksum, and installs it. Needs only `curl`; installing from a private fork is
+  the one case that falls back to `gh` with `GH_TOKEN`.
+- `--local` installs `target/release` (or `target/debug`); this is the developer
+  path.
+- `--install-only` stops after the files are in place.
+- Everything else is passed through to `vallum server init`, so `--endpoint`,
+  `--address`, `--no-nat`, `--no-firewall`, `--no-forward`, `--no-service`, and
+  `--dry-run` work here without being duplicated.
+- `--add-client NAME` and `--remove-client NAME` are shims over
+  `vallum peer add`/`peer remove`.
+- `--uninstall` runs `vallum uninstall`: stops and removes all Vallum units,
+  the binaries, the NAT table, the sysctl file, man pages, and completions —
+  `/etc/vallum` stays unless `--purge`.
+
+The setup itself — key, config, forwarding, firewall, NAT, units — lives in
+`vallum server init` (ADR-0013) so it has one implementation, unit tests, and a
+`--json` form. `scripts/release.sh` is the release pipeline: publishing holds
+the signing key and the two-host stamp, so it stays on the machine that has
+them rather than in a CI job.
 
 ---
 

@@ -62,6 +62,8 @@ pub mod field {
     /// Device fields.
     pub const VALLUM_LISTEN: &str = "vallum_listen";
     /// Device fields.
+    pub const VALLUM_CONTROL: &str = "vallum_control";
+    /// Device fields.
     pub const VALLUM_OFFLOAD: &str = "vallum_offload";
     /// Device fields.
     pub const VALLUM_BATCHING: &str = "vallum_batching";
@@ -78,6 +80,14 @@ pub mod field {
     /// Peer fields.
     pub const VALLUM_NAME: &str = "vallum_name";
     /// Peer fields.
+    ///
+    /// In a `set`, the identity a rotation moved aside: the referenced peer —
+    /// matched by this key, not by the block's `public_key` — adopts the new
+    /// identity and keeps the old one accepted (ADR-0019). `none` retires the
+    /// window (`peer finalize`). Absent means the config says nothing about
+    /// rotation for this peer, and the live window is left alone.
+    pub const VALLUM_PREVIOUS_PUBLIC_KEY: &str = "vallum_previous_public_key";
+    /// Peer fields.
     pub const PRESHARED_KEY: &str = "preshared_key";
     /// Peer fields.
     pub const ENDPOINT: &str = "endpoint";
@@ -92,9 +102,48 @@ pub mod field {
     /// Peer fields.
     pub const PERSISTENT_KEEPALIVE_INTERVAL: &str = "persistent_keepalive_interval";
     /// Peer fields.
+    pub const WINDOW_SENT: &str = "vallum_window_sent";
+    /// Peer fields.
+    pub const WINDOW_RECEIVED: &str = "vallum_window_received";
+    /// Peer drop reasons, counted separately because they have different causes
+    /// and an aggregate reads as a diagnosis when it is not one.
+    pub const DROPPED_NO_SESSION: &str = "vallum_dropped_no_session";
+    pub const DROPPED_REPLAY: &str = "vallum_dropped_replay";
+    pub const DROPPED_ALLOWED_IPS: &str = "vallum_dropped_allowed_ips";
+    /// Reactive re-handshake offers a peer was given (ADR-0019), rate-limited.
+    pub const REINIT_OFFERED: &str = "vallum_reinit_offered";
+    /// The most recent inner source rejected by `allowed_ips`; `none` if the
+    /// packet did not parse as IP, `-` if nothing has been rejected.
+    pub const LAST_REJECTED_SOURCE: &str = "vallum_last_rejected_source";
+    /// Peer fields.
     pub const ALLOWED_IP: &str = "allowed_ip";
     /// Peer fields.
+    /// The unix second a peer's identity document expires, when it has one.
+    pub const VALLUM_VALID_UNTIL: &str = "vallum_valid_until";
+    /// 1 when a rotation is open (a previous identity is still accepted).
+    pub const VALLUM_ROTATING: &str = "vallum_rotating";
     pub const VALLUM_EPOCH: &str = "vallum_epoch";
+
+    /// Datagrams handed to the socket.
+    pub const VALLUM_DATAGRAMS_SENT: &str = "vallum_datagrams_sent";
+    /// Datagrams that could not be sent.
+    pub const VALLUM_DATAGRAMS_FAILED: &str = "vallum_datagrams_failed";
+    /// Packets written to the interface.
+    pub const VALLUM_PACKETS_DELIVERED: &str = "vallum_packets_delivered";
+    /// Packets that could not be written.
+    pub const VALLUM_PACKETS_FAILED: &str = "vallum_packets_failed";
+    /// Completed handshakes.
+    pub const VALLUM_HANDSHAKES: &str = "vallum_handshakes_established";
+    /// Handshakes refused on policy.
+    pub const VALLUM_REFUSALS: &str = "vallum_handshakes_refused";
+    /// Messages reassembled from fragments.
+    pub const VALLUM_REASSEMBLED: &str = "vallum_reassembled";
+    /// Fragments refused or abandoned.
+    pub const VALLUM_FRAGMENTS_DROPPED: &str = "vallum_fragments_dropped";
+    /// Datagrams dropped because they did not parse as a transport message.
+    pub const VALLUM_DROPPED_MALFORMED: &str = "vallum_dropped_malformed";
+    /// Datagrams dropped because the sender index matched no peer session.
+    pub const VALLUM_DROPPED_UNKNOWN_INDEX: &str = "vallum_dropped_unknown_index";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
     /// Request markers and flags.
@@ -144,6 +193,8 @@ pub struct Peer {
     /// key is 2 374 bytes. The control layer validates the length against the
     /// suite.
     pub public_key: Option<Vec<u8>>,
+    /// A human-readable name for the peer; omitted leaves it unchanged.
+    pub name: Option<String>,
     /// `Some(None)` clears the PSK; `Some(Some(k))` sets it.
     pub preshared_key: Option<Option<[u8; 32]>>,
     /// `Some(None)` clears the endpoint (roam); `Some(Some(a))` sets it.
@@ -158,6 +209,10 @@ pub struct Peer {
     pub update_only: bool,
     /// Replace the peer's allowed IPs rather than appending.
     pub replace_allowed_ips: bool,
+    /// The rotation window, as a full-state statement: the identity the peer
+    /// rotates from, an empty vector to retire the window, or absent when the
+    /// config says nothing about rotation for this peer.
+    pub previous_public_key: Option<Vec<u8>>,
 }
 
 /// Parse a request body.
@@ -220,7 +275,9 @@ pub fn parse(text: &str) -> Result<Request, String> {
                         set.replace_peers = parse_bool(value)?;
                     }
                     // Peer fields require an open peer block.
-                    field::PRESHARED_KEY
+                    field::VALLUM_NAME
+                    | field::VALLUM_PREVIOUS_PUBLIC_KEY
+                    | field::PRESHARED_KEY
                     | field::ENDPOINT
                     | field::PERSISTENT_KEEPALIVE_INTERVAL
                     | field::ALLOWED_IP
@@ -231,6 +288,21 @@ pub fn parse(text: &str) -> Result<Request, String> {
                             .as_mut()
                             .ok_or_else(|| format!("`{key}` before any `public_key`"))?;
                         match key {
+                            field::VALLUM_NAME => {
+                                peer.name = Some(value.to_owned());
+                            }
+                            field::VALLUM_PREVIOUS_PUBLIC_KEY => {
+                                // `(none)` retires the window; a key names the
+                                // identity to rotate from. Length is validated
+                                // against the suite at apply time, like
+                                // `public_key`.
+                                peer.previous_public_key =
+                                    Some(if value == "none" || value == "(none)" {
+                                        Vec::new()
+                                    } else {
+                                        parse_any_key(value)?
+                                    });
+                            }
                             field::PRESHARED_KEY => {
                                 let parsed = parse_fixed_key(value)?;
                                 peer.preshared_key = Some((parsed != [0u8; 32]).then_some(parsed));
@@ -320,6 +392,8 @@ pub struct DeviceState {
     pub fingerprint: [u8; 8],
     /// The bound UDP address.
     pub listen: SocketAddr,
+    /// The control socket path, if one is configured.
+    pub control: Option<String>,
     /// The socket mark.
     pub fwmark: u32,
     /// The suite id.
@@ -332,6 +406,8 @@ pub struct DeviceState {
     pub batching: bool,
     /// What a `set` can actually change.
     pub capabilities: Capabilities,
+    /// Live loop counters.
+    pub stats: crate::run::LoopStats,
     /// The peers, in configuration order.
     pub peers: Vec<PeerState>,
 }
@@ -356,6 +432,9 @@ pub struct PeerState {
     pub public_key: Vec<u8>,
     /// The peer public line (`vallum1:…`).
     pub public_line: String,
+    /// The identity still accepted besides the current one, when a rotation is
+    /// open; empty when the window is closed.
+    pub previous_public_key: Vec<u8>,
     /// A short fingerprint of the peer key.
     pub fingerprint: [u8; 8],
     /// The configured PSK, if any.
@@ -368,10 +447,28 @@ pub struct PeerState {
     pub tx_bytes: u64,
     /// Wire bytes received.
     pub rx_bytes: u64,
+    /// Datagrams sent in the most recent delivery window.
+    pub window_sent: u64,
+    /// Datagrams received and opened in the most recent delivery window.
+    pub window_received: u64,
+    /// Datagrams dropped because this peer had no live session.
+    pub dropped_no_session: u64,
+    /// Datagrams that failed to open.
+    pub dropped_replay: u64,
+    /// Datagrams dropped by the `allowed_ips` check.
+    pub dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers this peer was given (ADR-0019).
+    pub reinit_offered: u64,
+    /// The most recent inner source rejected by `allowed_ips`.
+    pub last_rejected_source: Option<std::net::IpAddr>,
     /// Persistent keepalive, in seconds.
     pub keepalive: Option<u16>,
     /// Allowed prefixes.
     pub allowed_ips: Vec<Prefix>,
+    /// The unix second this peer's identity expires, when it is a document.
+    pub valid_until: Option<u64>,
+    /// Whether a previous identity is still accepted (a rotation is open).
+    pub rotating: bool,
     /// The current epoch.
     pub epoch: u64,
 }
@@ -413,6 +510,9 @@ pub fn render_get(state: &DeviceState) -> String {
         hex_encode(&state.fingerprint)
     ));
     out.push_str(&format!("{}={}\n", field::VALLUM_LISTEN, state.listen));
+    if let Some(control) = &state.control {
+        out.push_str(&format!("{}={control}\n", field::VALLUM_CONTROL));
+    }
     out.push_str(&format!("{}={}\n", field::VALLUM_OFFLOAD, state.offload));
     out.push_str(&format!("{}={}\n", field::VALLUM_BATCHING, state.batching));
     for address in &state.addresses {
@@ -434,6 +534,24 @@ pub fn render_get(state: &DeviceState) -> String {
         state.capabilities.set_fwmark
     ));
     out.push_str(&format!("{}={:#06x}\n", field::VALLUM_SUITE, state.suite));
+    let stats = state.stats;
+    for (key, value) in [
+        (field::VALLUM_DATAGRAMS_SENT, stats.datagrams_sent),
+        (field::VALLUM_DATAGRAMS_FAILED, stats.datagrams_failed),
+        (field::VALLUM_PACKETS_DELIVERED, stats.packets_delivered),
+        (field::VALLUM_PACKETS_FAILED, stats.packets_failed),
+        (field::VALLUM_HANDSHAKES, stats.established),
+        (field::VALLUM_REFUSALS, stats.refusals),
+        (field::VALLUM_REASSEMBLED, stats.reassembled),
+        (field::VALLUM_FRAGMENTS_DROPPED, stats.fragments_dropped),
+        (field::VALLUM_DROPPED_MALFORMED, stats.dropped_malformed),
+        (
+            field::VALLUM_DROPPED_UNKNOWN_INDEX,
+            stats.dropped_unknown_index,
+        ),
+    ] {
+        out.push_str(&format!("{key}={value}\n"));
+    }
     for peer in &state.peers {
         out.push_str(&format!(
             "\n{}={}\n",
@@ -441,6 +559,15 @@ pub fn render_get(state: &DeviceState) -> String {
             hex_encode(&peer.public_key)
         ));
         out.push_str(&format!("{}={}\n", field::VALLUM_NAME, peer.name));
+        if peer.previous_public_key.is_empty() {
+            out.push_str(&format!("{}=(none)\n", field::VALLUM_PREVIOUS_PUBLIC_KEY));
+        } else {
+            out.push_str(&format!(
+                "{}={}\n",
+                field::VALLUM_PREVIOUS_PUBLIC_KEY,
+                hex_encode(&peer.previous_public_key)
+            ));
+        }
         out.push_str(&format!(
             "{}={}\n",
             field::VALLUM_FINGERPRINT,
@@ -464,6 +591,41 @@ pub fn render_get(state: &DeviceState) -> String {
         }
         out.push_str(&format!("{}={}\n", field::TX_BYTES, peer.tx_bytes));
         out.push_str(&format!("{}={}\n", field::RX_BYTES, peer.rx_bytes));
+        // The only two numbers that say whether the tunnel is carrying traffic,
+        // as opposed to whether it has handshaked recently.
+        out.push_str(&format!("{}={}\n", field::WINDOW_SENT, peer.window_sent));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::WINDOW_RECEIVED,
+            peer.window_received
+        ));
+        // Split drop reasons: "accepted nothing" is a symptom, not a cause.
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_NO_SESSION,
+            peer.dropped_no_session
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_REPLAY,
+            peer.dropped_replay
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::DROPPED_ALLOWED_IPS,
+            peer.dropped_allowed_ips
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::REINIT_OFFERED,
+            peer.reinit_offered
+        ));
+        let rejected = match (peer.dropped_allowed_ips, peer.last_rejected_source) {
+            (0, _) => "-".to_owned(),
+            (_, None) => "none".to_owned(),
+            (_, Some(ip)) => ip.to_string(),
+        };
+        out.push_str(&format!("{}={}\n", field::LAST_REJECTED_SOURCE, rejected));
         out.push_str(&format!(
             "{}={}\n",
             field::PERSISTENT_KEEPALIVE_INTERVAL,
@@ -473,6 +635,14 @@ pub fn render_get(state: &DeviceState) -> String {
             out.push_str(&format!("{}={prefix}\n", field::ALLOWED_IP));
         }
         out.push_str(&format!("{}={}\n", field::VALLUM_EPOCH, peer.epoch));
+        if let Some(valid_until) = peer.valid_until {
+            out.push_str(&format!("{}={valid_until}\n", field::VALLUM_VALID_UNTIL));
+        }
+        out.push_str(&format!(
+            "{}={}\n",
+            field::VALLUM_ROTATING,
+            u8::from(peer.rotating)
+        ));
     }
     out.push_str(&format!("{}=0\n", field::ERRNO));
     out
@@ -611,6 +781,9 @@ pub fn render_config(response: &Response, include_secrets: bool) -> String {
             out.push_str(&format!("fwmark = {fwmark}\n"));
         }
     }
+    if let Some(control) = response.field(field::VALLUM_CONTROL) {
+        out.push_str(&format!("control = \"{}\"\n", escape(control)));
+    }
     let addresses: Vec<String> = response
         .device
         .iter()
@@ -681,6 +854,17 @@ pub fn render_set(set: &Set) -> String {
                 field::PUBLIC_KEY,
                 hex_encode(public_key)
             ));
+        }
+        if let Some(name) = &peer.name {
+            out.push_str(&format!("{}={name}\n", field::VALLUM_NAME));
+        }
+        if let Some(previous) = &peer.previous_public_key {
+            let value = if previous.is_empty() {
+                "(none)".to_owned()
+            } else {
+                hex_encode(previous)
+            };
+            out.push_str(&format!("{}={value}\n", field::VALLUM_PREVIOUS_PUBLIC_KEY));
         }
         if let Some(psk) = peer.preshared_key {
             let value = psk.map_or_else(|| "00".repeat(32), |key| hex_encode(&key));
@@ -827,10 +1011,19 @@ mod tests {
             prop::option::of(prop::array::uniform32(any::<u8>())),
             prop::option::of(an_address()),
             prop::option::of((any::<u64>(), any::<u32>())),
-            any::<u64>(),
-            any::<u64>(),
+            (
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+            ),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
+            prop::option::of((any::<u64>(), any::<bool>())),
             any::<u64>(),
         )
             .prop_map(
@@ -842,10 +1035,19 @@ mod tests {
                     preshared_key,
                     endpoint,
                     last_handshake,
-                    tx_bytes,
-                    rx_bytes,
+                    (
+                        tx_bytes,
+                        rx_bytes,
+                        window_sent,
+                        window_received,
+                        dropped_no_session,
+                        dropped_replay,
+                        dropped_allowed_ips,
+                        reinit_offered,
+                    ),
                     keepalive,
                     allowed_ips,
+                    identity,
                     epoch,
                 )| PeerState {
                     name,
@@ -857,8 +1059,18 @@ mod tests {
                     last_handshake,
                     tx_bytes,
                     rx_bytes,
+                    window_sent,
+                    window_received,
+                    dropped_no_session,
+                    dropped_replay,
+                    dropped_allowed_ips,
+                    reinit_offered,
+                    last_rejected_source: None,
                     keepalive,
                     allowed_ips,
+                    valid_until: identity.map(|(valid_until, _)| valid_until),
+                    rotating: identity.is_some_and(|(_, rotating)| rotating),
+                    previous_public_key: Vec::new(),
                     epoch,
                 },
             )
@@ -899,11 +1111,13 @@ mod tests {
                     public_line,
                     fingerprint,
                     listen,
+                    control: None,
                     fwmark,
                     suite,
                     addresses,
                     offload: false,
                     batching: false,
+                    stats: crate::run::LoopStats::default(),
                     capabilities: Capabilities {
                         set_private_key,
                         set_listen_port,
@@ -999,6 +1213,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tri_hybrid_set_with_a_name_parses() {
+        let key = "ab".repeat(2374);
+        let text = format!("set=1\npublic_key={key}\nvallum_name=third\nallowed_ip=10.7.0.3/32\n");
+        let request = parse(&text).expect("parse");
+        let Request::Set(set) = request else {
+            panic!("not a set");
+        };
+        assert_eq!(set.peers[0].public_key.as_ref().unwrap().len(), 2374);
+        assert_eq!(set.peers[0].name.as_deref(), Some("third"));
+        assert_eq!(set.peers[0].allowed_ips.len(), 1);
+    }
+
+    #[test]
     fn a_set_renders_and_parses_back() {
         let set = Set {
             private_key: Some([0x11; 32]),
@@ -1007,6 +1234,7 @@ mod tests {
             replace_peers: true,
             peers: vec![Peer {
                 public_key: Some(vec![0x22; 32]),
+                name: Some("laptop".to_owned()),
                 preshared_key: Some(Some([0x33; 32])),
                 endpoint: Some(Some("203.0.113.9:51820".parse().unwrap())),
                 keepalive: Some(25),
@@ -1014,6 +1242,7 @@ mod tests {
                 remove: false,
                 update_only: true,
                 replace_allowed_ips: true,
+                previous_public_key: None,
             }],
         };
         let text = render_set(&set);
@@ -1056,11 +1285,13 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,
             addresses: vec!["10.7.0.1/24".parse().unwrap()],
             offload: false,
             batching: false,
+            stats: crate::run::LoopStats::default(),
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,
@@ -1076,14 +1307,28 @@ mod tests {
                 last_handshake: Some((1_700_000_000, 42)),
                 tx_bytes: 10,
                 rx_bytes: 20,
+                window_sent: 40,
+                window_received: 30,
+                dropped_no_session: 1,
+                dropped_replay: 2,
+                dropped_allowed_ips: 3,
+                reinit_offered: 4,
+                last_rejected_source: None,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
+                valid_until: Some(1_800_000_000),
+                rotating: true,
                 epoch: 2,
+                previous_public_key: vec![3u8; 32],
             }],
         };
         let text = render_get(&state);
         assert!(text.contains("private_key=0101"));
         assert!(text.contains("vallum_interface=vallum0"));
+        // An expiring credential and an open rotation are visible to a client
+        // of the control socket, not just to the config file.
+        assert!(text.contains("vallum_valid_until=1800000000"));
+        assert!(text.contains("vallum_rotating=1"));
         assert!(text.contains("vallum_can_set_listen_port=false"));
         assert!(text.contains("endpoint=203.0.113.9:51820"));
         assert!(text.contains("allowed_ip=10.7.0.2/32"));
@@ -1100,11 +1345,13 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,
             addresses: Vec::new(),
             offload: false,
             batching: false,
+            stats: crate::run::LoopStats::default(),
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,
@@ -1120,15 +1367,33 @@ mod tests {
                 last_handshake: None,
                 tx_bytes: 0,
                 rx_bytes: 0,
+                window_sent: 0,
+                window_received: 0,
+                dropped_no_session: 0,
+                dropped_replay: 0,
+                dropped_allowed_ips: 0,
+                reinit_offered: 0,
+                last_rejected_source: None,
                 keepalive: None,
                 allowed_ips: Vec::new(),
+                valid_until: None,
+                rotating: false,
                 epoch: 0,
+                previous_public_key: Vec::new(),
             }],
         };
         let response = parse_response(&render_get(&state));
         assert_eq!(response.field(field::VALLUM_INTERFACE), Some("vallum0"));
         assert_eq!(response.peers.len(), 1);
         assert_eq!(response.peer_field(0, "vallum_name"), Some("laptop"));
+        // A peer with no document says nothing about a window, and reports a
+        // closed rotation explicitly.
+        assert_eq!(response.peer_field(0, "vallum_valid_until"), None);
+        assert_eq!(response.peer_field(0, "vallum_rotating"), Some("0"));
+        assert_eq!(
+            response.peer_field(0, field::VALLUM_PREVIOUS_PUBLIC_KEY),
+            Some("(none)")
+        );
     }
 
     #[test]
@@ -1136,6 +1401,10 @@ mod tests {
         let response = Response {
             device: vec![
                 ("vallum_interface".to_owned(), "vallum0".to_owned()),
+                (
+                    "vallum_control".to_owned(),
+                    "/run/vallum/vallum0.sock".to_owned(),
+                ),
                 (
                     "vallum_private_key_path".to_owned(),
                     "/etc/vallum/server.key".to_owned(),
@@ -1152,6 +1421,7 @@ mod tests {
         };
         let text = render_config(&response, true);
         assert!(text.contains("private_key = \"/etc/vallum/server.key\""));
+        assert!(text.contains("control = \"/run/vallum/vallum0.sock\""));
         assert!(text.contains(&format!("preshared_key = \"{}\"", "cc".repeat(32))));
     }
 
@@ -1190,6 +1460,10 @@ mod tests {
             device: vec![
                 ("vallum_interface".to_owned(), "vallum0".to_owned()),
                 ("vallum_listen".to_owned(), "0.0.0.0:51820".to_owned()),
+                (
+                    "vallum_control".to_owned(),
+                    "/run/vallum/vallum0.sock".to_owned(),
+                ),
                 ("vallum_address".to_owned(), "10.7.0.1/24".to_owned()),
             ],
             peers: vec![vec![
@@ -1205,6 +1479,7 @@ mod tests {
         };
         let text = render_config(&response, false);
         assert!(text.contains("name = \"vallum0\""));
+        assert!(text.contains("control = \"/run/vallum/vallum0.sock\""));
         assert!(text.contains("public_key = \"vallum1:0003:ab:-\""));
         assert!(text.contains("allowed_ips = [\"10.7.0.2/32\"]"));
         assert!(!text.contains("cc".repeat(32).as_str()));

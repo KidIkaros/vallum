@@ -36,11 +36,11 @@
 use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use vallum_tunnel::{Action, Clock, Device, Event, Randomness, Segments};
 
@@ -57,6 +57,13 @@ pub const DEFAULT_TICK_MS: u64 = 100;
 
 /// Queued events past which the device is told it is under load.
 pub const DEFAULT_UNDER_LOAD_DEPTH: usize = 64;
+
+/// How many destinations have their path MTU read from the routing table.
+///
+/// One `connect` plus `getsockopt` per destination, once each, so the cost is
+/// bounded by this rather than by how many addresses the send path can be
+/// talked into using. Well above any realistic peer count.
+pub const PROBED_PATH_LIMIT: usize = 64;
 
 /// The largest datagram a UDP read will accept.
 ///
@@ -137,6 +144,67 @@ impl Shutdown {
     }
 }
 
+/// [`LoopStats`] live, behind atomics.
+///
+/// The control socket answers `get` on the loop thread, but a scrape must not
+/// wait for the loop to finish to read counters — and `metrics`/`uapi` render
+/// them while the daemon is still running. Each field is a `Relaxed` counter
+/// written once per loop iteration; readers get a slightly stale but always
+/// consistent-with-itself value.
+#[derive(Debug, Default)]
+pub struct SharedStats {
+    datagrams_sent: AtomicU64,
+    datagrams_failed: AtomicU64,
+    packets_delivered: AtomicU64,
+    packets_failed: AtomicU64,
+    established: AtomicU64,
+    refusals: AtomicU64,
+    reassembled: AtomicU64,
+    fragments_dropped: AtomicU64,
+    dropped_malformed: AtomicU64,
+    dropped_unknown_index: AtomicU64,
+}
+
+impl SharedStats {
+    /// Publish a snapshot of the loop's counters.
+    pub fn publish(&self, stats: &LoopStats) {
+        self.datagrams_sent
+            .store(stats.datagrams_sent, Ordering::Relaxed);
+        self.datagrams_failed
+            .store(stats.datagrams_failed, Ordering::Relaxed);
+        self.packets_delivered
+            .store(stats.packets_delivered, Ordering::Relaxed);
+        self.packets_failed
+            .store(stats.packets_failed, Ordering::Relaxed);
+        self.established.store(stats.established, Ordering::Relaxed);
+        self.refusals.store(stats.refusals, Ordering::Relaxed);
+        self.reassembled.store(stats.reassembled, Ordering::Relaxed);
+        self.fragments_dropped
+            .store(stats.fragments_dropped, Ordering::Relaxed);
+        self.dropped_malformed
+            .store(stats.dropped_malformed, Ordering::Relaxed);
+        self.dropped_unknown_index
+            .store(stats.dropped_unknown_index, Ordering::Relaxed);
+    }
+
+    /// Read every counter as one [`LoopStats`].
+    #[must_use]
+    pub fn snapshot(&self) -> LoopStats {
+        LoopStats {
+            datagrams_sent: self.datagrams_sent.load(Ordering::Relaxed),
+            datagrams_failed: self.datagrams_failed.load(Ordering::Relaxed),
+            packets_delivered: self.packets_delivered.load(Ordering::Relaxed),
+            packets_failed: self.packets_failed.load(Ordering::Relaxed),
+            established: self.established.load(Ordering::Relaxed),
+            refusals: self.refusals.load(Ordering::Relaxed),
+            reassembled: self.reassembled.load(Ordering::Relaxed),
+            fragments_dropped: self.fragments_dropped.load(Ordering::Relaxed),
+            dropped_malformed: self.dropped_malformed.load(Ordering::Relaxed),
+            dropped_unknown_index: self.dropped_unknown_index.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// What the loop did, for the caller to log or a test to assert on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoopStats {
@@ -150,10 +218,16 @@ pub struct LoopStats {
     pub packets_failed: u64,
     /// Handshakes that completed.
     pub established: u64,
+    /// Handshakes refused for a policy reason (expired identity, pinned endpoint).
+    pub refusals: u64,
     /// Messages delivered out of reassembled fragments.
     pub reassembled: u64,
     /// Fragments refused, and half-assembled messages abandoned.
     pub fragments_dropped: u64,
+    /// Datagrams dropped because they did not parse as a transport message.
+    pub dropped_malformed: u64,
+    /// Datagrams dropped because the sender index matched no session.
+    pub dropped_unknown_index: u64,
 }
 
 /// Everything the loop needs from the operating system.
@@ -172,6 +246,15 @@ pub struct Attached {
     pub budget: usize,
     /// The control socket, if configured.
     pub control: Option<ControlServer>,
+    /// The addresses this interface owns. A packet leaving it may only carry
+    /// one of these unless [`Self::forward`] is set: anything else is refused
+    /// by the peer's `allowed_ips` check, so sending it converts a local
+    /// mistake into silent far-side loss.
+    pub addresses: Vec<vallum_tunnel::Prefix>,
+    /// Whether this node is a gateway: a packet whose source is not an
+    /// address here may still be relayed, because the far side's
+    /// `allowed_ips` check is where a source claim is judged. See ADR-0020.
+    pub forward: bool,
 }
 
 impl std::fmt::Debug for Attached {
@@ -205,6 +288,133 @@ pub(crate) enum Input {
 /// running is logged and counted, not fatal: a tunnel does not exit because one
 /// datagram did not go.
 #[must_use = "the run loop returns only when the tunnel has stopped"]
+/// Whether a packet's inner source may leave this interface.
+///
+/// Two claims, one rule (ADR-0020). Owned, always: a source inside
+/// `addresses` is this host speaking, and it is right to decline anything
+/// else locally when the host is not a gateway — that turns the peer's
+/// silent `allowed_ips` refusal (no counter, no ICMP, no log) into a cause
+/// named here, which is what made the physical-address leak from a socket
+/// bound before the tunnel came up diagnosable.
+///
+/// Not owned, and `[interface] forward` is on: the node is a gateway, and a
+/// packet whose destination routes to a peer but whose source belongs to
+/// nobody here is a relayed flow — the honest case is a conntrack reply that
+/// came back after this host forwarded its neighbour's packet. Far-side
+/// policy still governs: the receiving peer's `allowed_ips` decides whether
+/// to accept the source, so relaying does not let a host claim another's
+/// address, it just refuses claims where they are real instead of where a
+/// relay merely looks like one.
+fn outbound_allows(
+    source: Option<std::net::IpAddr>,
+    addresses: &[vallum_tunnel::Prefix],
+    forwards: bool,
+) -> bool {
+    source.is_some_and(|ip| {
+        addresses.iter().any(|prefix| prefix.contains(&ip)) || (forwards && !is_link_local(&ip))
+    })
+}
+
+/// Whether `ip` sits inside a link-local block (v4 `169.254.0.0/16`, v6
+/// `fe80::/10`).
+///
+/// A link-local source means nothing across a link boundary, whoever's
+/// interface it claims to come from, so it is refused even by a gateway.
+#[must_use]
+fn is_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            first & 0xffc0 == 0xfe80
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod outbound_source_tests {
+    use super::{is_link_local, outbound_allows};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    use vallum_tunnel::Prefix;
+
+    fn addrs() -> Vec<Prefix> {
+        vec![
+            Prefix::from_str("10.7.0.2/32").expect("valid prefix literal"),
+            Prefix::from_str("fd00:7::2/128").expect("valid prefix literal"),
+        ]
+    }
+
+    fn ip(text: &str) -> Option<IpAddr> {
+        text.parse::<IpAddr>().ok()
+    }
+
+    #[test]
+    fn the_tunnel_address_is_ours() {
+        assert!(outbound_allows(ip("10.7.0.2"), &addrs(), false));
+        assert!(outbound_allows(ip("fd00:7::2"), &addrs(), false));
+    }
+
+    #[test]
+    fn a_physical_address_is_not_ours() {
+        // The address observed leaking on the live deployment: a socket bound
+        // before the tunnel came up keeps using the physical interface's
+        // global IPv6, and the peer rejects every packet it sends.
+        assert!(!outbound_allows(
+            ip("2600:4041:542b:7800:6781:d74:5e93:4f62"),
+            &addrs(),
+            false,
+        ));
+    }
+
+    #[test]
+    fn a_link_local_source_is_not_ours() {
+        // Also observed rejected on the live deployment. A link-local address
+        // has no meaning beyond its own link, so it can never be a valid
+        // payload for a tunnel that crosses one.
+        assert!(!outbound_allows(
+            ip("fe80::6d93:636d:98a0:a51a"),
+            &addrs(),
+            false
+        ));
+    }
+
+    #[test]
+    fn an_unparseable_packet_is_not_ours() {
+        assert!(!outbound_allows(None, &addrs(), false));
+    }
+
+    #[test]
+    fn a_gateway_relays_a_foreign_source() {
+        // The conntrack reply that made the first verify-remote run fail: a
+        // server that forwarded a neighbour's packet to the internet received
+        // the reply back with src 1.1.1.1 and refused it locally, so every
+        // forwarded flow died while ping still worked.
+        assert!(outbound_allows(ip("1.1.1.1"), &addrs(), true));
+    }
+
+    #[test]
+    fn a_gateway_still_refuses_link_local_and_unparseable() {
+        assert!(!outbound_allows(
+            ip("fe80::6d93:636d:98a0:a51a"),
+            &addrs(),
+            true
+        ));
+        assert!(!outbound_allows(None, &addrs(), true));
+    }
+
+    #[test]
+    fn the_v4_link_local_block_is_recognised() {
+        assert!(is_link_local(
+            &"169.254.19.53".parse::<IpAddr>().expect("ip")
+        ));
+        assert!(is_link_local(&"fe80::1".parse::<IpAddr>().expect("ip")));
+        assert!(!is_link_local(&"1.1.1.1".parse::<IpAddr>().expect("ip")));
+        assert!(!is_link_local(&"fec0::1".parse::<IpAddr>().expect("ip")));
+    }
+}
+
 pub fn run(
     device: Device,
     attached: Attached,
@@ -219,6 +429,8 @@ pub fn run(
         clock,
         budget,
         control,
+        addresses,
+        forward,
     } = attached;
     let mut device = device;
     let mut stats = LoopStats::default();
@@ -227,6 +439,9 @@ pub fn run(
     // the device below only ever sees whole messages and nothing depends on IP
     // fragmentation to get a handshake across.
     let mut segments = Segments::with_budget(budget);
+    // The smallest budget that can still carry an envelope; a path narrower
+    // than this cannot run the protocol at all, so narrowing stops here.
+    let min_budget = usize::from(crate::tun::MIN_MTU) + crate::tun::DATA_OVERHEAD;
 
     let queued = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = mpsc::sync_channel::<Input>(QUEUE_CAPACITY);
@@ -235,10 +450,30 @@ pub fn run(
     // the readers going away; the loop still exits on the shutdown flag. The
     // context stays on this thread: the server thread only parses and forwards.
     let mut control = control;
+    let shared_stats = control.as_ref().map_or_else(
+        || Arc::new(SharedStats::default()),
+        |server| Arc::clone(&server.context.stats),
+    );
     let control_path = control.as_ref().map(|server| server.path.clone());
-    if let Some(path) = &control_path {
-        control::serve(path.clone(), tx.clone(), shutdown.clone())?;
-    }
+    let control_tx = control_path.as_ref().map(|_| tx.clone());
+    let mut control_shutdown = Shutdown::new();
+    let mut _control_handle = if let Some(path) = &control_path {
+        Some(control::serve(
+            path.clone(),
+            tx.clone(),
+            control_shutdown.clone(),
+        )?)
+    } else {
+        // A daemon with no control socket cannot be reconfigured, inspected, or
+        // asked for metrics. Say so once, at startup: silence here is what makes
+        // `vallum peer add` look like it worked when it did not. See ADR-0017.
+        log_warn!(
+            log,
+            "no control socket: this daemon cannot be reconfigured or inspected at \
+             runtime; set `control` in the config to enable it"
+        );
+        None
+    };
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
     spawn_udp_reader(&tx, Arc::clone(&queued), Arc::clone(&socket), &log)?;
@@ -246,20 +481,72 @@ pub fn run(
 
     log_info!(log, "tunnel up on interface `{}`", parts.name);
 
+    // Tell systemd the unit is alive: READY when the interface is serving,
+    // WATCHDOG at half the configured interval while the loop turns, STOPPING
+    // on the way out. No `$NOTIFY_SOCKET` (foreground run, tests) makes all
+    // three no-ops.
+    let mut notify = crate::notify::Notify::from_env();
+    notify.ready();
+
     let mut writer = parts.writer;
     let tick = Duration::from_millis(policy.tick_ms);
     // One warning per destination for a too-large datagram: the condition is a
     // configuration mistake, not a per-packet event, and a log line per packet
     // would bury it.
     let mut mtu_warned: HashSet<SocketAddr> = HashSet::new();
+    // Sources already reported as not belonging to this interface: one line per
+    // source, because the condition is a local misconfiguration rather than a
+    // per-packet event.
+    let mut foreign_source_warned: HashSet<std::net::IpAddr> = HashSet::new();
+    // Sources relayed because this interface forwards: one line per source,
+    // once, for the same reason. Every subsequent packet is silent.
+    let mut relayed_sources_noted: HashSet<std::net::IpAddr> = HashSet::new();
+    // Destinations whose path MTU has already been read from the routing table.
+    let mut probed: HashSet<SocketAddr> = HashSet::new();
+    let mut last_control_check = Instant::now();
 
     loop {
         if shutdown.is_triggered() {
             break;
         }
+        notify.pet_watchdog();
+
+        if let (Some(path), Some(tx)) = (&control_path, &control_tx) {
+            if last_control_check.elapsed() >= tick {
+                last_control_check = Instant::now();
+                if !path.exists() {
+                    log_warn!(
+                        log,
+                        "control socket `{}` was removed; re-binding",
+                        path.display()
+                    );
+                    control_shutdown.trigger();
+                    control_shutdown = Shutdown::new();
+                    match control::serve(path.clone(), tx.clone(), control_shutdown.clone()) {
+                        Ok(handle) => {
+                            _control_handle = Some(handle);
+                        }
+                        Err(error) => {
+                            log_warn!(
+                                log,
+                                "failed to re-bind control socket `{}`: {error}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let event = match rx.recv_timeout(tick) {
             Ok(Input::Control { request, reply }) => {
+                // Reassembly counters live in `segments`, so fold them in before
+                // the request handler takes its snapshot.
+                stats.reassembled = segments.reassembled();
+                stats.fragments_dropped = segments.dropped();
+                stats.dropped_malformed = device.dropped_malformed();
+                stats.dropped_unknown_index = device.dropped_unknown_index();
+                shared_stats.publish(&stats);
                 let body = match control.as_mut() {
                     Some(server) => control::handle(&mut device, &mut server.context, request),
                     None => crate::uapi::render_errno(crate::uapi::errno::ENOSYS),
@@ -269,7 +556,51 @@ pub fn run(
             }
             Ok(Input::Ip(packet)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
-                Some(Event::OutboundIp { packet })
+                // A packet may only leave this interface carrying an address it
+                // owns — unless the interface forwards (ADR-0020), in which
+                // case a relayed flow re-enters with a source that belongs to
+                // nobody here. Anything else — a link-local source, or a
+                // physical address a socket was bound to before the tunnel
+                // came up — is discarded by the peer's `allowed_ips` check with
+                // no counter, no ICMP and no log. Declining it here turns a
+                // silent far-side loss into a local cause that names its
+                // address; a gateway declines only what no role legitimises.
+                let source = vallum_tunnel::packet_source(&packet);
+                let owned =
+                    source.is_some_and(|ip| addresses.iter().any(|prefix| prefix.contains(&ip)));
+                if outbound_allows(source, &addresses, forward) {
+                    if let (false, Some(ip)) = (owned, source) {
+                        if relayed_sources_noted.insert(ip) {
+                            log_info!(
+                                log,
+                                "relaying packet from {ip}: not an address here, and \
+                                 `[interface] forward` is on (ADR-0020)"
+                            );
+                        }
+                    }
+                    Some(Event::OutboundIp { packet })
+                } else if let Some(ip) = source {
+                    if foreign_source_warned.insert(ip) {
+                        if is_link_local(&ip) {
+                            log_warn!(
+                                log,
+                                "dropping outbound packet from {ip}: a link-local source means \
+                                 nothing across a link"
+                            );
+                        } else {
+                            log_warn!(
+                                log,
+                                "dropping outbound packet from {ip}: this interface does not \
+                                 own that address, so the peer would reject it — set \
+                                 `forward = true` in [interface] if this host relays for a \
+                                 peer (ADR-0020)"
+                            );
+                        }
+                    }
+                    None
+                } else {
+                    None
+                }
             }
             Ok(Input::Datagram(source, bytes)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
@@ -300,6 +631,22 @@ pub fn run(
         for action in actions {
             match action {
                 Action::Send { destination, bytes } => {
+                    // Size the path before the first datagram to a destination we
+                    // have not measured. A responder has no configured endpoint:
+                    // it learns the address from the handshake, and without this
+                    // it would send its reply at the default budget and lose it.
+                    if probed.len() < PROBED_PATH_LIMIT && probed.insert(destination) {
+                        if let Some(fits) = crate::net::path_mtu(destination)
+                            .ok()
+                            .map(|mtu| {
+                                usize::from(mtu)
+                                    .saturating_sub(usize::from(crate::config::OUTER_HEADER_LEN))
+                            })
+                            .filter(|fits| *fits >= min_budget)
+                        {
+                            segments.narrow_budget(fits);
+                        }
+                    }
                     for datagram in segments.outbound(bytes, destination, rng) {
                         outbound.push((destination, datagram));
                     }
@@ -321,6 +668,13 @@ pub fn run(
                         "peer `{name}` established at epoch {epoch} as {role:?}"
                     );
                 }
+                Action::Refused { peer, reason } => {
+                    stats.refusals += 1;
+                    let name = device
+                        .peer(peer)
+                        .map_or_else(|| peer.to_string(), |config| config.name().to_owned());
+                    log_warn!(log, "peer `{name}`: {}", reason.as_str());
+                }
             }
         }
 
@@ -336,12 +690,27 @@ pub fn run(
                     Err(error) => {
                         stats.datagrams_failed += 1;
                         if is_message_too_long(&error) {
+                            // The kernel knows what this path carries; ask it
+                            // rather than dropping every later datagram the same
+                            // way. A responder has no configured endpoint to
+                            // probe at startup, so this is where it learns.
+                            if let Some(fits) = crate::net::path_mtu(*destination)
+                                .ok()
+                                .map(|mtu| {
+                                    usize::from(mtu).saturating_sub(usize::from(
+                                        crate::config::OUTER_HEADER_LEN,
+                                    ))
+                                })
+                                .filter(|fits| *fits >= min_budget)
+                            {
+                                segments.narrow_budget(fits);
+                            }
                             if mtu_warned.insert(*destination) {
                                 log_warn!(
                                     log,
                                     "send to {destination} exceeded the path MTU; \
-                                     lower interface.outer_mtu (currently a \
-                                     {budget}-byte datagram budget)"
+                                     datagrams are now cut to a {}-byte budget",
+                                    segments.budget()
                                 );
                             }
                         } else {
@@ -353,23 +722,30 @@ pub fn run(
         }
     }
 
+    notify.stopping();
+    control_shutdown.trigger();
     if let Some(path) = &control_path {
         let _ = std::fs::remove_file(path);
     }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();
+    stats.dropped_malformed = device.dropped_malformed();
+    stats.dropped_unknown_index = device.dropped_unknown_index();
 
     log_info!(
         log,
         "tunnel down: {} datagrams out ({} failed), {} packets delivered ({} failed), \
-         {} handshakes, {} messages reassembled ({} fragment drops)",
+         {} handshakes ({} refused), {} messages reassembled ({} fragment drops, {} malformed, {} unknown index)",
         stats.datagrams_sent,
         stats.datagrams_failed,
         stats.packets_delivered,
         stats.packets_failed,
         stats.established,
+        stats.refusals,
         stats.reassembled,
         stats.fragments_dropped,
+        stats.dropped_malformed,
+        stats.dropped_unknown_index,
     );
     Ok(stats)
 }

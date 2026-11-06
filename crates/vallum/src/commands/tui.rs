@@ -33,6 +33,30 @@ pub struct TuiArgs {
     /// Snapshot height.
     #[arg(long, default_value = "36")]
     pub height: u16,
+
+    /// Render snapshot with ANSI colors and styles.
+    #[arg(long)]
+    pub ansi: bool,
+
+    /// Read the snapshot's clock as this Unix second, so regenerating the
+    /// published media produces identical bytes.
+    #[arg(long, value_name = "UNIX", requires = "snapshot")]
+    pub at: Option<u64>,
+
+    /// Snapshot view mode (dashboard, logs, help, qr, empty, filter, ping).
+    #[arg(long, default_value = "dashboard")]
+    pub snapshot_view: String,
+
+    /// A `tui-keys.toml` keymap file (default `$XDG_CONFIG_HOME/vallum/tui-keys.toml`).
+    #[arg(long, value_name = "FILE")]
+    pub keys: Option<PathBuf>,
+}
+
+impl TuiArgs {
+    #[must_use]
+    pub fn keymap_file(&self) -> Option<&std::path::Path> {
+        self.keys.as_deref()
+    }
 }
 
 pub fn run(args: &TuiArgs) -> Result<(), Error> {

@@ -123,6 +123,8 @@ use vallum_crypto::KemPublicKey;
 use vallum_crypto::SharedSecret;
 
 use crate::error::ConfigError;
+use vallum_core::identity::PeerIdentity;
+
 use crate::peer::{PeerConfig, PeerId};
 use crate::rng::Randomness;
 use crate::routing::{packet_destination, packet_source, AllowedIps, Prefix};
@@ -236,6 +238,39 @@ pub enum Action {
         /// Which end we were in the handshake that produced it.
         role: Role,
     },
+    /// A handshake was refused for a policy reason, not a cryptographic one.
+    ///
+    /// Diagnostic: the caller logs it. Silence here would be the wrong answer —
+    /// an expired credential and a dead network look identical from outside.
+    Refused {
+        /// Which peer.
+        peer: PeerId,
+        /// Why.
+        reason: Refusal,
+    },
+}
+
+/// Why a handshake was refused before it started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The peer's identity document is past its `not_after`.
+    IdentityExpired,
+    /// The peer's identity document is before its `not_before`.
+    IdentityNotYetValid,
+    /// A pinned peer answered from an address that is not its endpoint.
+    EndpointPinned,
+}
+
+impl Refusal {
+    /// The reason, for a log line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdentityExpired => "identity document expired",
+            Self::IdentityNotYetValid => "identity document is not valid yet",
+            Self::EndpointPinned => "handshake from an address the peer is pinned away from",
+        }
+    }
 }
 
 /// Per-peer counters, for telemetry or assertions in a test.
@@ -256,9 +291,29 @@ pub struct PeerStats {
     pub tx_bytes: u64,
     /// Wire bytes received for this peer.
     pub rx_bytes: u64,
+    /// Datagrams sent in the most recent delivery window.
+    pub window_sent: u64,
+    /// Datagrams received and opened in the most recent delivery window.
+    pub window_received: u64,
+    /// Datagrams dropped because this peer had no live session.
+    pub dropped_no_session: u64,
+    /// Datagrams that failed to open: replay window, or authentication.
+    pub dropped_replay: u64,
+    /// Datagrams that opened but whose inner source was outside `allowed_ips`.
+    pub dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers made to this peer, per ADR-0019.
+    pub reinit_offered: u64,
+    /// The most recent inner source rejected by `allowed_ips`, if any.
+    pub last_rejected_source: Option<std::net::IpAddr>,
     /// When the last handshake completed, if one has.
     pub last_handshake: Option<vallum_core::Tai64n>,
 }
+
+/// How long a delivery window lasts.
+///
+/// Long enough that an idle tunnel is not judged on three packets, short enough
+/// that a tunnel that stops carrying is visible well inside the rekey interval.
+pub const DELIVERY_WINDOW_MS: u64 = 60_000;
 
 // ── the device ───────────────────────────────────────────────────────
 
@@ -275,6 +330,17 @@ pub struct Device {
     cookie_rotated_ms: u64,
     under_load: bool,
     now_ms: u64,
+    /// Datagrams that did not parse as a transport message. Device-level: there
+    /// is no peer to attribute them to.
+    dropped_malformed: u64,
+    /// Datagrams whose sender index resolves to no peer. Device-level for the
+    /// same reason, and the most diagnostic counter here: it is what a stale
+    /// session looks like from the receiving side.
+    dropped_unknown_index: u64,
+    /// When we last offered a reactive re-handshake to *any* peer, the device
+    /// half of ADR-0019's reinit budget (the per-peer half is
+    /// [`Peer::last_reinit_ms`]).
+    last_reinit_global_ms: Option<u64>,
 }
 
 impl core::fmt::Debug for Device {
@@ -324,6 +390,9 @@ impl Device {
             cookie_secret: CookieSecret::new(&seed),
             cookie_rotated_ms: now_ms,
             under_load: false,
+            dropped_malformed: 0,
+            dropped_unknown_index: 0,
+            last_reinit_global_ms: None,
             now_ms,
         };
         for config in configs {
@@ -341,8 +410,15 @@ impl Device {
         for existing in &self.peers {
             // The wire identity is the KEM key. The PSK and the signing
             // expectation are policy attached to that identity, not part of
-            // it: two entries with the same KEM key are the same peer.
-            if existing.config.identity().kem().as_bytes() == config.identity().kem().as_bytes() {
+            // it: two entries with the same KEM key are the same peer. A key
+            // still accepted from a rotation counts too, or two peers could
+            // both answer for the same device.
+            let duplicate = existing.accepts_kem(config.identity().kem().as_bytes())
+                || config
+                    .previous_identities()
+                    .iter()
+                    .any(|accepted| existing.accepts_kem(accepted.identity().kem().as_bytes()));
+            if duplicate {
                 return Err(ConfigError::DuplicatePeer {
                     existing: existing.config.name().to_owned(),
                     duplicate: config.name().to_owned(),
@@ -357,9 +433,9 @@ impl Device {
             }
         }
 
-        let hint = peer_hint(&*self.suite, config.identity().kem());
         let id = PeerId::from_index(self.peers.len());
-        self.peers.push(Peer::new(config, hint, self.now_ms));
+        self.peers
+            .push(Peer::new(config, &*self.suite, self.now_ms));
         Ok(id)
     }
 
@@ -406,6 +482,77 @@ impl Device {
                 peer.endpoint = endpoint;
             }
         }
+    }
+
+    /// Rename a peer at runtime.
+    pub fn set_name(&mut self, id: PeerId, name: impl Into<String>) {
+        if let Some(peer) = self.peers.get_mut(id.index()) {
+            if !peer.removed {
+                peer.config.set_name(name);
+            }
+        }
+    }
+
+    /// Rotate a peer onto a new identity, keeping the replaced one accepted
+    /// until [`Self::finalize_identity`].
+    ///
+    /// The live session is untouched: its transport keys predate the swap, and
+    /// the replaced identity answers handshakes until the peer adopts its own
+    /// new key (ADR-0019). Re-applying an installed rotation does nothing.
+    /// Returns whether the configuration changed.
+    pub fn rotate_identity(&mut self, id: PeerId, identity: PeerIdentity) -> bool {
+        let Some(peer) = self.peers.get_mut(id.index()) else {
+            return false;
+        };
+        if peer.removed {
+            return false;
+        }
+        if !peer.config.rotate_identity(identity) {
+            return false;
+        }
+        // The hint table is a projection of the accepted identities, built
+        // once at `Peer::new`; rebuild it so an inbound handshake matches
+        // either key. The current hint is part of that projection and must move
+        // with the identity: left on the replaced key, it resolved the *old*
+        // key once the window opened and nothing at all for the new one after
+        // `finalize` retired the window — every handshake from the rotated peer
+        // was then dropped as "no peer for hint", silently, until the daemon
+        // restarted and rebuilt the table from the config.
+        let suite = self.suite.clone();
+        peer.hint = vallum_core::peer_hint(&*suite, peer.config.identity().kem());
+        peer.previous = peer
+            .config
+            .previous_identities()
+            .iter()
+            .map(|accepted| {
+                (
+                    vallum_core::peer_hint(&*suite, accepted.identity().kem()),
+                    accepted.identity().clone(),
+                    accepted.validity(),
+                )
+            })
+            .collect();
+        true
+    }
+
+    /// Retire a peer's rotation window: the replaced identity is refused.
+    /// Returns whether a window was open.
+    pub fn finalize_identity(&mut self, id: PeerId) -> bool {
+        let Some(peer) = self.peers.get_mut(id.index()) else {
+            return false;
+        };
+        if peer.removed {
+            return false;
+        }
+        if !peer.config.clear_previous() {
+            return false;
+        }
+        // Retire the runtime accepted table too: the replaced identity must
+        // stop answering handshakes immediately, and the hint table is a
+        // projection of what is still accepted. Nothing else is touched — the
+        // live session keeps its own keys, which predate the swap entirely.
+        peer.previous.clear();
+        true
     }
 
     /// Remove a peer at runtime.
@@ -509,9 +656,10 @@ impl Device {
     /// Find a peer by its KEM public key, as the UAPI does.
     #[must_use]
     pub fn peer_by_kem(&self, kem: &[u8]) -> Option<PeerId> {
-        self.peers()
-            .find(|(_, config)| config.identity().kem().as_bytes() == kem)
-            .map(|(id, _)| id)
+        self.peers
+            .iter()
+            .position(|peer| peer.accepts_kem(kem))
+            .map(PeerId::from_index)
     }
 
     /// Whether this device's identity carries a signing half.
@@ -606,6 +754,13 @@ impl Device {
                 queued: peer.pending.len(),
                 tx_bytes: peer.tx_bytes,
                 rx_bytes: peer.rx_bytes,
+                window_sent: peer.window.settled().0,
+                window_received: peer.window.settled().1,
+                dropped_no_session: peer.dropped_no_session,
+                dropped_replay: peer.dropped_replay,
+                dropped_allowed_ips: peer.dropped_allowed_ips,
+                reinit_offered: peer.reinit_offered,
+                last_rejected_source: peer.last_rejected_source,
                 last_handshake: peer.last_handshake,
             })
         })
@@ -646,6 +801,18 @@ impl Device {
     #[must_use]
     pub fn public_key(&self) -> &KemPublicKey {
         self.identity.public()
+    }
+
+    /// Datagrams dropped because they did not parse as a transport message.
+    #[must_use]
+    pub fn dropped_malformed(&self) -> u64 {
+        self.dropped_malformed
+    }
+
+    /// Datagrams dropped because the sender index matched no peer session.
+    #[must_use]
+    pub fn dropped_unknown_index(&self) -> u64 {
+        self.dropped_unknown_index
     }
 
     /// React to one event and run the timer pass.

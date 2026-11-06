@@ -72,9 +72,16 @@ impl Device {
         let Ok(info) = responder_identify(&*suite, &self.identity, bytes) else {
             return;
         };
-        let Some(index) = self.peer_with_hint(info.peer_hint()) else {
+        let Some((index, which)) = self.peer_with_hint(info.peer_hint()) else {
             return;
         };
+        if let Some(reason) = self.validity_refusal(index, which, clock.wall.unix_seconds()) {
+            out.push(Action::Refused {
+                peer: PeerId::from_index(index),
+                reason,
+            });
+            return;
+        }
 
         // (3) A *different* peer's configured endpoint must not disagree with the
         //     hint: that is either a misconfiguration the operator needs to see,
@@ -129,14 +136,24 @@ impl Device {
         let own_index = self.alloc_index();
         let mut seed = [0u8; 32];
         rng.fill(&mut seed);
+        // ADR-0019: agree the epoch now, while the live session is visible.
+        // The rule: at least the initiator's claim, and at least our own next —
+        // an initiator that restarted claims its fresh (low) count and must
+        // still reconnect, while our own counter never regresses.
+        let own_next = self.peers[index]
+            .session
+            .as_ref()
+            .map_or(0, |session| session.epoch() + 1);
+        let agreed = info.claim().map(|claim| claim.max(own_next));
         let accepted = responder_accept_with_psk(
             &*suite,
             &self.identity,
-            self.peers[index].config.identity(),
+            self.peers[index].identity_at(which),
             &info,
             own_index,
             &seed,
             self.peers[index].config.preshared_key(),
+            agreed,
         );
         let Ok((resp_hello, state)) = accepted else {
             return;
@@ -273,6 +290,7 @@ impl Device {
             *init.timestamp.as_bytes(),
             &init.seed,
             self.peers[index].config.preshared_key(),
+            Some(init.epoch),
         );
         let Ok((_, state)) = rebuilt else {
             self.peers[index].handshake = Handshake::Initiating(init);
@@ -282,7 +300,18 @@ impl Device {
         match initiator_process_resp(&*suite, state, &self.identity, bytes) {
             Ok((init_conf, keys)) => {
                 // The responder has proven the key, so the address it answered
-                // from is now trustworthy for this peer.
+                // from is now trustworthy for this peer — unless the peer is
+                // pinned, in which case an answer from anywhere else is the
+                // roaming-mischief case and is refused.
+                if !self.endpoint_allowed(index, source) {
+                    self.peers[index].rejected += 1;
+                    self.peers[index].handshake = Handshake::Initiating(init);
+                    out.push(Action::Refused {
+                        peer: PeerId::from_index(index),
+                        reason: Refusal::EndpointPinned,
+                    });
+                    return;
+                }
                 self.peers[index].endpoint = Some(source);
                 self.install_session(index, &keys, Role::Initiator, clock, out);
                 out.push(Action::Send {
@@ -332,6 +361,18 @@ impl Device {
         let timestamp = Tai64n::from_bytes(*resp.state.timestamp());
         match responder_process_conf(&*suite, resp.state, bytes) {
             Ok(keys) => {
+                if !self.endpoint_allowed(index, source) {
+                    // A pinned peer whose confirmation came from somewhere else:
+                    // refuse it rather than silently keeping the old address, so
+                    // a redirected handshake does not look successful.
+                    self.peers[index].rejected += 1;
+                    self.remap(index);
+                    out.push(Action::Refused {
+                        peer: PeerId::from_index(index),
+                        reason: Refusal::EndpointPinned,
+                    });
+                    return;
+                }
                 // The initiator has now proven the key, so its timestamp may be
                 // committed and its address believed.
                 self.peers[index].timestamp_guard.commit(timestamp);
@@ -379,9 +420,18 @@ impl Device {
     // ── handshake driving ────────────────────────────────────────────
 
     /// Begin a handshake with `peer`, if one is not already in flight.
+    ///
+    /// `dial` is a fallback address used **only** when the peer has no endpoint
+    /// yet — the ADR-0019 reinit offer, where the only address we can attach to
+    /// a stale-session datagram is the address it arrived from. A configured or
+    /// learned endpoint always wins, so the rule (an address is committed as our
+    /// peer's endpoint only once authenticated traffic arrived from it) is
+    /// untouched: an offer to a roaming peer dials where the traffic came from
+    /// without making that the peer's endpoint.
     pub(super) fn start_handshake(
         &mut self,
         index: usize,
+        dial: Option<SocketAddr>,
         clock: Clock,
         rng: &mut dyn Randomness,
         out: &mut Vec<Action>,
@@ -389,9 +439,18 @@ impl Device {
         if !matches!(self.peers[index].handshake, Handshake::Idle) {
             return;
         }
-        // No address to dial: the peer must call us. Common for a roaming peer
-        // whose endpoint has not been learned yet.
-        let Some(endpoint) = self.peers[index].endpoint else {
+        if let Some(reason) = self.validity_refusal(index, 0, clock.wall.unix_seconds()) {
+            out.push(Action::Refused {
+                peer: PeerId::from_index(index),
+                reason,
+            });
+            return;
+        }
+        // No address to dial: the peer must call us, unless the caller saw one
+        // (the reinit offer dials the stale traffic's source address, which is
+        // not committed as the endpoint).
+        let endpoint = self.peers[index].endpoint.or(dial);
+        let Some(endpoint) = endpoint else {
             return;
         };
         let suite = Arc::clone(&self.suite);
@@ -400,6 +459,14 @@ impl Device {
         let mut seed = [0u8; 32];
         rng.fill(&mut seed);
         let timestamp = clock.wall;
+        // ADR-0019: the claimed epoch is the live session's successor, `0` for
+        // a first handshake. Claiming the successor — not the live epoch — is
+        // what makes a restarted peer re-establish at an agreed step instead of
+        // two counters that have drifted apart.
+        let epoch = self.peers[index]
+            .session
+            .as_ref()
+            .map_or(0, |session| session.epoch() + 1);
 
         let built = initiator_hello_with_psk(
             &*suite,
@@ -409,6 +476,7 @@ impl Device {
             *timestamp.as_bytes(),
             &seed,
             self.peers[index].config.preshared_key(),
+            Some(epoch),
         );
         let Ok((init_hello, state)) = built else {
             return;
@@ -439,6 +507,7 @@ impl Device {
 
         self.peers[index].handshake = Handshake::Initiating(Box::new(Initiating {
             sender_index,
+            epoch,
             seed,
             timestamp,
             mac1,

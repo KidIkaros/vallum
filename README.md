@@ -1,37 +1,37 @@
 # Vallum
 
-[![CI](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/KidIkaros/vallum/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](Cargo.toml)
 
-A hybrid **post-quantum layer-3 tunnel** — a real userspace VPN, not a reference
-crate.
+A hybrid **post-quantum layer-3 tunnel** — a deployable Linux server and client VPN, not a reference crate. Developed in joint engineering partnership between **Ikaros Digital** and **Atomguard**.
 
-Vallum is built *on top of* `origin-crypto-sdk` but never *inside* it: every
-cryptographic operation Vallum performs goes through a Vallum-owned boundary
-trait, so the SDK can be swapped — or replaced with from-scratch cryptography —
-without touching the protocol.
+<p align="center">
+  <img src="assets/vallum-demo.gif" alt="Vallum TUI Operations Cockpit" width="100%">
+</p>
+<p align="center">
+  <em>Live operations cockpit: tri-hybrid PQ tunnel state, shared-scale sparklines, one-time invite QR provisioning, and live dataplane counters.</em>
+  <br>
+  <a href="assets/vallum-demo.mp4"><b>▶ Download HD Video Capture (.mp4)</b></a> · <a href="assets/vallum-cockpit.svg"><b>View Vector SVG</b></a>
+</p>
+
+Vallum is built *on top of* `origin-crypto-sdk` but never *inside* it: every cryptographic operation goes through a Vallum-owned boundary trait (`vallum-crypto`), so the underlying cryptographic provider can be swapped without touching the protocol, framing, or daemon.
 
 ## Why it exists
 
-PQ-WireGuard (Hülsing–Ning–Weber–Schwabe–Zimmermann, 2023) proved a KEM-only
-handshake can replace WireGuard's non-interactive DH. Vallum takes that design as
-the floor and pushes on the five things it leaves on the table:
+PQ-WireGuard (Hülsing–Ning–Weber–Schwabe–Zimmermann, 2023) proved a KEM-only handshake can replace WireGuard's non-interactive DH. Vallum takes that design as the floor and closes what it leaves open:
 
-| Vector | Gap in PQ-WireGuard | Vallum |
+| Vector | Gap in PQ-WireGuard / WireGuard | Vallum |
 |---|---|---|
-| Hybrid KEM | one classical + one PQ leg, single KEM each | tri-hybrid `X25519 + sntrup761 + ML-KEM-768`, combined with HKDF-SHA3-256 |
-| Hybrid signature auth | none (static KEM keys only) | Ed25519 + Falcon-1024 over the transcript, with CA-issued identity documents and a signed validity window |
-| Key reuse | none | **rejected on purpose** (P3): one master seed → a KEM key *and* an independently derived signing key; no dual-use key |
-| Epoch axis | no epoch, no erasure discipline | rekey is a fresh hybrid handshake (root independence), 2⁴⁸/2⁴⁹ caps, one superseded epoch erased after `REJECT_AFTER_TIME` |
+| Hybrid KEM | one classical + one PQ leg | tri-hybrid `X25519 + sntrup761 + ML-KEM-768`, combined with HKDF-SHA3-256 |
+| Hybrid signature auth | static KEM keys only, no expiry | Ed25519 + Falcon-1024 over the transcript, CA-issued identity documents with a signed validity window ([ADR-0014](docs/adr/0014-wireguard-gaps.md)) |
+| Key reuse | — | **rejected on purpose**: one master seed derives an independent KEM key and signing key |
+| Epoch & PCS | no epoch or erasure discipline | rekey is a fresh hybrid handshake (root independence), 2⁴⁸/2⁴⁹ caps, superseded epoch erased after `REJECT_AFTER_TIME` |
 | Traffic analysis | none | Maybenot-style shaping, off by default, padding inside the AEAD |
+| Client key custody | manual copy or server-minted config | `--remote` (SSH) and `--join` (enrolment v2 token + ephemeral PQ KEM) keep private keys on the client ([ADR-0015](docs/adr/0015-enrolment-v2.md)) |
+| Key rotation | manual, with an outage | `peer rotate` accepts both keys until `peer finalize` retires the old identity |
+| Operations | no metrics endpoint, no teardown | `vallum metrics` (Prometheus), `doctor --probe-mtu`, `server teardown`, `resolvectl` DNS, policy-routed full tunnel (`fwmark`) |
 
-It also keeps the good parts of WireGuard (cryptokey routing, TAI64N, keyed MAC
-cookies, roaming by authenticated source) and strengthens suite negotiation:
-WireGuard offers no negotiation, Vallum *binds the suite id into the transcript*,
-so a downgrade is **detectable**.
-
-## The boundary (the load-bearing idea)
+## The boundary
 
 ```
    protocol (handshake · key schedule · framing · data plane)
@@ -41,20 +41,15 @@ so a downgrade is **detectable**.
         ▲
    ┌────┴─────────────────────────┐
    │                              │
-vallum-crypto-sdk            (future: from-scratch adapter)
+vallum-crypto-sdk            (future adapter)
 (origin-crypto-sdk)          same trait, new suite id
 ```
 
-- **`vallum-crypto`** — the `CryptoSuite` trait and the protocol-level combiner
-  and transcript hash. Zero dependencies, zero cryptographic implementations.
-- **`vallum-crypto-sdk`** — the only crate that names an SDK type.
-- **`vallum-crypto-contract`** — a suite-agnostic test harness. It depends on
-  `vallum-crypto` only, so it applies unchanged to any adapter.
+- **`vallum-crypto`** — the `CryptoSuite` trait, protocol combiner, and transcript hash. Zero dependencies.
+- **`vallum-crypto-sdk`** — the sole crate that names `origin-crypto-sdk` types.
+- **`vallum-crypto-contract`** — suite-agnostic test harness verifying KEM round-trip/tamper rejection, combiner, transcript hash, committing AEAD, and hybrid signatures.
 
-Swapping crypto = one new adapter + one new suite id + refreshing the KATs. The
-handshake, key schedule, framing, and data plane do not change.
-
-## Handshake
+## Handshake & Suite Registry
 
 Three messages, three hybrid-KEM operations, one round trip:
 
@@ -65,143 +60,125 @@ InitHello    ── STATIC_CT (A) · EPHEMERAL_PK · TIMESTAMP ──▶   [stat
 InitConf     ── conf_i ────────────────────────────────────▶   [verify]
 ```
 
-| op | direction | peer key | purpose |
-|----|-----------|----------|---------|
-| A | init → resp | responder **static** | responder authentication |
-| B | resp → init | initiator **ephemeral** | forward secrecy |
-| C | resp → init | initiator **static** | initiator authentication |
-
-Both static operations are **MEX-bound** (`KDF1(σ, r)`): the sender's own
-long-term secret is mixed into the encapsulation randomness, so a subverted RNG
-cannot fix the shared secret. Confirmation is **mutual and explicit** — the
-responder proves key possession in `RespHello`, the initiator in `InitConf` — so
-neither party accepts a key before authenticating the other. That is the property
-whose absence kept WireGuard out of eCK-PFS-PSK; see `docs/proof/eck-pfs-psk.md`.
-
-## Suite registry
+Both static operations are **MEX-bound** (`KDF1(σ, r)`) and key confirmation is mutual and explicit (`docs/proof/eck-pfs-psk.md`).
 
 | id | legs | status |
 |----|------|--------|
-| `0x0001` | X25519 + sntrup761 | supported (non-NIST-pure fallback) |
-| `0x0002` | X25519 + ML-KEM-768 | supported |
+| `0x0001` | X25519 + sntrup761 | supported (non-NIST fallback) |
+| `0x0002` | X25519 + ML-KEM-768 | supported (`fast` profile) |
 | **`0x0003`** | **X25519 + sntrup761 + ML-KEM-768** | **default** |
-| `0x0100+` | reserved for from-scratch cryptography | — |
 
-The two post-quantum legs are **independently implemented** (SDK NTRU Prime vs
-pinned RustCrypto ML-KEM), so an implementation fault in either is covered by
-the other. This does **not** protect against a break of the lattice family
-itself — a code-based leg would be needed for that, and the SDK does not ship
-one (recorded as an open limitation).
+## Deploy
+
+New here? **[Quickstart](docs/quickstart.md)** has the prerequisites and all
+three topologies — client, server, site-to-site — on one page.
+
+Install from the latest release (or `--local` from a checkout), then run `vallum setup`:
+
+```sh
+sudo ./scripts/install.sh --from-release
+
+# 1. Server — key, config, IP forwarding, firewall, NAT, systemd units
+sudo vallum setup --server
+
+# 2a. Client with SSH access — generates its own key locally; only the public line crosses SSH
+sudo vallum setup --remote you@vpn.example.com
+
+# 2b. Client without SSH — one invite ticket, one command, fingerprint pinned
+sudo vallum peer invite laptop                  # on the server (or press `v` in `vallum tui`)
+sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
+
+# 2c. Offline fallback — server-minted bundle (carries the client private key)
+sudo vallum peer add laptop --ship-key --bundle-out laptop.vallum-bundle --forget-key
+sudo vallum setup --client laptop.vallum-bundle
+```
+
+Operational lifecycle commands:
+
+```sh
+vallum doctor --config /etc/vallum/vallum0.toml --probe-mtu 1.1.1.1
+vallum metrics --config /etc/vallum/vallum0.toml
+sudo vallum peer invites                        # list live unspent invites & TTLs
+sudo vallum peer rotate laptop --public-key <new-line>
+sudo vallum peer finalize laptop
+sudo vallum server teardown --dry-run           # cleanly reverse server init
+sudo vallum client teardown --name laptop       # cleanly remove a client tunnel
+```
+
+Guides: [quickstart](docs/quickstart.md) ·
+[server](docs/deployment/server.md) ·
+[client](docs/deployment/client.md) ·
+[site-to-site](docs/deployment/site-to-site.md) ·
+[automation](docs/deployment/automation.md) ·
+[upgrades](docs/deployment/upgrades.md) ·
+[monitoring](docs/deployment/monitoring.md) ·
+[backup](docs/deployment/backup.md) ·
+[troubleshooting](docs/deployment/troubleshooting.md) ·
+[security model](docs/security-model.md) ·
+[roadmap](docs/roadmap.md).
+
+## TUI (`vallum tui`)
+
+`vallum tui` is the terminal operations cockpit: live interface and dataplane counters (`datagrams`, `packets`, `handshakes`, `fragments`), shared-scale RX/TX sparklines, one-time token invite QR generation (`v`), zero-downtime key rotation (`K` / `f`), peer ping probes (`p`), TOML diff audit (`E`), and journald log streaming (`l`).
+
+<p align="center">
+  <img src="assets/vallum-cockpit.png" alt="Vallum Cockpit Dashboard" width="100%">
+</p>
+
+| Live Cockpit & Peer Telemetry | Command Palette (`:` — Interactive Dispatch) |
+|:---:|:---:|
+| <img src="assets/vallum-peer-macbook.png" alt="Peer Selection & Details" width="100%"> | <img src="assets/vallum-palette.png" alt="Interactive Command Palette" width="100%"> |
+| **Peer Ping Connectivity Probe (`p`)** | **One-Time Enrolment Invite QR (`v` — Zero Private Keys)** |
+| <img src="assets/vallum-ping.png" alt="Ping Probe" width="100%"> | <img src="assets/vallum-qr.png" alt="One-Time Invite QR" width="100%"> |
+| **Semantic Journald Logs (`l`)** | **First-Run Onboarding Enclave** |
+| <img src="assets/vallum-logs.png" alt="Semantic Logs" width="100%"> | <img src="assets/vallum-empty.png" alt="Onboarding Enclave" width="100%"> |
+
+<p align="center">
+  <img src="assets/vallum-brandkit.png" alt="Vallum Brand & Interface System" width="100%">
+</p>
+
+See [`docs/tui.md`](docs/tui.md) for the full key map and configuration overrides.
 
 ## Layout
 
 ```
-Cargo.toml                        workspace
 crates/
-  vallum-crypto/                  boundary: trait + combiners (no deps)
-  vallum-crypto-sdk/              origin-crypto-sdk adapter (and the CT harnesses)
+  vallum-crypto/                  CryptoSuite trait + combiners (zero deps)
+  vallum-crypto-sdk/              origin-crypto-sdk adapter + DudeCT harnesses
   vallum-crypto-contract/         suite-agnostic contract tests
-  vallum-core/                    handshake · key schedule · TLV wire · data plane
-                                  · epoch · shaping · segmentation · identity
-  vallum-tunnel/                  sans-IO transport: peers, routing, handshakes
-  vallum-protocol-tests/          suite-dependent tests and benchmarks
-  vallum-quick/                   routes, DNS, firewall and hooks (admin tool)
-  vallum/                         the daemon: TOML, TUN, UDP, privileges, CLI
-packaging/                        systemd unit, man pages, completion
-scripts/install.sh                first install and client add/remove
-fuzz/                             cargo-fuzz workspace (four targets)
-docs/proof/                       one artefact per gate
-  eck-pfs-psk · committing-aead-multikey · hybrid-identity · ratchet-pcs
-  traffic-shaping · transport · segment · keepalive · pentest · daemon
-  constant-time · benchmarks · fuzzing · privileges · mtu · ipv6 · dual-stack
-  identity-validity · tamarin
+  vallum-core/                    handshake · key schedule · TLV wire · AEAD · shaping · segmentation
+  vallum-tunnel/                  sans-IO transport: peers, routing, cookies, reassembly
+  vallum-config/                  TOML configuration parser & validation
+  vallum-quick/                   routes, policy routing (fwmark), DNS, firewall hooks
+  vallum/                         daemon, CLI, enrolment v2 responder, UAPI control socket, TUI
+docs/
+  adr/                            0001..0016 architectural decision records
+  deployment/                     server, client, site-to-site, automation, troubleshooting
+  proof/                          cryptographic, DoS, fuzzing, and operational proof artefacts
 scripts/
-  e2e-netns.sh                    two namespaces, real kernel, four lifecycles
-  ct.sh · fuzz.sh                 the measurement and fuzzing gates
+  verify.sh                       fmt + clippy + workspace tests + netns E2E gate (E2E=1)
+  verify-remote.sh                two-host acceptance harness (bundle, SSH, token v2)
 ```
 
-## Build
+## Security & Cryptographic Posture
 
-The workspace pins the SDK by path, so clone both repositories as siblings:
+- **Tri-hybrid KEM:** Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking session confidentiality requires compromising all three algorithms simultaneously.
+- **Dependency Status:** Post-quantum algorithms are implemented via `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`). The implementations have not undergone external third-party audit; deployments should weigh risk accordingly.
+
+## Build & Verify
+
+Clone `vallum` and `origin-crypto-sdk` as siblings (or run `./scripts/bootstrap.sh`):
 
 ```sh
 git clone https://github.com/KidIkaros/vallum.git
 git clone https://github.com/KidIkaros/OriginSDK.git origin-crypto-sdk
 cd vallum
-cargo test --workspace
+
+E2E=1 ./scripts/verify.sh                 # fmt, clippy, unit/contract tests, 2-netns E2E
+./scripts/verify-remote.sh <ssh-host>     # real two-host acceptance across all 3 transports
+vallum bench                              # batched p50 / IQR / p95 / p99 + 95% CI microbenchmark
 ```
 
-`scripts/bootstrap.sh` does the sibling clone for you. The `fast` profile is
-suite `0x0002` (X25519+ML-KEM-768): generate a key with `vallum keygen --suite 2`.
-It completes a handshake in ~1.81 ms versus ~54 ms for the default tri-hybrid;
-the default stays tri-hybrid for KEM diversity.
+## Partnership & Releasing
 
-## TUI
-
-`vallum tui` is a terminal operations console: live device and peer state, peer
-add/edit/remove, key generation, client-bundle QR export, runtime device
-changes, start/stop, and journald logs. It talks to the 0600 control socket and
-needs no root for status or peer changes.
-
-```text
-┌Vallum────────────────────────────────────────────────────────────────────────────────────────┐
-│ vallum0                                                                                      │
-│listen 127.0.0.1:41403  suite 0x0003  fwmark 0  079c12170a8fb63b                              │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-┌Peers────────────────────────────────────────────────────────────────────┐┌Details──────────────┐
-│name         fingerprint      endpoint   allowed        handshake rx/tx    ││laptop               │
-│laptop       1a0888aca6183e92 (none)     10.7.0.2/32    —         0B/0B     ││allowed  10.7.0.2/32 │
-└──────────────────────────────────────────────────────────────────────────┘└─────────────────────┘
-Tab interface  j/k peer  a add  e edit  d remove  g keygen  q QR  c device
-E edit config  s start/stop  l logs  ? help  Q quit
-```
-
-Generate that frame yourself with
-`vallum tui --config <file> --snapshot --width 160 --height 30`. See
-[`docs/tui.md`](docs/tui.md) for the key map, QR bundle format, and limits.
-
-## Test
-
-```sh
-cargo test --workspace      # unit + integration + boundary contract tests
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt -p vallum-core -p vallum-tunnel -p vallum -p vallum-crypto \
-          -p vallum-crypto-sdk -p vallum-crypto-contract -- --check
-cargo deny check            # licenses, sources, bans, advisories
-bash scripts/e2e-netns.sh   # two namespaces, a real kernel, four lifecycles
-bash scripts/ct.sh          # DudeCT constant-time gate
-bash scripts/fuzz.sh 60     # four cargo-fuzz targets
-cargo bench -p vallum-protocol-tests  # handshake and data-plane baselines
-```
-
-Byte-exact handshake vectors are frozen in `crates/vallum-protocol-tests/tests/interop.rs`
-and regenerate with:
-
-```sh
-cargo test -p vallum-protocol-tests --test interop -- --ignored --nocapture
-```
-
-The contract tests (`crates/vallum-crypto-contract`) exercise KEM keygen/round-
-trip/tamper-rejection, the combiner, the transcript hash, committing-AEAD seal/
-open + forgery rejection, and hybrid signature verify/reject — for every shipped
-suite, plus an adapter-swap smoke test.
-
-## Status
-
-Every phase is implemented and gated: **P0–P6.8** (boundary through the daemon,
-keepalive, segmentation, and the admission tag), all seven proof obligations
-(including the Tamarin model and the PSK-tag DoS/replay model), **H1–H9**
-(constant-time, benchmarks, fuzzing and CI, privilege separation, MTU-aware
-segmentation, IPv6, identity validity, dual-stack addressing), the **G1–G6**
-operational surface (configured PSK, UAPI, runtime rebind, `vallum-quick`,
-batching, platform tier), and the **TUI**. The architecture decisions are in
-[`docs/adr/`](docs/adr/). `docs/proof/` holds one artefact per gate, and each one
-states what it does **not** claim.
-
-Known open items are product decisions rather than missing work: a code-based
-(non-lattice) KEM suite for true family diversity, the Rosenpass-style PSK bridge,
-and the final name. The SDK's custom sntrup761 is the cost centre — ~9 ms per
-decapsulation here, versus ~0.25 ms for the ML-KEM leg — which is why the
-alternative-suite work matters.
-
-A dual-stack tunnel is one config: `addresses = ["10.7.0.1/24", "fd00:7::1/64"]`.
+Vallum is co-developed through a joint engineering partnership between **Ikaros Digital** and **Atomguard**. See [`docs/releasing.md`](docs/releasing.md) for the release gate (`scripts/release.sh`).

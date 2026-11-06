@@ -1,0 +1,6 @@
+[Unit]
+Description=Push one Vallum metrics scrape into VictoriaMetrics
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vallum-telemetry-push.sh /etc/vallum/vallum0.toml

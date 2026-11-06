@@ -50,7 +50,7 @@ pub fn discover(args: &TuiArgs) -> Vec<Interface> {
         }
     }
 
-    if let Ok(entries) = std::fs::read_dir("/run/vallum") {
+    if let Ok(entries) = std::fs::read_dir(vallum_config::runtime_dir()) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("sock") {
@@ -85,7 +85,7 @@ fn from_config(path: &Path) -> Option<Interface> {
         .as_ref()
         .map(|declared| config::resolve_key_path(path, declared))
         .or_else(|| {
-            let candidate = PathBuf::from(format!("/run/vallum/{name}.sock"));
+            let candidate = vallum_config::socket_path(&name);
             candidate.exists().then_some(candidate)
         })?;
     Some(Interface::new(name, Some(path.to_path_buf()), control_path))

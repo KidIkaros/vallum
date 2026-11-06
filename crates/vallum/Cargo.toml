@@ -27,12 +27,14 @@ ipnet.workspace = true
 # Configuration is the operator's surface, so the parser is a hard dependency
 # rather than a hand-rolled one: a mis-parse here is a security bug.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # The CLI. A binary may exit on a bad argument; `clap` does that and prints why.
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4.6"
 serde_json = "1"
+toml_edit = "0.25"
+similar = "3"
 
 # The terminal operations console. Optional so `--no-default-features` keeps a
 # lean daemon; the release build enables it by default.
@@ -80,22 +82,86 @@ vallum-crypto-sdk.workspace = true
 
 [package.metadata.deb]
 maintainer = "Vallum contributors"
+maintainer-scripts = "../../packaging/debian"
 copyright = "2026, Vallum contributors"
-license-file = ["LICENSE", "4"]
+license-file = ["../../LICENSE", "4"]
 extended-description = "Hybrid post-quantum layer-3 tunnel."
 section = "net"
 priority = "optional"
 depends = "$auto"
+# The asset list is one manifest across all three channels — install.sh
+# installs this same set. scripts/check-package-manifest.sh fails CI when
+# either table drifts from it.
 assets = [
     ["target/release/vallum", "usr/bin/vallum", "755"],
+    ["target/release/vallum-quick", "usr/bin/vallum-quick", "755"],
     ["../../packaging/vallum@.service", "lib/systemd/system/vallum@.service", "644"],
+    ["../../packaging/vallum-guard@.service", "lib/systemd/system/vallum-guard@.service", "644"],
+    ["../../packaging/vallum-quick@.service", "lib/systemd/system/vallum-quick@.service", "644"],
+    ["../../packaging/vallum-quick-watch@.service", "lib/systemd/system/vallum-quick-watch@.service", "644"],
+    ["../../packaging/vallum-enroll@.service", "lib/systemd/system/vallum-enroll@.service", "644"],
+    ["../../packaging/vallum-metrics.service", "lib/systemd/system/vallum-metrics.service", "644"],
+    ["../../packaging/vallum-metrics.timer", "lib/systemd/system/vallum-metrics.timer", "644"],
+    ["../../packaging/vallum-tmpfiles.conf", "usr/lib/tmpfiles.d/vallum-tmpfiles.conf", "644"],
     ["../../packaging/vallum.8", "usr/share/man/man8/vallum.8", "644"],
     ["../../packaging/vallum-quick.8", "usr/share/man/man8/vallum-quick.8", "644"],
     ["../../packaging/vallum.toml.5", "usr/share/man/man5/vallum.toml.5", "644"],
     ["../../packaging/vallum.bash", "usr/share/bash-completion/completions/vallum", "644"],
+    ["../../packaging/vallum.zsh", "usr/share/zsh/site-functions/_vallum", "644"],
+    ["../../packaging/vallum.fish", "usr/share/fish/vendor_completions.d/vallum.fish", "644"],
 ]
 
-[package.metadata.rpm]
-package-name = "vallum"
+[package.metadata.generate-rpm]
+name = "vallum"
 summary = "Hybrid post-quantum layer-3 tunnel"
 license = "Apache-2.0"
+assets = [
+    { source = "../../target/release/vallum", dest = "/usr/bin/vallum", mode = "755" },
+    { source = "../../target/release/vallum-quick", dest = "/usr/bin/vallum-quick", mode = "755" },
+    { source = "../../packaging/vallum@.service", dest = "/lib/systemd/system/vallum@.service", mode = "644" },
+    { source = "../../packaging/vallum-guard@.service", dest = "/lib/systemd/system/vallum-guard@.service", mode = "644" },
+    { source = "../../packaging/vallum-quick@.service", dest = "/lib/systemd/system/vallum-quick@.service", mode = "644" },
+    { source = "../../packaging/vallum-quick-watch@.service", dest = "/lib/systemd/system/vallum-quick-watch@.service", mode = "644" },
+    { source = "../../packaging/vallum-enroll@.service", dest = "/lib/systemd/system/vallum-enroll@.service", mode = "644" },
+    { source = "../../packaging/vallum-metrics.service", dest = "/lib/systemd/system/vallum-metrics.service", mode = "644" },
+    { source = "../../packaging/vallum-metrics.timer", dest = "/lib/systemd/system/vallum-metrics.timer", mode = "644" },
+    { source = "../../packaging/vallum-tmpfiles.conf", dest = "/usr/lib/tmpfiles.d/vallum-tmpfiles.conf", mode = "644" },
+    { source = "../../packaging/vallum.8", dest = "/usr/share/man/man8/vallum.8", mode = "644" },
+    { source = "../../packaging/vallum-quick.8", dest = "/usr/share/man/man8/vallum-quick.8", mode = "644" },
+    { source = "../../packaging/vallum.toml.5", dest = "/usr/share/man/man5/vallum.toml.5", mode = "644" },
+    { source = "../../packaging/vallum.bash", dest = "/usr/share/bash-completion/completions/vallum", mode = "644" },
+    { source = "../../packaging/vallum.zsh", dest = "/usr/share/zsh/site-functions/_vallum", mode = "644" },
+    { source = "../../packaging/vallum.fish", dest = "/usr/share/fish/vendor_completions.d/vallum.fish", mode = "644" },
+]
+# Same lifecycle contract as the deb maintainer scripts: stop units before
+# the binaries leave, reload after, keep /etc/vallum (secrets are never the
+# package manager's to delete silently — `vallum uninstall --purge` is).
+[package.metadata.generate-rpm.scriptlets]
+# post: mirror install.sh — reload so the new units resolve, and enable the
+# metrics timer only where node_exporter's textfile collector exists (it is
+# opt-in telemetry, never a default).
+post = """
+if [ -d /run/systemd/system ]; then
+    # Create the runtime directory now, not at the next boot: the unit binds
+    # ReadWritePaths to it, and a missing path is 226/NAMESPACE. See ADR-0017.
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    if [ -d /var/lib/node_exporter/textfile_collector ]; then
+        systemctl enable --now vallum-metrics.timer 2>/dev/null || true
+    fi
+fi
+exit 0
+"""
+preun = """
+if [ -d /run/systemd/system ]; then
+    systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
+        | awk '{print $1}' | sed 's/\\.service$//;s/\\.timer$//' \
+        | while read -r unit; do systemctl disable --now "$unit" 2>/dev/null || true; done
+    systemctl disable --now vallum-metrics.timer vallum-metrics.service 2>/dev/null || true
+fi
+exit 0
+"""
+postun = """
+if [ -d /run/systemd/system ]; then systemctl daemon-reload 2>/dev/null || true; fi
+exit 0
+"""

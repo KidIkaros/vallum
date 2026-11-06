@@ -29,6 +29,10 @@ pub struct Config {
     /// Options only `vallum-quick` uses. The daemon parses and ignores them.
     #[serde(default)]
     pub quick: Quick,
+
+    /// See [`Enroll`].
+    #[serde(default)]
+    pub enroll: Enroll,
 }
 
 /// The `[quick]` table: OS-level work done by `vallum-quick`, never the daemon.
@@ -38,6 +42,14 @@ pub struct Quick {
     /// DNS servers to install on the interface, through `resolvconf`.
     #[serde(default)]
     pub dns: Vec<String>,
+    /// The routing domain to claim when the interface owns the resolvers.
+    ///
+    /// `~.` makes the tunnel the default route for every name, which is what
+    /// stops a query from leaking to the local resolver on a full tunnel. A
+    /// split tunnel usually wants no domain at all, so the field is optional.
+    /// Ignored by the `resolvconf` backend, which has no such concept.
+    #[serde(default)]
+    pub dns_domain: Option<String>,
     /// `auto`, `off`, or a routing-table number.
     #[serde(default)]
     pub table: Option<String>,
@@ -53,6 +65,59 @@ pub struct Quick {
     /// See [`Quick::pre_up`].
     #[serde(default)]
     pub post_down: Vec<String>,
+    /// What the egress guard enforces: `off`, `on`, or `auto`.
+    ///
+    /// `auto` turns the guard on for a full tunnel and off for a split tunnel.
+    /// See ADR-0018: the guard exists so that a dead tunnel cannot leak, and it
+    /// only makes sense where everything is supposed to be inside the tunnel.
+    #[serde(default)]
+    pub policy: Option<String>,
+    /// What happens when the tunnel session fails: `block` (or `block-on-failure`) or `restore`.
+    ///
+    /// `block` (the default) replaces tunnel routes with blackhole routes so traffic cannot
+    /// leak outside the tunnel when the session dies. `restore` withdraws the tunnel routes,
+    /// returning traffic to the physical gateway (fail-open).
+    #[serde(default)]
+    pub failure_policy: Option<String>,
+    /// Let traffic to private ranges leave outside the tunnel.
+    ///
+    /// Needed on a host that reaches a printer, a NAS, or a router admin page
+    /// directly. Off by default: a LAN exception is still an exception.
+    #[serde(default)]
+    pub allow_lan: bool,
+    /// Extra destinations that may leave outside the tunnel, as addresses or
+    /// CIDR prefixes.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tunnel only the processes launched into the member namespace (ADR-0023).
+    ///
+    /// When true, `vallum-quick attach` creates one shared mount+net namespace,
+    /// binds a private `resolv.conf` naming `[quick] dns` inside it, and moves
+    /// the tunnel device there. The host installs no routes and rewrites no
+    /// resolver, so a process outside the namespace keeps exactly the
+    /// networking it had. `vallum-quick app CONFIG NAME -- CMD` is the only way
+    /// in. The daemon parses and ignores this: the namespace is host-level
+    /// work, owned by `vallum-quick` alone.
+    ///
+    /// A full tunnel only — the namespace's default route is the tunnel device,
+    /// so `allowed_ips` must claim `0.0.0.0/0` (or `::/0`), and the interface
+    /// needs an address to carry inside; `attach` refuses anything else.
+    #[serde(default)]
+    pub app_class: bool,
+}
+
+/// The `[enroll]` table: the optional token-gated enrolment responder.
+///
+/// Off by default — a stock install answers nothing on this port.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Enroll {
+    /// Whether `vallum enroll-serve` may answer requests for this interface.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The UDP port to answer on. Defaults to the interface's `listen + 1`.
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 /// The `[interface]` table.
@@ -96,6 +161,23 @@ pub struct Interface {
     /// The UDP address to listen on.
     #[serde(default)]
     pub listen: Option<String>,
+    /// Whether this node relays flows for others — the gateway role.
+    ///
+    /// A server behind the forwarding rules `vallum server init` installs
+    /// receives a packet destined to a peer, and the reply that comes back
+    /// through conntrack re-enters the tunnel with a source that belongs to
+    /// nobody here: an internet address. With forwarding off, the egress
+    /// source check refuses such a reply and every forwarded TCP and UDP flow
+    /// dies while ping still works — measured live, `verify-remote.sh`, where
+    /// a relayed reply from 1.1.1.1 was dropped before it was ever sealed.
+    /// With forwarding on, such a packet is relayed; the far side still
+    /// decides by *its* `allowed_ips` whether to accept the source, so this
+    /// does not let a host claim another's address — it only moves the
+    /// refusal from a place where a relay looks like a claim to one where it
+    /// is. A link-local source is refused either way: it means nothing across
+    /// a link. See ADR-0020.
+    #[serde(default)]
+    pub forward: Option<bool>,
     /// A Unix socket to serve the control UAPI on.
     ///
     /// Absent means no control plane. The socket is `0600`; a relative path is
@@ -129,6 +211,22 @@ pub struct Interface {
     /// warned about, because it is rarely what an operator means.
     #[serde(default)]
     pub group: Option<String>,
+    /// The CA's `vallum1:` public line, or the bare hex of its signing key.
+    ///
+    /// When set, every peer's identity document must verify against it. When
+    /// absent, a document must be self-signed: a key binding with a window, not
+    /// an authorisation.
+    #[serde(default)]
+    pub identity_issuer: Option<String>,
+    /// The address clients should dial, as `host:port`.
+    ///
+    /// The daemon does not read this: a responder's own reachable address is a
+    /// property of its peers' configs, not its interface. It exists so
+    /// `vallum server init` can remember the `--endpoint` it was given and
+    /// `vallum peer add` can put the same address in every client bundle,
+    /// instead of guessing a source route that is often a private address.
+    #[serde(default)]
+    pub public_endpoint: Option<String>,
 }
 
 /// One `[[peer]]` table.
@@ -138,7 +236,34 @@ pub struct PeerEntry {
     /// A name for logs.
     pub name: String,
     /// The peer's public line. See the `vallum1:` public line.
-    pub public_key: String,
+    ///
+    /// Exactly one of `public_key`, `identity` or `identity_file` names the
+    /// peer's identity.
+    #[serde(default)]
+    pub public_key: Option<String>,
+    /// A CA-issued (or self-signed) identity document, hex-encoded.
+    ///
+    /// The document binds the peer's KEM key, its signing key, a label and a
+    /// validity window, and replaces `public_key`. Whether it must be signed by
+    /// `[interface] identity_issuer` or be self-signed is the interface's
+    /// policy, not the document's.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// A file holding the identity document, relative to the config.
+    #[serde(default)]
+    pub identity_file: Option<PathBuf>,
+    /// The identity this peer used before a rotation.
+    ///
+    /// Accepted alongside the current one, so `peer rotate` can install the new
+    /// key before the device has it and `peer finalize` can retire the old one.
+    #[serde(default)]
+    pub previous_public_key: Option<String>,
+    /// A previous identity document, hex-encoded.
+    #[serde(default)]
+    pub previous_identity: Option<String>,
+    /// A file holding the previous document.
+    #[serde(default)]
+    pub previous_identity_file: Option<PathBuf>,
     /// An address to dial, or absent to roam from the peer's handshakes.
     #[serde(default)]
     pub endpoint: Option<String>,
@@ -151,6 +276,15 @@ pub struct PeerEntry {
     /// wrote and the daemon ignores is how a security setting goes missing.
     #[serde(default)]
     pub persistent_keepalive: Option<u16>,
+    /// Refuse a handshake whose source is not `endpoint`.
+    ///
+    /// Roaming is normally desirable: a laptop changes networks and the peer
+    /// follows. It is also the one place an active man in the middle can
+    /// redirect a tunnel (WireGuard calls this "roaming mischief"). A pinned
+    /// peer does not roam, and a handshake from any other address is refused
+    /// rather than accepted. Requires `endpoint`.
+    #[serde(default)]
+    pub pin_endpoint: bool,
     /// A 32-byte preshared key as 64 hex characters, mixed into the handshake.
     ///
     /// The secret sits in the config file, so prefer [`Self::preshared_key_file`]
@@ -246,6 +380,20 @@ impl Config {
             source,
         })
     }
+
+    /// [`load`] with [`with_local_fwmark`] applied first: a full-tunnel
+    /// config minted before `fwmark` existed gains the local routing mark
+    /// in memory so clients that load a stale on-disk config still attach.
+    pub fn load_normalized(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 /// A configuration file that could not be read or parsed.
@@ -286,5 +434,124 @@ impl std::error::Error for ConfigError {
             Self::Io { source, .. } => Some(source),
             Self::Toml { source, .. } => Some(source),
         }
+    }
+}
+
+/// The policy-routing mark a full-tunnel client uses so its own packets can
+/// escape the policy table to the real gateway. A local routing detail — the
+/// server has no business dictating it — so it has a fixed default.
+pub const DEFAULT_FWMARK: u32 = 51820;
+
+/// The directory every control socket lives in.
+///
+/// A machine resource, not any one service's private state: created by
+/// `tmpfiles.d` (`/usr/lib/tmpfiles.d/vallum.conf`) so that it exists before any
+/// unit starts and survives any unit stopping. One daemon's exit must never
+/// remove another's socket — see ADR-0017. The path is spelled here once
+/// because the daemon, `vallum-quick`, the TUI and `uninstall` all need to
+/// agree on it.
+pub const RUNTIME_DIR: &str = "/run/vallum";
+
+/// The runtime directory, for callers that need a `&Path`.
+#[must_use]
+pub fn runtime_dir() -> &'static Path {
+    Path::new(RUNTIME_DIR)
+}
+
+/// The control socket for `interface`, e.g. `/run/vallum/vallum0.sock`.
+#[must_use]
+pub fn socket_path(interface: &str) -> PathBuf {
+    runtime_dir().join(format!("{interface}.sock"))
+}
+
+/// Complete a full-tunnel client config for this machine: if a peer's
+/// `allowed_ips` covers `0.0.0.0/0` or `::/0`, `vallum-quick` requires
+/// `[interface] fwmark` or it refuses to attach (an unmarked full tunnel
+/// would route the daemon's own packets into the dead tunnel). Configs minted
+/// before the field existed lack it; the mark is local to the machine that
+/// runs the tunnel, so the client fills it in rather than refusing the
+/// server's answer. Text that does not parse is returned untouched — the
+/// caller's own parse will report it.
+#[must_use]
+pub fn with_local_fwmark(config_text: &str) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.interface.fwmark.is_some() {
+        return config_text.to_owned();
+    }
+    let full_tunnel = config.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|ip| ip == "0.0.0.0/0" || ip == "::/0")
+    });
+    if !full_tunnel {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + 24);
+    let mut placed = false;
+    for line in config_text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !placed && line.trim() == "[interface]" {
+            out.push_str(&format!("fwmark = {DEFAULT_FWMARK}\n"));
+            placed = true;
+        }
+    }
+    if placed {
+        out
+    } else {
+        config_text.to_owned()
+    }
+}
+
+/// Insert `outer_mtu` into `[interface]` of `config_text` if not already present.
+///
+/// Preserves surrounding comments and fields. If the text does not parse or
+/// `outer_mtu` is already present, returns the text untouched.
+#[must_use]
+pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.interface.outer_mtu.is_some() {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + 24);
+    let mut placed = false;
+    for line in config_text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if !placed && line.trim() == "[interface]" {
+            out.push_str(&format!("outer_mtu = {outer_mtu}\n"));
+            placed = true;
+        }
+    }
+    if placed {
+        out
+    } else {
+        config_text.to_owned()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_outer_mtu_inserts_when_absent() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_outer_mtu(text, 1400);
+        assert!(with.contains("outer_mtu = 1400\n"));
+        let parsed: Config = toml::from_str(&with).unwrap();
+        assert_eq!(parsed.interface.outer_mtu, Some(1400));
+    }
+
+    #[test]
+    fn with_outer_mtu_preserves_explicit_value() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_outer_mtu(text, 1400);
+        assert_eq!(with, text);
     }
 }

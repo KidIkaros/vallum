@@ -182,6 +182,35 @@ impl CookieSecret {
         self.cookie_under(suite, &self.current, client)
     }
 
+    /// Whether `received` is a valid cookie for `client` under the current or
+    /// previous secret.
+    ///
+    /// Used by transports that carry the raw cookie (such as enrolment v2)
+    /// rather than a `mac2` derived from it, so secret rotation does not
+    /// invalidate a cookie issued moments earlier.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfError`] if the suite's KDF fails.
+    pub fn verify_cookie<S: CryptoSuite + ?Sized>(
+        &self,
+        suite: &S,
+        client: &[u8],
+        received: &[u8; COOKIE_SIZE],
+    ) -> Result<bool, KdfError> {
+        let current = self.cookie_under(suite, &self.current, client)?;
+        if mac_equal(suite, &current, received) {
+            return Ok(true);
+        }
+        if self.have_previous {
+            let previous = self.cookie_under(suite, &self.previous, client)?;
+            if mac_equal(suite, &previous, received) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether `mac2` is valid for `client` over `input`.
     ///
     /// Accepts the previous secret as well as the current one. A wrong-length

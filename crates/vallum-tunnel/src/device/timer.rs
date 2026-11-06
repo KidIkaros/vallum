@@ -35,6 +35,12 @@ impl Device {
     ) {
         let now = clock.monotonic_ms;
 
+        // (0) Turn the delivery window over, so the ratio describes recent
+        //     traffic rather than everything since the process started.
+        self.peers[index]
+            .window
+            .roll(now, crate::device::DELIVERY_WINDOW_MS);
+
         // (1) A shaping block whose window has closed releases its queue.
         let released = match self.peers[index].blocked_until {
             Some(deadline) if now >= deadline => {
@@ -76,7 +82,7 @@ impl Device {
             TimerAction::None => {}
             TimerAction::SendKeepalive if persistent => {}
             TimerAction::SendKeepalive => self.send_keepalive(index, clock, rng, out),
-            TimerAction::StartHandshake => self.start_handshake(index, clock, rng, out),
+            TimerAction::StartHandshake => self.start_handshake(index, None, clock, rng, out),
             TimerAction::RetransmitHandshake => self.retransmit_handshake(index, clock, out),
             TimerAction::GiveUp => self.abandon_handshake(index),
             TimerAction::Expire => self.tear_down(index, now),
@@ -124,7 +130,7 @@ impl Device {
             self.send_keepalive(index, clock, rng, out);
             true
         } else {
-            self.start_handshake(index, clock, rng, out);
+            self.start_handshake(index, None, clock, rng, out);
             false
         }
     }

@@ -1,19 +1,42 @@
 # Vallum's CI: the gates that were run by hand through P6.8, now repeatable.
 #
-# Two checkouts, as siblings, because the workspace pins the SDK by path
-# (`origin-crypto-sdk = { path = "../origin-crypto-sdk" }`). If the SDK
-# repository is private, add a `SDK_TOKEN` secret; otherwise the workflow uses
-# the run's own token, which works for a public repository.
+# One checkout: the crypto SDK is a git dependency (`origin-crypto-sdk = { git,
+# tag }`), so cargo fetches it itself.
 #
-# The e2e job needs unprivileged user namespaces. GitHub's Ubuntu runners
-# normally allow them; where they do not, the step falls back to `sudo`, which
-# the script supports because it creates its own namespaces either way.
+# The runner is chosen by repository visibility, and that choice is the fork
+# guard:
+#
+#   private  → `self-hosted, linux, x64` (this account's machine, `wingman-vps`)
+#   public   → `ubuntu-latest`, always
+#
+# Self-hosting exists because hosted Actions minutes are refused on this
+# account — "the job was not started because recent account payments have failed
+# or your spending limit needs to be increased" — before a runner is even
+# assigned, so `ubuntu-latest` alone would queue every push until the repository
+# is public (public minutes are free). Self-hosting is safe only while the
+# repository is private, because a private repository has no forks: there is no
+# untrusted `pull_request` to execute on a persistent machine. The moment it is
+# public, every job moves to a disposable runner with no secrets, which is what
+# makes outside PRs safe to run at all. Do not hard-code `self-hosted` anywhere:
+# a public repository with a self-hosted label in a `pull_request` workflow
+# executes a stranger's code on that machine.
+#
+# The e2e job needs unprivileged user namespaces. The self-hosted host allows
+# them; where an image does not — Ubuntu 24.04's AppArmor default — the step
+# falls back to `sudo -E` (passwordless on both runner types), and the script
+# creates its own namespaces either way.
 
 name: ci
 
+# `push` is `main` only, deliberately. Dependabot pushes its own branches too,
+# and on a single self-hosted runner each dependency update queued a full matrix
+# that sat in front of `main` for hours — `test (stable)` on 89d7213 never
+# started. Nothing is lost by narrowing it: dependency branches are covered by
+# `pull_request`, and tags by `release.yml` plus the `main` push that carries the
+# tagged commit (a tag's commit has already been tested as a branch head).
 on:
   push:
-    branches: [master, main]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -30,21 +53,17 @@ env:
 jobs:
   test:
     name: test (${{ matrix.toolchain }})
-    runs-on: ubuntu-latest
+    # Public ⇒ hosted, always. See the header for why this is the fork guard.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         # Stable is the working toolchain; 1.95.0 is the declared MSRV.
         toolchain: [stable, "1.95.0"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - name: Toolchain
         uses: dtolnay/rust-toolchain@master
@@ -58,7 +77,7 @@ jobs:
 
       - name: Format (scoped to the Vallum crates)
         working-directory: vallum
-        # Never `--all`: the SDK is a path dependency and is not ours to format.
+        # Never `--all`: the SDK is an external dependency and is not ours to format.
         run: >
           cargo fmt
           -p vallum-core -p vallum-tunnel -p vallum
@@ -68,6 +87,13 @@ jobs:
 
       - name: Clippy (all features)
         working-directory: vallum
+        # Stable only. The lint set moves with the compiler, and 1.95's clippy
+        # asks for `collapsible_match` rewrites that are not equivalent here:
+        # `KeyCode::Left => { if !masked { .. } }` becomes a *guarded arm*, which
+        # falls through to later arms instead of doing nothing. The MSRV leg
+        # exists to prove the code builds and tests on 1.95; suggestions are
+        # judged on the compiler whose lints are current.
+        if: matrix.toolchain == 'stable'
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
@@ -84,73 +110,36 @@ jobs:
           cargo run -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/tui.txt
           grep -q Vallum /tmp/tui.txt
 
-  macos-inner:
-    name: macOS check (protocol crates)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vallum
-      - name: Check the pure-Rust crates for macOS
+      - name: Package manifest parity (install.sh == deb == rpm)
         working-directory: vallum
-        run: cargo check -p vallum-core -p vallum-tunnel -p vallum-crypto
-
-  macos-daemon:
-    name: macOS check (daemon, experimental)
-    runs-on: macos-latest
-    # The daemon's SDK dependency builds C (blake3/zstd) with Apple clang; this
-    # job exists to surface the remaining cfg gaps, not to gate a release yet.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vallum
-      - name: Check the daemon for macOS
-        working-directory: vallum
-        run: cargo check -p vallum
+        run: scripts/check-package-manifest.sh
 
   e2e:
     name: end-to-end (two namespaces, real kernel)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: vallum
 
-      - name: Build the daemon
+      - name: Build both binaries
         working-directory: vallum
-        run: cargo build -p vallum
+        # `vallum-quick` is not optional here: the full-tunnel phase installs
+        # the product's own route plan with it, and the script refuses to start
+        # without it — a daemon-only build fails at the gate's first line.
+        run: cargo build -p vallum -p vallum-quick
 
       - name: Run the netns gate
         working-directory: vallum
+        # Both binaries default to `target/debug/`; the script copies them into
+        # /tmp itself, because the user namespace it creates cannot traverse the
+        # home directory the runner checks out into.
+        #
         # The script creates its own user and network namespaces. Some runners
         # restrict unprivileged user namespaces (Ubuntu 24.04's AppArmor
         # default); there, the same script runs under sudo. A failure is never
@@ -159,16 +148,22 @@ jobs:
 
   audit:
     name: advisories and supply chain
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
+    # A fork PR's token is read-only, so `audit-check`'s check run would fail
+    # there for a reason that says nothing about the change.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
+
+      # A toolchain step is not optional here: `audit-check` fails at "unable to
+      # locate executable file: cargo" if the image ships none, and naming the
+      # toolchain keeps this job independent of the image's Rust version.
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: rustsec/audit-check@v2
         with:

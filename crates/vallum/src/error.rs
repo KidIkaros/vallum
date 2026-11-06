@@ -84,6 +84,15 @@ pub enum Error {
     /// says what to run instead.
     Usage(String),
 
+    /// A precondition is not met, so nothing was attempted: not root, no
+    /// systemd, a host that cannot be prepared. Distinct from [`Self::Usage`]
+    /// because the command was correct — the environment is not.
+    Precondition(String),
+
+    /// Some steps succeeded and one did not. The message names the step, and
+    /// what is already in place, so a retry is safe.
+    Partial(String),
+
     /// A private key file is readable by someone other than its owner.
     ///
     /// Refused rather than warned about (P6.5's F7): a key that a group or the
@@ -133,6 +142,8 @@ impl fmt::Display for Error {
             Self::Suite(why) => write!(f, "{why}"),
             Self::Identity(why) => write!(f, "{why}"),
             Self::Usage(why) => write!(f, "{why}"),
+            Self::Precondition(why) => write!(f, "{why}"),
+            Self::Partial(why) => write!(f, "{why}"),
             Self::KeyPermissions { path, detail } => write!(
                 f,
                 "{}: {detail}\n  hint: chmod 600 it, or pass \

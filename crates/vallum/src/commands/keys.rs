@@ -14,7 +14,7 @@ use crate::Error;
 #[derive(Debug, Args)]
 pub struct KeygenArgs {
     /// Where to write the private key. Refuses to overwrite an existing file.
-    #[arg(long, short, value_name = "FILE")]
+    #[arg(long, short, alias = "key", value_name = "FILE")]
     output: PathBuf,
 
     /// The suite id, decimal or `0x`-prefixed hex. Defaults to the tri-hybrid.
@@ -29,7 +29,7 @@ pub struct KeygenArgs {
 #[derive(Debug, Args)]
 pub struct PubkeyArgs {
     /// The private key to read.
-    #[arg(long, short = 'k', value_name = "FILE")]
+    #[arg(long, short = 'k', alias = "key", value_name = "FILE")]
     private_key: PathBuf,
 }
 
@@ -93,4 +93,36 @@ pub fn parse_suite(text: &str) -> Result<u16, Error> {
             "suite `{text}` is not an id (decimal, or hex with a 0x prefix): {e}"
         ))
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser, Debug)]
+    struct KeygenCli {
+        #[command(flatten)]
+        args: KeygenArgs,
+    }
+
+    #[derive(Parser, Debug)]
+    struct PubkeyCli {
+        #[command(flatten)]
+        args: PubkeyArgs,
+    }
+
+    #[test]
+    fn key_alias_is_accepted_for_keygen_output() {
+        let cli = KeygenCli::try_parse_from(["keygen", "--key", "/path/to/key"]).unwrap();
+        assert_eq!(cli.args.output, PathBuf::from("/path/to/key"));
+    }
+
+    #[test]
+    fn key_alias_is_accepted_for_pubkey_private_key() {
+        let cli = PubkeyCli::try_parse_from(["pubkey", "--key", "/path/to/key"]).unwrap();
+        assert_eq!(cli.args.private_key, PathBuf::from("/path/to/key"));
+    }
 }

@@ -13,11 +13,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.6.4"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
-authors = ["Vallum contributors"]
+authors = ["Ikaros Digital", "Atomguard", "Vallum contributors"]
 description = "Vallum — hybrid post-quantum layer-3 tunnel"
 repository = "https://github.com/KidIkaros/vallum"
 homepage = "https://github.com/KidIkaros/vallum"
@@ -35,9 +35,16 @@ vallum-tunnel = { path = "crates/vallum-tunnel" }
 # become security bugs.
 ipnet = "2.12"
 
-# The SDK is pinned by path (never a floating crates.io version). See the plan's
-# disruption playbook: an SDK bump only recompiles the adapter.
-origin-crypto-sdk = { path = "../origin-crypto-sdk" }
+# The SDK is pinned to an exact git tag (never a floating version), so a bare
+# `git clone` of this repository builds without a sibling checkout. See the
+# plan's disruption playbook: an SDK bump only recompiles the adapter.
+#
+# To iterate on the SDK locally, add a sibling checkout override (never commit
+# it):
+#
+#   [patch."https://github.com/KidIkaros/OriginSDK"]
+#   origin-crypto-sdk = { path = "../origin-crypto-sdk" }
+origin-crypto-sdk = { git = "https://github.com/KidIkaros/OriginSDK", tag = "v0.7.4" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
@@ -46,3 +53,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
+
+[profile.release]
+# Release artifacts ship stripped; backtraces still resolve function names via
+# the .gnu_debuglink-free symbol-free path because panic=unwind is kept.
+strip = "symbols"
+lto = "thin"

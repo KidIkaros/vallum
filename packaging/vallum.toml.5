@@ -8,18 +8,24 @@ name = "vallum0"
 private_key = "private.key"
 addresses = ["10.7.0.1/24", "fd00:7::1/64"]
 listen = "0.0.0.0:51820"
+public_endpoint = "vpn.example.com:51820"
 control = "/run/vallum/vallum0.sock"
 fwmark = 4660
 
+identity_issuer = "..."
+
 [quick]
 dns = ["1.1.1.1"]
+dns_domain = "~."
 
 [[peer]]
 name = "laptop"
 public_key = "vallum1:0003:..."
+previous_public_key = "vallum1:0003:..."
 endpoint = "vpn.example.com:51820"
 allowed_ips = ["10.7.0.2/32"]
 persistent_keepalive = 25
+pin_endpoint = false
 preshared_key_file = "laptop.psk"
 .fi
 .SH INTERFACE
@@ -28,7 +34,9 @@ preshared_key_file = "laptop.psk"
 One or both families; every address is assigned over netlink.
 .TP
 .B control
-A 0600 Unix socket for the UAPI. Absent means no control plane.
+A 0600 Unix socket for the UAPI. Absent means no control plane. Use a unique
+path per config; a relative path is resolved against the config directory, so
+two configs in one directory with the same relative name collide.
 .TP
 .B fwmark
 An \fBSO_MARK\fR for policy routing; applied before the privilege drop.
@@ -38,10 +46,31 @@ The outer path MTU, default 1500; values above 1500 are refused.
 .TP
 .B user ", " group
 Drop to these ids after the interface and socket exist.
+.TP
+.B identity_issuer
+The CA's \fBvallum1:\fR public line (or the bare hex of its signing key).
+When set, every peer's identity document must verify against it. When absent, a
+document must be self-signed: a key binding with a window, not an authorisation.
+.TP
+.B public_endpoint
+The address clients should dial, as `host:port`. The daemon does not read it —
+a responder's reachable address is a property of its peers' configs. `server
+init` writes the `--endpoint` it was given so every `peer add` bundle dials the
+same address instead of re-detecting a source route.
 .SH PEER
 .TP
-.B public_key
-The peer's \fBvallum1:\fR public line.
+.B public_key " / " identity " / " identity_file
+The peer's identity. Exactly one form: a \fBvallum1:\fR public line, an inline
+document, or a file holding one. A document carries the key, a label and a
+validity window.
+.TP
+.B previous_public_key " / " previous_identity " / " previous_identity_file
+The identity a rotation still accepts. Written by `vallum peer rotate`, removed
+by `vallum peer finalize`.
+.TP
+.B pin_endpoint
+Refuse a handshake from any address other than \fBendpoint\fR. Requires an
+endpoint. Closes the roaming-mischief case at the cost of NAT rebinding.
 .TP
 .B endpoint
 An address or hostname; resolved at load, not periodically.
@@ -51,6 +80,16 @@ Both the destinations routed to the peer and the sources accepted from it.
 .TP
 .B preshared_key " / " preshared_key_file
 A 32-byte PSK, inline as 64 hex or in a 0600 file. Both is an error.
+.SH QUICK
+.TP
+.B dns
+Resolvers installed on the interface: through \fBresolvectl\fR when
+systemd-resolved is running, otherwise through \fBresolvconf\fR.
+.TP
+.B dns_domain
+The routing domain claimed when the interface owns the resolvers. Defaults to
+\fB~.\fR on a full tunnel, which is what stops a query from leaking to the
+local resolver.
 .SH SEE ALSO
 .BR vallum (8),
 .BR vallum-quick (8)

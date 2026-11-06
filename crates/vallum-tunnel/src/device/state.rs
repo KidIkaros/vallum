@@ -3,6 +3,7 @@
 //! Per-peer runtime state: the handshake slots, the session, the queue, timers.
 
 use super::*;
+use vallum_core::identity::{PeerIdentity, Validity};
 
 // ── per-peer runtime state ───────────────────────────────────────────
 
@@ -16,6 +17,12 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct Initiating {
     pub(super) sender_index: u32,
+    /// The epoch this handshake claims (ADR-0019): the current session's
+    /// successor, or `0` when there is no session. Stored so the state can be
+    /// rebuilt byte-identically — including the transcript binding — after a
+    /// failed `RespHello`, and so the eventual `SessionKeys` install at the
+    /// same value the `InitHello` committed to.
+    pub(super) epoch: u64,
     pub(super) seed: [u8; 32],
     pub(super) timestamp: Tai64n,
     /// The `mac1` of the `InitHello` we sent. A cookie reply is keyed by it, so it
@@ -82,6 +89,9 @@ pub(super) struct Peer {
     /// The hint we resolve inbound `InitHello`s by, precomputed because it
     /// depends only on the peer's static public key.
     pub(super) hint: [u8; PEER_HINT_SIZE],
+    /// Identities still accepted during a rotation, with their hints and
+    /// windows. Empty outside a rotation.
+    pub(super) previous: Vec<([u8; PEER_HINT_SIZE], PeerIdentity, Option<Validity>)>,
     pub(super) endpoint: Option<SocketAddr>,
     pub(super) session: Option<Session>,
     /// The index of the epoch retained receive-only, kept so it can be unmapped
@@ -89,6 +99,9 @@ pub(super) struct Peer {
     pub(super) previous_own_index: Option<u32>,
     pub(super) handshake: Handshake,
     pub(super) timers: Timers,
+    /// When this peer was last offered a reactive re-handshake from the data
+    /// plane, so reinitiation stays within ADR-0019's per-peer budget.
+    pub(super) last_reinit_ms: Option<u64>,
     pub(super) timestamp_guard: Tai64nGuard,
     pub(super) shaper: Shaper,
     pub(super) blocked_until: Option<u64>,
@@ -108,9 +121,29 @@ pub(super) struct Peer {
     pub(super) delivered: u64,
     pub(super) dropped: u64,
     pub(super) rejected: u64,
+    /// Authenticated datagrams dropped because the peer has no live session.
+    pub(super) dropped_no_session: u64,
+    /// Datagrams that failed to open: replay window, or authentication.
+    pub(super) dropped_replay: u64,
+    /// Datagrams that opened but whose inner source was outside `allowed_ips`.
+    ///
+    /// Kept apart from `dropped_replay` because the two have different causes
+    /// and used to share one counter, which made an aggregate look like a
+    /// diagnosis.
+    pub(super) dropped_allowed_ips: u64,
+    /// Reactive re-handshake offers made to this peer, per ADR-0019.
+    pub(super) reinit_offered: u64,
+    /// The most recent inner source address rejected by the `allowed_ips`
+    /// check, or `None` if the packet did not parse as IP at all.
+    ///
+    /// A count says traffic is being refused; only the address says what is
+    /// being refused, and that is the whole diagnosis.
+    pub(super) last_rejected_source: Option<std::net::IpAddr>,
     /// Wire bytes sent and received for this peer (G2 counters).
     pub(super) tx_bytes: u64,
     pub(super) rx_bytes: u64,
+    /// Datagram accounting for the current delivery window.
+    pub(super) window: DeliveryWindow,
     /// When the last handshake completed, for `show`.
     pub(super) last_handshake: Option<Tai64n>,
     /// A runtime `remove` marks the peer dead rather than shifting the table,
@@ -118,8 +151,94 @@ pub(super) struct Peer {
     pub(super) removed: bool,
 }
 
+/// Datagram counts over a fixed window, for the delivery ratio.
+///
+/// Every other liveness signal in this device measures a proxy: key age,
+/// handshake age, keepalive cadence. None of them can distinguish a tunnel that
+/// carries traffic from one that handshakes perfectly and delivers one packet in
+/// a hundred — which is a failure that was observed on a real deployment, with
+/// `vallum status` reporting `up` throughout.
+///
+/// A count of "did we hear nothing" cannot see that either: 186 packets arriving
+/// against 14 626 sent is not silence. A ratio can, because it compares the two
+/// directions instead of asking whether one of them was zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct DeliveryWindow {
+    pub started_ms: u64,
+    pub sent: u64,
+    pub received: u64,
+    /// The window that closed most recently, so a ratio stays readable across a
+    /// rollover instead of dropping to zero every time the clock turns over.
+    pub last_sent: u64,
+    pub last_received: u64,
+}
+
+impl DeliveryWindow {
+    /// Start a new window if the current one has run its course.
+    pub(super) fn roll(&mut self, now: u64, window_ms: u64) {
+        if now.saturating_sub(self.started_ms) < window_ms {
+            return;
+        }
+        self.last_sent = self.sent;
+        self.last_received = self.received;
+        self.sent = 0;
+        self.received = 0;
+        self.started_ms = now;
+    }
+
+    /// Datagrams sent and received in the most recent window that has data.
+    #[must_use]
+    pub(super) fn settled(&self) -> (u64, u64) {
+        if self.sent > 0 || self.received > 0 {
+            (self.sent, self.received)
+        } else {
+            (self.last_sent, self.last_received)
+        }
+    }
+}
+
 impl Peer {
-    pub(super) fn new(config: PeerConfig, hint: [u8; PEER_HINT_SIZE], now_ms: u64) -> Self {
+    /// The identity a hint matched: `0` is the current one, `n > 0` is the
+    /// `n`th previous identity.
+    pub(super) fn identity_at(&self, which: usize) -> &PeerIdentity {
+        if which == 0 {
+            self.config.identity()
+        } else {
+            &self.previous[which - 1].1
+        }
+    }
+
+    /// The window the matched identity asserted, if any.
+    pub(super) fn validity_at(&self, which: usize) -> Option<Validity> {
+        if which == 0 {
+            self.config.validity()
+        } else {
+            self.previous[which - 1].2
+        }
+    }
+
+    /// Whether this peer accepts `kem`, now or during a rotation.
+    pub(super) fn accepts_kem(&self, kem: &[u8]) -> bool {
+        self.config.identity().kem().as_bytes() == kem
+            || self
+                .previous
+                .iter()
+                .any(|(_, identity, _)| identity.kem().as_bytes() == kem)
+    }
+
+    pub(super) fn new(config: PeerConfig, suite: &dyn CryptoSuite, now_ms: u64) -> Self {
+        let hint = peer_hint(suite, config.identity().kem());
+        let previous = config
+            .previous_identities()
+            .iter()
+            .map(|accepted| {
+                (
+                    peer_hint(suite, accepted.identity().kem()),
+                    accepted.identity().clone(),
+                    accepted.validity(),
+                )
+            })
+            .collect();
         let shaper = Shaper::new(config.shaping().to_vec());
         // A configured endpoint is where we dial; roaming may replace it later,
         // but only with an address authenticated traffic arrived from.
@@ -130,11 +249,13 @@ impl Peer {
         Self {
             config,
             hint,
+            previous,
             endpoint,
             session: None,
             previous_own_index: None,
             handshake: Handshake::Idle,
             timers: Timers::new(now_ms),
+            last_reinit_ms: None,
             timestamp_guard: Tai64nGuard::new(),
             shaper,
             blocked_until: None,
@@ -145,10 +266,16 @@ impl Peer {
             indices: Vec::new(),
             sent: 0,
             delivered: 0,
+            dropped_no_session: 0,
+            dropped_replay: 0,
+            dropped_allowed_ips: 0,
+            reinit_offered: 0,
+            last_rejected_source: None,
             dropped: 0,
             rejected: 0,
             tx_bytes: 0,
             rx_bytes: 0,
+            window: DeliveryWindow::default(),
             last_handshake: None,
             removed: false,
         }
@@ -168,4 +295,47 @@ pub(super) fn keepalive_millis(interval: Duration) -> u64 {
     u64::try_from(interval.as_millis())
         .unwrap_or(u64::MAX)
         .max(1)
+}
+
+#[cfg(test)]
+mod delivery_window_tests {
+    use super::DeliveryWindow;
+
+    fn window(sent: u64, received: u64) -> DeliveryWindow {
+        DeliveryWindow {
+            sent,
+            received,
+            ..DeliveryWindow::default()
+        }
+    }
+
+    #[test]
+    fn a_window_keeps_its_counts_until_it_closes() {
+        assert_eq!(window(100, 12).settled(), (100, 12));
+    }
+
+    #[test]
+    fn closing_a_window_keeps_the_last_one_readable() {
+        let mut open = window(100, 12);
+        open.roll(60_000, 60_000);
+
+        // The fresh window has nothing in it yet; the ratio must still describe
+        // the window that just closed rather than collapsing to zero.
+        assert_eq!(open.settled(), (100, 12));
+        assert_eq!((open.sent, open.received), (0, 0));
+
+        open.sent = 5;
+        assert_eq!(
+            open.settled(),
+            (5, 0),
+            "a live window wins once it has data"
+        );
+    }
+
+    #[test]
+    fn a_window_does_not_close_early() {
+        let mut open = window(7, 0);
+        open.roll(59_999, 60_000);
+        assert_eq!(open.sent, 7);
+    }
 }

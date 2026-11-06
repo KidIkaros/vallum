@@ -12,3 +12,17 @@
 | [0008](0008-tui.md) | A feature-gated `vallum tui` operations console | accepted | 2026-10-19 |
 | [0009](0009-client-bundle-qr.md) | A versioned client bundle and animated multi-frame QR | accepted | 2026-10-19 |
 | [0010](0010-default-suite.md) | Keep the tri-hybrid default and document a fast profile | accepted | 2026-10-19 |
+| [0011](0011-macos-out-of-scope.md) | macOS is out of scope for v0.1 | accepted | 2026-10-19 |
+| [0012](0012-code-based-kem-roadmap.md) | Defer a code-based KEM; prefer HQC or provisioned McEliece later | accepted | 2026-10-19 |
+| [0013](0013-server-provisioning.md) | Server provisioning is a CLI, not a control plane | accepted | 2026-10-20 |
+| [0014](0014-wireguard-gaps.md) | Close the WireGuard gaps Vallum can win | accepted | 2026-10-20 |
+| [0015](0015-enrolment-v2.md) | Enrolment v2 — the PQ-WireGuard shape, applied to provisioning | accepted | 2026-10-21 |
+| [0016](0016-nat-traversal.md) | NAT traversal and relay — what we will and will not do | proposed | 2026-10-21 |
+| [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | accepted | 2026-10-21 |
+| [0018](0018-fail-closed-egress.md) | A packet leaves only through the tunnel, or to the endpoint | accepted | 2026-10-22 |
+| [0019](0019-passive-side-reinitiates.md) | The passive side re-initiates, so a restart costs seconds not 120 s | implemented | 2026-10-22 |
+| [0020](0020-gateway-forwarding-source-policy.md) | Forwarded replies mix sources; the egress check must not eat them | accepted | 2026-10-22 |
+| [0021](0021-live-rotation-syncconf.md) | A live `set` names the rotation window, not a replacement peer | accepted | 2026-10-23 |
+| [0022](0022-shaping-policy-in-core.md) | Traffic shaping is a passive policy machine in `vallum-core`; the `Device` is its single driver | accepted | 2026-10-23 |
+| [0023](0023-per-app-split-tunnelling.md) | Per-app split tunnelling rides the tunnel's mark tables, with launch-bound membership | implemented (classifier only; exclusive path deferred — 2026-10-28 amendment) | 2026-10-23 |
+| [0024](0024-desktop-ui.md) | A Tauri v2 desktop UI that reuses the Rust control client; x86_64 only | proposed | 2026-11-05 |

@@ -19,6 +19,8 @@ fn session(transcript: [u8; 32], key: [u8; 32]) -> SessionKeys {
         confirm_responder: SharedSecret::new([2u8; 32]),
         own_index: OWN,
         peer_index: PEER,
+        // No negotiated epoch: the session helpers walk the pre-ADR path.
+        epoch: None,
     }
 }
 

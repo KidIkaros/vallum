@@ -25,6 +25,12 @@ control = "control.sock"   # relative to the config; or an absolute path
 
 - A Unix listener, mode **0600**, same-user only. It is the same trust boundary
   as the private-key file; a world-writable socket would be a remote `set`.
+  The mode is set before the path is published: the socket is bound and
+  chmodded inside a `0700` staging directory beside the configured path, then
+  hard-linked into place, so a permissive umask never exposes a connectable
+  socket even briefly — and the name never exists without a listener behind it,
+  so a client that connects the moment it appears is served rather than refused.
+  An occupied path is refused with `EEXIST`, never replaced.
 - Absent means no control plane.
 - One request per connection: the client writes, shuts its write half, and reads
   the reply. All mutation is forwarded to the loop thread as
@@ -67,6 +73,8 @@ rx_bytes=<u64>
 persistent_keepalive_interval=<seconds, 0 = off>
 allowed_ip=<prefix>            (repeated)
 vallum_epoch=<u64>
+vallum_valid_until=<unix seconds>   # only when the peer's identity is a document
+vallum_rotating=<0|1>               # 1 while a previous identity is still accepted
 errno=0
 ```
 

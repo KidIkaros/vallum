@@ -260,6 +260,16 @@ pub enum DataError {
         /// The epoch that could not be advanced past.
         epoch: u64,
     },
+    /// A handshake arrived with an epoch not above the one already in force.
+    ///
+    /// After ADR-0019 the epoch travels in the handshake; agreeing one at or
+    /// below the session's live counter would install a spent ratchet step.
+    EpochStale {
+        /// The epoch currently in use.
+        have: u64,
+        /// The epoch the handshake asked for.
+        got: u64,
+    },
     /// A padded seal was asked for a target size that cannot hold the payload.
     ///
     /// The sealed plaintext is `u16 BE length ‖ payload ‖ zeros`, so the target
@@ -307,6 +317,9 @@ impl fmt::Display for DataError {
             ),
             Self::EpochExhausted { epoch } => {
                 write!(f, "DataError: epoch {epoch} cannot advance further")
+            }
+            Self::EpochStale { have, got } => {
+                write!(f, "DataError: epoch {got} is not above the epoch in force ({have})")
             }
             Self::PaddingTooSmall { payload, target } => write!(
                 f,

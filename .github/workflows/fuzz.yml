@@ -5,18 +5,26 @@
 # and the artifact upload, which are the two things a crash needs to be
 # reproducible.
 #
-# Both repositories are checked out as siblings because the fuzz workspace's path
-# dependencies reach into the main workspace, which pins the SDK by path.
+# One checkout: the crypto SDK is a git dependency and cargo fetches it.
+#
+# The runner follows repository visibility: self-hosted while private (no forks
+# exist, so no untrusted code), GitHub-hosted the moment it is public (see
+# ci.yml's header for why that is the fork guard).
 
 name: fuzz
 
+# `push` is `main` only for the same reason as ci.yml: a fuzz run is six
+# targets, and dependabot's branches would queue them on the one self-hosted
+# runner ahead of `main`. `pull_request` still covers dependency branches, the
+# schedule still covers the long run, and a tag's commit is covered by the
+# `main` push that carried it.
 on:
-  pull_request:
   push:
-    branches: [master, main]
+    branches: [main]
+  pull_request:
   schedule:
-    # 03:17 UTC — off the hour, so it does not race every other nightly job.
-    - cron: "17 3 * * *"
+    # A long run every week: 900s per target instead of the 60s smoke.
+    - cron: '17 4 * * 0'
   workflow_dispatch:
 
 concurrency:
@@ -32,26 +40,32 @@ env:
 jobs:
   fuzz:
     name: ${{ matrix.target }} (${{ github.event_name == 'schedule' && '900s' || '60s' }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        target: [message_parse, handshake_decode, replay, shaping]
+        target: [message_parse, handshake_decode, replay, shaping, enroll_parse, epoch_open]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: vallum
-      - uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-          token: ${{ secrets.SDK_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+
+      # The fuzz build is a sanitizer, release, single-codegen-unit build of
+      # every crate, and `checkout` cleans the tree between jobs — so without
+      # this each of the six targets recompiles the world from scratch.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            vallum
+            vallum/fuzz -> target
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       - name: Restore the corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vallum/fuzz/corpus/${{ matrix.target }}
           key: fuzz-${{ matrix.target }}-${{ github.run_id }}

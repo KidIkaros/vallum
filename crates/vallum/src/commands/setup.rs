@@ -1,0 +1,1067 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! `vallum setup`: one entry point, two roles.
+//!
+//! A server and a client are the same daemon with different configs, which is
+//! the right architecture and the wrong first impression: twenty subcommands
+//! and a TOML file before anything works. This asks the one question that
+//! decides everything — *what is this machine?* — and then runs exactly the
+//! commands that role needs, printing the handoff to the other side.
+//!
+//! Interactive when a person is at the terminal, plain guidance when not, and
+//! never a prompt that a script cannot answer.
+
+use std::io::{BufRead, IsTerminal, Write};
+use std::path::PathBuf;
+
+use clap::Args;
+use std::path::Path;
+
+use ipnet::IpNet;
+use vallum_crypto_sdk::SdkSuite;
+
+use crate::commands::import::ImportArgs;
+use crate::commands::server::InitArgs;
+use crate::{say, Error};
+
+#[derive(Debug, Args)]
+pub struct SetupArgs {
+    /// This machine accepts clients.
+    #[arg(long, conflicts_with = "client")]
+    pub server: bool,
+
+    /// This machine connects to a server, from a `.vallum-bundle` file.
+    #[arg(long, value_name = "BUNDLE", conflicts_with = "server")]
+    pub client: Option<PathBuf>,
+
+    /// Take the defaults and the host changes without asking.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// The address clients dial. Detected when absent.
+    #[arg(long, value_name = "HOST:PORT")]
+    pub endpoint: Option<String>,
+
+    /// The tunnel address and prefix.
+    #[arg(long, value_name = "CIDR")]
+    pub address: Option<String>,
+
+    /// The UDP address to listen on.
+    #[arg(long, value_name = "ADDR:PORT", default_value = "0.0.0.0:51820")]
+    pub listen: String,
+
+    /// The instance name: the config file stem and the unit instance.
+    ///
+    /// Defaults to `vallum0` on a server, and to this machine's hostname on a
+    /// client enrolled over SSH.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Enrol this machine against a server over SSH, which needs no bundle and
+    /// never sends this machine's private key anywhere.
+    #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client", "join", "token"])]
+    pub remote: Option<String>,
+
+    /// The server config to edit when enrolling with `--remote` (for a server
+    /// whose instance is not `vallum0`).
+    #[arg(long, value_name = "FILE", requires = "remote")]
+    pub remote_config: Option<PathBuf>,
+
+    /// Enrol with a single-use token, for machines that cannot SSH to the
+    /// server. Takes the `vallum1-join:…` ticket `vallum peer invite` prints,
+    /// or a bare `host:port` together with --invite-id and --token.
+    #[arg(long, value_name = "TICKET|HOST:PORT", conflicts_with_all = ["server", "client", "remote"])]
+    pub join: Option<String>,
+
+    /// The single-use token from `vallum peer invite`, or `-` to read it from
+    /// stdin so it stays out of shell history and `ps`.
+    #[arg(long, value_name = "TOKEN", requires = "join")]
+    pub token: Option<String>,
+
+    /// The invite id from `vallum peer invite` (32 hex characters).
+    #[arg(long, value_name = "HEX", requires = "join")]
+    pub invite_id: Option<String>,
+
+    /// Refuse the answer unless the server's fingerprint matches this. Printed
+    /// by `vallum peer invite`; it is how a client knows it reached the right
+    /// server rather than one that answered first.
+    #[arg(long, value_name = "FINGERPRINT", requires = "join")]
+    pub expect: Option<String>,
+
+    /// On a server, allow devices to enrol with a one-time token (opens UDP
+    /// `listen + 1`).
+    #[arg(long)]
+    pub enroll: bool,
+
+    /// Print every step and change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+const DEFAULT_ADDRESS: &str = "10.7.0.1/24";
+
+/// `vallum setup`.
+///
+/// # Errors
+///
+/// Whatever the command it dispatches to fails with.
+pub fn setup(args: &SetupArgs) -> Result<(), Error> {
+    if args.server {
+        return as_server(args);
+    }
+    if let Some(bundle) = &args.client {
+        return as_client(bundle, args.dry_run, false);
+    }
+    if let Some(remote) = &args.remote {
+        return as_remote(remote, args);
+    }
+    if let Some(join) = &args.join {
+        return as_join(join, args);
+    }
+    if !std::io::stdin().is_terminal() {
+        return guidance();
+    }
+    match ask_role()? {
+        Role::Server => as_server(args),
+        Role::Client => as_interactive_client(args),
+    }
+}
+
+/// What the machine is for. The only question that changes everything after it.
+enum Role {
+    Server,
+    Client,
+}
+
+fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
+    say!();
+    say!("How will this client enrol with the server?");
+    say!("  1) Over SSH — generates the key here; nothing secret leaves (recommended)");
+    say!("  2) With a one-time invite token (`vallum peer invite` on the server)");
+    say!("  3) From a .vallum-bundle file (offline / air-gapped)");
+    say!();
+    loop {
+        match prompt("Choose 1, 2, or 3", Some("1"))?.as_str() {
+            "1" | "ssh" | "remote" => {
+                let remote = prompt("The server's SSH target (e.g. you@vpn.example.com)", None)?;
+                if remote.is_empty() {
+                    return Err(Error::Usage(
+                        "give an SSH target like you@vpn.example.com".to_owned(),
+                    ));
+                }
+                return as_remote(&remote, args);
+            }
+            "2" | "token" | "join" => {
+                let ticket = prompt(
+                    "Paste the join ticket (`vallum1-join:…` from `vallum peer invite`)",
+                    None,
+                )?;
+                let joined = SetupArgs {
+                    server: false,
+                    client: None,
+                    remote: None,
+                    remote_config: None,
+                    join: Some(ticket.clone()),
+                    token: None,
+                    invite_id: None,
+                    expect: None,
+                    enroll: false,
+                    endpoint: None,
+                    address: None,
+                    listen: args.listen.clone(),
+                    name: args.name.clone(),
+                    yes: args.yes,
+                    dry_run: args.dry_run,
+                };
+                return as_join(&ticket, &joined);
+            }
+            "3" | "bundle" => {
+                let bundle = ask_bundle()?;
+                return as_client(&bundle, args.dry_run, true);
+            }
+            other => say!("`{other}` is not one of the three. Type 1, 2, or 3."),
+        }
+    }
+}
+
+fn ask_role() -> Result<Role, Error> {
+    say!("Vallum — a post-quantum tunnel between two machines.");
+    say!();
+    say!("What is this machine?");
+    say!("  1) A server — other machines connect to it");
+    say!("  2) A client — it connects to a server");
+    say!();
+    loop {
+        match prompt("Choose 1 or 2", Some("1"))?.as_str() {
+            "1" | "s" | "server" => return Ok(Role::Server),
+            "2" | "c" | "client" => return Ok(Role::Client),
+            other => say!("`{other}` is not one of the two. Type 1 or 2."),
+        }
+    }
+}
+
+/// Ask whether devices may enrol with a one-time token.
+///
+/// Asked, not assumed: it opens a second UDP port and runs another root
+/// service, which is not something to switch on behind an operator's back.
+fn ask_enroll(listen: &str) -> Result<bool, Error> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    let port = listen_port(listen).unwrap_or(51820).saturating_add(1);
+    say!();
+    say!("Devices can join in two ways: you hand them a bundle or SSH to them, or");
+    say!("they use a one-time token you print with `vallum peer invite`.");
+    say!("The token way needs UDP {port} open and a small responder service.");
+    match prompt("Allow token enrolment? (y/N)", Some("n"))?.as_str() {
+        "y" | "Y" | "yes" => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn as_server(args: &SetupArgs) -> Result<(), Error> {
+    let interactive = std::io::stdin().is_terminal() && !args.yes;
+    let endpoint = match (&args.endpoint, interactive) {
+        (Some(endpoint), _) => Some(endpoint.clone()),
+        (None, true) => {
+            // Shown, never defaulted: the detected address is usually private,
+            // and accepting it silently is how a bundle ends up dialling
+            // something only the LAN can reach.
+            if let Some(detected) =
+                crate::commands::server::detected_endpoint(listen_port(&args.listen)?)
+            {
+                say!("  this machine's address is {detected} — private if clients are off-LAN");
+            }
+            loop {
+                let answer = prompt("The address clients dial (a public name or IP)", None)?;
+                if answer.is_empty() {
+                    break None;
+                }
+                if plausible_endpoint(&answer) {
+                    break Some(answer);
+                }
+                // `1`, or a line that was meant for another prompt, is not a
+                // host — and an endpoint is copied into every bundle, so a
+                // wrong one is discovered by a client that cannot connect.
+                say!("`{answer}` is not an address. Give a name or an IP, like vpn.example.com.");
+            }
+        }
+        (None, false) => None,
+    };
+    let address = match (&args.address, interactive) {
+        (Some(address), _) => address.clone(),
+        (None, true) => {
+            // A wizard that hands an unvalidated value to `init` and lets the
+            // error surface four steps later has not prevented anything.
+            loop {
+                let answer = prompt("The tunnel address", Some(DEFAULT_ADDRESS))?;
+                match answer.parse::<IpNet>() {
+                    Ok(_) => break answer,
+                    Err(_) => say!("`{answer}` needs a prefix, like {DEFAULT_ADDRESS}. Try again."),
+                }
+            }
+        }
+        (None, false) => DEFAULT_ADDRESS.to_owned(),
+    };
+    let network = address
+        .parse::<IpNet>()
+        .map(|prefix| prefix.trunc().to_string())
+        .unwrap_or_else(|_| address.clone());
+
+    let instance = args.name.clone().unwrap_or_else(|| "vallum0".to_owned());
+    let init = InitArgs {
+        config: PathBuf::from(format!("/etc/vallum/{instance}.toml")),
+        name: Some(instance.clone()),
+        addresses: vec![address.clone()],
+        listen: args.listen.clone(),
+        endpoint,
+        control: None,
+        dns: Vec::new(),
+        user: None,
+        no_nat: false,
+        no_firewall: false,
+        no_forward: false,
+        no_service: false,
+        no_host: false,
+        dry_run: args.dry_run,
+        force: false,
+        json: false,
+        enroll: args.enroll || (!args.yes && ask_enroll(&args.listen)?),
+    };
+
+    if interactive && !args.dry_run {
+        say!();
+        say!("This will, on this machine:");
+        say!("  · generate the server key in /etc/vallum/ (never overwritten)");
+        say!("  · write {}", init.config.display());
+        say!("  · enable IP forwarding and persist it");
+        say!(
+            "  · open UDP {} in the host firewall",
+            listen_port(&args.listen)?
+        );
+        say!("  · add the NAT masquerade for {network}");
+        say!("  · install and start the vallum@{instance} service");
+        say!();
+        if !confirm("Do that?", true)? {
+            say!("Nothing was changed.");
+            return Ok(());
+        }
+    }
+
+    crate::commands::server::init(&init)?;
+    if args.dry_run {
+        return Ok(());
+    }
+
+    let add_client = if args.yes {
+        false
+    } else if interactive {
+        confirm("Add your first client now?", true)?
+    } else {
+        false
+    };
+    if !add_client {
+        say!();
+        say!("Next: enrol a client — on that machine, run");
+        say!("   sudo vallum setup --remote you@<this-host>");
+        say!("or mint a one-time token here with `sudo vallum peer invite <name>`.");
+        return Ok(());
+    }
+
+    let name = prompt("A name for that client", Some("laptop"))?;
+    if init.enroll {
+        crate::commands::peer::peer(&crate::commands::peer::PeerArgs {
+            command: crate::commands::peer::PeerCommand::Invite(
+                crate::commands::peer::InviteArgs {
+                    name,
+                    config: init.config.clone(),
+                    public_key: None,
+                    public_key_file: None,
+                    ttl: 15,
+                    json: false,
+                },
+            ),
+        })?;
+        return Ok(());
+    }
+    let bundle = PathBuf::from(format!("{name}.vallum-bundle"));
+    crate::commands::peer::add_for_setup(&init.config, &name, &bundle)?;
+
+    say!();
+    say!(
+        "Next: get {} to the client, then run this there:",
+        bundle.display()
+    );
+    say!("   scp {} <user>@<client>:", bundle.display());
+    say!("   sudo vallum setup --client {}", bundle.display());
+    Ok(())
+}
+
+/// The bundle to import: what the operator names, or the only one in sight.
+fn ask_bundle() -> Result<PathBuf, Error> {
+    // A prompt that asks for a file without saying what it is, where it came
+    // from, or what happens next is a riddle, not a question.
+    say!("A .vallum-bundle is the one file your server produced when it enrolled");
+    say!("this machine. It holds the client's config, its private key, and the");
+    say!("server's address — nothing else is needed from the server.");
+    say!();
+    let found: Vec<PathBuf> = std::fs::read_dir(".")
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "vallum-bundle")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let default = match found.as_slice() {
+        [only] => Some(only.display().to_string()),
+        _ => None,
+    };
+    loop {
+        let answer = prompt(
+            "The .vallum-bundle file the server gave you",
+            default.as_deref(),
+        )?;
+        if answer.is_empty() {
+            return Err(Error::Usage(
+                "give the path to a .vallum-bundle file, or ask the server for one: \
+                 `vallum peer add <name> --ship-key --bundle-out <name>.vallum-bundle`"
+                    .to_owned(),
+            ));
+        }
+        let path = PathBuf::from(&answer);
+        if path.is_file() {
+            return Ok(path);
+        }
+        say!(
+            "`{answer}` does not exist here. On the server it was written by \
+             `vallum peer add`, and copied over with `scp`."
+        );
+        if default.is_some() && answer != default.clone().unwrap_or_default() {
+            continue;
+        }
+        continue;
+    }
+}
+
+/// What a bundle will actually do, read from the bundle itself.
+struct Summary {
+    name: String,
+    endpoint: String,
+    full_tunnel: bool,
+    dns: bool,
+}
+
+fn summarise(bundle: &std::path::Path) -> Result<Summary, Error> {
+    let text = std::fs::read_to_string(bundle).map_err(|source| Error::IoPath {
+        action: "read the bundle",
+        path: bundle.to_path_buf(),
+        source,
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| Error::Usage(format!("{} is not a bundle: {error}", bundle.display())))?;
+    let config = parsed
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage(format!("{} has no config", bundle.display())))?;
+    let line = |key: &str| {
+        config
+            .lines()
+            .find(|line| line.trim_start().starts_with(key))
+            .map(|line| line.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let allowed = line("allowed_ips");
+    Ok(Summary {
+        name: parsed
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or("client")
+            .to_owned(),
+        endpoint: line("endpoint")
+            .trim_start_matches("endpoint = ")
+            .trim_matches('"')
+            .to_owned(),
+        full_tunnel: allowed.contains("0.0.0.0/0") || allowed.contains("::/0"),
+        dns: config.contains("\ndns = ") || config.starts_with("dns = "),
+    })
+}
+
+fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Result<(), Error> {
+    let summary = summarise(bundle)?;
+    say!();
+    say!("{} — {}", bundle.display(), summary.name);
+    say!("   server     {}", summary.endpoint);
+    say!(
+        "   routing    {}",
+        if summary.full_tunnel {
+            "every destination through the tunnel (a full tunnel)"
+        } else {
+            "only the prefixes the server routes"
+        }
+    );
+    if summary.dns {
+        say!("   DNS        the server's resolver, while the tunnel is up");
+    }
+    say!();
+    say!("Importing it will write the config and its key (0600), and install and");
+    say!("start the vallum@{} service.", summary.name);
+    if interactive && !confirm("Do that?", true)? {
+        say!("Nothing was changed.");
+        return Ok(());
+    }
+    if dry_run {
+        say!(
+            "would import {} and start the tunnel for it",
+            bundle.display()
+        );
+        return Ok(());
+    }
+    let root = nix::unistd::Uid::effective().is_root();
+    let import = ImportArgs {
+        bundle: bundle.to_path_buf(),
+        output_dir: None,
+        force: false,
+        install: root,
+    };
+    crate::commands::import::import(&import)?;
+    say!();
+    if root {
+        // Installed: the only thing left is to confirm it works.
+        say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
+    } else {
+        // Not installed: say the one thing `import` did not.
+        say!("To run it as a service instead, re-run this with sudo.");
+    }
+    Ok(())
+}
+
+/// Enrol this machine against a server over SSH.
+///
+/// The key is generated here and stays here; only the public line travels, over
+/// the SSH channel the operator already trusts. The server hands back its own
+/// public line and the address it allocated — nothing secret either way.
+fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
+    let name = args
+        .name
+        .clone()
+        .or_else(hostname)
+        .unwrap_or_else(|| "client".to_owned());
+    if args.dry_run {
+        say!("would generate a key here and enrol `{name}` on {remote} over SSH");
+        say!("   nothing secret would leave this machine");
+        return Ok(());
+    }
+
+    // Already enrolled here? Then this run is about installing or starting it,
+    // not about enrolling again: a second enrolment would present a new key and
+    // the server would rightly refuse it.
+    let candidates = [
+        PathBuf::from(format!("/etc/vallum/{name}.toml")),
+        PathBuf::from(format!("{name}.toml")),
+    ];
+    if let Some(existing) = candidates
+        .iter()
+        .find(|path| path.is_file() && path.with_extension("key").is_file())
+    {
+        say!("already enrolled: {}", existing.display());
+        return start_existing(existing, &name);
+    }
+
+    let seed = crate::entropy::seed();
+    let secret = crate::keys::new_secret(3, false, seed);
+    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
+    let identity = crate::keys::identity(&suite, &secret)?;
+    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
+    say!("generated a key here; the private half does not leave this machine");
+
+    let config_flag = match &args.remote_config {
+        Some(path) => format!(" --config {}", path.display()),
+        None => String::new(),
+    };
+    let remote_command =
+        format!("sudo vallum peer enroll {name}{config_flag} --public-key-file /dev/stdin --json");
+    let mut child = std::process::Command::new("ssh")
+        .arg(remote)
+        .arg(&remote_command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|source| Error::IoPath {
+            action: "run ssh",
+            path: PathBuf::from("ssh"),
+            source,
+        })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write as _;
+        stdin
+            .write_all(public_line.as_bytes())
+            .map_err(|error| Error::Usage(format!("could not send the public line: {error}")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| Error::Usage(format!("ssh: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Precondition(format!(
+            "the server refused the enrolment: {}\n\
+             That command runs `sudo vallum peer enroll` there, so it needs vallum \
+             installed on the server and passwordless sudo for this user. \
+             If that is not available, ask the server for a bundle instead: \
+             `vallum peer add {name} --ship-key --bundle-out {name}.vallum-bundle`",
+            stderr.trim()
+        )));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
+    let config_text = report
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage("the server's answer had no config".to_owned()))?;
+    let address = report
+        .get("address")
+        .and_then(|a| a.as_str())
+        .unwrap_or("?");
+    let endpoint = report
+        .get("endpoint")
+        .and_then(|e| e.as_str())
+        .unwrap_or("?");
+
+    let server_address = report
+        .get("server_address")
+        .and_then(|address| address.as_str());
+    // Before anything is written: is this the server the invite named?
+    if let Some(expect) = &args.expect {
+        let server_line = config_text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("public_key = \""))
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| {
+                Error::Usage("the answer had no server public line to check".to_owned())
+            })?;
+        let got = crate::keys::fingerprint(server_line);
+        if !got.eq_ignore_ascii_case(expect.trim()) {
+            return Err(Error::Precondition(format!(
+                "this is not the server the invite named.\n\
+                 \x20 expected {}\n\
+                 \x20 answered {}\n\
+                 Nothing was written. If the server was rebuilt, mint a new invite; \
+                 if not, treat this as an attack.",
+                expect.trim(),
+                got
+            )));
+        }
+        say!("   ok    server fingerprint {got}");
+    }
+    place_config(
+        &name,
+        config_text,
+        &secret,
+        address,
+        endpoint,
+        server_address,
+    )
+}
+
+/// Write the enrolled config and its key, and either install the service
+/// (as root) or say how to run it.
+fn place_config(
+    name: &str,
+    config_text: &str,
+    secret: &crate::keys::SecretFile,
+    address: &str,
+    endpoint: &str,
+    server_address: Option<&str>,
+) -> Result<(), Error> {
+    let root = nix::unistd::Uid::effective().is_root();
+    let directory = if root {
+        PathBuf::from("/etc/vallum")
+    } else {
+        PathBuf::from(".")
+    };
+    std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
+        action: "create",
+        path: directory.clone(),
+        source,
+    })?;
+    let key_path = directory.join(format!("{name}.key"));
+    let config_path = directory.join(format!("{name}.toml"));
+    crate::keys::save_secret(&key_path, secret)?;
+    // `fwmark` is this machine's routing detail: a server released before the
+    // field existed hands back a config that would refuse to attach.
+    let mut config_text = vallum_config::with_local_fwmark(config_text);
+
+    // Probe path MTU to the server endpoint. If a reduced-MTU link (PPPoE, DS-Lite)
+    // is measured, configure `interface.outer_mtu` so large payloads do not hang.
+    if !endpoint.is_empty() && endpoint != "?" {
+        if let Some(measured) = crate::net::probe_path_mtu_host(endpoint) {
+            if measured < crate::config::DEFAULT_OUTER_MTU {
+                say!("   ok    path MTU to {endpoint} measured as {measured} bytes (configured interface.outer_mtu = {measured})");
+                config_text = vallum_config::with_outer_mtu(&config_text, measured);
+            }
+        }
+    }
+
+    crate::keys::write_private(&config_path, config_text.as_bytes())?;
+
+    say!();
+    say!("enrolled `{name}` — {address}, through {endpoint}");
+    say!("   config     {}", config_path.display());
+    say!("   key        {} (this machine only)", key_path.display());
+    if root && config_path.starts_with("/etc/vallum") {
+        crate::commands::server::install_service(name, false)?;
+        prove_tunnel(name, &config_path, server_address);
+        say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
+    } else {
+        say!(
+            "Run it with `sudo vallum run --config {}`.",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Prove the tunnel actually carries traffic, rather than trusting that a
+/// config was written.
+///
+/// Three separate failures in this project's dogfooding all ended in
+/// "enrolled" followed by "no internet": a unit that could not exec, a config
+/// root could not read, and a default route into a dead interface. None of
+/// them were visible at the moment of enrolment. So enrolment finishes here:
+/// a real handshake, and a real packet, or a named reason why not.
+fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
+    let socket = vallum_config::Config::load(config)
+        .ok()
+        .and_then(|cfg| cfg.interface.control)
+        .unwrap_or_else(|| vallum_config::socket_path(name));
+    say!();
+    say!("proving the tunnel…");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut handshaked = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(response) = crate::control::request(&socket, "get=1\n") {
+            if handshake_seen(&response) {
+                handshaked = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    if !handshaked {
+        say!("   fail  no handshake within 15s");
+        say!("         likely causes, in order:");
+        say!("           · UDP 51820 is filtered on the server (firewall, provider)");
+        say!("           · the endpoint in this config is not reachable from here");
+        say!("           · the server's daemon is not running");
+        say!(
+            "         `vallum doctor --config {}` checks all three.",
+            config.display()
+        );
+        return;
+    }
+    say!("   ok    handshake with the server");
+    let Some(address) = server_address else {
+        return;
+    };
+    let status = std::process::Command::new("ping")
+        .args(["-c", "2", "-W", "1", address])
+        .output();
+    match status {
+        Ok(output) if output.status.success() => say!("   ok    ping {address} (2/2)"),
+        Ok(output) => {
+            let lost = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| line.contains("packet loss"))
+                .unwrap_or("no reply")
+                .to_owned();
+            say!("   warn  handshake ok, but ping {address} failed: {lost}");
+            say!("         the server may not route its own tunnel address, or ICMP");
+            say!("         is filtered; a TCP check through the tunnel settles it.");
+        }
+        Err(_) => say!("   skip  ping is not installed; handshake is the proof"),
+    }
+}
+
+/// Whether any peer has completed a handshake, read from the UAPI `get`.
+fn handshake_seen(response: &str) -> bool {
+    response.lines().any(|line| {
+        line.strip_prefix("last_handshake_time_sec=")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .is_some_and(|seconds| seconds > 0)
+    })
+}
+
+/// Resolve `--token`: `-` reads a line from `stdin` so the token stays out of
+/// shell history and `ps`; a literal token warns and returns it.
+fn read_token_arg(arg: Option<&str>, mut stdin: impl std::io::BufRead) -> Result<String, Error> {
+    match arg {
+        Some("-") => {
+            let mut line = String::new();
+            stdin
+                .read_line(&mut line)
+                .map_err(|error| Error::Usage(format!("reading the token: {error}")))?;
+            Ok(line.trim().to_owned())
+        }
+        Some(token) => {
+            say!("note: a token passed as an argument is visible in `ps` and stays in");
+            say!("      shell history; `--token -` reads it from stdin instead");
+            Ok(token.to_owned())
+        }
+        None => Ok(String::new()),
+    }
+}
+
+/// Enrol with a single-use token — transport B, for machines that cannot SSH.
+///
+/// `server` is either the `vallum1-join:…` ticket `peer invite` prints, or a
+/// bare `host:port` alongside `--invite-id`/`--token`/`--expect` (the form
+/// invites printed before tickets existed — kept working).
+fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
+    let ticket;
+    let server = if server.starts_with(crate::enroll::TICKET_PREFIX) {
+        if args.token.is_some() || args.invite_id.is_some() || args.expect.is_some() {
+            return Err(Error::Usage(
+                "a join ticket already carries the id, token, and fingerprint — \
+                 drop --invite-id/--token/--expect"
+                    .to_owned(),
+            ));
+        }
+        ticket = crate::enroll::JoinTicket::parse(server)?;
+        ticket.server.clone()
+    } else {
+        ticket = crate::enroll::JoinTicket {
+            server: server.to_owned(),
+            name: String::new(),
+            invite_id: args.invite_id.clone().ok_or_else(|| {
+                Error::Usage(
+                    "--invite-id is needed: `vallum peer invite` prints the whole command"
+                        .to_owned(),
+                )
+            })?,
+            token: crate::enroll::Token::parse(&read_token_arg(
+                args.token.as_deref(),
+                std::io::stdin().lock(),
+            )?)?,
+            fingerprint: args.expect.clone().unwrap_or_default(),
+        };
+        server.to_owned()
+    };
+    let server = server.as_str();
+    let name = args
+        .name
+        .clone()
+        .or_else(|| (!ticket.name.is_empty()).then(|| ticket.name.clone()))
+        .or_else(hostname)
+        .unwrap_or_else(|| "client".to_owned());
+    let expect = args
+        .expect
+        .clone()
+        .or_else(|| (!ticket.fingerprint.is_empty()).then(|| ticket.fingerprint.clone()));
+    if args.dry_run {
+        say!("would generate a key here and ask {server} to enrol `{name}`");
+        say!("   the token proves the server invited this machine; no secrets travel");
+        return Ok(());
+    }
+
+    let seed = crate::entropy::seed();
+    let secret = crate::keys::new_secret(3, false, seed);
+    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
+    let identity = crate::keys::identity(&suite, &secret)?;
+    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
+    say!("generated a key here; the private half does not leave this machine");
+    say!("asking {server} to enrol `{name}`…");
+
+    let answer = crate::enroll::join(
+        server,
+        &ticket.token,
+        &ticket.invite_id,
+        &name,
+        &public_line,
+    )?;
+    let report: serde_json::Value = serde_json::from_str(&answer)
+        .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
+    let config_text = report
+        .get("config")
+        .and_then(|config| config.as_str())
+        .ok_or_else(|| Error::Usage("the server's answer had no config".to_owned()))?;
+    let address = report
+        .get("address")
+        .and_then(|address| address.as_str())
+        .unwrap_or("?");
+    let endpoint = report
+        .get("endpoint")
+        .and_then(|endpoint| endpoint.as_str())
+        .unwrap_or(server);
+    let server_address = report
+        .get("server_address")
+        .and_then(|address| address.as_str());
+    // Before anything is written: is this the server the invite named?
+    if let Some(expect) = &expect {
+        let server_line = config_text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("public_key = \""))
+            .and_then(|rest| rest.split('"').next())
+            .ok_or_else(|| {
+                Error::Usage("the answer had no server public line to check".to_owned())
+            })?;
+        let got = crate::keys::fingerprint(server_line);
+        if !got.eq_ignore_ascii_case(expect.trim()) {
+            return Err(Error::Precondition(format!(
+                "this is not the server the invite named.\n\
+                 \x20 expected {}\n\
+                 \x20 answered {}\n\
+                 Nothing was written. If the server was rebuilt, mint a new invite; \
+                 if not, treat this as an attack.",
+                expect.trim(),
+                got
+            )));
+        }
+        say!("   ok    server fingerprint {got}");
+    }
+    place_config(
+        &name,
+        config_text,
+        &secret,
+        address,
+        endpoint,
+        server_address,
+    )
+}
+
+/// Finish a machine that is already enrolled: install the service, or say how
+/// to run it.
+fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
+    let root = nix::unistd::Uid::effective().is_root();
+    let in_etc = config.starts_with("/etc/vallum");
+    if root && in_etc {
+        crate::commands::server::install_service(name, false)?;
+        say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
+        return Ok(());
+    }
+    if root && !in_etc {
+        // The unit reads /etc/vallum/<name>.toml, so move it there.
+        let target = PathBuf::from(format!("/etc/vallum/{name}.toml"));
+        let key = config.with_extension("key");
+        let key_target = PathBuf::from(format!("/etc/vallum/{name}.key"));
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::IoPath {
+                action: "create",
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        std::fs::rename(config, &target).map_err(|source| Error::IoPath {
+            action: "move the config",
+            path: config.to_path_buf(),
+            source,
+        })?;
+        std::fs::rename(&key, &key_target).map_err(|source| Error::IoPath {
+            action: "move the key",
+            path: key,
+            source,
+        })?;
+        // The units drop capabilities, which means root loses CAP_DAC_OVERRIDE
+        // and cannot read a 0600 file owned by anyone else. A file moved in
+        // from a user's directory keeps its owner, so hand it to root.
+        for path in [&target, &key_target] {
+            let _ = std::os::unix::fs::chown(path, Some(0), Some(0));
+        }
+        say!("moved it to {}", target.display());
+        crate::commands::server::install_service(name, false)?;
+        return Ok(());
+    }
+    say!(
+        "Run it with `sudo vallum run --config {}`,",
+        config.display()
+    );
+    say!("or re-run this with sudo to install it as a service.");
+    Ok(())
+}
+
+/// This machine's short hostname, for naming the device on the server.
+fn hostname() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.split('.').next().unwrap_or(&name).to_owned())
+}
+
+/// The non-interactive default: say what the two paths are, without running
+/// either. A prompt a script cannot answer is worse than a clear instruction.
+fn guidance() -> Result<(), Error> {
+    say!("Vallum — a post-quantum tunnel between two machines.");
+    say!();
+    say!("On the server, where clients connect:");
+    say!("   sudo vallum setup --server");
+    say!();
+    say!("On a client (generates its own key here — nothing secret leaves):");
+    say!("   sudo vallum join vallum1-join:…   (`vallum peer invite` on the server prints this)");
+    say!("   sudo vallum setup --remote you@<server>");
+    say!("   sudo vallum setup --client <file>.vallum-bundle");
+    say!();
+    say!("`vallum setup` with no flags asks which of the two this machine is.");
+    say!("Every individual command is under `vallum --help`.");
+    Ok(())
+}
+
+/// Whether a dialled address looks like a host, not a stray answer.
+///
+/// Deliberately permissive: single-label LAN names (`nas`) are legitimate, so
+/// the test is that the host is not *purely numeric* — which is never a host
+/// and is almost always a line meant for a different prompt.
+fn plausible_endpoint(answer: &str) -> bool {
+    let host = answer.trim();
+    if host.is_empty() || host.contains(char::is_whitespace) {
+        return false;
+    }
+    let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !host.is_empty() && !host.chars().all(|character| character.is_ascii_digit())
+}
+
+fn listen_port(listen: &str) -> Result<u16, Error> {
+    listen
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .ok_or_else(|| Error::Usage(format!("`{listen}` is not an address with a port")))
+}
+
+fn prompt(question: &str, default: Option<&str>) -> Result<String, Error> {
+    let mut stdout = std::io::stdout();
+    match default {
+        Some(default) => {
+            let _ = write!(stdout, "{question} [{default}]: ");
+        }
+        None => {
+            let _ = write!(stdout, "{question}: ");
+        }
+    }
+    let _ = stdout.flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|error| Error::Usage(format!("could not read the answer: {error}")))?;
+    let answer = line.trim().to_owned();
+    if answer.is_empty() {
+        Ok(default.unwrap_or_default().to_owned())
+    } else {
+        Ok(answer)
+    }
+}
+
+fn confirm(question: &str, default: bool) -> Result<bool, Error> {
+    let hint = if default { "Y/n" } else { "y/N" };
+    let answer = prompt(&format!("{question} ({hint})"), None)?;
+    Ok(match answer.to_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_port_comes_from_the_listen_address() {
+        assert_eq!(listen_port("0.0.0.0:51820").unwrap(), 51820);
+        assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
+        assert!(listen_port("0.0.0.0").is_err());
+    }
+
+    #[test]
+    fn dash_token_reads_from_stdin_and_trims() {
+        let cursor = std::io::Cursor::new(b"a1b2-c3d4-e5f6-0011-2233-4455-6677-8899\n");
+        let raw = read_token_arg(Some("-"), cursor).unwrap();
+        let parsed = crate::enroll::Token::parse(&raw).unwrap();
+        assert_eq!(parsed.display(), "a1b2-c3d4-e5f6-0011-2233-4455-6677-8899");
+    }
+
+    #[test]
+    fn a_stray_number_is_not_a_host() {
+        assert!(plausible_endpoint("vpn.example.com"));
+        assert!(plausible_endpoint("203.0.113.5"));
+        assert!(plausible_endpoint("203.0.113.5:51820"));
+        assert!(plausible_endpoint("nas"));
+        assert!(plausible_endpoint("[2001:db8::1]:51820"));
+        // The line the wizard caught on a real host.
+        assert!(!plausible_endpoint("1"));
+        assert!(!plausible_endpoint(""));
+        assert!(!plausible_endpoint("two words"));
+    }
+
+    #[test]
+    fn guidance_names_both_roles_without_running_anything() {
+        // The non-interactive path must not prompt or mutate; it only explains.
+        guidance().unwrap();
+    }
+}
