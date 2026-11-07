@@ -50,8 +50,9 @@ operator must guarantee. The proofs behind the claims live in
   a silent filter looks, from the client, exactly like a server that is not
   answering ([ADR-0026](adr/0026-censorship-resistance.md)). The TCP carrier is
   the same packets inside one connection per peer: about 1 % larger, one order
-  for everything, and no roaming. It is reachability, not censorship resistance,
-  and the retransmission cost of a lossy path is unmeasured.
+  for everything, and no roaming. It is reachability, not censorship resistance —
+  32 MiB that takes 40–90 ms on a clean pair takes 1.0–2.1 s at 2 % loss, measured
+  in `docs/proof/transport.md` §2.8.
 
 ## What is explicitly NOT claimed
 

@@ -205,12 +205,35 @@ openable. Add the header difference (TCP+IP 40 bytes against UDP+IP 28, arithmet
 rather than measurement) and the carrier costs about 1 % more on the wire at a
 full-size packet.
 
-The cost that is *not* measured here is loss: loopback TCP does not drop segments,
-so the retransmission and head-of-line delay a real path would produce cannot be
-shown in this harness. What is shown is that a stream forces one order: the second
-packet cannot be handed over before the first, whatever the application asked for
+What is shown is that a stream forces one order: the second packet cannot be
+handed over before the first, whatever the application asked for
 (`a_stream_orders_everything_behind_the_slowest_read`). That is the property the
-fallback trades for reachability, and it is why it is a fallback.
+fallback trades for reachability.
+
+**Loss, measured.** This was ADR-0026's open number, and it is open no longer.
+`the_carrier_pays_retransmissions_on_a_lossy_path` puts the two ends of a veth
+pair in separate network namespaces, attaches `netem` with 0 % and 2 % loss to the
+client's end, and drives 32 MiB through the carrier in 23 014 real sealed frames.
+The retransmission count is the kernel's own (`/proc/net/snmp`, `RetransSegs`
+against `OutSegs`), not a model of it:
+
+| | clean | 2 % loss |
+|---|---|---|
+| time for 32 MiB | 40–90 ms | 1.0–2.1 s |
+| segments retransmitted | 0 of ~23 200 | 318–447 of 23 175 |
+| frames delivered | 23 014 | 23 014 |
+
+Thirteen to fifty times slower, and not one byte lost: a stream loses time, not
+data. The retransmission rate — 1.4–1.9 % of segments — is the offered loss, which
+is what TCP with SACK does on a path that is not also congested. So the cost is
+not the retransmitted bytes; it is the round trips they wait for, which is why the
+spread across runs is wide and why the number is quoted as a range. It is also why
+the carrier is a fallback: this path's round trip is 1 ms by construction, and a
+real one is not.
+
+The measurement needs an unprivileged user namespace, `tc` and `nsenter`; where a
+CI container lacks any of them the test says so and returns rather than reporting
+a pass it did not earn. It takes about two seconds where it runs.
 
 ---
 

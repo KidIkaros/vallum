@@ -74,10 +74,12 @@ carries exactly the same sealed packets as UDP:
 daemons, two real configs, a real handshake and traffic both ways over loopback
   TCP.
 
-The retransmission cost on a *lossy* path is still the one unmeasured number:
-loopback does not drop segments. `docs/proof/transport.md` §2.8 says so rather
-than guessing, and the claim stands at "reachable where UDP is blocked", not
-"fast there".
+The retransmission cost on a *lossy* path is measured now, not argued: 32 MiB in
+23 014 frames takes 40–90 ms on a clean veth pair and 1.0–2.1 s at 2 % loss, with
+318–447 of 23 175 segments retransmitted and every frame delivered. Thirteen to
+fifty times slower, and the cost is round trips rather than bytes — the full table
+and the harness are in `docs/proof/transport.md` §2.8. The claim therefore stands
+at "reachable where UDP is blocked", never "fast there".
 
 ## Alternatives Considered
 
