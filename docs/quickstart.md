@@ -182,4 +182,5 @@ brings the same tunnels back up.
 [automation](deployment/automation.md) · [upgrades](deployment/upgrades.md) ·
 [monitoring](deployment/monitoring.md) · [backup](deployment/backup.md) ·
 [troubleshooting](deployment/troubleshooting.md) ·
-[security model](security-model.md) · [TUI](tui.md) · [roadmap](roadmap.md)
+[security model](security-model.md) · [shaping](shaping.md) · [TUI](tui.md) ·
+[roadmap](roadmap.md)
