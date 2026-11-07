@@ -170,6 +170,13 @@ is the shape for a rate.
   power of two, so a configured cap is an upper bound; `window_ms` is clamped up
   to `VOLUME_MIN_WINDOW_MS` (1 000 ms), because a shorter window pads on every
   conversational pause and is a floor with extra steps.
+* `Machine::byte_volume_padding(window_ms, window_bytes, size)` — the volume
+  window with its unit in bytes: every `NormalSent` carries `Pad { target: size }`
+  *and* the step to the next count, which is what makes a window's bytes exactly
+  its count times `size` and a power-of-two byte target a power-of-two count.
+  Packets larger than `size` cannot be padded down, so such a window has a floor
+  under its byte target rather than a wrong one. `window_bytes` is rounded down to
+  a whole number of `size` packets, clamped to the same 32.
 * `Machine::jittered_floor(interval_ms, jitter_ms, size)` — the floor, with its
   interval drawn per firing: three states (short, configured, long), each armed
   for its own interval, and a `Timeout` picks the next one with weights 1, 2, 1.
@@ -301,6 +308,14 @@ open window adds nothing at all: `a_volume_window_pads_the_burst_to_a_power_of_t
 shows the three payloads leaving unpadded and one packet following the pause,
 with the daemon's peer discarding it.
 
+**Bytes** (`byte_volume_padding`, 1 000 ms, 8 × 1 400 B): on the page load,
+10 packets / **14 560 bytes** / **one distinct size** / 3 injected / +1 123.5 % —
+the same three injections the count shape spends, because the window arithmetic is
+the count's, plus the price of holding the size channel still underneath it.
+`a_byte_window_costs_a_fixed_size_per_packet_and_then_tops_up` asserts the
+injection count matches the count shape exactly and that every packet in the
+window is one size.
+
 **Noise** (`jittered_floor(500, 200)`): 7 176 injections over an idle hour
 against 7 200 for the plain floor at the same interval — a 0.3 % difference in
 *rate*, which is the sampler over 7 200 draws, not a cost. Jitter moves the gaps
@@ -352,10 +367,12 @@ and confirms the tag — not the length field — is what rejects it.
    three-point distribution is still a signature, and it is a *local* one: it says
    nothing about the volume the floor emits, which is one packet per interval
    whatever the gaps are.
-8. **Volume padding normalises counts, not bytes.** A window of nine 40-byte
-   packets and one of nine 1400-byte packets both pad to sixteen packets and
-   still differ in bytes. Closing that needs byte-bucket accounting and a target
-   size, which is a different machine with a much larger bill.
+8. **Volume padding normalises counts; bytes only when the size is fixed.** A
+   window of nine 40-byte packets and one of nine 1 400-byte packets both pad to
+   sixteen packets and still differ in bytes. `byte_volume_padding` closes that by
+   fixing the packet size first, which is why it costs what `pad_to_size` costs —
+   and a payload larger than its target escapes the accounting, because a packet
+   cannot be padded down.
 9. **The front burst is a burst, not a disguise.** It spends its packets where the
    front is most revealing and then the tunnel is as silent as it was before. An
    observer that watches past the first minute learns nothing it would not have
@@ -419,6 +436,12 @@ and confirms the tag — not the length field — is what rejects it.
 | a noisy floor draws its interval per packet and keeps the mean | `shaping.rs::Machine::jittered_floor` | `a_noisy_floor_varies_the_interval_and_keeps_the_mean` (unit) |
 | the noisy floor is rail-bounded like the plain one | `shaping.rs::{FLOOR_MIN_INTERVAL_MS}` | `a_noisy_floor_is_rail_bounded_like_the_plain_one` (unit) |
 | **noise costs no bandwidth** | `Machine::jittered_floor` | `a_jittered_floor_costs_what_a_plain_floor_costs` |
+| a byte window pads every packet and normalises the bytes | `shaping.rs::Machine::byte_volume_padding` | `a_byte_window_pads_every_packet_and_then_normalises_the_bytes` (unit) |
+| the byte window is bounded in packets, not only in bytes | `shaping.rs::VOLUME_MAX_PACKETS` | `a_byte_window_is_bounded_in_packets_not_just_in_bytes` (unit) |
+| **bytes are a whole number of packets, and the count matches the count shape** | `Machine::byte_volume_padding` | `a_byte_window_costs_a_fixed_size_per_packet_and_then_tops_up` |
+| a stream carrier frames packets without touching them | `vallum-tunnel/src/stream.rs` | `a_packet_survives_framing_unchanged`, `a_reader_reassembles_frames_split_across_reads`, `the_framing_carries_a_sealed_packet_unchanged` |
+| **the frame costs two bytes per packet, measured on a real TCP connection** | `stream::FRAME_LEN_SIZE` | `the_carrier_costs_two_bytes_of_frame_per_packet` |
+| a stream forces one order on everything | — | `a_stream_orders_everything_behind_the_slowest_read` |
 | a hand-written machine costs what the built-in one costs | `Machine::new`/`State`/`Branch` | `the_same_padding_target_costs_the_same_bytes_however_it_is_reached` |
 
 ---
