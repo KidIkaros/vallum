@@ -27,11 +27,13 @@ deployment.
 | `control` | the control socket is not there | `systemctl start vallum@<instance>`; the daemon creates it |
 | `forwarding` | `ip_forward` is off | `vallum server init` enables it, or `sysctl -w net.ipv4.ip_forward=1` |
 | `firewall` | the port is not open | `ufw allow 51820/udp`, plus `/tcp` if `carrier = "tcp"`; or the nftables chain that drops it |
-| *(nothing — no check exists)* | the path blocks UDP between the hosts | set `carrier = "tcp"` in `[interface]` on **both** ends and open the TCP port: the same packets, framed, about 1 % larger, no roaming ([ADR-0026](../adr/0026-censorship-resistance.md)) |
+| *(only with `--probe-path`, and only on tcp)* | the path blocks the port between the hosts | set `carrier = "tcp"` in `[interface]` on **both** ends and open the TCP port: the same packets, framed, about 1 % larger, and 13–50× slower at 2 % loss ([ADR-0026](../adr/0026-censorship-resistance.md)) |
 | `service` | the unit is inactive or failed | `journalctl -u vallum@<instance>` |
 | `config mode` | the config is group/world readable | `chmod 600`, because it can name a PSK file |
 | `rotation` | a peer still accepts a previous key | `vallum peer finalize <name>` once the device has the new one |
 | `path-mtu` | `doctor --probe-mtu` found a smaller path than `outer_mtu` | set `interface.outer_mtu` to the measured value |
+| `carrier` | never fails: it names the transport in use | nothing, unless both ends disagree — `carrier = "tcp"` on one side and the default on the other is silence, not an error |
+| `path` | `doctor --probe-path` could not open a TCP connection to a peer's endpoint | the port is closed or filtered, or the far end is not on `carrier = "tcp"`; under UDP the check reports that it cannot probe instead |
 
 ## The service will not start
 
@@ -82,7 +84,9 @@ Check in this order:
   [ADR-0026](../adr/0026-censorship-resistance.md): put `carrier = "tcp"` in
   `[interface]` on **both** ends and open the TCP port. It carries the same
   packets, framed, about 1 % larger, in one order, and a peer cannot roam under
-  it.
+  it. On TCP the question is answerable rather than guesswork: `vallum doctor
+  --config … --probe-path` dials each peer's endpoint, so a refusal or a timeout
+  names the side that is not listening.
 - **Suite mismatch.** A peer key generated with `--suite 2` on a `0x0003` server
   is refused at load time with the two suites named. Regenerate with the server's
   suite.

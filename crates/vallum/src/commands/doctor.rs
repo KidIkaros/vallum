@@ -24,11 +24,17 @@ pub struct DoctorArgs {
 
     /// Probe the path MTU to this host with `ping -M do` and compare it with
     /// the config's `outer_mtu`.
-    ///
-    /// This is the one active check: it sends packets. Without the flag,
-    /// `doctor` is read-only.
     #[arg(long, value_name = "HOST")]
     probe_mtu: Option<String>,
+
+    /// Dial each peer's endpoint and report whether its port answers.
+    ///
+    /// A connection attempt, so it is one of the two active checks: without a
+    /// probe flag, `doctor` sends nothing. It only means something on
+    /// `carrier = "tcp"`, where a listener accepts or refuses; UDP has no
+    /// connection to make, and the check says so instead of guessing.
+    #[arg(long)]
+    probe_path: bool,
 
     /// Emit JSON instead of a table.
     #[arg(long)]
@@ -131,7 +137,10 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
                 checks.push(Check::new("control", Status::Pass, detail));
                 // The parts can all pass while nothing crosses the wire. This
                 // is the only check that says whether the tunnel is *live*.
-                checks.push(check_tunnel(&path));
+                checks.push(check_tunnel(
+                    &path,
+                    config.as_ref().map(|resolved| resolved.carrier),
+                ));
             }
             Err(error) => {
                 let is_offline = match &error {
@@ -167,11 +176,19 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
     }
 
     if let Some(resolved) = &config {
+        // Which transport the tunnel actually uses. It is one field, and every
+        // other check in this report means something different depending on it:
+        // a closed UDP port and a closed TCP port are the same failure with a
+        // different fix.
+        checks.push(check_carrier(resolved.carrier));
+        if args.probe_path {
+            checks.push(check_path_probe(resolved));
+        }
         // A port of 0 is an ephemeral client; anything else is a server, and a
         // server that cannot forward or is not reachable is not working.
         if resolved.listen.port() != 0 {
             checks.push(check_forwarding(resolved));
-            checks.push(check_firewall(resolved.listen.port()));
+            checks.push(check_firewall(resolved.listen.port(), resolved.carrier));
         }
         let rotating: Vec<&str> = resolved
             .peers
@@ -256,6 +273,115 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
     }
 }
 
+/// Which transport the tunnel uses, said plainly.
+///
+/// Not a pass/fail judgement: both carriers are supported. It is here because
+/// it changes the meaning of every other line in the report, and because the
+/// one failure an operator cannot see is two ends configured differently — TCP
+/// on one side and UDP on the other is silence, not an error message.
+fn check_carrier(carrier: vallum_config::Carrier) -> Check {
+    let detail = match carrier {
+        vallum_config::Carrier::Udp => {
+            "udp (the default): datagrams, one packet each, and peers may roam".to_owned()
+        }
+        vallum_config::Carrier::Tcp => {
+            "tcp: framed packets over one connection per peer — both ends must set \
+             `carrier = \"tcp\"`, and a peer cannot roam under it"
+                .to_owned()
+        }
+    };
+    Check::new("carrier", Status::Pass, detail)
+}
+
+/// Dial each peer's endpoint, when the carrier has something to dial.
+///
+/// This is the check that separates "the path blocks it" from "the other end is
+/// not listening", which the daemon cannot tell apart: it sends and hears
+/// nothing either way. Only TCP can answer it — a UDP port that nobody listens
+/// on is silent, not refused — so under UDP the check says what it cannot do
+/// rather than reporting a pass it did not earn.
+fn check_path_probe(resolved: &crate::config::Resolved) -> Check {
+    let endpoints: Vec<std::net::SocketAddr> = resolved
+        .peers
+        .iter()
+        .filter_map(vallum_tunnel::PeerConfig::endpoint)
+        .collect();
+    probe_endpoints(
+        resolved.carrier,
+        endpoints,
+        std::time::Duration::from_secs(2),
+        |endpoint, timeout| std::net::TcpStream::connect_timeout(endpoint, timeout).map(|_| ()),
+    )
+}
+
+/// The probe's decision, separated from the dial so both branches are testable
+/// without a network or a config.
+fn probe_endpoints(
+    carrier: vallum_config::Carrier,
+    mut endpoints: Vec<std::net::SocketAddr>,
+    timeout: std::time::Duration,
+    connect: impl Fn(&std::net::SocketAddr, std::time::Duration) -> std::io::Result<()>,
+) -> Check {
+    endpoints.sort();
+    endpoints.dedup();
+
+    if endpoints.is_empty() {
+        return Check::new(
+            "path",
+            Status::Pass,
+            "no peer endpoint configured, so this host listens and there is nothing to dial",
+        );
+    }
+    if !carrier.is_probeable() {
+        return Check::new(
+            "path",
+            Status::Pass,
+            format!(
+                "udp: not probeable — a UDP port that is closed or filtered is silence, not a \
+                 refusal; `vallum show` reports the last handshake for {}",
+                endpoints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
+
+    let mut failed = Vec::new();
+    for endpoint in &endpoints {
+        // Short by default: a filtered port costs a full timeout, and several of
+        // them should not make `doctor` feel hung.
+        if let Err(error) = connect(endpoint, timeout) {
+            failed.push(format!("{endpoint} ({})", error.kind()));
+        }
+    }
+    if failed.is_empty() {
+        Check::new(
+            "path",
+            Status::Pass,
+            format!(
+                "tcp: {} accepted a connection",
+                endpoints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    } else {
+        Check::new(
+            "path",
+            Status::Warn,
+            format!(
+                "tcp: no answer from {}; the port is closed or filtered, or the far end is not \
+                 on `carrier = \"tcp\"` — UDP to the same host is the other half of the question",
+                failed.join(", ")
+            ),
+        )
+    }
+}
+
 fn check_config(path: &Path) -> Result<crate::config::Resolved, Error> {
     let config = Config::load(path)?;
     let suite_id = config.suite_id(path)?;
@@ -292,7 +418,7 @@ fn check_control(path: &Path) -> Result<String, Error> {
 /// a unit that could not exec, a config root could not read, and a default
 /// route into a dead interface. `doctor` checked the parts and passed all three
 /// times. This check is about the whole.
-fn check_tunnel(path: &Path) -> Check {
+fn check_tunnel(path: &Path, carrier: Option<vallum_config::Carrier>) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,
         Err(error) => return Check::new("tunnel", Status::Warn, error.to_string()),
@@ -334,15 +460,19 @@ fn check_tunnel(path: &Path) -> Check {
                 )
             }
         }
-        _ => Check::new(
-            "tunnel",
-            Status::Warn,
-            format!(
-                "no handshake since the daemon started: UDP {} may be filtered on one \
-                 side, the endpoint may be wrong, or the other daemon may not be running",
-                response.field(uapi::field::LISTEN_PORT).unwrap_or("?")
-            ),
-        ),
+        _ => {
+            let protocol = carrier.map_or("udp", vallum_config::Carrier::protocol);
+            Check::new(
+                "tunnel",
+                Status::Warn,
+                format!(
+                    "no handshake since the daemon started: {protocol} {} may be filtered \
+                     on one side, the endpoint may be wrong, or the other daemon may not be \
+                     running",
+                    response.field(uapi::field::LISTEN_PORT).unwrap_or("?")
+                ),
+            )
+        }
     }
 }
 
@@ -434,31 +564,36 @@ fn check_forwarding(resolved: &crate::config::Resolved) -> Check {
     }
 }
 
-/// The UDP port has to be reachable from outside, or nothing connects.
-fn check_firewall(port: u16) -> Check {
+/// The listening port has to be reachable from outside, or nothing connects.
+///
+/// The protocol is the configured carrier's, because a rule that opens UDP
+/// 51820 does nothing for a tunnel that speaks TCP on it.
+fn check_firewall(port: u16, carrier: vallum_config::Carrier) -> Check {
+    let proto = carrier.protocol();
     let state = crate::hostnet::inspect();
     let (status, detail) = match state.firewall {
         crate::hostnet::Firewall::Ufw => {
-            let allowed = ufw_allows(port);
+            let allowed = ufw_allows(port, proto);
             (
                 if allowed { Status::Pass } else { Status::Warn },
                 if allowed {
-                    format!("ufw allows UDP {port}")
+                    format!("ufw allows {proto} {port}")
                 } else {
-                    format!("ufw does not allow UDP {port}; run `ufw allow {port}/udp`")
+                    format!("ufw does not allow {proto} {port}; run `ufw allow {port}/{proto}`")
                 },
             )
         }
         crate::hostnet::Firewall::Firewalld => {
-            let allowed = output("firewall-cmd", &[&format!("--query-port={port}/udp")]).is_some();
+            let allowed =
+                output("firewall-cmd", &[&format!("--query-port={port}/{proto}")]).is_some();
             (
                 if allowed { Status::Pass } else { Status::Warn },
                 if allowed {
-                    format!("firewalld allows UDP {port}")
+                    format!("firewalld allows {proto} {port}")
                 } else {
                     format!(
-                        "firewalld does not allow UDP {port}; run \
-                         `firewall-cmd --permanent --add-port={port}/udp`"
+                        "firewalld does not allow {proto} {port}; run \
+                         `firewall-cmd --permanent --add-port={port}/{proto}`"
                     )
                 },
             )
@@ -467,7 +602,7 @@ fn check_firewall(port: u16) -> Check {
             let allowed = output("nft", &["list", "ruleset"])
                 .is_some_and(|rules| rules.contains(&format!("dport {port}")));
             if allowed {
-                (Status::Pass, format!("nftables accepts UDP {port}"))
+                (Status::Pass, format!("nftables accepts {proto} {port}"))
             } else if !state.input_drop {
                 // Nothing is dropping the port, so there is no rule to add.
                 // Saying otherwise sends the operator to edit a chain that is
@@ -475,26 +610,29 @@ fn check_firewall(port: u16) -> Check {
                 (
                     Status::Pass,
                     if state.ufw_installed {
-                        if ufw_allows(port) {
+                        if ufw_allows(port, proto) {
                             format!(
-                                "nothing blocks UDP {port}; ufw is installed but not enabled, \
+                                "nothing blocks {proto} {port}; ufw is installed but not enabled, \
                                  and the allow rule is stored for when you enable it"
                             )
                         } else {
                             format!(
-                                "nothing blocks UDP {port}; ufw is installed but not enabled — \
-                                 if you enable it, run `ufw allow {port}/udp` first"
+                                "nothing blocks {proto} {port}; ufw is installed but not enabled \
+                                 — if you enable it, run `ufw allow {port}/{proto}` first"
                             )
                         }
                     } else {
-                        format!("nothing blocks UDP {port}; the nftables input chain has no drop policy")
+                        format!(
+                            "nothing blocks {proto} {port}; the nftables input chain has no \
+                             drop policy"
+                        )
                     },
                 )
             } else {
                 (
                     Status::Warn,
                     format!(
-                        "the nftables input chain drops UDP {port}; run `vallum server init \
+                        "the nftables input chain drops {proto} {port}; run `vallum server init \
                          --force`, or add an accept rule to `inet filter input`"
                     ),
                 )
@@ -502,10 +640,11 @@ fn check_firewall(port: u16) -> Check {
         }
         crate::hostnet::Firewall::None => (
             Status::Pass,
-            if state.ufw_installed && !ufw_allows(port) {
+            if state.ufw_installed && !ufw_allows(port, proto) {
                 format!(
-                    "no host firewall is active, so nothing blocks UDP {port}; ufw is \
-                     installed but not enabled — run `ufw allow {port}/udp` before enabling it"
+                    "no host firewall is active, so nothing blocks {proto} {port}; ufw is \
+                     installed but not enabled — run `ufw allow {port}/{proto}` before \
+                     enabling it"
                 )
             } else {
                 "no host firewall detected, so nothing is blocking the port".to_owned()
@@ -515,13 +654,13 @@ fn check_firewall(port: u16) -> Check {
     Check::new("firewall", status, detail)
 }
 
-/// Whether ufw stores an allow rule for this port.
+/// Whether ufw stores an allow rule for this port and protocol.
 ///
 /// `ufw status` only lists rules while ufw is enabled; `ufw show added` reads
 /// the stored ones, which is what matters for a manager that is installed but
 /// switched off.
-fn ufw_allows(port: u16) -> bool {
-    let rule = format!("{port}/udp");
+fn ufw_allows(port: u16, proto: &str) -> bool {
+    let rule = format!("{port}/{proto}");
     ["status", "show added"].iter().any(|args| {
         let args: Vec<&str> = args.split(' ').collect();
         output("ufw", &args).is_some_and(|text| {
@@ -742,6 +881,87 @@ mod tests {
     }
 
     #[test]
+    fn the_carrier_check_names_the_transport_and_its_price() {
+        use vallum_config::Carrier;
+
+        let udp = super::check_carrier(Carrier::Udp);
+        assert_eq!(udp.status, super::Status::Pass);
+        assert!(
+            udp.detail.starts_with("udp (the default)"),
+            "{}",
+            udp.detail
+        );
+
+        let tcp = super::check_carrier(Carrier::Tcp);
+        assert_eq!(tcp.status, super::Status::Pass);
+        // The failure this line exists to prevent: one end on tcp, the other
+        // on udp, which is silence rather than an error.
+        assert!(tcp.detail.contains("both ends"), "{}", tcp.detail);
+        assert!(tcp.detail.contains("cannot roam"), "{}", tcp.detail);
+    }
+
+    #[test]
+    fn the_path_probe_only_claims_what_it_can_test() {
+        use std::net::SocketAddr;
+        use std::time::Duration;
+        use vallum_config::Carrier;
+
+        let endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+
+        // UDP: no connection to make, so no pass and no fail — the honest
+        // answer, because a filtered UDP port looks exactly like a quiet one.
+        let udp = super::probe_endpoints(
+            Carrier::Udp,
+            vec![endpoint],
+            Duration::from_secs(1),
+            |_, _| panic!("a UDP carrier must not dial"),
+        );
+        assert_eq!(udp.status, super::Status::Pass);
+        assert!(udp.detail.contains("not probeable"), "{}", udp.detail);
+
+        // A listening port answers.
+        let reachable = super::probe_endpoints(
+            Carrier::Tcp,
+            vec![endpoint, endpoint],
+            Duration::from_secs(1),
+            |_, _| Ok(()),
+        );
+        assert_eq!(reachable.status, super::Status::Pass);
+        assert!(reachable.detail.contains("accepted a connection"));
+        // The same endpoint twice is one dial, because the report is per path.
+        assert_eq!(reachable.detail.matches("127.0.0.1:51820").count(), 1);
+
+        // A closed or filtered port is a warning naming the endpoint, not a
+        // failure: the far end may simply be restarting.
+        let unreachable = super::probe_endpoints(
+            Carrier::Tcp,
+            vec![endpoint],
+            Duration::from_secs(1),
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "refused",
+                ))
+            },
+        );
+        assert_eq!(unreachable.status, super::Status::Warn);
+        assert!(unreachable.detail.contains("127.0.0.1:51820"));
+        assert!(
+            unreachable.detail.contains("carrier"),
+            "{}",
+            unreachable.detail
+        );
+
+        // A server has nothing to dial, and says so rather than passing quietly.
+        let nothing =
+            super::probe_endpoints(Carrier::Tcp, Vec::new(), Duration::from_secs(1), |_, _| {
+                panic!("nothing to dial")
+            });
+        assert_eq!(nothing.status, super::Status::Pass);
+        assert!(nothing.detail.contains("nothing to dial"));
+    }
+
+    #[test]
     fn doctor_reports_offline_daemon_as_warning_not_failure() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -767,6 +987,7 @@ mod tests {
             config: Some(config_path.clone()),
             control: None,
             probe_mtu: None,
+            probe_path: false,
             json: false,
         };
         // Ephemeral port 0 means no firewall/forwarding check; socket is offline so control warns.

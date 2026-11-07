@@ -103,8 +103,11 @@ four verdict states above — the same states the browsing suite asserts.
 
 ## Operational tooling
 
-- `vallum doctor --config …` — host-level health (forwarding, firewall,
-  service state, config mode, path MTU with `--probe-mtu`, clock sync).
+- `vallum doctor --config …` — host-level health (carrier, forwarding,
+  firewall, service state, config mode, path MTU with `--probe-mtu`, clock
+  sync). `--probe-path` adds the one check that dials: it opens a TCP connection
+  to each peer's endpoint, which is how a closed or filtered port is told apart
+  from a wrong key.
 - `vallum show --control …` / `vallum tui` — live peer state, traffic, loop
   counters, invite/rotation actions.
 - The units are `Type=notify` with `WatchdogSec=30s`: a wedged run loop is
