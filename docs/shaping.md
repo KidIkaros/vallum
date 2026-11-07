@@ -22,8 +22,80 @@ file that can describe a flood ([ADR-0022](adr/0022-shaping-policy-in-core.md)).
 
 The one thing every shape assumes: **shaping is not censorship resistance.** It
 makes the traffic harder to *analyse*; it does nothing about a network that drops
-UDP, and there is no fallback transport
+the transport, which is the separate `[interface] carrier` question
 ([ADR-0026](adr/0026-censorship-resistance.md)).
+
+## Presets
+
+Two complete configurations, meant to be pasted rather than assembled. Each one
+is parsed by `crates/vallum-config/tests/presets.rs`, so a field that stops
+existing breaks the build instead of this page.
+
+### Balanced: one size, and a packet every two seconds
+
+The cheapest combination that closes both channels — length and silence. About
+5.8 kbit/s per peer per direction, plus the padding that brings small packets up
+to 1 400 bytes.
+
+<!-- parse-check -->
+```toml
+[interface]
+name = "vallum0"
+private_key = "private.key"
+address = "10.7.0.2/24"
+listen = "0.0.0.0:51820"
+
+[[peer]]
+name = "server"
+public_key = "vallum1:..."
+endpoint = "203.0.113.5:51820"
+allowed_ips = ["0.0.0.0/0", "::/0"]
+
+# Every packet leaves at one size: the length channel carries nothing.
+[[peer.shaping]]
+kind = "pad_to_size"
+size = 1400
+
+# And an idle tunnel keeps speaking. Drop jitter_ms for a metronome, raise it
+# for a noisier one; the mean rate is the interval either way.
+[[peer.shaping]]
+kind = "constant_rate_floor"
+interval_ms = 2000
+jitter_ms = 500
+size = 1400
+```
+
+### Opening only: one size, and a burst that ends
+
+For a laptop that suspends and wakes: the interesting moment is the first minute
+after it comes back, and the burst costs about 43 kB once instead of a rate that
+runs all day.
+
+<!-- parse-check -->
+```toml
+[interface]
+name = "vallum0"
+private_key = "private.key"
+address = "10.7.0.2/24"
+listen = "0.0.0.0:51820"
+
+[[peer]]
+name = "server"
+public_key = "vallum1:..."
+endpoint = "203.0.113.5:51820"
+allowed_ips = ["0.0.0.0/0", "::/0"]
+
+[[peer.shaping]]
+kind = "pad_to_size"
+size = 1400
+
+# 30 packets, each riding along with real traffic or after 200 ms of silence.
+[[peer.shaping]]
+kind = "front_padding"
+count = 30
+interval_ms = 200
+size = 1400
+```
 
 ## The shapes
 
@@ -101,8 +173,10 @@ size = 1400
 A window closes on a two-second pause or on 16 packets, and closing tops the count
 up to the next power of two: nine packets become sixteen, eleven become sixteen.
 On the page-load trace, three windows close and three packets are added
-(**+367 %** on that trace). The cap is rounded down to a power of two, so `20`
-means sixteen.
+(**+367 %** on that trace) — but that is a browsing figure. On a mixed day with a
+bulk upload in it the same shape adds **+9.4 %**, because a full window is already
+a power of two and costs nothing. The cap is rounded down to a power of two, so
+`20` means sixteen.
 
 If what matters is bytes rather than packets, use the byte form:
 
