@@ -141,11 +141,15 @@ Copy `laptop.pub` to the server, then:
 ```sh
 sudo vallum peer add laptop \
     --public-key-file laptop.pub \
-    --client-config-out laptop.toml
+    --client-config-out laptop.toml \
+    --shaping balanced
 ```
 
 The server allocated `10.7.0.2/32`, wrote the peer, applied it to the running
 daemon, and wrote `laptop.toml` — the device's config, with no private key in it.
+`--shaping balanced` adds the [shaping preset](../shaping.md#presets) to that
+config instead of leaving the blocks to be copied by hand; `opening` is the other
+one, and omitting the flag shapes nothing.
 Copy `laptop.toml` to the device as `/etc/vallum/laptop.toml`, next to
 `laptop.key`, then see [the client guide](client.md).
 

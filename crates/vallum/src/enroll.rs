@@ -878,6 +878,10 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             public_key_file: None,
             address: None,
             keepalive: None,
+            // An invite is answered from a token the device already holds, and
+            // shaping is a per-device choice the operator makes on the server
+            // side (`peer add --shaping`) or in the config the device keeps.
+            shaping: None,
             no_apply: false,
             json: true,
         }) {

@@ -28,8 +28,13 @@ the transport, which is the separate `[interface] carrier` question
 ## Presets
 
 Two complete configurations, meant to be pasted rather than assembled. Each one
-is parsed by `crates/vallum-config/tests/presets.rs`, so a field that stops
-existing breaks the build instead of this page.
+is parsed by `crates/vallum-config/tests/presets.rs` and compared with the named
+preset of the same name, so a field that stops existing — or a page that drifts
+from the code — breaks the build instead of a deployment.
+
+When the server writes a device's config, `vallum peer add <name> --shaping
+balanced` emits the blocks below instead: one word instead of a copy-paste, and
+the same blocks by construction.
 
 ### Balanced: one size, and a packet every two seconds
 
@@ -37,7 +42,7 @@ The cheapest combination that closes both channels — length and silence. About
 5.8 kbit/s per peer per direction, plus the padding that brings small packets up
 to 1 400 bytes.
 
-<!-- parse-check -->
+<!-- parse-check: balanced -->
 ```toml
 [interface]
 name = "vallum0"
@@ -71,7 +76,7 @@ For a laptop that suspends and wakes: the interesting moment is the first minute
 after it comes back, and the burst costs about 43 kB once instead of a rate that
 runs all day.
 
-<!-- parse-check -->
+<!-- parse-check: opening -->
 ```toml
 [interface]
 name = "vallum0"

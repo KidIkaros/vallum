@@ -138,6 +138,17 @@ pub struct AddArgs {
     #[arg(long, value_name = "ADDR")]
     pub dns: Vec<String>,
 
+    /// Emit a named shaping preset into the client's config.
+    ///
+    /// `balanced` closes the length and silence channels together at about
+    /// 5.8 kbit/s per direction; `opening` pads one size and spends a 43 kB
+    /// burst in the first minute. The blocks are the ones in `docs/shaping.md`,
+    /// so the page can be read first and this flag used instead of copying it.
+    /// The peer's own config is what shapes the peer's traffic: the server's
+    /// `[[peer.shaping]]` shapes what the server sends.
+    #[arg(long, value_name = "PRESET")]
+    pub shaping: Option<String>,
+
     /// Delete the server's copy of the client key after writing the bundle.
     #[arg(long)]
     pub forget_key: bool,
@@ -485,6 +496,7 @@ pub(crate) fn add_for_setup(config: &Path, name: &str, bundle_out: &Path) -> Res
         pin_endpoint: false,
         psk: false,
         dns: Vec::new(),
+        shaping: None,
         forget_key: false,
         no_apply: false,
         json: false,
@@ -518,6 +530,10 @@ pub struct EnrollArgs {
     /// Send a keepalive every this many seconds.
     #[arg(long, value_name = "SECS")]
     pub keepalive: Option<u16>,
+
+    /// Emit a named shaping preset into the device's config (see `peer add`).
+    #[arg(long, value_name = "PRESET")]
+    pub shaping: Option<String>,
 
     /// Write the config but do not tell a running daemon.
     #[arg(long)]
@@ -623,6 +639,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
                 pin_endpoint: false,
                 psk: false,
                 dns: Vec::new(),
+                shaping: args.shaping.clone(),
                 forget_key: false,
                 no_apply: args.no_apply,
                 json: false,
@@ -656,6 +673,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
         &endpoint,
         &[],
         None,
+        shaping_preset(args.shaping.as_deref())?,
     );
 
     let _ = source;
@@ -941,6 +959,10 @@ fn invites(args: &InvitesArgs) -> Result<(), Error> {
 }
 
 fn add(args: &AddArgs) -> Result<(), Error> {
+    // Refused before anything is written or applied: a config with a preset that
+    // does not exist would otherwise fail at the peer's first start, on a machine
+    // that has never heard of this one.
+    let preset = shaping_preset(args.shaping.as_deref())?;
     // The default must not be "the server makes the key": that is the custody
     // finding this command used to embody. A device that can run `vallum
     // keygen` should send its public line; one that cannot must be named.
@@ -1108,6 +1130,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             &endpoint,
             &args.dns,
             psk_hex.as_deref(),
+            preset,
         );
         let bundle = Bundle {
             version: 1,
@@ -1142,6 +1165,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
             &endpoint,
             &args.dns,
             psk_hex.as_deref(),
+            preset,
         );
         write_private(path, text.as_bytes())?;
         client_config_path = Some(path.clone());
@@ -1300,6 +1324,7 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
             &endpoint,
             &args.dns,
             psk.as_deref(),
+            None,
         );
         let bundle = Bundle {
             version: 1,
@@ -1955,6 +1980,7 @@ fn client_config(
     endpoint: &str,
     dns: &[String],
     psk: Option<&str>,
+    preset: Option<vallum_config::ShapingPreset>,
 ) -> String {
     let mut body = String::new();
     body.push_str("[interface]\n");
@@ -2025,7 +2051,31 @@ fn client_config(
     if let Some(psk) = psk {
         body.push_str(&format!("preshared_key = \"{psk}\"\n"));
     }
+    // `[[peer.shaping]]` tables append to the `[[peer]]` above them, so the
+    // preset's blocks belong after every scalar field of that peer.
+    if let Some(preset) = preset {
+        body.push_str(&preset.to_toml());
+    }
     body
+}
+
+/// Resolve `--shaping`, naming the presets when the name is wrong.
+fn shaping_preset(name: Option<&str>) -> Result<Option<vallum_config::ShapingPreset>, Error> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    vallum_config::ShapingPreset::parse(name)
+        .map(Some)
+        .ok_or_else(|| {
+            let known: Vec<&str> = vallum_config::ShapingPreset::ALL
+                .iter()
+                .map(|preset| preset.name())
+                .collect();
+            Error::Usage(format!(
+                "no shaping preset named `{name}`; the presets are {}",
+                known.join(", ")
+            ))
+        })
 }
 
 use crate::keys::fingerprint;
@@ -2102,6 +2152,7 @@ mod tests {
             "vpn.example.com:51820",
             &[],
             None,
+            None,
         );
         assert!(text.contains("allowed_ips = [\"::/0\"]"));
         assert!(
@@ -2119,6 +2170,7 @@ mod tests {
             "vpn.example.com:51820",
             &["1.1.1.1".to_owned()],
             Some("0011"),
+            Some(vallum_config::ShapingPreset::Balanced),
         );
         assert!(text.contains("private_key = \"laptop.key\""));
         assert!(text.contains("public_key = \"vallum1:0003:aa:-\""));
@@ -2139,9 +2191,28 @@ mod tests {
             text.contains("fwmark = 51820"),
             "a full-tunnel client config must carry a fwmark"
         );
-        // It must parse as a config the daemon accepts.
+        // It must parse as a config the daemon accepts, shaping and all: the
+        // preset's blocks have to land inside the `[[peer]]` table, and a
+        // generated config that only *looks* right is the failure this catches.
         let parsed: vallum_config::Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
+        assert_eq!(
+            parsed.peers[0].shaping,
+            vallum_config::ShapingPreset::Balanced.specs()
+        );
+    }
+
+    #[test]
+    fn a_shaping_preset_name_that_does_not_exist_lists_the_ones_that_do() {
+        assert_eq!(shaping_preset(None).unwrap(), None);
+        assert_eq!(
+            shaping_preset(Some("opening")).unwrap(),
+            Some(vallum_config::ShapingPreset::Opening)
+        );
+        let error = shaping_preset(Some("balanced-ish"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("balanced, opening"), "{error}");
     }
 
     #[test]

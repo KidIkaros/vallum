@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use vallum_core::shaping::Machine;
 
+mod preset;
+pub use preset::ShapingPreset;
+
 /// A parsed configuration file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +153,28 @@ impl Carrier {
             Carrier::Udp => "udp",
             Carrier::Tcp => "tcp",
         }
+    }
+
+    /// The transport protocol name, for firewall rules and probes.
+    ///
+    /// Same spellings as `/etc/services` and `ufw`, which is what an operator
+    /// types after the port.
+    #[must_use]
+    pub fn protocol(self) -> &'static str {
+        match self {
+            Carrier::Udp => "udp",
+            Carrier::Tcp => "tcp",
+        }
+    }
+
+    /// Whether the endpoint can be probed with a connection attempt.
+    ///
+    /// A TCP listener answers a dial, so a refusal is information. UDP has no
+    /// connection: a closed port is an ICMP message that may never come back,
+    /// and a filtered one is silence either way.
+    #[must_use]
+    pub fn is_probeable(self) -> bool {
+        matches!(self, Carrier::Tcp)
     }
 }
 
@@ -354,7 +379,7 @@ pub struct PeerEntry {
 /// The shapes are named ones rather than raw machines; a raw state machine is
 /// deliberately not expressible from a config file, because a config file that
 /// can describe arbitrary machines is a config file that can describe a flood.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ShapingSpec {
     /// Pad every packet to `size` bytes of sealed plaintext.
