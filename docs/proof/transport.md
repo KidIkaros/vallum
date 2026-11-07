@@ -187,14 +187,16 @@ suppress the traffic that keeps the path reachable.
 
 ### 2.8 A stream carrier, and what it would cost
 
-ADR-0026 defers a TCP fallback, but the seam it would sit on is already here: the
-device emits `Action::Send { destination, bytes }` and never a socket, and the
-daemon's `DatagramSocket` is the only thing that knows the transport. What a
-stream carrier needs beyond that is **framing** — a length prefix, because a
-stream has no message boundaries — and that is `vallum_tunnel::stream`:
+ADR-0026's TCP fallback sits on a seam that was already here: the device emits
+`Action::Send { destination, bytes }` and never a socket, and the daemon's
+`DatagramSocket` is the only thing that knows the transport. What a stream carrier
+needs beyond that is **framing** — a length prefix, because a stream has no
+message boundaries — and that is `vallum_tunnel::stream`:
 `frame`/`unframe`/`FrameReader`, two bytes of prefix, a 32 KiB ceiling below the
 prefix's own range so a bogus length is refused rather than buffered, and no I/O,
-no socket and no connection state.
+no socket and no connection state. `[interface] carrier = "tcp"` selects
+`TcpTransport`, which is that framing inside a `DatagramSocket`: one connection per
+peer, `SO_MARK` set before the dial, and the same loop and handshake above it.
 
 Measured over a real TCP connection on loopback with real sealed packets
 (`tests/carrier.rs`): a 1 456-byte data packet goes out as 1 458 bytes — **+2

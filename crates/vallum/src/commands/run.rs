@@ -15,7 +15,7 @@ use crate::control;
 use crate::entropy;
 use crate::keys;
 use crate::logging::Logger;
-use crate::net::{DatagramSocket, SharedSocket, UdpTransport};
+use crate::net::{self, SharedSocket};
 use crate::privileges;
 use crate::run::{self, Shutdown};
 use crate::tun::{self, InterfaceSpec};
@@ -135,10 +135,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_warn!(log, "{warning}");
     }
 
-    let socket: Arc<dyn DatagramSocket> = Arc::new(UdpTransport::bind_with_fwmark(
-        resolved.listen,
-        resolved.fwmark,
-    )?);
+    let socket = net::bind(resolved.carrier, resolved.listen, resolved.fwmark)?;
     let bound = socket.local_addr().unwrap_or(resolved.listen);
     let shared = Arc::new(SharedSocket::new(Arc::clone(&socket)));
 
@@ -196,6 +193,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
                     private_key_path: key_path.clone(),
                     control_path: Some(path),
                     listen: bound,
+                    carrier: resolved.carrier,
                     fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),
                     suite,

@@ -41,7 +41,9 @@ use vallum_core::identity::{IdentityDocument, PeerIdentity, StaticIdentity, Vali
 use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_tunnel::{PeerConfig, Prefix};
 
-pub use vallum_config::{Config, ConfigError, Interface, Log, PeerEntry, Quick, ShapingSpec};
+pub use vallum_config::{
+    Carrier, Config, ConfigError, Interface, Log, PeerEntry, Quick, ShapingSpec,
+};
 
 use crate::error::Error;
 use crate::keys::{self, SecretFile};
@@ -74,8 +76,10 @@ pub struct Resolved {
     pub addresses: Vec<Prefix>,
     /// The inner MTU.
     pub mtu: u16,
-    /// The UDP address to bind.
+    /// The address to bind, for the configured carrier.
     pub listen: SocketAddr,
+    /// The transport: UDP, or the TCP fallback.
+    pub carrier: Carrier,
     /// The control socket, if configured.
     pub control: Option<PathBuf>,
     /// The socket mark; `0` means unset.
@@ -112,6 +116,7 @@ impl std::fmt::Debug for Resolved {
             .field("addresses", &self.addresses)
             .field("mtu", &self.mtu)
             .field("listen", &self.listen)
+            .field("carrier", &self.carrier)
             .field("seed", &self.seed)
             .field("control", &self.control)
             .field("fwmark", &self.fwmark)
@@ -266,6 +271,20 @@ impl ResolveConfig for Config {
             })?,
             None => SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
         };
+
+        // The carrier. Named explicitly because the fallback is worse in ways an
+        // operator should be told once, at startup, rather than discover from a
+        // graph: framing, one order, no roaming. ADR-0026 has the numbers.
+        let carrier = self.interface.carrier.unwrap_or_default();
+        if carrier == Carrier::Tcp {
+            warnings.push(
+                "carrier = \"tcp\" is the UDP fallback: every packet carries a two-byte frame \
+                 and shares one connection, so a lost segment delays everything behind it, and \
+                 a peer cannot roam (the connection is the endpoint); use it only where UDP is \
+                 dropped (ADR-0026)"
+                    .to_owned(),
+            );
+        }
 
         // The outer path's budget. 1500 is the assumption the product was built
         // on; a narrower path names its MTU here and every datagram is cut to
@@ -646,6 +665,7 @@ impl ResolveConfig for Config {
             addresses,
             mtu,
             listen,
+            carrier,
             control,
             fwmark: self.interface.fwmark.unwrap_or(0),
             identity,
@@ -874,6 +894,7 @@ mod tests {
             addresses: Vec::new(),
             mtu: 1420,
             listen: "0.0.0.0:51820".parse().expect("addr"),
+            carrier: Carrier::Udp,
             control: None,
             fwmark: 0,
             identity: StaticIdentity::generate(&*suite, &seed).expect("identity"),

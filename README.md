@@ -164,7 +164,7 @@ scripts/
 
 - **Tri-hybrid KEM:** Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking session confidentiality requires compromising all three algorithms simultaneously.
 - **Dependency Status:** Post-quantum algorithms are implemented via `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`). The implementations have not undergone external third-party audit; deployments should weigh risk accordingly.
-- **Reachability:** UDP only, by decision. Shaping makes the traffic harder to classify; it does nothing about a network that blocks the port, and there is no TCP fallback ([ADR-0026](docs/adr/0026-censorship-resistance.md)).
+- **Reachability:** UDP by default, with an opt-in TCP carrier (`carrier = "tcp"`, both ends) for paths that drop UDP: the same packets, framed, one connection per peer, about 1 % larger and without roaming. There is no automatic fallback — nothing detects the block for you — and shaping makes the traffic harder to classify but not harder to block ([ADR-0026](docs/adr/0026-censorship-resistance.md)).
 
 ## Build & Verify
 

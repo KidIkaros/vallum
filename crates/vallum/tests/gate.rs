@@ -262,6 +262,19 @@ fn launch_from_text(
     text: String,
     listen: SocketAddr,
 ) -> Host {
+    let socket: Arc<dyn DatagramSocket> = Arc::new(net.bind(listen).expect("bind the socket"));
+    launch_over(dir, socket, prepared, text, listen)
+}
+
+/// As [`launch_from_text`], over a socket the caller made — the seam that lets a
+/// test swap the in-process network for a real carrier.
+fn launch_over(
+    dir: &Path,
+    socket: Arc<dyn DatagramSocket>,
+    prepared: &Prepared,
+    text: String,
+    listen: SocketAddr,
+) -> Host {
     let resolved = resolve_text(dir, &prepared.name, &text).expect("the config must resolve");
     for warning in &resolved.warnings {
         eprintln!("config warning: {warning}");
@@ -282,7 +295,6 @@ fn launch_from_text(
 
     let name = prepared.name.clone();
     let (parts, interface) = tun::mock::pair(&name, 1280);
-    let socket: Arc<dyn DatagramSocket> = Arc::new(net.bind(listen).expect("bind the socket"));
     let shared = Arc::new(vallum::net::SharedSocket::new(socket));
     let shutdown = Shutdown::new();
 
@@ -302,6 +314,7 @@ fn launch_from_text(
                 private_key_path: dir.join(format!("{name}.key")),
                 control_path: Some(path),
                 listen,
+                carrier: resolved.carrier,
                 fwmark: resolved.fwmark,
                 socket: Arc::clone(&shared),
                 suite: Arc::new(suite()),
@@ -428,6 +441,89 @@ fn two_daemons_establish_and_carry_traffic_both_ways() {
         stats_b.reassembled >= 1,
         "B assembled no message, so A sent no fragments: {stats_b:?}"
     );
+}
+
+#[test]
+fn two_daemons_carry_traffic_over_the_tcp_carrier() {
+    // The same two daemons and the same config path, with one substitution: the
+    // socket is a real TCP carrier on loopback instead of the in-process network.
+    // Everything above it — handshake, endpoint learning, routing, the loop — is
+    // the code that ships.
+    let dir = TempDir::new("carrier");
+    let a = prepare(dir.path(), "a", A_SEED);
+    let b = prepare(dir.path(), "b", B_SEED);
+
+    let transport_a = Arc::new(
+        vallum::net::TcpTransport::bind("127.0.0.1:0".parse().expect("a loopback address"))
+            .expect("bind A's carrier"),
+    );
+    let transport_b = Arc::new(
+        vallum::net::TcpTransport::bind("127.0.0.1:0".parse().expect("a loopback address"))
+            .expect("bind B's carrier"),
+    );
+    let address_a = DatagramSocket::local_addr(&*transport_a).expect("A's address");
+    let address_b = DatagramSocket::local_addr(&*transport_b).expect("B's address");
+
+    // A dials B. B is told nothing about A and must learn it from the connection
+    // the handshake arrives on — under this carrier the connection *is* the
+    // endpoint.
+    let peers_a = peer_entry("b", &b.public, Some(address_b), &["10.7.0.2/32"]);
+    let peers_b = peer_entry("a", &a.public, None, &["10.7.0.1/32"]);
+
+    let text_a = config_text(
+        "a",
+        &dir.path().join("a.key"),
+        &format!("{A_IP}/24"),
+        address_a,
+        Level::Warn,
+        &peers_a,
+    );
+    let text_b = config_text(
+        "b",
+        &dir.path().join("b.key"),
+        &format!("{B_IP}/24"),
+        address_b,
+        Level::Warn,
+        &peers_b,
+    );
+
+    let mut host_a = launch_over(
+        dir.path(),
+        Arc::clone(&transport_a) as Arc<dyn DatagramSocket>,
+        &a,
+        text_a,
+        address_a,
+    );
+    let mut host_b = launch_over(
+        dir.path(),
+        Arc::clone(&transport_b) as Arc<dyn DatagramSocket>,
+        &b,
+        text_b,
+        address_b,
+    );
+
+    let request = a_packet(A_IP, B_IP, b"request over tcp");
+    host_a.send(request.clone());
+    let delivered = host_b
+        .receive(PATIENT)
+        .expect("B never received the request over the TCP carrier");
+    assert_eq!(delivered, request);
+
+    let reply = a_packet(B_IP, A_IP, b"reply over tcp");
+    host_b.send(reply.clone());
+    let delivered = host_a
+        .receive(PATIENT)
+        .expect("A never received the reply over the TCP carrier");
+    assert_eq!(delivered, reply);
+
+    let stats_a = host_a.stop();
+    let stats_b = host_b.stop();
+    assert!(
+        stats_a.established >= 1 && stats_b.established >= 1,
+        "a handshake did not complete on both ends: A {stats_a:?}, B {stats_b:?}"
+    );
+    // Nothing was lost along the way: a stream queue overflow would show here.
+    assert_eq!(transport_a.dropped() + transport_b.dropped(), 0);
 }
 
 #[test]

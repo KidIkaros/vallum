@@ -192,10 +192,12 @@ Stated here so it is not discovered during an incident:
   monitoring system at all is dark from there.
 - **No package repository.** Upgrades and rollbacks are manual `.deb` handling.
 - **No independent crypto audit.** Recorded in the README.
-- **No transport fallback.** UDP is the only carrier. A path that drops UDP
-  — a hotel, a campus, a locked-down egress — is a dead tunnel, and the daemon
-  cannot tell that apart from a server that stopped answering. Shaping raises the
-  cost of *analysing* the traffic and does nothing about blocking it; that
-  boundary is [ADR-0026](adr/0026-censorship-resistance.md), and the symptom and
-  its test are in
-  [troubleshooting](deployment/troubleshooting.md#handshake-never-completes).
+- **No automatic transport fallback.** UDP is the default and cannot detect that
+  it is being dropped. A path that drops it — a hotel, a campus, a locked-down
+  egress — needs `carrier = "tcp"` on both ends, which carries the same packets
+  framed over one connection per peer (about 1 % larger, one order, no roaming).
+  Shaping raises the cost of *analysing* the traffic and does nothing about
+  blocking it; that boundary is
+  [ADR-0026](adr/0026-censorship-resistance.md), and the symptom and its test are
+  in [troubleshooting](deployment/troubleshooting.md#handshake-never-completes).
+  Open the TCP port as well when you use it: `ufw allow 51820/tcp`.

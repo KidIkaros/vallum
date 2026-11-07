@@ -1,7 +1,7 @@
 # ADR-0026: Censorship resistance is a separate surface from traffic shaping
 
 **Date**: 2026-11-06
-**Status**: proposed
+**Status**: accepted, amended (see "Implementation status")
 **Deciders**: Vallum maintainers
 
 ## Context
@@ -37,13 +37,6 @@ local nor measurable here.
    of its own, and those costs are to be measured before it is offered as
    anything.
 
-**The seam, as built.** No carrier was added, and no framing was committed to a
-socket: `vallum_tunnel::stream` is the length prefix a stream needs and nothing
-more (no I/O, no connection state), and `tests/carrier.rs` measures it over a
-real TCP connection — 2 bytes of frame per 1 456-byte packet, byte-identical on
-arrival, and the head-of-line ordering a stream forces. The retransmission cost
-of a lossy path is the one number left unmeasured, and
-`docs/proof/transport.md` §2.8 says so rather than guessing.
 3. **Protocol emulation is rejected.** MOOR's `transport_*` files emulate
    specific protocols; so do uTLS-style fingerprint forgeries. Two reasons: the
    emulation is only as good as the version of the protocol it copied, and it is
@@ -55,6 +48,36 @@ of a lossy path is the one number left unmeasured, and
    a different product with a different user, a different operational burden, and
    an abuse surface Vallum has no story for today. ADR-0016 covers the narrower
    NAT-traversal relay question and stands.
+
+## Implementation status (amendment)
+
+Decision 2's carrier now exists, as `[interface] carrier = "tcp"`. It is opt-in
+on both ends — there is no detection and no automatic switching, because a
+fallback that engages silently is a fallback the operator never chose — and it
+carries exactly the same sealed packets as UDP:
+
+- **Framing.** `vallum_tunnel::stream` is a two-byte length prefix and nothing
+  else: no I/O, no connection state, a 32 KiB ceiling below the prefix's own
+  range so a bogus length is refused before its body is buffered. Measured over a
+  real TCP connection with real sealed packets (`tests/carrier.rs`): 1 458 bytes
+  on the wire for a 1 456-byte packet, byte-identical on arrival.
+- **One connection per peer.** `TcpTransport` implements the daemon's
+  `DatagramSocket`, so the device, the handshake, the loop and the shaping
+  machines above it are unchanged. A dial is marked with `SO_MARK` *before* the
+  connect, so a full tunnel does not capture its own attempt to establish.
+- **What it costs.** Two bytes of frame per packet and the header difference
+  (TCP+IP 40 against UDP+IP 28): about 1 % on a full-size packet. What it adds
+  is one order: a lost segment holds everything behind it, and a peer cannot
+  roam, because the connection is the endpoint.
+- **Verified end to end** by
+  `two_daemons_carry_traffic_over_the_tcp_carrier` in `tests/gate.rs`: two real
+daemons, two real configs, a real handshake and traffic both ways over loopback
+  TCP.
+
+The retransmission cost on a *lossy* path is still the one unmeasured number:
+loopback does not drop segments. `docs/proof/transport.md` §2.8 says so rather
+than guessing, and the claim stands at "reachable where UDP is blocked", not
+"fast there".
 
 ## Alternatives Considered
 
@@ -91,7 +114,7 @@ of a lossy path is the one number left unmeasured, and
 
 ### Positive
 - The claim boundary is explicit: shaping resists *analysis*, a transport resists
-  *blocking*, and only the first is shipped.
+  *blocking*, and the second is a manual, opt-in fallback.
 - `Device` already emits `Action::Send { destination, bytes }`, so the carrier is
   a policy around a byte slice rather than an assumption inside the protocol. A
   TCP carrier is an addition there, not a rewrite of the handshake or the data
@@ -100,8 +123,9 @@ of a lossy path is the one number left unmeasured, and
   `cargo deny` covers.
 
 ### Negative
-- A user behind a UDP-blocking network has no answer from Vallum, and the
-  documentation must say so where it is most inconvenient — in the install and
+- A user behind a UDP-blocking network has one answer, and it is manual: name
+  `carrier = "tcp"` on both ends. Nothing detects the block for them, and the
+  documentation says so where it is most inconvenient — in the install and
   troubleshooting paths, not only in an ADR.
 - UDP-over-TCP is a fallback, not resistance: it is exactly the shape a censor
   learns to block second, and it degrades badly on a lossy path.

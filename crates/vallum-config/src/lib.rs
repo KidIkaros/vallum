@@ -120,6 +120,39 @@ pub struct Enroll {
     pub port: Option<u16>,
 }
 
+/// Which transport the tunnel's packets travel in.
+///
+/// UDP is the protocol; this exists for the one case UDP cannot serve, a path
+/// that drops it. It is opt-in per interface because the fallback is strictly
+/// worse: every packet costs a TCP header, everything on a connection travels in
+/// one order, and a lost segment holds every packet behind it. See ADR-0026.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Carrier {
+    /// Datagrams, one packet each. The default, and the only mode with measured
+    /// path-MTU handling and roaming.
+    #[default]
+    Udp,
+    /// Frames inside TCP, one connection per peer.
+    ///
+    /// A peer cannot roam under this carrier — the connection is the endpoint —
+    /// and every packet is two bytes larger plus the header difference. It
+    /// exists so a network that drops UDP has something to fall back to, not as
+    /// an equal choice.
+    Tcp,
+}
+
+impl Carrier {
+    /// The name as it appears in a config.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Carrier::Udp => "udp",
+            Carrier::Tcp => "tcp",
+        }
+    }
+}
+
 /// The `[interface]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,9 +191,22 @@ pub struct Interface {
     /// The inner MTU.
     #[serde(default)]
     pub mtu: Option<u16>,
-    /// The UDP address to listen on.
+    /// The address to listen on, for both transports.
     #[serde(default)]
     pub listen: Option<String>,
+    /// The carrier: `udp` (default) or `tcp`.
+    ///
+    /// ```toml
+    /// carrier = "tcp"
+    /// ```
+    ///
+    /// `tcp` is for a path that drops UDP. It carries the same packets, framed,
+    /// over one connection per peer, and costs two bytes of framing plus one
+    /// order: a lost segment delays everything behind it. There is no automatic
+    /// fallback in either direction — a `tcp` interface talks to a `tcp` peer, so
+    /// both ends of a pair name it.
+    #[serde(default)]
+    pub carrier: Option<Carrier>,
     /// Whether this node relays flows for others — the gateway role.
     ///
     /// A server behind the forwarding rules `vallum server init` installs
@@ -730,6 +776,33 @@ cap = 4
             shaper.handle(vallum_core::Event::NormalSent, 0).len(),
             1,
             "a byte window pads every packet"
+        );
+    }
+
+    #[test]
+    fn the_carrier_defaults_to_udp_and_refuses_a_name_it_does_not_know() {
+        // Defaulting matters more than parsing here: every config written before
+        // the fallback existed must keep meaning UDP, not acquire a transport.
+        let base = |carrier: &str| {
+            format!(
+                "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n{carrier}\n\n\
+                 [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"10.0.0.2/32\"]\n"
+            )
+        };
+
+        let config: Config = toml::from_str(&base("")).expect("parses without a carrier");
+        assert_eq!(config.interface.carrier, None);
+        assert_eq!(config.interface.carrier.unwrap_or_default(), Carrier::Udp);
+
+        let config: Config = toml::from_str(&base("carrier = \"tcp\"")).expect("parses tcp");
+        assert_eq!(config.interface.carrier, Some(Carrier::Tcp));
+
+        // A typo must not silently leave the interface on the protocol it was
+        // meant to avoid.
+        let error = toml::from_str::<Config>(&base("carrier = \"tcpp\"")).expect_err("refused");
+        assert!(
+            error.to_string().contains("tcpp"),
+            "the error should name the bad value: {error}"
         );
     }
 

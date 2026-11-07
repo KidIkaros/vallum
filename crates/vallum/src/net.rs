@@ -17,11 +17,16 @@
 //! so roaming and source-address checks behave exactly as they do on a wire.
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
+
+use vallum_tunnel::stream::{frame, FrameReader};
+
+use crate::config::Carrier;
 
 /// A connectionless, unreliable-ish datagram transport.
 ///
@@ -71,6 +76,26 @@ pub trait DatagramSocket: Send + Sync {
 }
 
 // ── the real socket ──────────────────────────────────────────────────
+
+/// Bind the transport the config names.
+///
+/// One function for both places a socket is created — startup and the control
+/// plane's rebind — so a `tcp` interface cannot silently become a UDP one when an
+/// operator changes its port at runtime.
+///
+/// # Errors
+///
+/// Whatever the chosen transport reports.
+pub fn bind(
+    carrier: Carrier,
+    address: SocketAddr,
+    fwmark: u32,
+) -> io::Result<Arc<dyn DatagramSocket>> {
+    Ok(match carrier {
+        Carrier::Udp => Arc::new(UdpTransport::bind_with_fwmark(address, fwmark)?),
+        Carrier::Tcp => Arc::new(TcpTransport::bind_with_fwmark(address, fwmark)?),
+    })
+}
 
 /// A [`UdpSocket`] behind [`DatagramSocket`].
 #[derive(Debug)]
@@ -183,6 +208,545 @@ impl DatagramSocket for UdpTransport {
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+}
+
+// ── a stream carrier ────────────────────────────────────────────────
+
+/// How long a dial to a peer's endpoint may take before the datagram is lost.
+///
+/// Short on purpose: the writer thread is one thread, so a dial is a stall for
+/// every other destination. A peer that is not reachable in three seconds is not
+/// reachable *now*, and the next datagram will try again.
+pub const CARRIER_DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How deep the carrier's own queues are, in packets.
+///
+/// The same order as [`crate::run::QUEUE_CAPACITY`]: the loop already holds a
+/// queue between its readers and itself, and a second, larger one would only
+/// move the drop point away from where the counters are.
+const CARRIER_QUEUE: usize = 1_024;
+
+/// How much a reader takes from a stream per read. Larger than any frame, so a
+/// read is a frame or a few of them and never a half in normal operation.
+const STREAM_READ_BUFFER: usize = 64 * 1024;
+
+/// TCP with length framing, behind [`DatagramSocket`].
+///
+/// This is the carrier ADR-0026 defers: the same sealed packets, the same device,
+/// the same loop — the datagrams just travel inside one connection per peer
+/// instead of one packet per datagram. It is for paths that drop UDP and nothing
+/// else, and its costs are measured in `tests/carrier.rs`: two bytes of frame per
+/// packet, and one order for everything, so one lost segment holds every later
+/// packet behind its retransmission.
+///
+/// # How it presents as a datagram socket
+///
+/// - **Outbound**: `send_to` enqueues, and one writer thread frames and writes. A
+///   destination with no connection is dialled on first use, marked with
+///   `SO_MARK` *before* the connect so the handshake takes the same route as the
+///   data. A connection is keyed by the peer's address as seen on the wire, so a
+///   responder's reply to the source of a handshake lands on the connection that
+///   handshake arrived on.
+/// - **Inbound**: one reader thread per connection unframes and queues, and
+///   `recv_from` hands a whole packet back with the address it came from. The
+///   device's endpoint learning therefore sees the TCP peer, which is also the
+///   only address that connection can come from: under this carrier an endpoint
+///   cannot roam, because the connection *is* the endpoint.
+/// - **Loss**: both queues drop the newest packet when full and count it, the
+///   same policy as the daemon's own queue. A stream does not lose packets on its
+///   own; a queue overflow is the only loss here.
+///
+/// It is `Debug`, `Send` and `Sync`, and it never blocks the loop: the only
+/// blocking calls are inside its own threads and inside `recv_from`.
+pub struct TcpTransport {
+    local: SocketAddr,
+    closed: Arc<AtomicBool>,
+    /// One reader may wait here at a time, which is one more than exists.
+    inbound: Mutex<mpsc::Receiver<(SocketAddr, Vec<u8>)>>,
+    outbound: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    /// The write half of every live connection, by peer address.
+    connections: Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound_dropped: Arc<AtomicU64>,
+    outbound_dropped: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for TcpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpTransport")
+            .field("local", &self.local)
+            .field(
+                "connections",
+                &self.connections.lock().map(|map| map.len()).unwrap_or(0),
+            )
+            .field(
+                "dropped",
+                &(self.inbound_dropped.load(Ordering::Relaxed)
+                    + self.outbound_dropped.load(Ordering::Relaxed)),
+            )
+            .finish()
+    }
+}
+
+impl TcpTransport {
+    /// Listen on `address` and dial peers on demand.
+    ///
+    /// # Errors
+    ///
+    /// If the address cannot be bound, or the mark cannot be set (it needs
+    /// `CAP_NET_ADMIN`).
+    pub fn bind(address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_fwmark(address, 0)
+    }
+
+    /// Bind with an `SO_MARK`, for policy routing.
+    ///
+    /// The mark is set on the listener, on every accepted connection, and on a
+    /// dial *before* the connect: a tunnel that routes a default route into
+    /// itself would otherwise dial its peer through itself.
+    ///
+    /// # Errors
+    ///
+    /// If the socket cannot be created, marked, bound or listened on.
+    pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
+        let listener = listen_socket(address, fwmark)?;
+        let local = listener.local_addr()?;
+        let closed = Arc::new(AtomicBool::new(false));
+        let connections: Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let inbound_dropped = Arc::new(AtomicU64::new(0));
+        let outbound_dropped = Arc::new(AtomicU64::new(0));
+
+        // The inbound queue keeps one sender of its own, so it stays open for the
+        // socket's whole life instead of closing the moment no peer is connected.
+        let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(SocketAddr, Vec<u8>)>(CARRIER_QUEUE);
+        let (outbound_tx, outbound_rx) = mpsc::sync_channel::<(SocketAddr, Vec<u8>)>(CARRIER_QUEUE);
+
+        spawn_acceptor(
+            listener,
+            Arc::clone(&closed),
+            Arc::clone(&connections),
+            inbound_tx.clone(),
+            inbound_dropped.clone(),
+            fwmark,
+            local,
+        );
+        spawn_writer(
+            outbound_rx,
+            Arc::clone(&closed),
+            Arc::clone(&connections),
+            inbound_tx,
+            inbound_dropped.clone(),
+            outbound_dropped.clone(),
+            fwmark,
+            local,
+        );
+
+        Ok(Self {
+            local,
+            closed,
+            inbound: Mutex::new(inbound_rx),
+            outbound: outbound_tx,
+            connections,
+            inbound_dropped,
+            outbound_dropped,
+        })
+    }
+
+    /// Packets dropped because a queue was full, incoming and outgoing.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.inbound_dropped.load(Ordering::Relaxed) + self.outbound_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The peer addresses with a live connection.
+    #[must_use]
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.connections
+            .lock()
+            .map(|map| map.keys().copied().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl DatagramSocket for TcpTransport {
+    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+        // A full queue is a drop, not an error: the loop's contract is that a
+        // packet either goes or is lost, and the caller has no retry to offer.
+        if self
+            .outbound
+            .try_send((destination, bytes.to_vec()))
+            .is_err()
+        {
+            self.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let Ok(inbound) = self.inbound.lock() else {
+            return Err(io::Error::other("carrier inbound queue is poisoned"));
+        };
+        // A timeout, not a block: the loop's reader compares the socket's
+        // generation on one, which is how a rebind reaches a blocked reader.
+        match inbound.recv_timeout(Duration::from_millis(250)) {
+            Ok((source, bytes)) => {
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                Ok((n, source))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "no frame waiting"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "carrier closed"))
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local)
+    }
+}
+
+impl Drop for TcpTransport {
+    fn drop(&mut self) {
+        // Three things hold threads: the listener blocked in `accept`, readers
+        // blocked in `read`, and a writer waiting on its queue. Shut the
+        // connections down so the readers see EOF, and dial ourselves so the
+        // listener returns once — otherwise a rebind would find the port still
+        // taken by a carrier nobody owns.
+        self.closed.store(true, Ordering::Relaxed);
+        if let Ok(connections) = self.connections.lock() {
+            for stream in connections.values() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        let wake = if self.local.ip().is_unspecified() {
+            let ip = if self.local.is_ipv4() {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                IpAddr::V6(Ipv6Addr::LOCALHOST)
+            };
+            SocketAddr::new(ip, self.local.port())
+        } else {
+            self.local
+        };
+        let _ = TcpStream::connect_timeout(&wake, Duration::from_millis(200));
+    }
+}
+
+/// Bind, mark and listen: a `TcpListener` that policy routing can see.
+fn listen_socket(address: SocketAddr, fwmark: u32) -> io::Result<TcpListener> {
+    #[cfg(target_os = "linux")]
+    if fwmark != 0 {
+        let fd = marked_socket(address, fwmark)?;
+        rustix::net::bind(&fd, &address)
+            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
+        rustix::net::listen(&fd, 128)
+            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
+        return Ok(TcpListener::from(fd));
+    }
+    let _ = fwmark;
+    TcpListener::bind(address)
+}
+
+/// An unconnected, non-blocking stream socket with `SO_MARK` already set.
+///
+/// Marked *before* the connect on purpose: a full tunnel routes a default route
+/// into itself, so an unmarked SYN would be captured by the interface it is
+/// trying to establish. `nix` is the wrapper here because `SO_MARK` is not a
+/// portable socket option and `rustix` does not expose it.
+#[cfg(target_os = "linux")]
+fn marked_socket(address: SocketAddr, fwmark: u32) -> io::Result<std::os::fd::OwnedFd> {
+    use nix::sys::socket::{socket, AddressFamily, SockFlag, SockProtocol, SockType};
+
+    let family = if address.is_ipv4() {
+        AddressFamily::Inet
+    } else {
+        AddressFamily::Inet6
+    };
+    let fd = socket(
+        family,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK,
+        SockProtocol::Tcp,
+    )
+    .map_err(errno)?;
+    if fwmark != 0 {
+        nix::sys::socket::setsockopt(&fd, nix::sys::socket::sockopt::Mark, &fwmark)
+            .map_err(errno)?;
+    }
+    Ok(fd)
+}
+
+/// A `nix` error as the `io::Error` the rest of the module speaks.
+#[cfg(target_os = "linux")]
+fn errno(error: nix::errno::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error as i32)
+}
+
+/// Accept loop: one connection per peer address, one reader per connection.
+fn spawn_acceptor(
+    listener: TcpListener,
+    closed: Arc<AtomicBool>,
+    connections: Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    dropped: Arc<AtomicU64>,
+    fwmark: u32,
+    local: SocketAddr,
+) {
+    let _ = thread::Builder::new()
+        .name("vallum-tcp-accept".to_owned())
+        .spawn(move || {
+            let _ = fwmark;
+            let _ = local;
+            loop {
+                match listener.accept() {
+                    Ok((stream, remote)) => {
+                        if closed.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        register(stream, remote, &connections, &inbound, &dropped, &closed);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) if closed.load(Ordering::Relaxed) => break,
+                    Err(_) => {
+                        // An accept failure is transient (a wake connect, a
+                        // backlog race). The socket stays open; anything fatal
+                        // will show as a dead listener and a dial that fails.
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        });
+}
+
+/// Write loop: frame, dial on first use, write, forget a broken connection.
+#[allow(clippy::too_many_arguments)]
+fn spawn_writer(
+    outbound: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
+    closed: Arc<AtomicBool>,
+    connections: Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    inbound_dropped: Arc<AtomicU64>,
+    outbound_dropped: Arc<AtomicU64>,
+    fwmark: u32,
+    local: SocketAddr,
+) {
+    let _ = thread::Builder::new()
+        .name("vallum-tcp-write".to_owned())
+        .spawn(move || {
+            let _ = local;
+            while let Ok((destination, bytes)) = outbound.recv() {
+                if closed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(framed) = frame(&bytes) else {
+                    // A packet past the frame ceiling cannot be carried, and
+                    // silently splitting it would re-implement segmentation.
+                    outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let stream = match connection(
+                    destination,
+                    &connections,
+                    &inbound,
+                    &inbound_dropped,
+                    &closed,
+                    fwmark,
+                ) {
+                    Some(stream) => stream,
+                    None => {
+                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                if let Err(error) = (&*stream).write_all(&framed) {
+                    // The connection is gone; the next datagram for this peer
+                    // dials again. Dropping the packet is the honest outcome:
+                    // the stream cannot tell us whether it arrived.
+                    outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                    let _ = error;
+                    forget(destination, &stream, &connections);
+                }
+            }
+        });
+}
+
+/// The connection for `destination`, dialling and registering a reader if new.
+fn connection(
+    destination: SocketAddr,
+    connections: &Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound: &mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    dropped: &Arc<AtomicU64>,
+    closed: &Arc<AtomicBool>,
+    fwmark: u32,
+) -> Option<Arc<TcpStream>> {
+    if let Ok(map) = connections.lock() {
+        if let Some(stream) = map.get(&destination) {
+            return Some(Arc::clone(stream));
+        }
+    }
+    let stream = dial(destination, fwmark).ok()?;
+    register(stream, destination, connections, inbound, dropped, closed);
+    connections
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&destination).map(Arc::clone))
+}
+
+/// Dial with the mark already on the socket, and a bounded wait.
+fn dial(destination: SocketAddr, fwmark: u32) -> io::Result<TcpStream> {
+    #[cfg(target_os = "linux")]
+    if fwmark != 0 {
+        let fd = marked_socket(destination, fwmark)?;
+        return connect_marked(fd, destination);
+    }
+    let _ = fwmark;
+    TcpStream::connect_timeout(&destination, CARRIER_DIAL_TIMEOUT)
+}
+
+/// Non-blocking connect with a deadline, so a marked dial cannot hang the writer.
+#[cfg(target_os = "linux")]
+fn connect_marked(fd: std::os::fd::OwnedFd, destination: SocketAddr) -> io::Result<TcpStream> {
+    use rustix::event::{poll, PollFd, PollFlags};
+
+    match rustix::net::connect(&fd, &destination) {
+        Ok(()) => {}
+        Err(rustix::io::Errno::INPROGRESS) => {
+            let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
+            let ready = poll(
+                &mut fds,
+                Some(&rustix::time::Timespec {
+                    tv_sec: CARRIER_DIAL_TIMEOUT.as_secs() as i64,
+                    tv_nsec: 0,
+                }),
+            )
+            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
+            if ready == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "carrier dial timed out",
+                ));
+            }
+            match rustix::net::sockopt::socket_error(&fd)
+                .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?
+            {
+                Ok(()) => {}
+                Err(error) => return Err(io::Error::from_raw_os_error(error.raw_os_error())),
+            }
+        }
+        Err(error) => return Err(io::Error::from_raw_os_error(error.raw_os_error())),
+    }
+    // Back to blocking: the writer thread does one write at a time and would
+    // rather wait than spin.
+    nix::fcntl::fcntl(
+        &fd,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::empty()),
+    )
+    .map_err(errno)?;
+    Ok(TcpStream::from(fd))
+}
+
+/// Take a connected stream, start its reader, and remember its write half.
+fn register(
+    stream: TcpStream,
+    remote: SocketAddr,
+    connections: &Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound: &mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    dropped: &Arc<AtomicU64>,
+    closed: &Arc<AtomicBool>,
+) {
+    let write_half = match stream.try_clone() {
+        Ok(clone) => Arc::new(clone),
+        Err(_) => return,
+    };
+    if let Ok(mut map) = connections.lock() {
+        // One connection per peer address. A second dial or a peer dialling in
+        // while a connection is live would only split the order in two.
+        if map.contains_key(&remote) {
+            let _ = write_half.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+        map.insert(remote, Arc::clone(&write_half));
+    } else {
+        return;
+    }
+    spawn_reader(
+        stream,
+        remote,
+        write_half,
+        Arc::clone(connections),
+        inbound.clone(),
+        Arc::clone(dropped),
+        Arc::clone(closed),
+    );
+}
+
+/// Read loop for one connection: unframe, queue, and forget the connection on EOF.
+fn spawn_reader(
+    stream: TcpStream,
+    remote: SocketAddr,
+    registered: Arc<TcpStream>,
+    connections: Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+    inbound: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    dropped: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+) {
+    let _ = thread::Builder::new()
+        .name(format!("vallum-tcp-read {remote}"))
+        .spawn(move || {
+            // A timeout on each read is how this thread notices the carrier being
+            // dropped while it waits; `shutdown` covers the fast path.
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+            let mut reader = FrameReader::new();
+            let mut buffer = vec![0u8; STREAM_READ_BUFFER];
+            loop {
+                if closed.load(Ordering::Relaxed) {
+                    break;
+                }
+                match (&stream).read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        reader.push(&buffer[..n]);
+                        loop {
+                            match reader.next_frame() {
+                                Ok(Some(packet)) => {
+                                    if inbound.try_send((remote, packet)).is_err() {
+                                        dropped.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::TimedOut => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+            // Only forget the connection this reader owns: a newer one for the
+            // same address may already have been registered by a redial.
+            forget(remote, &registered, &connections);
+        });
+}
+
+/// Remove `stream` from the map if it is still the one registered there.
+fn forget(
+    remote: SocketAddr,
+    stream: &Arc<TcpStream>,
+    connections: &Arc<Mutex<HashMap<SocketAddr, Arc<TcpStream>>>>,
+) {
+    if let Ok(mut map) = connections.lock() {
+        if let Some(current) = map.get(&remote) {
+            if Arc::ptr_eq(current, stream) {
+                map.remove(&remote);
+            }
+        }
     }
 }
 
@@ -786,6 +1350,92 @@ mod tests {
         // settles on what it actually proved.
         assert_eq!(prober("192.0.2.1", 1400), (false, None));
         assert_eq!(calls.get(), 0);
+    }
+
+    /// One received packet, waiting up to a second for the carrier's threads.
+    fn recv(carrier: &TcpTransport) -> (Vec<u8>, SocketAddr) {
+        let mut buffer = [0u8; 2_048];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match carrier.recv_from(&mut buffer) {
+                Ok((n, source)) => return (buffer[..n].to_vec(), source),
+                Err(error)
+                    if error.kind() == io::ErrorKind::TimedOut
+                        || error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("carrier read failed: {error}"),
+            }
+        }
+        panic!("no packet arrived within two seconds");
+    }
+
+    #[test]
+    fn a_stream_carrier_carries_datagrams_whole_and_in_order() {
+        let receiver = TcpTransport::bind("127.0.0.1:0".parse().expect("receiver")).expect("bind");
+        let sender = TcpTransport::bind("127.0.0.1:0".parse().expect("sender")).expect("bind");
+        let destination = receiver.local_addr().expect("local addr");
+
+        // A frame boundary is not a read boundary: three sends may arrive as one
+        // read, and each must still come back as the packet that was sent.
+        for packet in [b"one".as_slice(), b"two", b"three"] {
+            sender
+                .send_to(packet, destination)
+                .expect("enqueue a packet");
+        }
+
+        let sender_address = sender.local_addr().expect("sender addr");
+        for expected in [b"one".as_slice(), b"two", b"three"] {
+            let (packet, source) = recv(&receiver);
+            assert_eq!(packet, expected);
+            // The source is the sender's address as the connection came from:
+            // the host, and the ephemeral port the dial chose — not the port the
+            // sender listens on. That is also the address a reply is written
+            // back to, because it is the connection's own far end.
+            assert_eq!(source.ip(), sender_address.ip());
+            assert_eq!(source.port(), receiver.peers()[0].port());
+        }
+        assert_eq!(sender.dropped() + receiver.dropped(), 0);
+    }
+
+    #[test]
+    fn a_stream_carrier_keeps_two_peers_on_separate_connections() {
+        let first = TcpTransport::bind("127.0.0.1:0".parse().expect("first")).expect("bind");
+        let second = TcpTransport::bind("127.0.0.1:0".parse().expect("second")).expect("bind");
+        let sender = TcpTransport::bind("127.0.0.1:0".parse().expect("sender")).expect("bind");
+
+        sender
+            .send_to(b"to-first", first.local_addr().expect("addr"))
+            .expect("send");
+        sender
+            .send_to(b"to-second", second.local_addr().expect("addr"))
+            .expect("send");
+
+        assert_eq!(recv(&first).0, b"to-first");
+        assert_eq!(recv(&second).0, b"to-second");
+        // One connection per destination, not one connection for everything.
+        assert_eq!(sender.peers().len(), 2);
+    }
+
+    #[test]
+    fn a_stream_carrier_frees_its_port_when_dropped() {
+        // A rebind replaces the socket at runtime, so a dropped carrier that kept
+        // its listener alive would make `listen_port` a one-way trip.
+        let address: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+        let first = TcpTransport::bind(address).expect("bind");
+        let bound = first.local_addr().expect("local addr");
+        drop(first);
+        thread::sleep(Duration::from_millis(50));
+        let second = TcpTransport::bind(bound).expect("rebind the same port");
+        assert_eq!(second.local_addr().expect("local addr"), bound);
+    }
+
+    #[test]
+    fn a_stream_carrier_reports_a_closed_socket_rather_than_blocking_forever() {
+        let carrier = TcpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("bind");
+        let mut buffer = [0u8; 64];
+        // Nothing has arrived: the read times out, which is what lets the loop's
+        // reader notice a rebind instead of blocking on a dead socket.
+        let error = carrier.recv_from(&mut buffer).expect_err("empty carrier");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

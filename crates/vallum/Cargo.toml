@@ -57,7 +57,7 @@ signal-hook = "0.4"
 tun2 = { version = "4.0", default-features = false }
 # Privilege separation. Safe wrappers over setgroups/setgid/setuid/prctl, so
 # every Vallum-owned crate keeps `unsafe_code = "forbid"`.
-nix = { version = "0.31", features = ["user", "process", "socket", "net", "uio"] }
+nix = { version = "0.31", features = ["user", "process", "socket", "net", "uio", "fs"] }
 # IPv6 address assignment. `tun2`'s configuration path is an `AF_INET` ioctl, so
 # a v6 address needs netlink; these crates provide it without `unsafe` in
 # Vallum's own code.
@@ -66,7 +66,10 @@ netlink-packet-route = "0.33"
 netlink-sys = "0.9"
 # `IP_MTU_DISCOVER = DO` for IPv4, which neither nix nor socket2 exposes. Safe
 # wrappers, so the `unsafe_code = "forbid"` invariant survives.
-rustix = { version = "1", features = ["net", "time"] }
+# `event` is for the marked TCP dial's bounded non-blocking connect: a fallback
+# carrier that could hang its writer thread on a dead endpoint would take the
+# whole tunnel with it.
+rustix = { version = "1", features = ["net", "time", "event"] }
 
 [dev-dependencies]
 # Property tests for the UAPI codec: a parser on a socket boundary should be

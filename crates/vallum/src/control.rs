@@ -30,7 +30,6 @@ use vallum_crypto::KemPublicKey;
 use vallum_crypto::{CryptoSuite, SharedSecret};
 use vallum_tunnel::{Device, PeerConfig};
 
-use crate::net::DatagramSocket;
 use crate::run::{Input, Shutdown};
 use crate::uapi::errno::{EADDRINUSE, EADDRNOTAVAIL, EEXIST, EINVAL, ENOENT, EPERM, ETIMEDOUT};
 use crate::uapi::{self, Request, Set};
@@ -68,8 +67,10 @@ pub struct ControlContext {
     pub interface: String,
     /// The interface addresses.
     pub addresses: Vec<vallum_tunnel::Prefix>,
-    /// The bound UDP address.
+    /// The bound address, for the configured carrier.
     pub listen: SocketAddr,
+    /// The transport, so a rebind binds the same one.
+    pub carrier: crate::config::Carrier,
     /// The socket mark.
     pub fwmark: u32,
     /// The swappable socket, for a runtime rebind.
@@ -463,10 +464,10 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
     let desired_mark = set.fwmark.unwrap_or(current_mark);
     if desired_port != current_listen.port() || desired_mark != current_mark {
         let address = SocketAddr::new(current_listen.ip(), desired_port);
-        match crate::net::UdpTransport::bind_with_fwmark(address, desired_mark) {
+        match crate::net::bind(context.carrier, address, desired_mark) {
             Ok(socket) => {
                 let bound = socket.local_addr().unwrap_or(address);
-                context.socket.replace(Arc::new(socket));
+                context.socket.replace(socket);
                 context.listen = bound;
                 context.fwmark = desired_mark;
             }
@@ -615,7 +616,7 @@ mod tests {
         let socket = Arc::new(
             crate::net::UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("bind"),
         );
-        let listen = socket.local_addr().expect("local addr");
+        let listen = crate::net::DatagramSocket::local_addr(&*socket).expect("local addr");
         ControlContext {
             interface: "vallum0".to_owned(),
             addresses: Vec::new(),
@@ -623,6 +624,7 @@ mod tests {
             private_key_path: PathBuf::from("test.key"),
             control_path: None,
             listen,
+            carrier: crate::config::Carrier::Udp,
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
