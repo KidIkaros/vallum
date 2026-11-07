@@ -332,7 +332,8 @@ pub enum ShapingSpec {
     /// including at 3 a.m. with nobody using the tunnel. `interval_ms` below
     /// 100 ms is clamped up to 100 ms, which is the safety rail: the floor is
     /// the one shape whose rate is limited only by its own parameter. For the
-    /// measured prices, see `docs/proof/traffic-shaping.md`.
+    /// measured prices, see `docs/proof/traffic-shaping.md`; for worked examples,
+    /// `docs/shaping.md`.
     ConstantRateFloor {
         /// The silence to allow before injecting, in milliseconds.
         interval_ms: u64,
@@ -386,6 +387,25 @@ pub enum ShapingSpec {
         /// The sealed-plaintext length of each injected packet.
         size: u16,
     },
+    /// Normalise each window's **bytes** to a power of two.
+    ///
+    /// The byte-level form of [`Self::VolumePadding`]: every packet is padded to
+    /// `size`, so a window's bytes are exactly its packet count times `size` and
+    /// a power-of-two byte target is a power-of-two packet count. Packets larger
+    /// than `size` cannot be padded down and count as more than the window
+    /// accounts for, so choose a target above the largest payload.
+    ///
+    /// `window_bytes` is rounded down to a whole number of packets and clamped to
+    /// 32 of them, and `window_ms` up to 1 000 ms. For the measured prices, see
+    /// `docs/proof/traffic-shaping.md`.
+    ByteVolumePadding {
+        /// The pause that ends a window, in milliseconds.
+        window_ms: u64,
+        /// The window's target volume, in sealed plaintext bytes.
+        window_bytes: u32,
+        /// The size every packet in the window is padded to.
+        size: u16,
+    },
     /// Answer received packets with padding, probabilistically.
     RespondWithPadding {
         /// The payload size of an injected packet.
@@ -420,6 +440,11 @@ impl ShapingSpec {
                 max_packets,
                 size,
             } => Machine::volume_padding(window_ms, max_packets, size),
+            Self::ByteVolumePadding {
+                window_ms,
+                window_bytes,
+                size,
+            } => Machine::byte_volume_padding(window_ms, window_bytes, size),
             Self::FrontPadding {
                 count,
                 interval_ms,
@@ -669,6 +694,12 @@ max_packets = 16
 size = 1400
 
 [[peer.shaping]]
+kind = "byte_volume_padding"
+window_ms = 1000
+window_bytes = 5600
+size = 1400
+
+[[peer.shaping]]
 kind = "respond_with_padding"
 size = 300
 injections = 1
@@ -680,7 +711,7 @@ cap = 4
             .iter()
             .map(ShapingSpec::machine)
             .collect();
-        assert_eq!(machines.len(), 7);
+        assert_eq!(machines.len(), 8);
 
         // A plain floor is armed for its own interval; the noisy one is armed for
         // the shortest of its drawn intervals, which is what the transport uses.
@@ -691,6 +722,15 @@ cap = 4
         // And the window's own pause: clamped up from 200 ms to the rail.
         let shaper = vallum_core::Shaper::new(vec![machines[5].clone()]);
         assert_eq!(shaper.wake_after(), Some(vallum_core::VOLUME_MIN_WINDOW_MS));
+        // The byte window is a window too, and it pads rather than only counting.
+        let shaper = vallum_core::Shaper::new(vec![machines[6].clone()]);
+        assert_eq!(shaper.wake_after(), Some(1000));
+        let mut shaper = shaper;
+        assert_eq!(
+            shaper.handle(vallum_core::Event::NormalSent, 0).len(),
+            1,
+            "a byte window pads every packet"
+        );
     }
 
     #[test]

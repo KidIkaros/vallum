@@ -534,6 +534,69 @@ impl Machine {
         Self::new(states)
     }
 
+    /// Normalise each window's **bytes** to a power of two, by fixing the packet
+    /// size first.
+    ///
+    /// A byte target is meaningless while packets have arbitrary sizes: injecting
+    /// until the byte count lands on a bucket says nothing if the next packet may
+    /// be 40 bytes or 1 400. So this shape pads every packet to `size` and counts
+    /// the result, which makes bytes exactly `count * size` and a power-of-two
+    /// byte target exactly a power-of-two packet count — the same window machine,
+    /// with the size channel held still underneath it.
+    ///
+    /// Windows close the same two ways as [`Self::volume_padding`]: a pause of
+    /// `window_ms`, or a run of `window_bytes / size` packets. `window_bytes` is
+    /// rounded **down** to a whole number of `size` packets, clamped to
+    /// [`VOLUME_MAX_PACKETS`], so a configured target binds the cost and never
+    /// describes a burst larger than the count shape could.
+    ///
+    /// A payload larger than `size` cannot be padded down: the transport seals it
+    /// as it is, so that packet counts as more bytes than the window accounts for.
+    /// A deployment that pairs this with a target smaller than its largest packet
+    /// has a window with a floor under it, not a lie — the padding after the close
+    /// is still the arithmetic the count promises.
+    #[must_use]
+    pub fn byte_volume_padding(window_ms: u64, window_bytes: u32, size: u16) -> Self {
+        let window = window_ms.max(VOLUME_MIN_WINDOW_MS);
+        // A pad target below the length prefix cannot hold even an empty payload.
+        let size = size.max(u16::try_from(crate::data::PAYLOAD_LEN_SIZE).unwrap_or(2));
+        let unit = u32::from(size);
+        let cap = round_down_power_of_two((window_bytes / unit).clamp(2, VOLUME_MAX_PACKETS));
+
+        let mut states = Vec::with_capacity(cap as usize + 1);
+        for count in 0..=cap {
+            let settled = if count == cap {
+                1
+            } else {
+                u16::try_from(count + 1).unwrap_or(MACHINE_END)
+            };
+            let missing = next_power_of_two(count).saturating_sub(count);
+            let close = match u16::try_from(missing) {
+                Ok(0) | Err(_) => vec![Branch::pass(1, 0)],
+                Ok(missing) => vec![Branch::act(
+                    1,
+                    Action::Inject {
+                        count: missing,
+                        size,
+                    },
+                    0,
+                )],
+            };
+            states.push(
+                State::new(UNLIMITED)
+                    .wake(window)
+                    // Padding every packet is what makes the count equal the
+                    // bytes; the branch carries both the `Pad` and the step.
+                    .on(
+                        Event::NormalSent,
+                        vec![Branch::act(1, Action::Pad { target: size }, settled)],
+                    )
+                    .on(Event::Timeout, close),
+            );
+        }
+        Self::new(states)
+    }
+
     /// Hold further outgoing packets for `interval_ms` after each normal send.
     ///
     /// A crude rate limiter: it turns a burst into a train, which is what makes
@@ -1106,6 +1169,51 @@ mod tests {
             assert!(shaper.handle(Event::NormalSent, 0).is_empty());
         }
         assert_eq!(shaper.state_of(0), Some(16), "20 rounded down to 16");
+    }
+
+    #[test]
+    fn a_byte_window_pads_every_packet_and_then_normalises_the_bytes() {
+        // 4 000 bytes of window against 1 000-byte packets is four packets, which
+        // is a power of two already; the interesting part is the padding.
+        let mut shaper = Shaper::new(vec![Machine::byte_volume_padding(1_000, 4_000, 1_000)]);
+
+        // Every normal packet is padded to the window's unit, which is what makes
+        // bytes equal to count * size.
+        for _ in 0..3 {
+            assert_eq!(
+                shaper.handle(Event::NormalSent, 0),
+                vec![Effect {
+                    machine: 0,
+                    action: Action::Pad { target: 1_000 },
+                }]
+            );
+        }
+        // Three packets of 1 000 bytes is 3 000 bytes; closing the window pads it
+        // to 4 000, which is one more packet.
+        assert_eq!(
+            shaper.handle(Event::Timeout, 0),
+            vec![Effect {
+                machine: 0,
+                action: Action::Inject {
+                    count: 1,
+                    size: 1_000,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_byte_window_is_bounded_in_packets_not_just_in_bytes() {
+        // A window of 100 000 bytes would be 100 packets of 1 000, past the cap:
+        // the cap binds, so the window is 32 packets and the target is advisory.
+        let mut shaper = Shaper::new(vec![Machine::byte_volume_padding(1_000, 100_000, 1_000)]);
+        for count in 0..VOLUME_MAX_PACKETS {
+            assert_eq!(shaper.handle(Event::NormalSent, 0).len(), 1);
+            assert_eq!(
+                shaper.state_of(0),
+                Some(u16::try_from(count + 1).expect("a small count"))
+            );
+        }
     }
 
     #[test]

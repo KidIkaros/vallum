@@ -710,7 +710,57 @@ fn a_jittered_floor_costs_what_a_plain_floor_costs() {
     assert_eq!(noisy.sizes.len(), 2, "sizes: {:?}", noisy.sizes);
 }
 
-// ── 6. padding is indistinguishable in kind ──────────────────────────
+// ── 6. bytes, not just counts ────────────────────────────────────────
+
+#[test]
+fn a_byte_window_costs_a_fixed_size_per_packet_and_then_tops_up() {
+    const WINDOW_MS: u64 = 1000;
+    const SIZE: u16 = 1400;
+    const WINDOW_BYTES: u32 = 8 * SIZE as u32;
+
+    let baseline = simulate(Vec::new(), PAGE_LOAD, 1);
+    let bytes = simulate(
+        vec![Machine::byte_volume_padding(WINDOW_MS, WINDOW_BYTES, SIZE)],
+        PAGE_LOAD,
+        1,
+    );
+    println!("byte window: {bytes}");
+    println!("baseline:    {baseline}");
+
+    // Every packet in the window is one size, so bytes are count * size and the
+    // byte target is exact rather than approximated from mixed lengths.
+    let sealed: Vec<_> = bytes
+        .sizes
+        .iter()
+        .copied()
+        .filter(|size| *size > 200)
+        .collect();
+    assert_eq!(sealed.len(), 1, "the window's own packets are one size");
+    let per_packet = sealed[0];
+
+    // The count shape pads to the same counts; this one also closes the length
+    // channel underneath, which is what makes its byte target meaningful.
+    let counts = simulate(
+        vec![Machine::volume_padding(
+            WINDOW_MS,
+            WINDOW_BYTES / u32::from(SIZE),
+            SIZE,
+        )],
+        PAGE_LOAD,
+        1,
+    );
+    assert_eq!(
+        bytes.injected, counts.injected,
+        "the same window arithmetic, on a fixed size"
+    );
+    assert!(
+        bytes.bytes > counts.bytes,
+        "padding every packet costs bytes the count shape does not"
+    );
+    assert_eq!(bytes.bytes % per_packet, 0, "bytes are whole packets");
+}
+
+// ── 7. padding is indistinguishable in kind ──────────────────────────
 
 #[test]
 fn an_injected_padding_packet_is_an_openable_keepalive() {
