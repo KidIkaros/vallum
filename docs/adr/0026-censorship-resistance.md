@@ -36,6 +36,14 @@ local nor measurable here.
    costs head-of-line blocking, an MSS-limited MTU, and a stream-level signature
    of its own, and those costs are to be measured before it is offered as
    anything.
+
+**The seam, as built.** No carrier was added, and no framing was committed to a
+socket: `vallum_tunnel::stream` is the length prefix a stream needs and nothing
+more (no I/O, no connection state), and `tests/carrier.rs` measures it over a
+real TCP connection — 2 bytes of frame per 1 456-byte packet, byte-identical on
+arrival, and the head-of-line ordering a stream forces. The retransmission cost
+of a lossy path is the one number left unmeasured, and
+`docs/proof/transport.md` §2.8 says so rather than guessing.
 3. **Protocol emulation is rejected.** MOOR's `transport_*` files emulate
    specific protocols; so do uTLS-style fingerprint forgeries. Two reasons: the
    emulation is only as good as the version of the protocol it copied, and it is

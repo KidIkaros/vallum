@@ -62,6 +62,8 @@
 //! - [`device`] — the peer table, the handshake driver, and the data plane.
 //! - [`segment`] — the envelope that keeps a large message off the IP fragment
 //!   path: splits outbound messages, reassembles inbound fragments.
+//! - [`stream`] — length-prefix framing, the one thing a stream carrier needs
+//!   that a datagram carrier does not (ADR-0026).
 
 #![forbid(unsafe_code)]
 
@@ -71,6 +73,7 @@ pub mod peer;
 pub mod rng;
 pub mod routing;
 pub mod segment;
+pub mod stream;
 
 pub use device::{
     Action, Clock, Device, Event, PeerStats, Refusal, MAX_INJECTION_BURST, MAX_QUEUED_BYTES,
@@ -81,3 +84,4 @@ pub use peer::{PeerConfig, PeerId};
 pub use rng::Randomness;
 pub use routing::{packet_destination, packet_source, AllowedIps, Prefix};
 pub use segment::{Segments, MAX_REASSEMBLIES};
+pub use stream::{frame, unframe, FrameError, FrameReader, FRAME_LEN_SIZE, MAX_FRAME};

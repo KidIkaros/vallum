@@ -185,6 +185,31 @@ protect. A keepalive is *sent through* the shaper — it is a shaped event, not 
 invisible one — but ignores `Block`, because a machine that held a keepalive would
 suppress the traffic that keeps the path reachable.
 
+### 2.8 A stream carrier, and what it would cost
+
+ADR-0026 defers a TCP fallback, but the seam it would sit on is already here: the
+device emits `Action::Send { destination, bytes }` and never a socket, and the
+daemon's `DatagramSocket` is the only thing that knows the transport. What a
+stream carrier needs beyond that is **framing** — a length prefix, because a
+stream has no message boundaries — and that is `vallum_tunnel::stream`:
+`frame`/`unframe`/`FrameReader`, two bytes of prefix, a 32 KiB ceiling below the
+prefix's own range so a bogus length is refused rather than buffered, and no I/O,
+no socket and no connection state.
+
+Measured over a real TCP connection on loopback with real sealed packets
+(`tests/carrier.rs`): a 1 456-byte data packet goes out as 1 458 bytes — **+2
+bytes of frame per packet, nothing else** — and comes back byte-identical and
+openable. Add the header difference (TCP+IP 40 bytes against UDP+IP 28, arithmetic
+rather than measurement) and the carrier costs about 1 % more on the wire at a
+full-size packet.
+
+The cost that is *not* measured here is loss: loopback TCP does not drop segments,
+so the retransmission and head-of-line delay a real path would produce cannot be
+shown in this harness. What is shown is that a stream forces one order: the second
+packet cannot be handed over before the first, whatever the application asked for
+(`a_stream_orders_everything_behind_the_slowest_read`). That is the property the
+fallback trades for reachability, and it is why it is a fallback.
+
 ---
 
 ## 3. What P6.3 does **not** claim
