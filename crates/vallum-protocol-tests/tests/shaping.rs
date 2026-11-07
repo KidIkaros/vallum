@@ -760,6 +760,95 @@ fn a_byte_window_costs_a_fixed_size_per_packet_and_then_tops_up() {
     assert_eq!(bytes.bytes % per_packet, 0, "bytes are whole packets");
 }
 
+/// A mixed day: the page load, a bulk upload, a download, typing, another page
+/// load, and the silences between them.
+///
+/// The page load alone answers "what does this cost on a browsing trace"; it
+/// cannot answer "what does this cost on *my* traffic", because a percentage is a
+/// property of the trace it divides by. A bulk transfer is the case that flatters
+/// volume padding — every window is already full — and typing is the case that
+/// punishes it: two packets a window, padded to a power of two each time.
+fn mixed_day() -> Vec<(bool, usize, u64)> {
+    let mut trace: Vec<(bool, usize, u64)> = PAGE_LOAD.to_vec();
+    // Thirty seconds of nothing after the page settles.
+    trace.push((false, 40, 30_000));
+    // A bulk upload: sixty full packets at 3 ms apart. Every window closes on
+    // the cap rather than on a pause, which is the second closing rule.
+    for _ in 0..60 {
+        trace.push((false, 1400, 3));
+    }
+    // A two-second pause, then a download nobody shapes (inbound costs nothing
+    // on this side) and twenty keystroke-sized packets at ~150 ms.
+    trace.push((true, 1400, 2_000));
+    for _ in 0..40 {
+        trace.push((true, 1400, 2));
+    }
+    for index in 0..20 {
+        trace.push((false, if index % 2 == 0 { 60 } else { 84 }, 150));
+    }
+    // Back to browsing, then gone for a minute.
+    trace.extend_from_slice(PAGE_LOAD);
+    trace.push((false, 40, 60_000));
+    trace
+}
+
+#[test]
+fn the_volume_cost_is_a_property_of_the_trace_not_a_constant() {
+    const WINDOW_MS: u64 = 1000;
+    const CAP: u32 = 8;
+
+    let day = mixed_day();
+    let baseline = simulate(Vec::new(), &day, 1);
+    let normalised = simulate(vec![Machine::volume_padding(WINDOW_MS, CAP, 1400)], &day, 1);
+    let page_baseline = simulate(Vec::new(), PAGE_LOAD, 1);
+    let page = simulate(
+        vec![Machine::volume_padding(WINDOW_MS, CAP, 1400)],
+        PAGE_LOAD,
+        1,
+    );
+
+    println!("mixed day, volume {CAP} / {WINDOW_MS} ms: {normalised}");
+    println!("mixed day, baseline:                    {baseline}");
+    println!(
+        "  overhead {:.1} % ({} packets, {} bytes)",
+        normalised.overhead_percent(&baseline),
+        baseline.packets,
+        baseline.bytes
+    );
+    println!(
+        "page load, volume {CAP} / {WINDOW_MS} ms: {page} -- overhead {:.1} %",
+        page.overhead_percent(&page_baseline)
+    );
+
+    // The shape does what it always does: windows top up to a power of two.
+    assert!(normalised.injected > 0, "the day has windows to normalise");
+    assert_eq!(
+        normalised.packets,
+        baseline.packets + normalised.injected,
+        "every injected packet is one more on the wire and nothing else"
+    );
+    // Bounded by construction: no window can spend more than the cap.
+    assert!(
+        normalised.injected <= baseline.packets.div_ceil(CAP as usize),
+        "{normalised}"
+    );
+
+    // And the price is not one number: a bulk transfer fills its windows, so the
+    // same shape costs a fraction of what it costs on a browsing trace. Quoting
+    // either alone would be honest and misleading.
+    let day_overhead = normalised.overhead_percent(&baseline);
+    let page_overhead = page.overhead_percent(&page_baseline);
+    assert!(
+        day_overhead < page_overhead,
+        "a full window cannot cost as much as an empty one: {day_overhead:.1} % vs \
+         {page_overhead:.1} %"
+    );
+    assert!(
+        day_overhead > 0.0,
+        "the mixed day has a cost too, just a smaller one"
+    );
+}
+
 // ── 7. padding is indistinguishable in kind ──────────────────────────
 
 #[test]

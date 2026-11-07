@@ -308,6 +308,17 @@ open window adds nothing at all: `a_volume_window_pads_the_burst_to_a_power_of_t
 shows the three payloads leaving unpadded and one packet following the pause,
 with the daemon's peer discarding it.
 
+That +367 % is a *browsing* figure, and quoting it alone would be honest and
+misleading: the percentage is a property of the trace it divides by. On a mixed
+day — a page load, a sixty-packet bulk upload, a download, twenty keystrokes at
+150 ms, another page load — the same machine injects **six** packets into a
+96-packet / 92 656-byte baseline and costs **+9.4 %**, because a full window is
+already a power of two and spends nothing. The bulk transfer is the case that
+flatters volume padding; typing is the case that punishes it (two packets a
+window, padded to four).
+`the_volume_cost_is_a_property_of_the_trace_not_a_constant` measures both and
+asserts the relation rather than either number.
+
 **Bytes** (`byte_volume_padding`, 1 000 ms, 8 × 1 400 B): on the page load,
 10 packets / **14 560 bytes** / **one distinct size** / 3 injected / +1 123.5 % —
 the same three injections the count shape spends, because the window arithmetic is
@@ -432,6 +443,7 @@ and confirms the tag — not the length field — is what rejects it.
 | a full window closes itself and starts the next | `shaping.rs::Machine::volume_padding` | `a_full_volume_window_closes_itself` (unit) |
 | the window's cap and interval are clamped | `shaping.rs::{VOLUME_MAX_PACKETS, VOLUME_MIN_WINDOW_MS}` | `a_volume_window_cannot_be_configured_past_its_rails` (unit) |
 | **a volume window costs at most the cap per window** | `Machine::volume_padding` | `volume_padding_tops_a_window_up_to_the_next_power_of_two` |
+| volume's percentage follows the trace, not the shape | `Machine::volume_padding` | `the_volume_cost_is_a_property_of_the_trace_not_a_constant` |
 | **the daemon normalises a window when it closes, and not before** | `device/{timer,data}.rs` | `a_volume_window_pads_the_burst_to_a_power_of_two` |
 | a noisy floor draws its interval per packet and keeps the mean | `shaping.rs::Machine::jittered_floor` | `a_noisy_floor_varies_the_interval_and_keeps_the_mean` (unit) |
 | the noisy floor is rail-bounded like the plain one | `shaping.rs::{FLOOR_MIN_INTERVAL_MS}` | `a_noisy_floor_is_rail_bounded_like_the_plain_one` (unit) |
