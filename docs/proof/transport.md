@@ -284,33 +284,30 @@ percent of a clean path's segments so that a rare repair cannot fail a measureme
 nobody asked to be perfect. A repair still has to have a visible cause — a drop on
 either end, a timer, or duplicate data reported by the far end — because
 out-of-order arrivals are this path's ordinary state and explain nothing on their
-own. Five of the sixteen runs did retransmit on the 40 ms
-clean row — 0–360 segments of 23 182 — and the counters say what happened: every
-one of them was a fast retransmit (`rto` was zero on every clean row of every run),
-the far end's receive queue dropped nothing, and no timer fired. The row's time
-does not move either: 0.28–0.58 s with the repairs against 0.28–0.30 s without
-them.
+own. Five of the sixteen runs did retransmit on the 40 ms clean row, 0–360
+segments of 23 182, always as fast retransmits (`rto` was zero on every clean row
+of every run), with nothing dropped on arrival, nothing dropped by the qdisc and
+no timer fired; the row's time did not move either, 0.28–0.58 s with the repairs
+against 0.28–0.30 s without them.
 
 Reordering is the ordinary state of this path rather than a consequence of a
-repair. Clean rows that re-sent nothing still had the far end queue segments out of
-order (`TCPOFOQueue`): 0 to 32 on the 1 ms row here, and 33 and 54 on the CI host's
-clean rows, with zero retransmissions in both. The path delivers segments late, so
-the question a clean repair raises is only whether it answered a late arrival or a
-lost one.
-
-The far end's DSACK answers that. A re-sent segment that duplicates data already
-received draws one, and the sender counts it in `TCPDSACKRecv`; a re-sent segment
-that fills a real hole draws none. Two runs with the host's CPUs busy re-sent
-exactly one segment each and drew exactly one DSACK, so those repairs were
-duplicates rather than losses. The one quiet run that repaired during this
-investigation re-sent 32 segments behind 33 out-of-order arrivals and drew a single
-DSACK: one of the 32 is accounted for as a duplicate, and the other 31 are not
-accounted for by any counter here. `TCPDSACKRecv` counts DSACK blocks and one block
-can cover several segments, so the table also carries `dup segs`
-(`TCPDSACKRecvSegs`), which counts the segments that came in duplicate: that is the
-column that can attribute a repaired burst a segment at a time instead of a block
-at a time. Both ends share one namespace, so these counters belong to the pair
-rather than to one side.
+repair: clean rows that re-sent nothing still had the far end queue 0 to 32
+segments out of order on the 1 ms row, and 30, 33 and 54 on the CI host's clean
+rows. So the only question a clean repair raises is whether it answered a late
+arrival or a lost one, and the far end answers it — a re-sent segment that
+duplicates data already received draws a DSACK, and one that fills a real hole
+draws none. Two runs with the host's CPUs busy re-sent exactly one segment each and
+drew exactly one DSACK: duplicates, not losses. `TCPDSACKRecv` counts blocks and
+one block can cover several segments, so the table also carries `dup segs`
+(`TCPDSACKRecvSegs`), which counts the segments; on a standalone probe with a
+reordering qdisc as the only mechanism (`delay 20ms reorder 30% 50%`, 23 000
+writes of 1 418 bytes) 396 of 399 retransmissions came back reported as duplicate
+segments, against 150 DSACK blocks. That is the rule the column exists for: `dup
+segs` close to the retransmission count means the path reordered, far below it
+means segments really were missing. The one 32-segment repair seen on a quiet run
+drew a single DSACK before the segment-level counter existed, so that occurrence
+stays open; the next one is what settles it. Both ends share one namespace, so
+these counters belong to the pair rather than to one side.
 
 The qdisc's own drop counter cannot settle anything either: with `delay` in the
 qdisc that counter under-reports. A standalone TCP probe through `delay 1ms loss
