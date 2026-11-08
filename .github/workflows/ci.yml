@@ -145,6 +145,8 @@ jobs:
         # A green check says the measurement ran; the summary says what it found,
         # so a change in the transport's cost is visible in the run that changed
         # it rather than in a doc nobody re-measures.
+        # Printed as well as summarised: the summary is what the check page shows,
+        # the log is what is left after the run's artefacts expire.
         run: |
           table="${{ runner.temp }}/carrier-table.txt"
           if [ -s "$table" ]; then
@@ -153,9 +155,10 @@ jobs:
               echo '```'
               cat "$table"
               echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo 'the carrier measurement wrote no table, so it did not run' >> "$GITHUB_STEP_SUMMARY"
+            echo 'the carrier measurement wrote no table, so it did not run' \
+              | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Test the lean daemon (no TUI)
