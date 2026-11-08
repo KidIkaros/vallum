@@ -34,7 +34,10 @@ from the code — breaks the build instead of a deployment.
 
 When the server writes a device's config, `vallum peer add <name> --shaping
 balanced` emits the blocks below instead: one word instead of a copy-paste, and
-the same blocks by construction.
+the same blocks by construction. `vallum peer enroll <name> --shaping balanced`
+does the same where the device generated its own key and the server only wrote its
+config. The flag applies to the files that command writes, so a `--shaping` on a
+run that writes no client config changes nothing on the server side.
 
 ### Balanced: one size, and a packet every two seconds
 

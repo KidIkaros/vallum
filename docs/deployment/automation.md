@@ -63,6 +63,13 @@ and a repair.
 - `applied` is `false` when no daemon is listening. The config is still written;
   the daemon reads it when it starts.
 - `bundle` and `client_config` are `null` unless you asked for one.
+- `--shaping balanced` or `--shaping opening` puts that preset's
+  `[[peer.shaping]]` blocks into the config this command writes — the bundle, or
+  `--client-config-out` ([presets](../shaping.md#presets)). The JSON does not
+  repeat it: the returned config already contains the blocks, and a preset name in
+  the report would be a second copy that could disagree with them.
+- `peer enroll` takes the same `--shaping` flag, for the path where the device
+  generated its own key and the server only wrote its config.
 
 `vallum peer list --json` returns the same objects without `bundle`, `backup`,
 or `config`. `vallum peer remove --json` returns `{name, allowed_ips, config,

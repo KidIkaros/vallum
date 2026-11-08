@@ -14,7 +14,7 @@ that owns the detail.
 | One UDP port, `51820` by default | open it on the host **and** in the cloud security group — `vallum server init` only manages the host firewall | [`deployment/server.md`](deployment/server.md) |
 | A decision: full or split tunnel | full carries everything (`0.0.0.0/0`, `::/0`); split carries the prefixes you name | [`deployment/client.md`](deployment/client.md#full-tunnel-vs-split-tunnel) |
 | A DNS answer | systemd-resolved, resolvconf, or deliberately left to the host | [`deployment/client.md`](deployment/client.md#dns) |
-| UDP that actually gets through | the tunnel speaks UDP only; a path that drops it — hotel, campus, some mobile carriers — blocks Vallum, and nothing in the config changes that | [`adr/0026`](adr/0026-censorship-resistance.md) |
+| UDP that actually gets through | the tunnel speaks UDP by default; a path that drops it — hotel, campus, some mobile carriers — needs `carrier = "tcp"` on **both** ends and the TCP port opened, which is reachability at a measured cost rather than vapour | [`adr/0026`](adr/0026-censorship-resistance.md) |
 
 Read the crypto posture before trusting this with something that matters: the
 post-quantum primitives come from `origin-crypto-sdk`, which labels itself

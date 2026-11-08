@@ -12,7 +12,8 @@ This guide assumes a server is already up. If not, start with
 - Linux with systemd.
 - Root, or `sudo`.
 - The client's config and key, from one of the two enrolment paths below.
-- Outbound UDP to the server's port (default `51820`).
+- Outbound UDP to the server's port (default `51820`), or TCP to it if the path
+  drops UDP ([below](#if-the-path-blocks-udp)).
 
 ## Path A — the server handed you a bundle
 
@@ -128,6 +129,35 @@ instead of letting the kernel fragment:
 [interface]
 outer_mtu = 1400
 ```
+
+## If the path blocks UDP
+
+A config the server writes says nothing about the transport, so both ends use the
+default: UDP. Where that is dropped — a hotel, a campus, some mobile carriers —
+both ends need the stream carrier, because one side speaking TCP to a UDP listener
+is silence rather than an error ([ADR-0026](../adr/0026-censorship-resistance.md)):
+
+```toml
+[interface]
+carrier = "tcp"
+```
+
+Open the TCP port instead of the UDP one, and restart both daemons: the config is
+read at start. The same packets then travel inside one connection per peer,
+framed and about 1 % larger, delivered in one order, and the peer cannot roam.
+`vallum doctor` prints the carrier it is using, and `--probe-path` dials each
+peer's endpoint — the one check that separates a blocked port from a server that is
+not listening. What the carrier costs on a lossy path is measured in
+[`proof/transport.md`](../proof/transport.md#28-a-stream-carrier-and-what-it-would-cost).
+
+## If the server shaped the config
+
+`vallum peer add <you> --shaping balanced` (or `opening`) writes `[[peer.shaping]]`
+blocks into the config it hands you, so nothing needs copying by hand. Those blocks
+are this device's own policy — they shape what *this* end sends — and the server's
+config is separate, because shaping is local and never negotiated. A config with no
+such blocks shapes nothing, which is the default; what each preset does, and what
+it costs, is in [`shaping.md`](../shaping.md#presets).
 
 ## Keeping the path open
 
