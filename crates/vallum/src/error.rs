@@ -109,6 +109,13 @@ pub enum Error {
     /// Privilege separation failed: a lookup, a `set*id`, or the verification
     /// after it.
     Privileges(String),
+
+    /// The syscall filter could not be compiled or installed (ADR-0028).
+    ///
+    /// Fatal by design: a daemon that was configured to be filtered and is not
+    /// has a worse posture than one that never asked, because everything
+    /// downstream assumes the filter is there.
+    Sandbox(String),
 }
 
 impl fmt::Display for Error {
@@ -151,6 +158,7 @@ impl fmt::Display for Error {
                 path.display()
             ),
             Self::Privileges(why) => write!(f, "privilege separation failed: {why}"),
+            Self::Sandbox(why) => write!(f, "the syscall filter failed: {why}"),
         }
     }
 }

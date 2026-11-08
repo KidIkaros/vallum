@@ -18,6 +18,7 @@ use crate::logging::Logger;
 use crate::net::{self, SharedSocket};
 use crate::privileges;
 use crate::run::{self, Shutdown};
+use crate::sandbox;
 use crate::tun::{self, InterfaceSpec};
 use crate::{log_info, log_warn, Error};
 
@@ -145,6 +146,12 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     if let Some(privileges) = &resolved.privileges {
         privileges::drop_to(privileges)?;
         log_info!(log, "dropped privileges to {}", privileges.describe());
+        // Before any thread exists: the control server, the readers, and the
+        // carrier's threads all start below, and each inherits this filter. That
+        // ordering is the reason the filter is complete rather than partial, and
+        // moving this call after them would lose it silently (ADR-0028).
+        sandbox::install(resolved.sandbox)?;
+        log_info!(log, "syscall filter installed in {} mode", resolved.sandbox);
     }
 
     let budget = outer_budget;

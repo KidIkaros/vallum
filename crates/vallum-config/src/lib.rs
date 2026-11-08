@@ -282,6 +282,20 @@ pub struct Interface {
     /// warned about, because it is rarely what an operator means.
     #[serde(default)]
     pub group: Option<String>,
+    /// What the syscall filter does with a syscall the allow-list does not name.
+    ///
+    /// `log` installs the filter and asks the kernel to log — and allow —
+    /// anything the list is missing; `enforce` kills the process instead. The
+    /// default is `log`, and it stays that way until the log is empty across a
+    /// full exercise: a wrong entry in an enforcing filter is a daemon that dies
+    /// on the one path nobody tested. See ADR-0028.
+    ///
+    /// Only meaningful with `user` or `group`: the filter is installed as part
+    /// of the privilege drop, and setting this without one is refused rather
+    /// than ignored, because a security field the daemon quietly does not apply
+    /// is worse than no field at all.
+    #[serde(default)]
+    pub seccomp: Option<Seccomp>,
     /// The CA's `vallum1:` public line, or the bare hex of its signing key.
     ///
     /// When set, every peer's identity document must verify against it. When
@@ -298,6 +312,17 @@ pub struct Interface {
     /// instead of guessing a source route that is often a private address.
     #[serde(default)]
     pub public_endpoint: Option<String>,
+}
+
+/// `interface.seccomp`: what the syscall filter does with a syscall it does not
+/// name. See ADR-0028.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Seccomp {
+    /// Install the filter, log what it would have killed, and let it through.
+    Log,
+    /// Install the filter and kill the process on a syscall it does not name.
+    Enforce,
 }
 
 /// One `[[peer]]` table.
@@ -720,6 +745,28 @@ pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seccomp_accepts_only_the_two_stages() {
+        let parse = |value: &str| {
+            let text =
+                format!("[interface]\nname = \"v0\"\nprivate_key = \"k\"\nseccomp = \"{value}\"\n");
+            toml::from_str::<Config>(&text)
+        };
+        assert_eq!(
+            parse("log").expect("log").interface.seccomp,
+            Some(Seccomp::Log)
+        );
+        assert_eq!(
+            parse("enforce").expect("enforce").interface.seccomp,
+            Some(Seccomp::Enforce)
+        );
+        // A typo must be a parse error, not a silently unfiltered daemon.
+        assert!(
+            parse("enforced").is_err(),
+            "interface.seccomp accepted a mode it does not implement"
+        );
+    }
 
     #[test]
     fn shaping_kinds_parse_and_build_the_machine_they_name() {

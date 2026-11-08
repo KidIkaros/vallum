@@ -102,6 +102,9 @@ pub struct Resolved {
     /// Who to become after the privileged setup. `None` keeps the process as it
     /// started.
     pub privileges: Option<crate::privileges::Privileges>,
+    /// Which stage the syscall filter runs in. Only installed when
+    /// `privileges` is set, since the filter is part of the drop. See ADR-0028.
+    pub sandbox: crate::sandbox::Mode,
     /// The largest UDP payload the outer path can carry: `outer_mtu - 48`.
     pub outer_budget: usize,
 }
@@ -125,6 +128,7 @@ impl std::fmt::Debug for Resolved {
             .field("forward", &self.forward)
             .field("warnings", &self.warnings)
             .field("privileges", &self.privileges)
+            .field("sandbox", &self.sandbox)
             .field("outer_budget", &self.outer_budget)
             .finish_non_exhaustive()
     }
@@ -407,6 +411,28 @@ impl ResolveConfig for Config {
             self.interface.group.as_deref(),
             &mut warnings,
         )?;
+
+        // The syscall filter is installed as part of the privilege drop, so a
+        // config that asks for one without the other is refused: a security
+        // field the daemon quietly does not apply is how a hardening step goes
+        // missing. See ADR-0028.
+        let sandbox = match self.interface.seccomp {
+            Some(_) if !cfg!(target_os = "linux") => {
+                return Err(Error::Usage(
+                    "interface.seccomp is only implemented on Linux".to_owned(),
+                ));
+            }
+            Some(_) if privileges.is_none() => {
+                return Err(Error::Invalid {
+                    path: path.to_path_buf(),
+                    what: "interface.seccomp needs interface.user or interface.group: \
+                           the filter is installed with the privilege drop"
+                        .to_owned(),
+                });
+            }
+            Some(vallum_config::Seccomp::Enforce) => crate::sandbox::Mode::Enforce,
+            _ => crate::sandbox::Mode::Log,
+        };
         let identity = keys::identity(suite, &secret)?;
         let issuer = match self.interface.identity_issuer.as_deref() {
             Some(text) => Some(
@@ -675,6 +701,7 @@ impl ResolveConfig for Config {
             forward: self.interface.forward.unwrap_or(false),
             warnings,
             privileges,
+            sandbox,
             outer_budget: budget,
         })
     }
@@ -904,6 +931,7 @@ mod tests {
             forward: false,
             warnings: Vec::new(),
             privileges: None,
+            sandbox: crate::sandbox::Mode::Log,
             outer_budget: 1372,
         };
         let rendered = format!("{resolved:?}");

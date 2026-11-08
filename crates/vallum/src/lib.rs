@@ -57,6 +57,7 @@ pub mod notify;
 pub mod policy;
 pub mod privileges;
 pub mod run;
+pub mod sandbox;
 pub mod style;
 pub mod tun;
 
