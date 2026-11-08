@@ -17,7 +17,7 @@
 | [0013](0013-server-provisioning.md) | Server provisioning is a CLI, not a control plane | accepted | 2026-10-20 |
 | [0014](0014-wireguard-gaps.md) | Close the WireGuard gaps Vallum can win | accepted | 2026-10-20 |
 | [0015](0015-enrolment-v2.md) | Enrolment v2 — the PQ-WireGuard shape, applied to provisioning | accepted | 2026-10-21 |
-| [0016](0016-nat-traversal.md) | NAT traversal and relay — what we will and will not do | proposed | 2026-10-21 |
+| [0016](0016-nat-traversal.md) | NAT traversal and relay — what we will and will not do | superseded by [0027](0027-mesh-topology-and-control-plane.md) | 2026-10-21 |
 | [0017](0017-runtime-directory-ownership.md) | The runtime directory is a machine resource, not a service's private state | accepted | 2026-10-21 |
 | [0018](0018-fail-closed-egress.md) | A packet leaves only through the tunnel, or to the endpoint | accepted | 2026-10-22 |
 | [0019](0019-passive-side-reinitiates.md) | The passive side re-initiates, so a restart costs seconds not 120 s | implemented | 2026-10-22 |
@@ -28,3 +28,4 @@
 | [0024](0024-desktop-ui.md) | A Tauri v2 desktop UI that reuses the Rust control client; x86_64 only | accepted | 2026-11-05 |
 | [0025](0025-moor-techniques-not-code.md) | Take MOOR's padding and scheduling techniques as bounded shapes, not its code | proposed | 2026-11-06 |
 | [0026](0026-censorship-resistance.md) | Censorship resistance is a separate surface from traffic shaping | proposed | 2026-11-06 |
+| [0027](0027-mesh-topology-and-control-plane.md) | Mesh topology as an external agent — vallum-core stays a tunnel | proposed | 2026-11-07 |

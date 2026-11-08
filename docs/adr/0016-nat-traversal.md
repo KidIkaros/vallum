@@ -1,6 +1,13 @@
 # ADR-0016: NAT traversal and relay — what we will and will not do
 
-**Status:** proposed · **Date:** 2026-10-21
+**Status:** superseded by [ADR-0027](0027-mesh-topology-and-control-plane.md) (2026-11-07) · **Date:** 2026-10-21
+
+> **Superseded.** The constraints in this record were correct and are adopted
+> unchanged by ADR-0027; what changed is the decision *not* to build traversal
+> and relay in the current series. ADR-0027 makes them in scope, because the
+> goal moved from "a better WireGuard" to "a mesh VPN with Vallum's
+> cryptography." Read this record for the constraints; read 0027 for the
+> decision.
 
 ## Context
 
