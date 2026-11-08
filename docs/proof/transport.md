@@ -221,42 +221,44 @@ measures, not from the label:
 
 | path | time for 32 MiB | segments retransmitted | frames delivered |
 |---|---|---|---|
-| 1 ms round trip, clean | 0.03–0.18 s | 0 of ~23 185 | 23 014 |
-| 1 ms round trip, 2 % loss | 0.04–2.5 s | 288–725 of 23 178 | 23 014 |
-| 1 ms round trip, 5 % loss | 13.2–17.9 s | 1 167–1 344 of 23 175 | 23 014 |
-| 40 ms round trip, clean | 0.28–0.42 s | 0 to 90 of ~23 180 | 23 014 |
-| 40 ms round trip, 2 % loss | 26–48 s | 410–554 of 23 176 | 23 014 |
+| 1 ms round trip, clean | 0.03–0.20 s | 0 of ~23 200 | 23 014 |
+| 1 ms round trip, 2 % loss | 0.04–2.4 s | 247–682 of ~23 180 | 23 014 |
+| 1 ms round trip, 5 % loss | 8.8–19.6 s | 1 071–1 325 of ~23 178 | 23 014 |
+| 40 ms round trip, clean | 0.28–0.58 s | 0–360 of ~23 182 | 23 014 |
+| 40 ms round trip, 2 % loss | 42–49 s | 442–565 of ~23 177 | 23 014 |
 
-Ranges are the spread across seven runs on a machine that was also building, not a
-confidence interval: the retransmission counts hold roughly still between runs and
-the wall clock does not.
+Ranges are the spread across sixteen runs on a machine that was also building, not
+a confidence interval: the retransmission counts hold to within a few percent
+between runs and the wall clock does not. Ten of the runs reached the 40 ms 2 %
+row, which is the slowest and was sometimes left out of a repeat of the others.
 
 Not one byte lost on any path: a stream loses time, not data. The retransmission
-rate matches the offered loss — 1.2–2.9 % at 2 %, 5.0–5.8 % at 5 % — so TCP with
+rate matches the offered loss — 1.1–2.9 % at 2 %, 4.6–5.7 % at 5 % — so TCP with
 SACK repairs what `netem` drops without amplifying it, and what the repairs cost is
 the round trips they wait for rather than the bytes they resend. Dividing the
-excess time by the number of repairs makes that literal on the paths where the
-stream actually stalls: **11–14 ms per repair at 5 % loss on a 1 ms round trip**
-(the congestion window collapses as well as being repaired) and **46–116 ms on the
-40 ms path**. Loss costs a round trip, and a round trip costs what the path says it
-does.
+excess time by the number of repairs makes that literal: **7–16 ms per repair at
+5 % loss on a 1 ms round trip** (the congestion window collapses as well as being
+repaired), **75–97 ms on the 40 ms path**, and 0–7 ms at 2 % on a 1 ms path,
+where the repairs fit inside a window that is hundreds of round trips wide. Loss
+costs a round trip, and a round trip costs what the path says it does.
 
 The 1 ms round trip at 2 % loss is the row that will not sit still, and the reason
 is worth stating rather than averaging away. A lost segment is repaired one round
 trip later, and at one millisecond there are hundreds of round trips available
-inside the time the window needs to drain: the fastest run finished in 44 ms — as
-fast as a clean path — having retransmitted 288 segments, because every repair fit
-inside a window far larger than the path's delay. In other runs the same path took
-2.5 s, with the congestion window collapsing and the connection running at the
-Mathis bound instead. Both are the carrier behaving correctly; neither is the
-carrier's cost on a real path, where a round trip is not one millisecond. The
-rows that answer the question are 5 % at 1 ms and 2 % at 40 ms.
+inside the time the window needs to drain: the fastest runs finished in 40 and 44
+milliseconds — as fast as a clean path — having retransmitted hundreds of
+segments, because every repair fit inside a window far larger than the path's
+delay. In the slowest runs the same path took 2.4 s, with the congestion window
+collapsing and the connection running at the Mathis bound instead. Both are the
+carrier behaving correctly; neither is the carrier's cost on a real path, where a
+round trip is not one millisecond. The rows that answer the question are 5 % at
+1 ms and 2 % at 40 ms.
 
 The two clean rows are the control for both claims. Delay alone barely moves a
-bulk transfer: 0.29–0.42 s for 32 MiB over 40 ms against 0.04–0.18 s over 1 ms,
+bulk transfer: 0.28–0.58 s for 32 MiB over 40 ms against 0.03–0.20 s over 1 ms,
 because at this size the window is doing the work, and a 40× larger window is 40×
 more in flight rather than 40× the time. Loss does move it once the round trip is
-long enough that a repair cannot hide — the same 40 ms path at 2 % is 26–48 s — and
+long enough that a repair cannot hide — the same 40 ms path at 2 % is 42–49 s — and
 that is the whole argument for the carrier being a fallback: it is not the
 retransmissions that hurt, it is that each one is repaid a round trip later, and a
 real path's round trip is not one millisecond.
@@ -278,15 +280,26 @@ most of the retransmissions are fast retransmits, which is TCP recovering withou
 stalling.
 
 The clean paths retransmit nothing in most runs, and the test allows up to one
-percent of a clean path's segments so that a rare timer cannot fail a measurement
-nobody asked to be perfect — but "up to one percent" is not an explanation. Across
-about a dozen runs, two of the 40 ms clean rows retransmitted 64 and 95 segments of
-23 180 with the far end's receive queue empty, which is 0.3–0.4 %, and **why is not
-established**. The cause columns are the instrument for the next occurrence: a
-nonzero `fast` count would point at reordering or a dropped datagram in the delayed
-path, a nonzero `rto` at a stalled acknowledgement. Until one of those is measured,
-the 40 ms clean baseline should be read as "about 0.3 s, occasionally with a few
-hundred segments of extra work", not as a path that is provably drop-free.
+percent of a clean path's segments so that a rare repair cannot fail a measurement
+nobody asked to be perfect. Five of the sixteen runs did retransmit on the 40 ms
+clean row — 0–360 segments of 23 182 — and the counters say what happened: every
+one of them was a fast retransmit (`rto` was zero on every clean row of every run),
+the far end's receive queue dropped nothing, and no timer fired. A fast retransmit
+is started by duplicate acknowledgements, and those come from arrivals the far end
+has to queue out of order (`TCPOFOQueue`), of which it reported one to eight in the
+runs that repaired. The re-send then covers the rest of the window, which is why
+one such arrival costs 120 segments rather than one, and why the row's time does
+not move: 0.28–0.58 s with the repairs against 0.28–0.30 s without them.
+
+Whether the gap that starts it is a reordered segment or a dropped one is not
+established, and the qdisc's own drop counter cannot settle it: with `delay` in the
+qdisc that counter under-reports. A standalone TCP probe through `delay 1ms loss
+2%` counted 149 qdisc drops against 454 retransmitted segments of 22 576, where the
+same probe without `delay` counted 448 against 531. The table shows the same gap:
+on every lossy row its drop column is a fraction of its retransmission column. So
+the clean rows are quoted as what was measured — no timer, nothing lost on
+arrival, every frame delivered, no change in time — and not as a path that is
+provably drop-free. The cause columns stay in the table for the next occurrence.
 
 The measurement needs a network namespace, `tc` and `nsenter`. The namespace comes
 from `unshare -Urn` where the host allows unprivileged user namespaces, and from
@@ -323,21 +336,21 @@ rate it is two seconds per path, and the comparison is of loss rates, not bytes.
 | path | datagrams sent | arrived | dropped on arrival |
 |---|---|---|---|
 | 1 ms round trip, clean | 2 880 | 2 880 (100 %) | 0 |
-| 1 ms round trip, 2 % loss | 2 880 | 2 804–2 828 (97.4–98.2 %) | 0 |
-| 1 ms round trip, 5 % loss | 2 880 | 2 734–2 746 (94.9–95.3 %) | 0 |
+| 1 ms round trip, 2 % loss | 2 880 | 2 808–2 834 (97.5–98.4 %) | 0 |
+| 1 ms round trip, 5 % loss | 2 880 | 2 711–2 761 (94.1–95.9 %) | 0 |
 | 40 ms round trip, clean | 2 880 | 2 880 (100 %) | 0 |
-| 40 ms round trip, 2 % loss | 2 880 | 2 813–2 829 (97.7–98.2 %) | 0 |
+| 40 ms round trip, 2 % loss | 2 880 | 2 807–2 833 (97.5–98.4 %) | 0 |
 
-Four runs. Random loss is random, so the test's assertion is not the exact count:
+Sixteen runs. Random loss is random, so the test's assertion is not the exact count:
 arrivals must fall within two percent of what the offered loss predicts, which is
 five times the spread 2 880 draws have and still far tighter than the gap between
 "no loss" and "the loss that was offered".
 
 The two carriers, same path, same offered loss: the datagram run loses the
 datagrams and stays quick, and the stream loses the time and delivers everything.
-At 5 % loss on a 1 ms path that is 95 % of the arrivals against every frame in
-14–18 s; at 2 % on a 40 ms path it is 98 % of the arrivals against every frame in
-26–48 s. Neither number is an argument that one carrier is better: the datagram is
+At 5 % loss on a 1 ms path that is 94–96 % of the arrivals against every frame in
+8.8–19.6 s; at 2 % on a 40 ms path it is 98 % of the arrivals against every frame
+in 42–49 s. Neither number is an argument that one carrier is better: the datagram is
 what a VPN carries, and a frame that never arrives is a retransmission the
 *application* decides about, at whatever cost it chooses. The stream is the
 fallback that promises delivery where UDP is blocked, and this is the promise's

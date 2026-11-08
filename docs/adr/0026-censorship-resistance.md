@@ -75,13 +75,13 @@ daemons, two real configs, a real handshake and traffic both ways over loopback
   TCP.
 
 The retransmission cost on a *lossy* path is measured now, not argued: 32 MiB in
-23 014 frames takes 0.04–0.18 s on a clean 1 ms round trip, 13.2–17.9 s at 5 % loss
-on that path, and 26–48 s at 2 % loss over a 40 ms round trip, with every frame
+23 014 frames takes 0.03–0.20 s on a clean 1 ms round trip, 8.8–19.6 s at 5 % loss
+on that path, and 42–49 s at 2 % loss over a 40 ms round trip, with every frame
 delivered on all five paths. At 2 % loss on a 1 ms path the same run takes anywhere
-from 0.04 to 2.5 s depending on whether the repairs fit inside the window or the
+from 0.04 to 2.4 s depending on whether the repairs fit inside the window or the
 window collapses — both measured, and neither is the cost on a real path. The cost
-is round trips, not bytes: 11–14 ms per repair at 5 % loss, 46–116 ms at 40 ms.
-And the same qdisc that costs the stream 14–18 s at 5 % costs paced datagrams 5 %
+is round trips, not bytes: 7–16 ms per repair at 5 % loss, 75–97 ms at 40 ms.
+And the same qdisc that costs the stream 8.8–19.6 s at 5 % costs paced datagrams 5 %
 of their arrivals in two seconds, which is the comparison the fallback exists for
 (`docs/proof/transport.md` §2.8–2.9). The claim therefore stands at "reachable
 where UDP is blocked", never "fast there".
