@@ -287,6 +287,28 @@ fn retransmission_causes() -> (u64, u64, u64) {
     (values[0], values[1], values[2])
 }
 
+/// Whether a retransmission was answering a real hole or a reordered arrival.
+///
+/// `TCPOFOQueue` cannot tell those apart: a dropped segment and a late one both
+/// leave a gap for the segments behind them. What separates them is what the far
+/// end says when the re-send arrives. If the original had already turned up, the
+/// re-send is duplicate data and the far end answers with a DSACK, which the
+/// sender counts in `TCPDSACKRecv`; if the hole was real, there is nothing to
+/// duplicate and no DSACK follows. The reordering detectors say which signal
+/// caught it — timestamps, SACK blocks, or the older RTT estimate.
+fn reordering_causes() -> (u64, u64, u64, u64) {
+    let values = netstat(
+        "TcpExt:",
+        &[
+            "TCPDSACKRecv",
+            "TCPTSReorder",
+            "TCPSackReorder",
+            "TCPRenoReorder",
+        ],
+    );
+    (values[0], values[1], values[2], values[3])
+}
+
 fn netstat(block: &str, names_wanted: &[&str]) -> Vec<u64> {
     let text = std::fs::read_to_string("/proc/net/netstat").expect("netstat");
     let mut names: Vec<&str> = Vec::new();
@@ -417,6 +439,7 @@ fn lossy_client() {
 
     let (retrans_before, out_before) = tcp_segments();
     let (rto_before, fast_before, spurious_before) = retransmission_causes();
+    let (dsack_before, ts_before, sack_before, reno_before) = reordering_causes();
     let started = Instant::now();
     for _ in 0..packets {
         tx.write_all(&framed).expect("write");
@@ -432,18 +455,28 @@ fn lossy_client() {
     let elapsed = started.elapsed();
     let (retrans_after, out_after) = tcp_segments();
     let (rto_after, fast_after, spurious_after) = retransmission_causes();
+    let (dsack_after, ts_after, sack_after, reno_after) = reordering_causes();
     let retransmitted = retrans_after.saturating_sub(retrans_before);
     let sent = out_after.saturating_sub(out_before);
+    let dsack = dsack_after.saturating_sub(dsack_before);
 
     println!(
         "LOSSY packets={packets} bytes={} ms={} connect={connect_ms} retrans={retransmitted} \
-         sent={sent} rto={} fast={} spurious={}",
+         sent={sent} rto={} fast={} spurious={} dsack={dsack}",
         packets * framed.len(),
         elapsed.as_millis(),
         rto_after.saturating_sub(rto_before),
         fast_after.saturating_sub(fast_before),
         spurious_after.saturating_sub(spurious_before)
     );
+    if retransmitted > 0 {
+        println!(
+            "WHY dsack={dsack} ts_reorder={} sack_reorder={} reno_reorder={}",
+            ts_after.saturating_sub(ts_before),
+            sack_after.saturating_sub(sack_before),
+            reno_after.saturating_sub(reno_before)
+        );
+    }
 }
 
 /// The far end of the datagram comparison: count what arrives, and count what the
@@ -548,6 +581,13 @@ struct Measurement {
     /// Segments the far end saw out of order, which is what makes a sender
     /// retransmit without a timer and without a loss.
     reordered: u64,
+    /// DSACKs the sender received: each one says a retransmission was duplicate
+    /// data, so the segment it replaced had arrived after all. Retransmissions
+    /// without one filled a hole somebody made.
+    dsack: u64,
+    /// The far end's answer in full, for the rows a clean path repaired on: what
+    /// it said about the re-sends, and which signal caught the reordering.
+    cause: String,
     /// The same traffic as datagrams over the same path.
     datagram: Datagram,
 }
@@ -861,6 +901,12 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             qdisc_pkts: field(qdisc, "qdisc_pkts"),
             qdisc_drops: field(qdisc, "qdisc_drops"),
             reordered: field(served, "reordered"),
+            dsack: field(&lossy, "dsack"),
+            cause: lossy
+                .lines()
+                .find(|line| line.starts_with("WHY "))
+                .unwrap_or_default()
+                .to_owned(),
             datagram: Datagram {
                 ms: field(&datagram, "ms"),
                 sent: field(&datagram, "datagrams"),
@@ -899,7 +945,7 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         runs[0].packets
     );
     say!(
-        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8} {:>14} {:>10}",
+        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7}",
         "path",
         "connect",
         "time",
@@ -909,11 +955,12 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         "arrived",
         "pruned",
         "qdisc pkt/drop",
-        "reordered"
+        "reordered",
+        "dsack"
     );
     for run in &runs {
         say!(
-            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8} {:>14} {:>10}",
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7}",
             run.path.label,
             run.connect_ms,
             run.ms,
@@ -924,11 +971,20 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             run.frames,
             run.pruned,
             format!("{}/{}", run.qdisc_pkts, run.qdisc_drops),
-            run.reordered
+            run.reordered,
+            run.dsack
         );
     }
+    // A clean path that repaired says why here: the table carries how much, this
+    // carries what the two ends saw, which is the only thing that separates a
+    // reordered arrival from a dropped segment.
+    for run in &runs {
+        if run.path.loss == 0 && run.retrans > 0 && !run.cause.is_empty() {
+            say!("  {}: {}", run.path.label, run.cause);
+        }
+    }
     say!(
-        "\n4 MiB of the same packets as datagrams, paced at 93 KiB per 40 ms so the \
+        "\n4 MiB of the same packets as datagrams, paced at 93 KiB per 40 ms so the 
          far end's queue is never the limit"
     );
     say!(
@@ -979,15 +1035,23 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             // and every number below is wrong.
             if run.retrans > 0 {
                 // A fast retransmit on a clean path says a segment arrived out of
-                // order, which needs a reason: the qdisc's own queue limit, or a
-                // reader that stopped reading. Neither being visible means the
-                // path dropped something nobody asked it to, and every number
-                // here is measured on a path that is not the one in the label.
+                // order, which needs a reason: the qdisc's own queue limit, a
+                // reader that stopped reading, or the far end saying the re-send
+                // was duplicate data — a DSACK, which means the segment had
+                // arrived after all and the path merely reordered it. None of
+                // them being visible means the path dropped something nobody
+                // asked it to, and every number here is measured on a path that is
+                // not the one in the label.
                 assert!(
-                    run.pruned > 0 || run.qdisc_drops > 0 || run.reordered > 0 || run.rto > 0,
+                    run.pruned > 0
+                        || run.qdisc_drops > 0
+                        || run.reordered > 0
+                        || run.dsack > 0
+                        || run.rto > 0,
                     "{} retransmitted {} of {} segments with no loss offered, no \
-                     receive-queue drops on the far end, nothing dropped by its own qdisc and \
-                     nothing out of order at the far end ({} timers, {} fast retransmits)",
+                     receive-queue drops on the far end, nothing dropped by its own qdisc, \
+                     nothing out of order at the far end and no duplicate seen by the far \
+                     end ({} timers, {} fast retransmits)",
                     run.path.label,
                     run.retrans,
                     run.sent,
