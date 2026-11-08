@@ -1,7 +1,7 @@
 # ADR-0028: A seccomp filter, derived from the daemon's own syscall surface
 
 **Date**: 2026-11-08
-**Status**: proposed
+**Status**: accepted — implemented in log mode (see “Implementation status”)
 **Deciders**: the maintainer
 **Relates to**: ADR-0005 / ADR-0011 (Linux-only scope), ADR-0017 (runtime directory), ADR-0027 (mesh agent)
 
@@ -238,6 +238,26 @@ run with the privileges it was meant to shed."*
    subset of the allowed set.
 5. **Flip the default to `"enforce"`** in the release after the log is clean, and
    say in that release's notes that the property now holds.
+
+## Implementation status
+
+| Step | State |
+|---|---|
+| 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 81 entries that cover it |
+| 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
+| 3. Empty the log | **not done** — the list has been traced once, not exercised; this is where the real work is |
+| 4. Add the CI guard | **not done** |
+| 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
+
+What has been verified: the filter installs and kills what the list does not
+name (a test re-executes itself, installs enforce mode, and asserts the child
+dies on `SIGSYS` when it tries `execve`), and every syscall in the post-startup
+trace is on the list. What has not: a live daemon in enforce mode, because the
+privilege drop calls `setgroups`, which an unprivileged user namespace denies —
+that run belongs to CI, where the drop happens under `sudo`.
+
+Open question 1 is settled: its own module (`sandbox.rs`). Question 2 is settled
+for the startup log line; `doctor` does not report the mode yet.
 
 ## Open questions
 

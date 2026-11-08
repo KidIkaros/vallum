@@ -106,7 +106,12 @@ be theatre.
 
 ## 6. What this does **not** claim
 
-1. **No `seccomp`.** The syscall surface is unchanged.
+1. **No enforced `seccomp`.** ADR-0028 installs an allow-list after the drop, but
+   in log mode: the kernel logs what the list would have killed and lets it
+   through. The list is derived from a trace of the daemon and the filter is
+   inherited by every thread, so the mechanism holds; the *property* — nothing
+   off the list runs — does not hold until the log is empty and the mode is
+   `enforce`. `seccomp.md` says exactly what was and was not verified.
 2. **No `chroot`, no mount namespace, no capability retention.** The drop is
    `set*id` + `no_new_privs`, nothing more.
 3. **No per-peer isolation.** One process, one peer table.

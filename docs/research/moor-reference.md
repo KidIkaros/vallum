@@ -153,21 +153,23 @@ Two areas of MOOR were named in this note and then fell between the two records,
 because neither is a shaping change and neither is a transport. They are recorded
 here so the omission is a decision rather than an oversight.
 
-### 1. The seccomp sandbox — the highest-value thing left on the table
+### 1. The seccomp sandbox — taken up by ADR-0028
 
 `src/sandbox.c:191` installs a syscall allow-list with `getrandom`,
-`no_new_privs` and rlimits. Vallum has **none of this**, and says so plainly:
+`no_new_privs` and rlimits. When this note was written Vallum had **none of
+this**, and said so plainly in `docs/proof/privileges.md`, `daemon.md`, and
+`pentest.md`.
 
-- `docs/proof/privileges.md:109` — *"No `seccomp`. The syscall surface is
-  unchanged."*
-- `docs/proof/daemon.md:352` — *"Still no `seccomp`, no sandbox."*
-- `docs/proof/pentest.md:304` — names the absence as a finding.
-
-Vallum's privilege story stops at `set*id` + `PR_SET_NO_NEW_PRIVS`
-(`crates/vallum/src/privileges.rs:160`). That drops privilege but does not bound
+Vallum's privilege story then stopped at `set*id` + `PR_SET_NO_NEW_PRIVS`
+(`crates/vallum/src/privileges.rs:160`): that drops privilege but does not bound
 what the process may ask the kernel for. A seccomp filter is the next layer, and
 it is a technique — a list of syscalls the daemon actually makes — not a port of
 MOOR's C.
+
+Since this was written, ADR-0028 derived that list by tracing the daemon and
+installs it in log mode after the drop (`docs/proof/seccomp.md`). What remains is
+MOOR's other half: emptying the log, then enforcing, then rlimits, which no ADR
+covers yet.
 
 This is not a MOOR-shaped problem: it is a hardening item that MOOR happens to
 have solved and Vallum has not. It deserves its own ADR (a filter is a

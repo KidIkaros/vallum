@@ -29,4 +29,4 @@
 | [0025](0025-moor-techniques-not-code.md) | Take MOOR's padding and scheduling techniques as bounded shapes, not its code | proposed | 2026-11-06 |
 | [0026](0026-censorship-resistance.md) | Censorship resistance is a separate surface from traffic shaping | proposed | 2026-11-06 |
 | [0027](0027-mesh-topology-and-control-plane.md) | Mesh topology as an external agent — vallum-core stays a tunnel | proposed | 2026-11-07 |
-| [0028](0028-seccomp-filter.md) | A seccomp filter, derived from the daemon's own syscall surface | proposed | 2026-11-08 |
+| [0028](0028-seccomp-filter.md) | A seccomp filter, derived from the daemon's own syscall surface | accepted (log mode) | 2026-11-08 |

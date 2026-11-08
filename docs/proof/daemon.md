@@ -348,9 +348,12 @@ performance claim and should not be quoted as one.
 5. **No privilege separation in P6.4.** The process ran as the user that started
    it and kept the TUN descriptor for its lifetime. H5 adds
    `interface.user`/`interface.group`: after the interface and socket are open,
-   the daemon drops supplementary groups, `setgid`, `setuid`, sets
-   `PR_SET_NO_NEW_PRIVS`, and verifies the ids. Still no `seccomp`, no sandbox,
-   and no per-peer isolation — see `privileges.md`.
+   the daemon drops supplementary groups,   `setgid`, `setuid`, sets
+   `PR_SET_NO_NEW_PRIVS`, and verifies the ids. ADR-0028 adds a syscall
+   allow-list on the same line (`interface.seccomp`), inherited by every thread;
+   it ships in `log` mode, so the list is measured but not yet enforced. No
+   filesystem sandbox and no per-peer isolation — see `privileges.md` and
+   `seccomp.md`.
 6. **No performance or scale claim.** The under-load threshold (64 queued
    packets), the 100 ms tick, and the reader→loop queue bound (256 packets, ≈4 MiB
    — enforced by the channel, see `pentest.md` F1) are reasoned, not tuned. Nothing
