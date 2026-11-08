@@ -145,3 +145,84 @@ the copyright line must name the holder (ask the author to fix `LICENSE`), the
 permission notice must ship in a `THIRD-PARTY` file, and the copied files must
 stay identifiable as MOOR's rather than being silently rewritten into Vallum's
 style. None of the recommendations above require copying any.
+
+## Addendum (2026-11-08): what remains untaken, and the licence condition
+
+ADR-0025 took four shaping techniques and ADR-0026 took the transport question.
+Two areas of MOOR were named in this note and then fell between the two records,
+because neither is a shaping change and neither is a transport. They are recorded
+here so the omission is a decision rather than an oversight.
+
+### 1. The seccomp sandbox — the highest-value thing left on the table
+
+`src/sandbox.c:191` installs a syscall allow-list with `getrandom`,
+`no_new_privs` and rlimits. Vallum has **none of this**, and says so plainly:
+
+- `docs/proof/privileges.md:109` — *"No `seccomp`. The syscall surface is
+  unchanged."*
+- `docs/proof/daemon.md:352` — *"Still no `seccomp`, no sandbox."*
+- `docs/proof/pentest.md:304` — names the absence as a finding.
+
+Vallum's privilege story stops at `set*id` + `PR_SET_NO_NEW_PRIVS`
+(`crates/vallum/src/privileges.rs:160`). That drops privilege but does not bound
+what the process may ask the kernel for. A seccomp filter is the next layer, and
+it is a technique — a list of syscalls the daemon actually makes — not a port of
+MOOR's C.
+
+This is not a MOOR-shaped problem: it is a hardening item that MOOR happens to
+have solved and Vallum has not. It deserves its own ADR (a filter is a
+compatibility commitment across kernels and libc versions, and a wrong filter is
+a daemon that dies on a path nobody tested), but the note belongs here because
+this is where it was first seen.
+
+### 2. Vegas congestion control and SKIPS scheduling — considered, deferred
+
+ADR-0025's context paragraph names both; neither record decides them. The reason
+they were not taken is worth stating: for a point-to-point UDP tunnel, congestion
+control is largely the kernel's job — the datagram path has no send window of its
+own to manage, and Vallum's pacing already exists for the TCP carrier
+(`docs/proof/transport.md`). MOOR needs a scheduler because it multiplexes many
+circuits over fixed cells; Vallum has one flow per peer and no cell layer.
+
+Where this could matter later: the TCP carrier (ADR-0026) inherits the kernel's
+congestion control and degrades badly on loss — measured at 8.8–19.6 s for
+32 MiB at 5 % loss. A delay-based controller is not the fix for that (the loss is
+the problem, not the window), but a mesh relay forwarding many peers' traffic
+would have a genuine scheduling question. Deferred, not rejected.
+
+### 3. Conflux multi-path — an open question for the mesh, not for the tunnel
+
+Four-leg aggregation with a Feistel PRP over sequence numbers. Out of scope for a
+point-to-point VPN, and ADR-0025's Alternative 3 already refuses the anonymity
+stack it belongs to.
+
+It becomes interesting for a different reason after ADR-0027: a mesh node with
+both wifi and LTE has two paths to the same peer, and aggregating them is a real
+capability rather than an anonymity feature. That is an open question ADR-0027
+does not address, and it should be argued on its own terms — the sequence-number
+problem (reordering across legs) is the whole difficulty, and it is a datapath
+concern, which ADR-0027 deliberately kept out of core.
+
+### Licence condition, restated because it is now actionable
+
+The permission to use this project is a verbal grant from its author. That is
+good faith and it is not the thing that travels with code. Two concrete gaps:
+
+1. **`LICENSE` names no copyright holder.** It reads `Copyright (c) 2026` with
+   nobody's name. MIT's only obligation is to preserve the notice, and the notice
+   identifies no one — so there is no notice to preserve. Ask the author to fix
+   the line, in the repository, before any file is copied.
+2. **"His project" is two repositories.** The README's quick start clones
+   `github.com/0xdeadbeefnetwork/MOOR_PQ` and pipes a remote `setup.sh` into
+   `sudo bash`; the code read here is `codeberg.org/sickkk/MOOR_PQ` at `98bb70c`.
+   A grant covering one does not obviously cover the other.
+
+None of this is a live problem today: ADR-0025's decision is **import no MOOR
+code**, and nothing in this repository contains any. It becomes a problem the
+moment someone copies a file, which is exactly when nobody re-reads the licence.
+If a grant is wanted on the record, get it in writing, naming the repository and
+the commit, and put it beside this note.
+
+Verified 2026-11-08: the Codeberg `LICENSE` could not be re-fetched (HTTP 403 to
+a non-browser client), so the licence finding above stands as read at `98bb70c`
+rather than as a current observation.
