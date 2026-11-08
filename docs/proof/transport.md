@@ -281,7 +281,10 @@ stalling.
 
 The clean paths retransmit nothing in most runs, and the test allows up to one
 percent of a clean path's segments so that a rare repair cannot fail a measurement
-nobody asked to be perfect. Five of the sixteen runs did retransmit on the 40 ms
+nobody asked to be perfect. A repair still has to have a visible cause — a drop on
+either end, a timer, or duplicate data reported by the far end — because
+out-of-order arrivals are this path's ordinary state and explain nothing on their
+own. Five of the sixteen runs did retransmit on the 40 ms
 clean row — 0–360 segments of 23 182 — and the counters say what happened: every
 one of them was a fast retransmit (`rto` was zero on every clean row of every run),
 the far end's receive queue dropped nothing, and no timer fired. The row's time
@@ -302,8 +305,12 @@ exactly one segment each and drew exactly one DSACK, so those repairs were
 duplicates rather than losses. The one quiet run that repaired during this
 investigation re-sent 32 segments behind 33 out-of-order arrivals and drew a single
 DSACK: one of the 32 is accounted for as a duplicate, and the other 31 are not
-accounted for by any counter here. Both ends share one namespace, so these counters
-belong to the pair rather than to one side.
+accounted for by any counter here. `TCPDSACKRecv` counts DSACK blocks and one block
+can cover several segments, so the table also carries `dup segs`
+(`TCPDSACKRecvSegs`), which counts the segments that came in duplicate: that is the
+column that can attribute a repaired burst a segment at a time instead of a block
+at a time. Both ends share one namespace, so these counters belong to the pair
+rather than to one side.
 
 The qdisc's own drop counter cannot settle anything either: with `delay` in the
 qdisc that counter under-reports. A standalone TCP probe through `delay 1ms loss
