@@ -212,10 +212,25 @@ fn a_stream_orders_everything_behind_the_slowest_read() {
 /// wrong file returns zero for every run and makes a perfect path look perfect
 /// under any loss.
 fn tcp_segments() -> (u64, u64) {
+    let values = snmp("Tcp:", &["RetransSegs", "OutSegs"]);
+    (values[0], values[1])
+}
+
+/// The kernel's count of datagrams it dropped because a socket's receive queue
+/// was full — `RcvbufErrors` in `/proc/net/snmp`'s `Udp:` block.
+///
+/// A datagram socket has no flow control to make a sender wait, so this counter
+/// is the only thing between "the path dropped 5 %" and "the reader was too slow
+/// to notice": the datagrams are missing from the count either way.
+fn datagram_drops() -> u64 {
+    snmp("Udp:", &["RcvbufErrors"])[0]
+}
+
+fn snmp(block: &str, names_wanted: &[&str]) -> Vec<u64> {
     let text = std::fs::read_to_string("/proc/net/snmp").expect("snmp");
     let mut names: Vec<&str> = Vec::new();
     for line in text.lines() {
-        let Some(values) = line.strip_prefix("Tcp:") else {
+        let Some(values) = line.strip_prefix(block) else {
             continue;
         };
         let values: Vec<&str> = values.split_whitespace().collect();
@@ -237,9 +252,9 @@ fn tcp_segments() -> (u64, u64) {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0)
         };
-        return (read("RetransSegs"), read("OutSegs"));
+        return names_wanted.iter().map(|name| read(name)).collect();
     }
-    panic!("/proc/net/snmp has no Tcp: block");
+    panic!("/proc/net/snmp has no {block} block");
 }
 
 /// The kernel's count of segments dropped *after* they arrived, because the
@@ -251,10 +266,32 @@ fn tcp_segments() -> (u64, u64) {
 /// counter is what says so; without it, a harness that stalls and a qdisc that
 /// drops look the same from the sending end.
 fn receive_queue_drops() -> u64 {
+    netstat("TcpExt:", &["RcvPruned", "TCPRcvQDrop"])
+        .iter()
+        .sum()
+}
+
+/// Why the sender retransmitted: a timer fired, or duplicate acknowledgements
+/// said something was missing.
+///
+/// A retransmission on a path that was offered no loss has to be one of these,
+/// and which one it is decides whether the path lost the segment (a fast
+/// retransmit means duplicates reached the sender, so something arrived twice and
+/// something else did not) or the sender gave up waiting (an RTO, which on a clean
+/// path means the far end or this host stalled).
+fn retransmission_causes() -> (u64, u64, u64) {
+    let values = netstat(
+        "TcpExt:",
+        &["TCPTimeouts", "TCPFastRetrans", "TCPSpuriousRTOs"],
+    );
+    (values[0], values[1], values[2])
+}
+
+fn netstat(block: &str, names_wanted: &[&str]) -> Vec<u64> {
     let text = std::fs::read_to_string("/proc/net/netstat").expect("netstat");
     let mut names: Vec<&str> = Vec::new();
     for line in text.lines() {
-        let Some(values) = line.strip_prefix("TcpExt:") else {
+        let Some(values) = line.strip_prefix(block) else {
             continue;
         };
         let values: Vec<&str> = values.split_whitespace().collect();
@@ -275,23 +312,33 @@ fn receive_queue_drops() -> u64 {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0)
         };
-        return read("RcvPruned") + read("TCPRcvQDrop");
+        return names_wanted.iter().map(|name| read(name)).collect();
     }
-    // A driver without these counters is not a reason to fail a measurement.
-    0
+    // A kernel without these counters is not a reason to fail a measurement.
+    names_wanted.iter().map(|_| 0).collect()
 }
 
 /// How much payload one run pushes: a megabyte, in the carrier's real frame.
 const LOSSY_BYTES: usize = 32 << 20;
 
-/// The frames a run sends, and how many there are.
-fn sealed_frames() -> (usize, Vec<u8>) {
+/// The sealed packet a run sends, and how many of them there are.
+///
+/// The count is fixed by the *framed* size, because that is what the stream
+/// carries; the datagram comparison sends the same packets without the frame, so
+/// both carriers push the same traffic at the same rate and the only difference
+/// between the two measurements is how they respond to a lost one.
+fn sealed_packet() -> (usize, Vec<u8>) {
     let (suite, mut a_send, _b_recv) = link();
     let packet = a_send
         .seal_padded(&suite, &payload(1_398), 1_400)
         .expect("seal");
+    (LOSSY_BYTES / (packet.len() + 2), packet)
+}
+
+/// The frames a run sends, and how many there are.
+fn sealed_frames() -> (usize, Vec<u8>) {
+    let (packets, packet) = sealed_packet();
     let framed = frame(&packet).expect("frame");
-    let packets = LOSSY_BYTES / framed.len();
     (packets, framed)
 }
 
@@ -362,6 +409,7 @@ fn lossy_client() {
     }
 
     let (retrans_before, out_before) = tcp_segments();
+    let (rto_before, fast_before, spurious_before) = retransmission_causes();
     let started = Instant::now();
     for _ in 0..packets {
         tx.write_all(&framed).expect("write");
@@ -376,14 +424,84 @@ fn lossy_client() {
     let _ = tx.read(&mut sink);
     let elapsed = started.elapsed();
     let (retrans_after, out_after) = tcp_segments();
+    let (rto_after, fast_after, spurious_after) = retransmission_causes();
     let retransmitted = retrans_after.saturating_sub(retrans_before);
     let sent = out_after.saturating_sub(out_before);
 
     println!(
         "LOSSY packets={packets} bytes={} ms={} connect={connect_ms} retrans={retransmitted} \
-         sent={sent}",
+         sent={sent} rto={} fast={} spurious={}",
         packets * framed.len(),
-        elapsed.as_millis()
+        elapsed.as_millis(),
+        rto_after.saturating_sub(rto_before),
+        fast_after.saturating_sub(fast_before),
+        spurious_after.saturating_sub(spurious_before)
+    );
+}
+
+/// The far end of the datagram comparison: count what arrives, and count what the
+/// kernel dropped on arrival.
+///
+/// There is no end-of-stream marker to look for, so an idle gap ends the run —
+/// the pacing keeps datagrams arriving many times a second, and nothing here
+/// waits longer than a second for the next one.
+fn lossy_udp_server() {
+    let socket = std::net::UdpSocket::bind(lossy_address()).expect("bind");
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("timeout");
+    let before = datagram_drops();
+    let mut buffer = vec![0u8; 2_048];
+    let mut arrived = 0u64;
+    while socket.recv_from(&mut buffer).is_ok() {
+        arrived += 1;
+    }
+    println!(
+        "UDPSERVER datagrams={arrived} dropped={}",
+        datagram_drops().saturating_sub(before)
+    );
+}
+
+/// How many datagrams one comparison sends, and how long the sender pauses
+/// between bursts.
+///
+/// Pacing is not decoration. A stream is slowed by its receiver, so nothing has
+/// to be paced; datagrams are not, so a sender that loops flat out fills the far
+/// end's socket buffer and the arrivals stop being the path's count. Sixty-four
+/// datagrams is 93 KiB, comfortably inside the 208 KiB a UDP socket gets by
+/// default, and 40 ms is long enough for that burst to drain over any path here.
+const UDP_BURST: usize = 64;
+const UDP_PAUSE: Duration = Duration::from_millis(40);
+
+/// Datagrams per comparison: 4 MiB, a quarter of what the stream carries.
+///
+/// The volume is smaller because the pacing is: 4 MiB at 93 KiB per 40 ms is a
+/// couple of seconds per path, and the arrival count is a rate over a few
+/// thousand draws rather than thirty thousand. The loss rates are what is being
+/// compared, not the byte count.
+const LOSSY_UDP_BYTES: usize = 4 << 20;
+
+/// The near end of the datagram comparison: send the same sealed packets the
+/// stream sent, paced, and report what the sending took.
+fn lossy_udp_client() {
+    let (packets, packet) = sealed_packet();
+    let packets = packets.min(LOSSY_UDP_BYTES / packet.len());
+    let address = lossy_address();
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+    let started = Instant::now();
+    for burst in 0..packets.div_ceil(UDP_BURST) {
+        if burst > 0 {
+            std::thread::sleep(UDP_PAUSE);
+        }
+        let first = burst * UDP_BURST;
+        for _ in first..(first + UDP_BURST).min(packets) {
+            socket.send_to(&packet, address).expect("send");
+        }
+    }
+    println!(
+        "UDP datagrams={packets} bytes={} ms={}",
+        packets * packet.len(),
+        started.elapsed().as_millis()
     );
 }
 
@@ -408,6 +526,26 @@ struct Measurement {
     /// Receive-queue drops on the far end: this host's reader falling behind,
     /// never the path's loss.
     pruned: u64,
+    /// Retransmission timers that fired, and fast retransmits — which is the
+    /// difference between the sender giving up on an acknowledgement and the
+    /// acknowledgements themselves reporting a gap.
+    rto: u64,
+    fast: u64,
+    /// The same traffic as datagrams over the same path.
+    datagram: Datagram,
+}
+
+/// What one path cost a datagram.
+struct Datagram {
+    /// How long the sender was busy writing, pacing included.
+    ms: u64,
+    /// What the sender handed to the kernel: not the stream's frame count, since
+    /// the volume is smaller.
+    sent: u64,
+    arrived: u64,
+    /// Datagrams the far end's kernel dropped on arrival: this host's queue, not
+    /// the path, and the one thing that makes an arrival count trustworthy.
+    dropped: u64,
 }
 
 /// The paths worth measuring, and why each one is here.
@@ -484,6 +622,8 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     match std::env::var("VALLUM_LOSSY_ROLE").as_deref() {
         Ok("server") => return lossy_server(),
         Ok("client") => return lossy_client(),
+        Ok("udp_server") => return lossy_udp_server(),
+        Ok("udp_client") => return lossy_udp_client(),
         _ => {}
     }
 
@@ -598,12 +738,23 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
              VALLUM_LOSSY_ROLE=client VALLUM_LOSSY_ADDR=10.99.0.2:41820 \
                  {exe} --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture\n\
              wait \"$server\"\n\
+             VALLUM_LOSSY_ROLE=udp_server VALLUM_LOSSY_ADDR=10.99.0.2:41821 \
+                 nsenter -t \"$holder\" -n {exe} \
+                 --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture \
+                 > {udp_log} 2>&1 &\n\
+             udp_server=$!\n\
+             sleep 0.2\n\
+             VALLUM_LOSSY_ROLE=udp_client VALLUM_LOSSY_ADDR=10.99.0.2:41821 \
+                 {exe} --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture\n\
+             wait \"$udp_server\"\n\
              kill \"$holder\" 2>/dev/null || true\n\
              cat {log}\n\
-             rm -f {log}\n",
+             cat {udp_log}\n\
+             rm -f {log} {udp_log}\n",
             pidfile = pidfile.display(),
             exe = staged.display(),
             log = scratch(&path).display(),
+            udp_log = scratch(&path).with_extension("udp.log").display(),
         );
         let output = match escalation {
             Escalation::Sudo => {
@@ -648,6 +799,26 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
                 )
             });
 
+        let datagram = stdout
+            .lines()
+            .find(|line| line.starts_with("UDP "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no datagram measurement at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+            .to_owned();
+        let arrived = stdout
+            .lines()
+            .find(|line| line.starts_with("UDPSERVER "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the far end reported no datagrams at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+
         runs.push(Measurement {
             path,
             packets: field(&lossy, "packets"),
@@ -657,6 +828,14 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             sent: field(&lossy, "sent"),
             frames: field(served, "frames"),
             pruned: field(served, "pruned"),
+            rto: field(&lossy, "rto"),
+            fast: field(&lossy, "fast"),
+            datagram: Datagram {
+                ms: field(&datagram, "ms"),
+                sent: field(&datagram, "datagrams"),
+                arrived: field(arrived, "datagrams"),
+                dropped: field(arrived, "dropped"),
+            },
         });
     }
     let _ = std::fs::remove_file(&staged);
@@ -670,21 +849,69 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             .status();
     }
 
-    println!(
-        "{:>18} {:>8} {:>10} {:>8} {:>22} {:>8} {:>8}",
-        "path", "connect", "time", "frames", "retransmitted", "arrived", "pruned"
+    // Cargo swallows a passing test's stdout, so the tables are built as text and
+    // printed from one place: a gate that wants them as evidence asks for the file
+    // (`VALLUM_LOSSY_TABLE`), and a green check then carries the numbers the run
+    // measured instead of a duration somebody has to trust.
+    let mut report = String::new();
+    macro_rules! say {
+        ($($arg:tt)*) => {{
+            let line = format!($($arg)*);
+            println!("{line}");
+            report.push_str(&line);
+            report.push('\n');
+        }};
+    }
+
+    say!(
+        "\nthe stream, one connection, 32 MiB in {} frames",
+        runs[0].packets
+    );
+    say!(
+        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8}",
+        "path",
+        "connect",
+        "time",
+        "frames",
+        "retransmitted",
+        "by rto/fast",
+        "arrived",
+        "pruned"
     );
     for run in &runs {
-        println!(
-            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<11} {:>8} {:>8}",
+        say!(
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8}",
             run.path.label,
             run.connect_ms,
             run.ms,
             run.packets,
             run.retrans,
             run.sent,
+            format!("{}/{}", run.rto, run.fast),
             run.frames,
             run.pruned
+        );
+    }
+    say!(
+        "\n4 MiB of the same packets as datagrams, paced at 93 KiB per 40 ms so the \
+         far end's queue is never the limit"
+    );
+    say!(
+        "{:>18} {:>10} {:>10} {:>10} {:>14}",
+        "path",
+        "send took",
+        "sent",
+        "arrived",
+        "buffer drops"
+    );
+    for run in &runs {
+        say!(
+            "{:>18} {:>7} ms {:>10} {:>10} {:>14}",
+            run.path.label,
+            run.datagram.ms,
+            run.datagram.sent,
+            run.datagram.arrived,
+            run.datagram.dropped
         );
     }
 
@@ -717,9 +944,10 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             // and every number below is wrong.
             if run.retrans > 0 {
                 assert!(
-                    run.pruned > 0,
-                    "{} retransmitted {} of {} segments with no loss offered and no \
-                     receive-queue drops on the far end",
+                    run.pruned > 0 || run.rto > 0 || run.fast > 0,
+                    "{} retransmitted {} of {} segments with no loss offered, no \
+                     receive-queue drops on the far end, and no timer or duplicate-acknowledgement \
+                     event at the sending end",
                     run.path.label,
                     run.retrans,
                     run.sent
@@ -737,21 +965,15 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             }
             continue;
         }
+        // Repairs are the evidence the qdisc applied, and the datagram rows below
+        // confirm it from the other side. Wall clock is not: at a 1 ms round trip
+        // a 2 % path can absorb every repair inside a window far larger than the
+        // path's delay, and a run then finishes nearly as fast as a clean one. That
+        // is the outcome, and this test reports it rather than asserting it.
         assert!(
             run.retrans > 0,
             "{} produced no retransmissions, so the netem qdisc did not apply",
             run.path.label
-        );
-        let clean = runs
-            .iter()
-            .find(|other| other.path.loss == 0 && other.path.delay_ms == run.path.delay_ms)
-            .expect("a clean path with the same delay");
-        assert!(
-            run.ms > clean.ms,
-            "{} took {} ms against {} ms clean, so the offered loss did not apply",
-            run.path.label,
-            run.ms,
-            clean.ms
         );
     }
     // The delay, checked on the handshake rather than on the transfer: a bulk
@@ -778,9 +1000,36 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             .find(|run| run.path.loss == loss && run.path.delay_ms == delay_ms)
             .expect("the path is in the table")
     };
+    // The datagram rows answer the other half of "what does the carrier cost":
+    // the same packets over the same qdisc, with nothing waiting for an
+    // acknowledgement. What arrives is what the path allowed, and the kernel's
+    // own drop counter has to be zero for that to be the path's doing rather
+    // than the reader's.
+    for run in &runs {
+        assert_eq!(
+            run.datagram.dropped, 0,
+            "{} dropped {} datagrams on arrival, so the arrival count is this host's, not the \
+             path's",
+            run.path.label, run.datagram.dropped
+        );
+        // Random loss is random: the tolerance is two percent of the datagrams —
+        // five times the spread this many draws has, and still far tighter than
+        // the gap between "no loss" and "the loss that was offered".
+        let sent = run.datagram.sent;
+        let expected = sent * u64::from(100 - run.path.loss) / 100;
+        let tolerance = sent / 50;
+        assert!(
+            run.datagram.arrived.abs_diff(expected) <= tolerance,
+            "{} delivered {} datagrams where {} % loss predicts about {expected} of {sent}",
+            run.path.label,
+            run.datagram.arrived,
+            run.path.loss,
+        );
+    }
+
     let five = at(5, base.path.delay_ms);
     let far = at(2, delayed.path.delay_ms);
-    println!(
+    say!(
         "the carrier on {} paths, {packets} frames each: {} ms clean, {} ms at 5% loss (\
          {:.1}x), {} ms at 40 ms RTT and 2% loss ({:.1}x), every frame delivered",
         runs.len(),
@@ -790,4 +1039,13 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         far.ms,
         far.ms as f64 / base.ms as f64,
     );
+    say!(
+        "paced datagrams, the same path: {} arrived clean and {} at 5% loss — in every frame or \
+         in time, never both",
+        base.datagram.arrived,
+        five.datagram.arrived
+    );
+    if let Ok(path) = std::env::var("VALLUM_LOSSY_TABLE") {
+        std::fs::write(path, &report).expect("write the table");
+    }
 }

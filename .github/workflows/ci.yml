@@ -134,7 +134,29 @@ jobs:
         # be restricted, and the skip stays a skip.
         env:
           VALLUM_LOSSY_REQUIRED: ${{ github.event.repository.private && '1' || '0' }}
+          # Where the measurement leaves its tables. Cargo captures a passing
+          # test's output, so without this the numbers exist only on the machine
+          # that ran them.
+          VALLUM_LOSSY_TABLE: ${{ runner.temp }}/carrier-table.txt
         run: cargo test --workspace
+
+      - name: Record the carrier's measured tables
+        if: always()
+        # A green check says the measurement ran; the summary says what it found,
+        # so a change in the transport's cost is visible in the run that changed
+        # it rather than in a doc nobody re-measures.
+        run: |
+          table="${{ runner.temp }}/carrier-table.txt"
+          if [ -s "$table" ]; then
+            {
+              echo '### TCP carrier and datagrams, measured on this runner'
+              echo '```'
+              cat "$table"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'the carrier measurement wrote no table, so it did not run' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Test the lean daemon (no TUI)
         working-directory: vallum

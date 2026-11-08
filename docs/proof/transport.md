@@ -221,32 +221,45 @@ measures, not from the label:
 
 | path | time for 32 MiB | segments retransmitted | frames delivered |
 |---|---|---|---|
-| 1 ms round trip, clean | 0.04–0.18 s | 0 of ~23 190 | 23 014 |
-| 1 ms round trip, 2 % loss | 0.5–2.3 s | 530–682 of 23 175 | 23 014 |
-| 1 ms round trip, 5 % loss | 13.2–17.7 s | 1 167–1 272 of 23 175 | 23 014 |
-| 40 ms round trip, clean | 0.29–0.34 s | 0 | 23 014 |
+| 1 ms round trip, clean | 0.03–0.18 s | 0 of ~23 185 | 23 014 |
+| 1 ms round trip, 2 % loss | 0.04–2.5 s | 288–725 of 23 178 | 23 014 |
+| 1 ms round trip, 5 % loss | 13.2–17.9 s | 1 167–1 344 of 23 175 | 23 014 |
+| 40 ms round trip, clean | 0.28–0.42 s | 0 to 90 of ~23 180 | 23 014 |
 | 40 ms round trip, 2 % loss | 26–48 s | 410–554 of 23 176 | 23 014 |
 
-Ranges are the spread across six runs on a machine that was also building, not a
-confidence interval: the retransmission counts hold still between runs and the
-wall clock does not.
+Ranges are the spread across seven runs on a machine that was also building, not a
+confidence interval: the retransmission counts hold roughly still between runs and
+the wall clock does not.
 
 Not one byte lost on any path: a stream loses time, not data. The retransmission
-rate matches the offered loss — 1.8–2.9 % at 2 %, 5.0–5.5 % at 5 % — so TCP with
-SACK repairs what `netem` drops without amplifying it, and the cost is the round
-trips the repairs wait for rather than the bytes they resend. Dividing the excess
-time by the number of repairs makes that literal: **0.9–3.3 ms per lost segment at
-a 1 ms round trip and 2 % loss**, 11–14 ms at 5 % (the congestion window collapses
-as well as being repaired), and **46–100 ms on the 40 ms path**. Loss costs a round
-trip, and a round trip costs what the path says it does.
+rate matches the offered loss — 1.2–2.9 % at 2 %, 5.0–5.8 % at 5 % — so TCP with
+SACK repairs what `netem` drops without amplifying it, and what the repairs cost is
+the round trips they wait for rather than the bytes they resend. Dividing the
+excess time by the number of repairs makes that literal on the paths where the
+stream actually stalls: **11–14 ms per repair at 5 % loss on a 1 ms round trip**
+(the congestion window collapses as well as being repaired) and **46–116 ms on the
+40 ms path**. Loss costs a round trip, and a round trip costs what the path says it
+does.
+
+The 1 ms round trip at 2 % loss is the row that will not sit still, and the reason
+is worth stating rather than averaging away. A lost segment is repaired one round
+trip later, and at one millisecond there are hundreds of round trips available
+inside the time the window needs to drain: the fastest run finished in 44 ms — as
+fast as a clean path — having retransmitted 288 segments, because every repair fit
+inside a window far larger than the path's delay. In other runs the same path took
+2.5 s, with the congestion window collapsing and the connection running at the
+Mathis bound instead. Both are the carrier behaving correctly; neither is the
+carrier's cost on a real path, where a round trip is not one millisecond. The
+rows that answer the question are 5 % at 1 ms and 2 % at 40 ms.
 
 The two clean rows are the control for both claims. Delay alone barely moves a
-bulk transfer: 0.29–0.34 s for 32 MiB over 40 ms against 0.04–0.18 s over 1 ms,
+bulk transfer: 0.29–0.42 s for 32 MiB over 40 ms against 0.04–0.18 s over 1 ms,
 because at this size the window is doing the work, and a 40× larger window is 40×
-more in flight rather than 40× the time. Loss does move it — the same 40 ms path at
-2 % is 26–48 s — and that is the whole argument for the carrier being a fallback:
-it is not the retransmissions that hurt, it is that each one is repaid a round trip
-later, and a real path's round trip is not one millisecond.
+more in flight rather than 40× the time. Loss does move it once the round trip is
+long enough that a repair cannot hide — the same 40 ms path at 2 % is 26–48 s — and
+that is the whole argument for the carrier being a fallback: it is not the
+retransmissions that hurt, it is that each one is repaid a round trip later, and a
+real path's round trip is not one millisecond.
 
 The `netem` queue limit is raised to 100 000 packets. Its default of 1 000 overflows
 during a burst of this size and drops segments the path was not asked to drop —
@@ -254,10 +267,26 @@ observed as 45 retransmissions on a *clean* path, which would have been read as
 noise in every lossy row below.
 
 A retransmission on a *clean* path is a statement about the harness, not about the
-carrier, so the far end reports its own receive-queue drops (`RcvPruned` +
-`TCPRcvQDrop`) beside the frame count. A clean path may only retransmit where those
-drops explain it, and never more than a percent of its segments; anything else is a
-qdisc, or a reader, being measured in place of the path.
+carrier, so the run reports the counters that can explain one. The far end reports
+its receive-queue drops (`RcvPruned` + `TCPRcvQDrop`); the sending end reports
+which of the two mechanisms fired — `TCPTimeouts` against `TCPFastRetrans` — because
+a fast retransmit means duplicate acknowledgements reached the sender (so something
+was dropped or reordered) and an RTO means the sender gave up waiting (so an
+acknowledgement was). The table carries both, so a lossy row says not only that it
+paid for repairs but which repairs it paid for: at 5 % loss a handful of timers and
+most of the retransmissions are fast retransmits, which is TCP recovering without
+stalling.
+
+The clean paths retransmit nothing in most runs, and the test allows up to one
+percent of a clean path's segments so that a rare timer cannot fail a measurement
+nobody asked to be perfect — but "up to one percent" is not an explanation. Across
+about a dozen runs, two of the 40 ms clean rows retransmitted 64 and 95 segments of
+23 180 with the far end's receive queue empty, which is 0.3–0.4 %, and **why is not
+established**. The cause columns are the instrument for the next occurrence: a
+nonzero `fast` count would point at reordering or a dropped datagram in the delayed
+path, a nonzero `rto` at a stalled acknowledgement. Until one of those is measured,
+the 40 ms clean baseline should be read as "about 0.3 s, occasionally with a few
+hundred segments of extra work", not as a path that is provably drop-free.
 
 The measurement needs a network namespace, `tc` and `nsenter`. The namespace comes
 from `unshare -Urn` where the host allows unprivileged user namespaces, and from
@@ -266,8 +295,53 @@ because the CI runner is one of those hosts. Where neither is available the test
 names what is missing and returns rather than reporting a pass it did not earn; the
 gate runner sets `VALLUM_LOSSY_REQUIRED=1`, where that same absence is a failure
 instead — the transport's cost is evidence, and evidence that can disappear while
-the suite stays green is not. It takes about a minute where it runs, most of it the
-40 ms and 2 % path.
+the suite stays green is not. It takes about 75 seconds where it runs, most of it
+the 40 ms and 2 % path.
+
+The tables are also what the gate runner keeps: `VALLUM_LOSSY_TABLE` names a file
+the test writes them to, and `ci.yml` appends it to the run's step summary. A green
+check then carries the numbers the run measured — a change in the transport's cost
+shows up in the run that changed it, not in a document nobody re-measures.
+
+### 2.9 The same path as datagrams
+
+The carrier's cost is only half the comparison: the other half is what the default
+carrier does with the same traffic over the same qdisc. After each stream run the
+same namespaces, the same `netem` and the same sealed packets carry 4 MiB as
+datagrams — one send each, nothing waiting for an acknowledgement — and the far end
+reports both what arrived and what its kernel dropped because a queue was full
+(`RcvbufErrors`). The drop count is what makes an arrival count mean anything: a
+datagram socket has no flow control, so a fast sender overruns a slow reader and
+the missing datagrams look exactly like a lossy path.
+
+That is why the datagrams are paced, 64 at a time (93 KiB) every 40 ms. Sixty-four
+datagrams fit inside the 208 KiB a UDP socket gets by default, so a burst always
+drains over any path here, and every datagram that does not arrive was dropped by
+the qdisc. The pacing is also why this leg carries 4 MiB rather than 32: at that
+rate it is two seconds per path, and the comparison is of loss rates, not bytes.
+
+| path | datagrams sent | arrived | dropped on arrival |
+|---|---|---|---|
+| 1 ms round trip, clean | 2 880 | 2 880 (100 %) | 0 |
+| 1 ms round trip, 2 % loss | 2 880 | 2 804–2 828 (97.4–98.2 %) | 0 |
+| 1 ms round trip, 5 % loss | 2 880 | 2 734–2 746 (94.9–95.3 %) | 0 |
+| 40 ms round trip, clean | 2 880 | 2 880 (100 %) | 0 |
+| 40 ms round trip, 2 % loss | 2 880 | 2 813–2 829 (97.7–98.2 %) | 0 |
+
+Four runs. Random loss is random, so the test's assertion is not the exact count:
+arrivals must fall within two percent of what the offered loss predicts, which is
+five times the spread 2 880 draws have and still far tighter than the gap between
+"no loss" and "the loss that was offered".
+
+The two carriers, same path, same offered loss: the datagram run loses the
+datagrams and stays quick, and the stream loses the time and delivers everything.
+At 5 % loss on a 1 ms path that is 95 % of the arrivals against every frame in
+14–18 s; at 2 % on a 40 ms path it is 98 % of the arrivals against every frame in
+26–48 s. Neither number is an argument that one carrier is better: the datagram is
+what a VPN carries, and a frame that never arrives is a retransmission the
+*application* decides about, at whatever cost it chooses. The stream is the
+fallback that promises delivery where UDP is blocked, and this is the promise's
+price.
 
 ---
 
