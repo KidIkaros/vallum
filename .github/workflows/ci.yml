@@ -207,6 +207,16 @@ jobs:
         # skipped — it either passes one way or fails the job.
         run: bash scripts/e2e-netns.sh || sudo -E bash scripts/e2e-netns.sh
 
+      - name: Run the syscall allow-list gate
+        working-directory: vallum
+        # ADR-0028 step 4: the daemon must not make a syscall its own filter
+        # does not name, or `enforce` mode kills it on that path in production.
+        # The traced syscall set comes from the binary's own list, so the two
+        # cannot disagree. `strace` is a dependency the script refuses to skip.
+        run: |
+          command -v strace > /dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)
+          bash scripts/seccomp-trace.sh || sudo -E bash scripts/seccomp-trace.sh
+
   audit:
     name: advisories and supply chain
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

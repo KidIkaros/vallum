@@ -16,6 +16,7 @@ use vallum::commands::metrics::MetricsArgs;
 use vallum::commands::peer::PeerArgs;
 use vallum::commands::policy::PolicyArgs;
 use vallum::commands::run::RunArgs;
+use vallum::commands::sandbox::SandboxArgs;
 use vallum::commands::server::ServerArgs;
 use vallum::commands::setup::SetupArgs;
 use vallum::commands::status::StatusArgs;
@@ -23,8 +24,8 @@ use vallum::commands::status::StatusArgs;
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::uninstall::UninstallArgs;
 use vallum::commands::{
-    bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run, server,
-    setup, status, uninstall,
+    bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run, sandbox,
+    server, setup, status, uninstall,
 };
 use vallum::Error;
 
@@ -108,6 +109,8 @@ enum Command {
     Tui(TuiArgs),
     /// Remove everything the installer and setup put on this host.
     Uninstall(UninstallArgs),
+    /// Print the syscall allow-list the daemon installs after the privilege drop.
+    Sandbox(SandboxArgs),
     /// Print a shell completion script.
     Completions(CompletionsArgs),
 }
@@ -214,6 +217,7 @@ fn main() -> ExitCode {
         }),
         Command::Peer(args) => peer::peer(&args),
         Command::Metrics(args) => metrics::metrics(&args),
+        Command::Sandbox(args) => sandbox::list(&args),
         Command::Identity(args) => identity::identity(&args),
         Command::ImportBundle(args) => import::import(&args),
         Command::Uninstall(args) => uninstall::uninstall(&args),

@@ -39,6 +39,10 @@ seccomp = "log"      # or "enforce"; "log" is the default
 ```
 
 The mode is printed at startup (`syscall filter installed in log mode`).
+`vallum sandbox` prints the list the binary would install (a table by default,
+`--names` one per line, `--json` for machines), and `vallum doctor` reports the
+mode this configuration resolves to — `FAIL` when the kernel could not install
+the filter, which is the answer the daemon would give by refusing to start.
 
 ## 3. How the list was derived
 
@@ -70,6 +74,12 @@ the daemon cannot spawn a process or open a file.
 The list is in `crates/vallum/src/sandbox.rs`, grouped by what each group is for
 (one group is the tunnel, one is the control plane, one is thread creation, one
 is the allocator). 81 syscalls are allowed.
+
+The same exercise, run through the committed script (`scripts/seccomp-trace.sh`),
+sees 27 distinct syscalls, all of them on the list. The two counts differ because
+the exercises are not identical — the script uses `vallum show` as the control
+client and runs the shutdown the same way every time. Neither count is the
+argument: the guard diffs the trace against the list, not against this page.
 
 ### What the trace did not reach
 
@@ -117,17 +127,40 @@ descriptors it was handed.
    dies on `SIGSYS` when it tries `execve`), and the 20-syscall post-startup
    trace is entirely inside the list. The live run belongs to CI, where the
    privilege drop is exercised under `sudo`.
-3. **The CI guard does not exist yet.** ADR-0028 step 4: fail the build when a
-   trace of the test suite observes a syscall the list does not allow. Until
-   then the list is only as current as this document.
-4. **A path that shells out would now die.** If any code after the drop spawns a
-   process — policy installation is the one to check — enforce mode kills the
-   daemon on it. Log mode is the answer until that is settled.
+3. **The guard covers the traced paths only.** `scripts/seccomp-trace.sh` (run
+   by the `e2e` job in CI) repeats the exercise and fails when the daemon's
+   syscalls are not a subset of `vallum sandbox --names`. It has been shown to
+   fail: removing `sendto` from the list made it exit 1 and name that syscall.
+   What it cannot see is §3's list of gaps — threads that existed when `strace`
+   attached, the TCP carrier, `--tui`. A syscall added on one of those paths
+   still reaches a deployment before anything notices. The list is as current as
+   the exercise, not as the code.
+4. **Nothing spawns a process after the drop — as of this audit.** Every place
+   the daemon could run a program was checked: `nft` (policy installation) is
+   called from `vallum policy`, `status`, and `metrics`, never from `run`; `ip`
+   from `tun`, `hostnet`, `server`, and `quick`, all before the drop; `ping` only
+   from `doctor --probe-mtu` and `setup`; `systemctl` from `service`, `doctor`,
+   and the dashboard. The daemon path spawns nothing, so no exception to the
+   list was needed. If one is added, enforce mode kills the daemon on it, and a
+   traced path would also show `execve` and fail the guard — but a path the
+   exercise does not take would only be found by the log.
 
 ## 6. How to reproduce the trace
 
-The exercise is not a script in this repository; it was run once to produce the
-list above, with two configs that differed only in name, address, listen port,
-and peer, and with `strace -f -p` attached after the handshake. A future
-derivation should be committed as a script beside this document rather than
-re-invented, and the CI guard in §5.3 is how it stops being re-invented at all.
+```
+cargo build -p vallum
+scripts/seccomp-trace.sh              # 0: every traced syscall is on the list
+KEEP=1 scripts/seccomp-trace.sh       # keep the configs, logs and raw trace
+```
+
+The script builds the same exercise — two configs that differ only in name,
+address, listen port and peer, a real TUN each, the outer path over loopback
+UDP, a handshake, three pings, a control request, `SIGTERM` — inside one network
+namespace and attaches `strace -f -p` to the client daemon after the tunnel is
+up. It reads the allow-list back from the binary, so it needs no privileges of
+its own beyond the user namespace (or `sudo` where user namespaces are
+restricted), and `ip`, `ping`, and `strace`.
+
+When it fails it prints the syscalls the list does not name, keeps the scratch
+directory, and points at the raw trace — which is the whole edit: add them to
+`ALLOWED` in `crates/vallum/src/sandbox.rs`, or stop making the call.

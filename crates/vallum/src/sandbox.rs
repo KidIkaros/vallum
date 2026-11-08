@@ -238,6 +238,72 @@ pub fn install(_mode: Mode) -> Result<(), Error> {
     Ok(())
 }
 
+/// Whether this kernel can install the filter, and what is missing if it cannot.
+///
+/// [`install`] fails closed, so the daemon refuses to start rather than run
+/// unfiltered when this says no. That makes the answer worth showing an operator
+/// *before* they restart into it, which is why `vallum doctor` reports it.
+///
+/// It is a prediction, not a proof: only an install proves it, and a diagnostic
+/// must not install anything. The two facts that decide it are checked directly
+/// — `PR_GET_SECCOMP` exists, and the kernel's action list carries the two
+/// actions the filter uses. The second read is evidence, not authority: a
+/// container runtime can mask `/proc/sys/kernel/seccomp/actions_avail`, so a
+/// missing entry is reported as the doubt it is.
+///
+/// # Errors
+///
+/// What is missing: no `seccomp` in this kernel, an action older than 4.14, or an
+/// architecture with no syscall table.
+#[cfg(target_os = "linux")]
+pub fn support() -> Result<(), String> {
+    // A kernel built without `CONFIG_SECCOMP` omits this field entirely; with it,
+    // the field is there whether or not a filter is installed, and its value is
+    // the mode this process is in (which for a diagnostic is 0).
+    const STATUS: &str = "/proc/self/status";
+    let status = std::fs::read_to_string(STATUS)
+        .map_err(|error| format!("`{STATUS}` is unreadable ({error})"))?;
+    if !status.lines().any(|line| line.starts_with("Seccomp:")) {
+        return Err(format!(
+            "`{STATUS}` has no `Seccomp:` line, which is what a kernel built without \
+             CONFIG_SECCOMP looks like"
+        ));
+    }
+    seccompiler::TargetArch::try_from(std::env::consts::ARCH)
+        .map_err(|why| format!("no syscall table for `{}`: {why}", std::env::consts::ARCH))?;
+    const ACTIONS: &str = "/proc/sys/kernel/seccomp/actions_avail";
+    let available = std::fs::read_to_string(ACTIONS)
+        .map_err(|error| format!("`{ACTIONS}` is unreadable ({error})"))?;
+    for action in ["log", "kill_process"] {
+        if !available.split_whitespace().any(|name| name == action) {
+            return Err(format!(
+                "`{ACTIONS}` does not list `{action}`: {} — the filter needs the seccomp \
+                 actions of Linux 4.14",
+                available.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// As [`support`], for a build without the Linux backend.
+///
+/// # Errors
+///
+/// Always: there is no filter to install, and the configuration says so when an
+/// operator asks for one.
+#[cfg(not(target_os = "linux"))]
+pub fn support() -> Result<(), String> {
+    Err("seccomp is only implemented on Linux".to_owned())
+}
+
+/// The allow-list as `(name, number)` pairs, for `vallum sandbox` and the CI
+/// guard that diffs a trace against it.
+#[must_use]
+pub fn entries() -> Vec<(&'static str, i64)> {
+    ALLOWED.to_vec()
+}
+
 #[cfg(all(test, target_os = "linux"))]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -266,6 +332,17 @@ mod tests {
                 !names.contains(&refused),
                 "the allow-list lets `{refused}` through"
             );
+        }
+    }
+
+    /// If this fails the daemon will not start with `interface.seccomp`, so it is
+    /// worth knowing before a deployment finds out. The kernel this runs on is
+    /// expected to have seccomp; a container that masks the action list makes
+    /// this fail with the file's contents in the message.
+    #[test]
+    fn this_kernel_can_install_the_filter() {
+        if let Err(why) = support() {
+            panic!("the syscall filter cannot be installed here: {why}");
         }
     }
 

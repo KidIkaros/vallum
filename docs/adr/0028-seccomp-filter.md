@@ -246,7 +246,7 @@ run with the privileges it was meant to shed."*
 | 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 81 entries that cover it |
 | 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
 | 3. Empty the log | **not done** — the list has been traced once, not exercised; this is where the real work is |
-| 4. Add the CI guard | **not done** |
+| 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
 | 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
 
 What has been verified: the filter installs and kills what the list does not
@@ -256,8 +256,13 @@ trace is on the list. What has not: a live daemon in enforce mode, because the
 privilege drop calls `setgroups`, which an unprivileged user namespace denies —
 that run belongs to CI, where the drop happens under `sudo`.
 
+The guard is checked both ways: it passes on the current list, and removing
+`sendto` from the list made it exit 1 and name that syscall — a guard nobody has
+seen fail is a guard that might not be able to.
+
 Open question 1 is settled: its own module (`sandbox.rs`). Question 2 is settled
-for the startup log line; `doctor` does not report the mode yet.
+too: the mode is a startup log line, `vallum doctor` reports it (with `FAIL` when
+the kernel could not install the filter), and `vallum sandbox` prints the list.
 
 ## Open questions
 

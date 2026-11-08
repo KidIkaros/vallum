@@ -30,7 +30,7 @@ cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== supply chain"
@@ -59,6 +59,8 @@ if [ "${E2E:-0}" = "1" ]; then
     cargo build -p vallum -p vallum-quick
     echo "== e2e (netns)"
     bash scripts/e2e-netns.sh
+    echo "== syscall allow-list (ADR-0028)"
+    bash scripts/seccomp-trace.sh
 fi
 echo "== release signature round trip"
 # install.sh's trust decision, exercised offline: sign a fake SHA256SUMS with

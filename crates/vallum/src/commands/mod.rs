@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod peer;
 pub mod policy;
 pub mod run;
+pub mod sandbox;
 pub mod server;
 pub mod setup;
 pub mod status;

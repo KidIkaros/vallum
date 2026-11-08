@@ -181,6 +181,7 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         // a closed UDP port and a closed TCP port are the same failure with a
         // different fix.
         checks.push(check_carrier(resolved.carrier));
+        checks.push(check_sandbox(resolved));
         if args.probe_path {
             checks.push(check_path_probe(resolved));
         }
@@ -279,6 +280,44 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
 /// it changes the meaning of every other line in the report, and because the
 /// one failure an operator cannot see is two ends configured differently — TCP
 /// on one side and UDP on the other is silence, not an error message.
+/// Whether the syscall filter would be installed, and what it would do.
+///
+/// Three states are worth telling apart, because they are three different
+/// problems: no filter at all (there is no privilege drop to attach it to), a
+/// filter that only logs, and a filter the kernel would refuse. The first two
+/// are the operator's choice; the third is the kernel's, and it means the
+/// daemon would refuse to start rather than run unfiltered.
+fn check_sandbox(resolved: &crate::config::Resolved) -> Check {
+    if resolved.privileges.is_none() {
+        return Check::new(
+            "seccomp",
+            Status::Warn,
+            "no syscall filter: it is installed with the privilege drop, so set \
+             `interface.user` or `interface.group`",
+        );
+    }
+    if let Err(why) = crate::sandbox::support() {
+        return Check::new(
+            "seccomp",
+            Status::Fail,
+            format!("the daemon would refuse to start with `interface.seccomp`: {why}"),
+        );
+    }
+    if resolved.sandbox == crate::sandbox::Mode::Enforce {
+        return Check::new(
+            "seccomp",
+            Status::Pass,
+            "enforced: a syscall off the allow-list kills the daemon",
+        );
+    }
+    Check::new(
+        "seccomp",
+        Status::Warn,
+        "log mode: a syscall off the allow-list is logged and allowed; \
+         `interface.seccomp = \"enforce\"` kills the daemon instead",
+    )
+}
+
 fn check_carrier(carrier: vallum_config::Carrier) -> Check {
     let detail = match carrier {
         vallum_config::Carrier::Udp => {
