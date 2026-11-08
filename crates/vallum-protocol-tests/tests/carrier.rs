@@ -242,6 +242,45 @@ fn tcp_segments() -> (u64, u64) {
     panic!("/proc/net/snmp has no Tcp: block");
 }
 
+/// The kernel's count of segments dropped *after* they arrived, because the
+/// receiving socket's queue was full: `RcvPruned` for the in-order queue,
+/// `TCPRcvQDrop` for the backlog.
+///
+/// It is the difference between a lossy path and a slow reader. A clean path that
+/// retransmits has one explanation — the far end could not keep up — and this
+/// counter is what says so; without it, a harness that stalls and a qdisc that
+/// drops look the same from the sending end.
+fn receive_queue_drops() -> u64 {
+    let text = std::fs::read_to_string("/proc/net/netstat").expect("netstat");
+    let mut names: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let Some(values) = line.strip_prefix("TcpExt:") else {
+            continue;
+        };
+        let values: Vec<&str> = values.split_whitespace().collect();
+        // Same header-or-values discrimination as `/proc/net/snmp`: the header
+        // names counters, the values are numbers.
+        if values
+            .first()
+            .is_none_or(|value| value.parse::<u64>().is_err())
+        {
+            names = values;
+            continue;
+        }
+        let read = |name: &str| -> u64 {
+            names
+                .iter()
+                .position(|candidate| *candidate == name)
+                .and_then(|index| values.get(index))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0)
+        };
+        return read("RcvPruned") + read("TCPRcvQDrop");
+    }
+    // A driver without these counters is not a reason to fail a measurement.
+    0
+}
+
 /// How much payload one run pushes: a megabyte, in the carrier's real frame.
 const LOSSY_BYTES: usize = 32 << 20;
 
@@ -287,7 +326,7 @@ fn lossy_server() {
             Err(error) => panic!("read: {error}"),
         }
     }
-    println!("SERVER frames={frames}");
+    println!("SERVER frames={frames} pruned={}", receive_queue_drops());
 }
 
 /// The near end: write the frames and report what the path cost.
@@ -366,6 +405,9 @@ struct Measurement {
     retrans: u64,
     sent: u64,
     frames: u64,
+    /// Receive-queue drops on the far end: this host's reader falling behind,
+    /// never the path's loss.
+    pruned: u64,
 }
 
 /// The paths worth measuring, and why each one is here.
@@ -404,6 +446,37 @@ const PATHS: [Path; 5] = [
     },
 ];
 
+/// How the measurement got the namespaces it puts the two ends in.
+#[derive(Clone, Copy)]
+enum Escalation {
+    /// `unshare -Urn`: root inside a namespace of our own, without a password.
+    Unprivileged,
+    /// `sudo -n unshare -n`: a namespace of root's, on a host that restricts the
+    /// unprivileged kind.
+    Sudo,
+}
+
+/// Runs `program args` the way the measurement will run it, so a probe answers
+/// the question actually asked: `tc` can be absent from a runner's `PATH` and
+/// present in root's.
+fn probed(escalation: Option<Escalation>, program: &str, args: &[&str]) -> bool {
+    let mut command = match escalation {
+        Some(Escalation::Sudo) => {
+            let mut command = Command::new("sudo");
+            command.arg("-n").arg(program);
+            command
+        }
+        _ => Command::new(program),
+    };
+    command
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[test]
 fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     // The same test binary, in three roles: the parent sets the path up, and the
@@ -414,25 +487,36 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         _ => {}
     }
 
-    // An unprivileged user namespace, `tc`, and `nsenter` are what make a path
-    // lose packets. Where any is missing this is not a statement about the
-    // carrier, so it is a skip, not a failure.
-    // Checked one at a time so the message names what is missing: "not available
-    // here" on its own sends someone looking at the wrong package.
+    // A network namespace to put the two ends in, a qdisc that drops what
+    // crosses the wire between them, and a way to enter the second namespace.
+    // An unprivileged user namespace is the usual route; where the host restricts
+    // those (Ubuntu 24.04's AppArmor default among them) the same script runs
+    // under passwordless sudo, which is how the end-to-end gate already copes —
+    // and the CI runner needs the budget, so a skip here is the cost of the
+    // carrier going unmeasured with every check green.
+    let escalation = if probed(None, "unshare", &["-Urn", "true"]) {
+        Some(Escalation::Unprivileged)
+    } else if probed(Some(Escalation::Sudo), "unshare", &["-n", "true"]) {
+        Some(Escalation::Sudo)
+    } else {
+        None
+    };
+    // Each prerequisite is checked the way it will be used, so the message names
+    // what is missing: "not available here" on its own sends someone looking at
+    // the wrong package.
     let mut missing = Vec::new();
-    if !Command::new("unshare")
-        .args(["-Urn", "true"])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-    {
-        missing.push("`unshare -Urn` (unprivileged user namespaces)");
+    if escalation.is_none() {
+        missing.push(
+            "`unshare -Urn` (unprivileged user namespaces) or `sudo -n unshare -n` (passwordless sudo)",
+        );
     }
-    if Command::new("tc").arg("-V").output().is_err() {
-        missing.push("`tc`");
-    }
-    if Command::new("nsenter").arg("--version").output().is_err() {
-        missing.push("`nsenter`");
+    if let Some(escalation) = escalation {
+        if !probed(Some(escalation), "tc", &["-V"]) {
+            missing.push("`tc`");
+        }
+        if !probed(Some(escalation), "nsenter", &["--version"]) {
+            missing.push("`nsenter`");
+        }
     }
     if !missing.is_empty() {
         let verb = if missing.len() == 1 { "is" } else { "are" };
@@ -449,13 +533,22 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         eprintln!("{line}");
         return;
     }
+    let escalation = escalation.expect("prerequisites checked above");
 
     let exe = std::env::current_exe().expect("current exe");
     let staged = std::env::temp_dir().join(format!("vallum-carrier-lossy-{}", std::process::id()));
     std::fs::copy(&exe, &staged).expect("stage the test binary where the namespace can reach it");
-    let pidfile = std::env::temp_dir().join(format!("vallum-carrier-ns-{}", std::process::id()));
-    // One log per path, named by what the path offers: a failure then points at
-    // the run that failed instead of at the first one.
+    let pid_file = |path: &Path| {
+        std::env::temp_dir().join(format!(
+            "vallum-carrier-ns-{}-{}-{}",
+            std::process::id(),
+            path.loss,
+            path.delay_ms
+        ))
+    };
+    let pidfile = pid_file(&PATHS[0]); // first path, until the loop sets its own
+                                       // One log per path, named by what the path offers: a failure then points at
+                                       // the run that failed instead of at the first one.
     let scratch = |path: &Path| {
         std::env::temp_dir().join(format!(
             "vallum-carrier-{}-{}-{}.log",
@@ -468,6 +561,10 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     let mut runs: Vec<Measurement> = Vec::new();
     for path in PATHS {
         let (loss, delay) = (path.loss, path.delay_ms);
+        // The pidfile is per path: a stale one would park the second namespace on
+        // the wrong process, and under sudo the parent cannot clear it.
+        let pidfile = pid_file(&path);
+        let _ = std::fs::remove_file(&pidfile);
         // Two ends of one wire, in two namespaces: the addresses are local only
         // to the pair, so the kernel has to put the segments on the veth — and
         // the qdisc on the near end is what it consults before each one leaves.
@@ -501,20 +598,28 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
              VALLUM_LOSSY_ROLE=client VALLUM_LOSSY_ADDR=10.99.0.2:41820 \
                  {exe} --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture\n\
              wait \"$server\"\n\
-             kill \"$holder\" 2>/dev/null || true\n",
+             kill \"$holder\" 2>/dev/null || true\n\
+             cat {log}\n\
+             rm -f {log}\n",
             pidfile = pidfile.display(),
             exe = staged.display(),
             log = scratch(&path).display(),
         );
-        // The pidfile is per run: a stale one from a previous run would park the
-        // second namespace on the wrong process.
-        let _ = std::fs::remove_file(&pidfile);
-        let output = Command::new("unshare")
-            .args(["-Urn", "bash", "-c", &script])
-            .output()
-            .expect("run the namespace");
+        let output = match escalation {
+            Escalation::Sudo => {
+                let mut command = Command::new("sudo");
+                command.arg("-n").arg("unshare").args(["-n", "bash", "-c"]);
+                command.arg(&script).output().expect("run the namespace")
+            }
+            Escalation::Unprivileged => Command::new("unshare")
+                .args(["-Urn", "bash", "-c"])
+                .arg(&script)
+                .output()
+                .expect("run the namespace"),
+        };
+        // The script echoes the far end's report into stdout and removes its own
+        // files, because as root it owns them and the parent could not.
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let server_log = std::fs::read_to_string(scratch(&path)).unwrap_or_default();
         let _ = std::fs::remove_file(scratch(&path));
 
         let field = |line: &str, name: &str| -> u64 {
@@ -528,16 +633,19 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             .find(|line| line.starts_with("LOSSY "))
             .unwrap_or_else(|| {
                 panic!(
-                    "no measurement at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}\nserver:\n{server_log}",
+                    "no measurement at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 )
             })
             .to_owned();
-        let served = server_log
+        let served = stdout
             .lines()
             .find(|line| line.starts_with("SERVER "))
             .unwrap_or_else(|| {
-                panic!("the far end reported nothing at {loss}% loss\n{server_log}")
+                panic!(
+                    "the far end reported nothing at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
             });
 
         runs.push(Measurement {
@@ -548,19 +656,35 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             retrans: field(&lossy, "retrans"),
             sent: field(&lossy, "sent"),
             frames: field(served, "frames"),
+            pruned: field(served, "pruned"),
         });
     }
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(&pidfile);
+    // As root, the staged binary outlives the parent's reach: everything the
+    // script itself made is gone, and this one file is the exception.
+    if let Escalation::Sudo = escalation {
+        let _ = Command::new("sudo")
+            .args(["-n", "rm", "-f"])
+            .arg(&staged)
+            .status();
+    }
 
     println!(
-        "{:>18} {:>8} {:>10} {:>8} {:>22} {:>8}",
-        "path", "connect", "time", "frames", "retransmitted", "arrived"
+        "{:>18} {:>8} {:>10} {:>8} {:>22} {:>8} {:>8}",
+        "path", "connect", "time", "frames", "retransmitted", "arrived", "pruned"
     );
     for run in &runs {
         println!(
-            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<11} {:>8}",
-            run.path.label, run.connect_ms, run.ms, run.packets, run.retrans, run.sent, run.frames
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<11} {:>8} {:>8}",
+            run.path.label,
+            run.connect_ms,
+            run.ms,
+            run.packets,
+            run.retrans,
+            run.sent,
+            run.frames,
+            run.pruned
         );
     }
 
@@ -584,17 +708,33 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     let base = &runs[0];
     for run in &runs {
         if run.path.loss == 0 {
-            // Not exactly zero: a timer can fire spuriously once in twenty-three
-            // thousand segments, and that is not a congestion signal. A tenth of
-            // a percent is still two orders of magnitude below every lossy path
-            // below, so a qdisc that silently went missing is not hidden.
-            assert!(
-                run.retrans * 1_000 <= run.sent,
-                "{} retransmitted {} of {} segments with no loss offered",
-                run.path.label,
-                run.retrans,
-                run.sent
-            );
+            // Nothing should be retransmitted on a clean path, and where it is,
+            // the receiving host has to have been the reason: this test reads a
+            // frame at a time with a decryption in the loop, so on a delayed
+            // path its own queue can fill while its reader is busy. That is a
+            // property of the harness, not of the carrier — but it has to be
+            // visible in the counters, or it is a qdisc dropping clean traffic
+            // and every number below is wrong.
+            if run.retrans > 0 {
+                assert!(
+                    run.pruned > 0,
+                    "{} retransmitted {} of {} segments with no loss offered and no \
+                     receive-queue drops on the far end",
+                    run.path.label,
+                    run.retrans,
+                    run.sent
+                );
+                // Even explained, it has to stay a fraction of a percent: a
+                // reader that cannot keep up with a clean path is not measuring
+                // the carrier either.
+                assert!(
+                    run.retrans * 100 <= run.sent,
+                    "{} retransmitted {} of {} segments with no loss offered",
+                    run.path.label,
+                    run.retrans,
+                    run.sent
+                );
+            }
             continue;
         }
         assert!(

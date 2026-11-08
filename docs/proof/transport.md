@@ -221,41 +221,53 @@ measures, not from the label:
 
 | path | time for 32 MiB | segments retransmitted | frames delivered |
 |---|---|---|---|
-| 1 ms round trip, clean | 0.15–0.18 s | 0 of ~23 240 | 23 014 |
-| 1 ms round trip, 2 % loss | 1.8 s | 542–555 of 23 175 | 23 014 |
+| 1 ms round trip, clean | 0.04–0.18 s | 0 of ~23 190 | 23 014 |
+| 1 ms round trip, 2 % loss | 0.5–2.3 s | 530–682 of 23 175 | 23 014 |
 | 1 ms round trip, 5 % loss | 13.2–17.7 s | 1 167–1 272 of 23 175 | 23 014 |
-| 40 ms round trip, clean | 0.29–0.30 s | 0 | 23 014 |
-| 40 ms round trip, 2 % loss | 41.2–47.7 s | 410–551 of 23 176 | 23 014 |
+| 40 ms round trip, clean | 0.29–0.34 s | 0 | 23 014 |
+| 40 ms round trip, 2 % loss | 26–48 s | 410–554 of 23 176 | 23 014 |
 
-Ranges are two consecutive runs, not a confidence interval.
+Ranges are the spread across six runs on a machine that was also building, not a
+confidence interval: the retransmission counts hold still between runs and the
+wall clock does not.
 
 Not one byte lost on any path: a stream loses time, not data. The retransmission
-rate matches the offered loss — 2.3–2.4 % at 2 %, 5.0–5.5 % at 5 % — so TCP with
+rate matches the offered loss — 1.8–2.9 % at 2 %, 5.0–5.5 % at 5 % — so TCP with
 SACK repairs what `netem` drops without amplifying it, and the cost is the round
 trips the repairs wait for rather than the bytes they resend. Dividing the excess
-time by the number of repairs makes that literal: about **3 ms per lost segment at
-a 1 ms round trip and 2 % loss**, about 12 ms at 5 % (the congestion window
-collapses as well as being repaired), and about 90 ms on the 40 ms path. Loss
-costs a round trip, and a round trip costs what the path says it does.
+time by the number of repairs makes that literal: **0.9–3.3 ms per lost segment at
+a 1 ms round trip and 2 % loss**, 11–14 ms at 5 % (the congestion window collapses
+as well as being repaired), and **46–100 ms on the 40 ms path**. Loss costs a round
+trip, and a round trip costs what the path says it does.
 
-The two clean rows are the control for the two claims the other rows are read
-from. A 40 ms round trip is 1.6–2× a 1 ms one for 32 MiB, because bulk transfer at
-this size is limited by the window and not by the RTT; the same 40 ms path at 2 %
-loss is 265× the 1 ms clean path. That is the whole argument for the carrier being
-a fallback: it is not the retransmissions that hurt, it is that each one is
-repaid a round trip later, and a real path's round trip is not one millisecond.
+The two clean rows are the control for both claims. Delay alone barely moves a
+bulk transfer: 0.29–0.34 s for 32 MiB over 40 ms against 0.04–0.18 s over 1 ms,
+because at this size the window is doing the work, and a 40× larger window is 40×
+more in flight rather than 40× the time. Loss does move it — the same 40 ms path at
+2 % is 26–48 s — and that is the whole argument for the carrier being a fallback:
+it is not the retransmissions that hurt, it is that each one is repaid a round trip
+later, and a real path's round trip is not one millisecond.
 
 The `netem` queue limit is raised to 100 000 packets. Its default of 1 000 overflows
 during a burst of this size and drops segments the path was not asked to drop —
 observed as 45 retransmissions on a *clean* path, which would have been read as
 noise in every lossy row below.
 
-The measurement needs an unprivileged user namespace, `tc` and `nsenter`; where a
-runner lacks any of them the test names what is missing and returns rather than
-reporting a pass it did not earn. The gate runner sets `VALLUM_LOSSY_REQUIRED=1`,
-where that same absence is a failure instead — the transport's cost is evidence,
-and evidence that can disappear while the suite stays green is not. It takes about
-a minute where it runs, most of it the 40 ms and 2 % path.
+A retransmission on a *clean* path is a statement about the harness, not about the
+carrier, so the far end reports its own receive-queue drops (`RcvPruned` +
+`TCPRcvQDrop`) beside the frame count. A clean path may only retransmit where those
+drops explain it, and never more than a percent of its segments; anything else is a
+qdisc, or a reader, being measured in place of the path.
+
+The measurement needs a network namespace, `tc` and `nsenter`. The namespace comes
+from `unshare -Urn` where the host allows unprivileged user namespaces, and from
+`sudo -n unshare -n` where it does not — the same two-step the end-to-end gate uses,
+because the CI runner is one of those hosts. Where neither is available the test
+names what is missing and returns rather than reporting a pass it did not earn; the
+gate runner sets `VALLUM_LOSSY_REQUIRED=1`, where that same absence is a failure
+instead — the transport's cost is evidence, and evidence that can disappear while
+the suite stays green is not. It takes about a minute where it runs, most of it the
+40 ms and 2 % path.
 
 ---
 
