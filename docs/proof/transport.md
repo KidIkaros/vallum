@@ -212,28 +212,50 @@ fallback trades for reachability.
 
 **Loss, measured.** This was ADR-0026's open number, and it is open no longer.
 `the_carrier_pays_retransmissions_on_a_lossy_path` puts the two ends of a veth
-pair in separate network namespaces, attaches `netem` with 0 % and 2 % loss to the
-client's end, and drives 32 MiB through the carrier in 23 014 real sealed frames.
-The retransmission count is the kernel's own (`/proc/net/snmp`, `RetransSegs`
-against `OutSegs`), not a model of it:
+pair in separate network namespaces, attaches `netem` to the client's end, and
+drives 32 MiB through the carrier in 23 014 real sealed frames on five paths. The
+retransmission count is the kernel's own (`/proc/net/snmp`, `RetransSegs` against
+`OutSegs`), not a model of it. The 40 ms paths delay one direction by 20 ms, so
+the round trip costs 40 ms; the value is quoted from the handshake the test
+measures, not from the label:
 
-| | clean | 2 % loss |
-|---|---|---|
-| time for 32 MiB | 40–90 ms | 1.0–2.1 s |
-| segments retransmitted | 0 of ~23 200 | 318–447 of 23 175 |
-| frames delivered | 23 014 | 23 014 |
+| path | time for 32 MiB | segments retransmitted | frames delivered |
+|---|---|---|---|
+| 1 ms round trip, clean | 0.15–0.18 s | 0 of ~23 240 | 23 014 |
+| 1 ms round trip, 2 % loss | 1.8 s | 542–555 of 23 175 | 23 014 |
+| 1 ms round trip, 5 % loss | 13.2–17.7 s | 1 167–1 272 of 23 175 | 23 014 |
+| 40 ms round trip, clean | 0.29–0.30 s | 0 | 23 014 |
+| 40 ms round trip, 2 % loss | 41.2–47.7 s | 410–551 of 23 176 | 23 014 |
 
-Thirteen to fifty times slower, and not one byte lost: a stream loses time, not
-data. The retransmission rate — 1.4–1.9 % of segments — is the offered loss, which
-is what TCP with SACK does on a path that is not also congested. So the cost is
-not the retransmitted bytes; it is the round trips they wait for, which is why the
-spread across runs is wide and why the number is quoted as a range. It is also why
-the carrier is a fallback: this path's round trip is 1 ms by construction, and a
-real one is not.
+Ranges are two consecutive runs, not a confidence interval.
+
+Not one byte lost on any path: a stream loses time, not data. The retransmission
+rate matches the offered loss — 2.3–2.4 % at 2 %, 5.0–5.5 % at 5 % — so TCP with
+SACK repairs what `netem` drops without amplifying it, and the cost is the round
+trips the repairs wait for rather than the bytes they resend. Dividing the excess
+time by the number of repairs makes that literal: about **3 ms per lost segment at
+a 1 ms round trip and 2 % loss**, about 12 ms at 5 % (the congestion window
+collapses as well as being repaired), and about 90 ms on the 40 ms path. Loss
+costs a round trip, and a round trip costs what the path says it does.
+
+The two clean rows are the control for the two claims the other rows are read
+from. A 40 ms round trip is 1.6–2× a 1 ms one for 32 MiB, because bulk transfer at
+this size is limited by the window and not by the RTT; the same 40 ms path at 2 %
+loss is 265× the 1 ms clean path. That is the whole argument for the carrier being
+a fallback: it is not the retransmissions that hurt, it is that each one is
+repaid a round trip later, and a real path's round trip is not one millisecond.
+
+The `netem` queue limit is raised to 100 000 packets. Its default of 1 000 overflows
+during a burst of this size and drops segments the path was not asked to drop —
+observed as 45 retransmissions on a *clean* path, which would have been read as
+noise in every lossy row below.
 
 The measurement needs an unprivileged user namespace, `tc` and `nsenter`; where a
-CI container lacks any of them the test says so and returns rather than reporting
-a pass it did not earn. It takes about two seconds where it runs.
+runner lacks any of them the test names what is missing and returns rather than
+reporting a pass it did not earn. The gate runner sets `VALLUM_LOSSY_REQUIRED=1`,
+where that same absence is a failure instead — the transport's cost is evidence,
+and evidence that can disappear while the suite stays green is not. It takes about
+a minute where it runs, most of it the 40 ms and 2 % path.
 
 ---
 

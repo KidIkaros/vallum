@@ -126,6 +126,14 @@ jobs:
 
       - name: Test
         working-directory: vallum
+        # The lossy-path measurement in `vallum-protocol-tests` skips itself where
+        # `unshare`, `tc` or `nsenter` is missing. On the private self-hosted host
+        # that skip would delete the transport's only measured cost with the job
+        # still green, so there it is an error. A public fork runs on a shared
+        # runner Vallum does not control, where unprivileged user namespaces can
+        # be restricted, and the skip stays a skip.
+        env:
+          VALLUM_LOSSY_REQUIRED: ${{ github.event.repository.private && '1' || '0' }}
         run: cargo test --workspace
 
       - name: Test the lean daemon (no TUI)

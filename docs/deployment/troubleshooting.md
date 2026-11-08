@@ -27,7 +27,7 @@ deployment.
 | `control` | the control socket is not there | `systemctl start vallum@<instance>`; the daemon creates it |
 | `forwarding` | `ip_forward` is off | `vallum server init` enables it, or `sysctl -w net.ipv4.ip_forward=1` |
 | `firewall` | the port is not open | `ufw allow 51820/udp`, plus `/tcp` if `carrier = "tcp"`; or the nftables chain that drops it |
-| *(only with `--probe-path`, and only on tcp)* | the path blocks the port between the hosts | set `carrier = "tcp"` in `[interface]` on **both** ends and open the TCP port: the same packets, framed, about 1 % larger, and 13–50× slower at 2 % loss ([ADR-0026](../adr/0026-censorship-resistance.md)) |
+| *(only with `--probe-path`, and only on tcp)* | the path blocks the port between the hosts | set `carrier = "tcp"` in `[interface]` on **both** ends and open the TCP port: the same packets, framed, about 1 % larger, and 10–12× slower at 2 % loss on a 1 ms path (265× on a 40 ms one) ([ADR-0026](../adr/0026-censorship-resistance.md)) |
 | `service` | the unit is inactive or failed | `journalctl -u vallum@<instance>` |
 | `config mode` | the config is group/world readable | `chmod 600`, because it can name a PSK file |
 | `rotation` | a peer still accepts a previous key | `vallum peer finalize <name>` once the device has the new one |

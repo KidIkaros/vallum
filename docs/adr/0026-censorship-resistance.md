@@ -75,11 +75,14 @@ daemons, two real configs, a real handshake and traffic both ways over loopback
   TCP.
 
 The retransmission cost on a *lossy* path is measured now, not argued: 32 MiB in
-23 014 frames takes 40–90 ms on a clean veth pair and 1.0–2.1 s at 2 % loss, with
-318–447 of 23 175 segments retransmitted and every frame delivered. Thirteen to
-fifty times slower, and the cost is round trips rather than bytes — the full table
-and the harness are in `docs/proof/transport.md` §2.8. The claim therefore stands
-at "reachable where UDP is blocked", never "fast there".
+23 014 frames takes 0.15–0.18 s on a 1 ms round trip, 1.8 s at 2 % loss on that
+path, and 13.2–17.7 s at 5 %. On a 40 ms round trip the same run is 0.29–0.30 s
+clean and 41.2–47.7 s at 2 % loss — about 265× the 1 ms clean path — with every
+frame delivered on all five paths. The cost is round trips, not bytes: roughly
+3 ms per lost segment at a 1 ms RTT, 12 ms at 5 % loss where the window also
+collapses, and 90 ms at 40 ms. The full table and the harness are in
+`docs/proof/transport.md` §2.8. The claim therefore stands at "reachable where UDP
+is blocked", never "fast there".
 
 ## Alternatives Considered
 

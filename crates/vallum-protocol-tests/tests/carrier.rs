@@ -17,15 +17,20 @@
 //!    later packet — head-of-line blocking is the whole reason this is a fallback
 //!    and not the default, and it is shown here as a delay, not asserted.
 //!
-//! 4. **What loss costs.** A plain loopback cannot lose a segment, so the last
-//!    test re-executes itself inside a network namespace and puts a `netem` qdisc
-//!    with 0 % and 2 % loss on `lo`: the same packets, the same reader, and the
-//!    retransmissions the kernel actually made. That is the one number ADR-0026
-//!    left open, and it is recorded in `docs/proof/transport.md` §2.8.
+//! 4. **What loss costs, and what a real round trip costs.** A plain loopback
+//!    cannot lose a segment and cannot be slow, so the last test re-executes
+//!    itself into two network namespaces joined by a veth pair and puts a `netem`
+//!    qdisc on the client's end: 0 %, 2 % and 5 % loss at a 1 ms round trip, then
+//!    a 40 ms round trip clean and at 2 % loss. The retransmission counts are the
+//!    kernel's own. Those are the numbers ADR-0026 left open, and they are
+//!    recorded in `docs/proof/transport.md` §2.8.
 //!
-//! The lossy test needs an unprivileged user namespace and `tc`; where those are
-//! missing it says so and returns rather than failing, because a CI container
-//! without `unshare` is not evidence about a carrier.
+//! The lossy test needs an unprivileged user namespace, `tc` and `nsenter`. Where
+//! they are missing it says so and returns rather than failing, because a
+//! container without `unshare` is not evidence about a carrier — except on the
+//! gate runner, which sets `VALLUM_LOSSY_REQUIRED=1`: there a skip is a failure,
+//! because the transport's cost quietly going unmeasured is exactly the failure
+//! mode this test exists to prevent.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -293,9 +298,20 @@ fn lossy_client() {
     // The server is started just before this, in another namespace; a connect
     // that loses that race is not the measurement.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut tx = loop {
+    // The handshake is the only round trip measured on its own, and it is the
+    // one place the path's delay shows up without a queue or a congestion window
+    // in the way: SYN there, SYN|ACK back. The parent uses it to check that the
+    // delay it asked for is really in the path.
+    let mut tx;
+    let connect_ms;
+    loop {
+        let started = Instant::now();
         match TcpStream::connect(address) {
-            Ok(stream) => break stream,
+            Ok(stream) => {
+                connect_ms = started.elapsed().as_millis();
+                tx = stream;
+                break;
+            }
             Err(error) => {
                 assert!(
                     Instant::now() < deadline,
@@ -304,7 +320,7 @@ fn lossy_client() {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-    };
+    }
 
     let (retrans_before, out_before) = tcp_segments();
     let started = Instant::now();
@@ -325,11 +341,68 @@ fn lossy_client() {
     let sent = out_after.saturating_sub(out_before);
 
     println!(
-        "LOSSY packets={packets} bytes={} ms={} retrans={retransmitted} sent={sent}",
+        "LOSSY packets={packets} bytes={} ms={} connect={connect_ms} retrans={retransmitted} \
+         sent={sent}",
         packets * framed.len(),
         elapsed.as_millis()
     );
 }
+
+/// One path the carrier is measured on: an offered loss rate, and a one-way
+/// delay. The qdisc sits on the client's egress only, so the round trip costs
+/// twice the delay.
+struct Path {
+    label: &'static str,
+    loss: u32,
+    delay_ms: u32,
+}
+
+/// What one path cost.
+struct Measurement {
+    path: Path,
+    packets: u64,
+    ms: u64,
+    connect_ms: u64,
+    retrans: u64,
+    sent: u64,
+    frames: u64,
+}
+
+/// The paths worth measuring, and why each one is here.
+///
+/// Clean and 2 % are the pair ADR-0026 asked for: what loss costs at all. 5 % is
+/// where recovery starts to be most of what the stream does. The two delayed
+/// paths answer what the 1 ms numbers cannot: a real round trip is not one
+/// millisecond, and because a lost segment is repaid one round trip later, the
+/// same loss on a 40 ms path is not the same cost. How much larger is the
+/// question; it is measured here rather than assumed.
+const PATHS: [Path; 5] = [
+    Path {
+        label: "1 ms, clean",
+        loss: 0,
+        delay_ms: 1,
+    },
+    Path {
+        label: "1 ms, 2% loss",
+        loss: 2,
+        delay_ms: 1,
+    },
+    Path {
+        label: "1 ms, 5% loss",
+        loss: 5,
+        delay_ms: 1,
+    },
+    Path {
+        label: "40 ms RTT, clean",
+        loss: 0,
+        delay_ms: 20,
+    },
+    Path {
+        label: "40 ms RTT, 2% loss",
+        loss: 2,
+        delay_ms: 20,
+    },
+];
 
 #[test]
 fn the_carrier_pays_retransmissions_on_a_lossy_path() {
@@ -344,18 +417,36 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     // An unprivileged user namespace, `tc`, and `nsenter` are what make a path
     // lose packets. Where any is missing this is not a statement about the
     // carrier, so it is a skip, not a failure.
-    let tooling = Command::new("unshare")
+    // Checked one at a time so the message names what is missing: "not available
+    // here" on its own sends someone looking at the wrong package.
+    let mut missing = Vec::new();
+    if !Command::new("unshare")
         .args(["-Urn", "true"])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-        && Command::new("tc").arg("-V").output().is_ok()
-        && Command::new("nsenter").arg("--version").output().is_ok();
-    if !tooling {
-        eprintln!(
-            "skipping the lossy-path measurement: `unshare -Urn`, `tc`, or `nsenter` is not \
-             available here"
+    {
+        missing.push("`unshare -Urn` (unprivileged user namespaces)");
+    }
+    if Command::new("tc").arg("-V").output().is_err() {
+        missing.push("`tc`");
+    }
+    if Command::new("nsenter").arg("--version").output().is_err() {
+        missing.push("`nsenter`");
+    }
+    if !missing.is_empty() {
+        let verb = if missing.len() == 1 { "is" } else { "are" };
+        let line = format!(
+            "skipping the lossy-path measurement: {} {verb} not available here",
+            missing.join(", ")
         );
+        // A gate runner sets this, because there the measurement is the point. A
+        // silent skip would leave the carrier's cost unmeasured with every check
+        // green, and nobody reads a green suite looking for the absence.
+        if std::env::var("VALLUM_LOSSY_REQUIRED").is_ok_and(|required| required == "1") {
+            panic!("{line}, and VALLUM_LOSSY_REQUIRED=1");
+        }
+        eprintln!("{line}");
         return;
     }
 
@@ -363,17 +454,31 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
     let staged = std::env::temp_dir().join(format!("vallum-carrier-lossy-{}", std::process::id()));
     std::fs::copy(&exe, &staged).expect("stage the test binary where the namespace can reach it");
     let pidfile = std::env::temp_dir().join(format!("vallum-carrier-ns-{}", std::process::id()));
-    let scratch = |loss: u32| {
-        std::env::temp_dir().join(format!("vallum-carrier-{}-{loss}.log", std::process::id()))
+    // One log per path, named by what the path offers: a failure then points at
+    // the run that failed instead of at the first one.
+    let scratch = |path: &Path| {
+        std::env::temp_dir().join(format!(
+            "vallum-carrier-{}-{}-{}.log",
+            std::process::id(),
+            path.loss,
+            path.delay_ms
+        ))
     };
 
-    let mut runs = Vec::new();
-    for loss in [0u32, 2] {
+    let mut runs: Vec<Measurement> = Vec::new();
+    for path in PATHS {
+        let (loss, delay) = (path.loss, path.delay_ms);
         // Two ends of one wire, in two namespaces: the addresses are local only
         // to the pair, so the kernel has to put the segments on the veth — and
         // the qdisc on the near end is what it consults before each one leaves.
         // `lo` would not do: it has no queue, so an attached qdisc is never
         // consulted and nothing is ever dropped.
+        //
+        // `limit 100000` rather than netem's default of 1 000 packets: a burst
+        // of a whole file overflows a queue that small, and those drops are not
+        // the loss this path was asked to offer. With the queue out of the way,
+        // a retransmission on a clean path is a timer artifact, not a full
+        // buffer.
         let script = format!(
             "set -e\n\
              ip link add va type veth peer name vb\n\
@@ -392,14 +497,14 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
                  > {log} 2>&1 &\n\
              server=$!\n\
              sleep 0.3\n\
-             tc qdisc add dev va root netem delay 1ms loss {loss}%\n\
+             tc qdisc add dev va root netem delay {delay}ms loss {loss}% limit 100000\n\
              VALLUM_LOSSY_ROLE=client VALLUM_LOSSY_ADDR=10.99.0.2:41820 \
                  {exe} --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture\n\
              wait \"$server\"\n\
              kill \"$holder\" 2>/dev/null || true\n",
             pidfile = pidfile.display(),
             exe = staged.display(),
-            log = scratch(loss).display(),
+            log = scratch(&path).display(),
         );
         // The pidfile is per run: a stale one from a previous run would park the
         // second namespace on the wrong process.
@@ -409,8 +514,8 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             .output()
             .expect("run the namespace");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let server_log = std::fs::read_to_string(scratch(loss)).unwrap_or_default();
-        let _ = std::fs::remove_file(scratch(loss));
+        let server_log = std::fs::read_to_string(scratch(&path)).unwrap_or_default();
+        let _ = std::fs::remove_file(scratch(&path));
 
         let field = |line: &str, name: &str| -> u64 {
             line.split_whitespace()
@@ -435,47 +540,114 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
                 panic!("the far end reported nothing at {loss}% loss\n{server_log}")
             });
 
-        runs.push((
-            loss,
-            field(&lossy, "packets"),
-            field(&lossy, "ms"),
-            field(&lossy, "retrans"),
-            field(&lossy, "sent"),
-            field(served, "frames"),
-            lossy.clone(),
-        ));
+        runs.push(Measurement {
+            path,
+            packets: field(&lossy, "packets"),
+            ms: field(&lossy, "ms"),
+            connect_ms: field(&lossy, "connect"),
+            retrans: field(&lossy, "retrans"),
+            sent: field(&lossy, "sent"),
+            frames: field(served, "frames"),
+        });
     }
     let _ = std::fs::remove_file(&staged);
     let _ = std::fs::remove_file(&pidfile);
 
-    for (loss, packets, ms, retrans, sent, frames, _) in &runs {
+    println!(
+        "{:>18} {:>8} {:>10} {:>8} {:>22} {:>8}",
+        "path", "connect", "time", "frames", "retransmitted", "arrived"
+    );
+    for run in &runs {
         println!(
-            "{loss}% loss: {packets} frames, {ms} ms, {retrans}/{sent} segments retransmitted, \
-             {frames} arrived"
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<11} {:>8}",
+            run.path.label, run.connect_ms, run.ms, run.packets, run.retrans, run.sent, run.frames
         );
     }
-    let (_, packets_clean, ms_clean, retrans_clean, _, frames_clean, _) = runs[0];
-    let (_, packets_lossy, ms_lossy, retrans_lossy, sent_lossy, frames_lossy, _) = runs[1];
 
-    assert_eq!(packets_clean, packets_lossy);
-    // Delivery is not the casualty of loss — the clock is.
-    assert_eq!(frames_clean, packets_clean, "the clean path lost data");
-    assert_eq!(frames_lossy, packets_lossy, "the lossy path lost data");
-    // A lossless path retransmits nothing; if this is non-zero the baseline is
-    // not a baseline and the comparison means nothing.
-    assert_eq!(
-        retrans_clean, 0,
-        "a path with no loss retransmitted {retrans_clean} segments"
-    );
-    // 2 % of ~720 segments is fourteen, so zero retransmissions means the qdisc
-    // was not in the path — the one way this test could pass without measuring.
+    // Delivery is not the casualty of loss — the clock is. A missing frame on any
+    // path means the framing or the connection is wrong, not that the path was
+    // lossy.
+    let packets = runs[0].packets;
+    for run in &runs {
+        assert_eq!(run.packets, packets, "the frame count moved between paths");
+        assert_eq!(
+            run.frames, packets,
+            "{} delivered {} of {packets} frames",
+            run.path.label, run.frames
+        );
+    }
+
+    // The qdisc has to have been in the path, or every number here is one
+    // loopback measurement wearing five labels. A clean path retransmits nothing,
+    // a lossy one retransmits, and a delayed one takes longer than the undelayed
+    // one — each of those fails loudly if the traffic went around the qdisc.
+    let base = &runs[0];
+    for run in &runs {
+        if run.path.loss == 0 {
+            // Not exactly zero: a timer can fire spuriously once in twenty-three
+            // thousand segments, and that is not a congestion signal. A tenth of
+            // a percent is still two orders of magnitude below every lossy path
+            // below, so a qdisc that silently went missing is not hidden.
+            assert!(
+                run.retrans * 1_000 <= run.sent,
+                "{} retransmitted {} of {} segments with no loss offered",
+                run.path.label,
+                run.retrans,
+                run.sent
+            );
+            continue;
+        }
+        assert!(
+            run.retrans > 0,
+            "{} produced no retransmissions, so the netem qdisc did not apply",
+            run.path.label
+        );
+        let clean = runs
+            .iter()
+            .find(|other| other.path.loss == 0 && other.path.delay_ms == run.path.delay_ms)
+            .expect("a clean path with the same delay");
+        assert!(
+            run.ms > clean.ms,
+            "{} took {} ms against {} ms clean, so the offered loss did not apply",
+            run.path.label,
+            run.ms,
+            clean.ms
+        );
+    }
+    // The delay, checked on the handshake rather than on the transfer: a bulk
+    // run's wall clock swings by hundreds of milliseconds on a busy machine, and
+    // an assertion that noisy would either pass by accident or fail at random.
+    // One SYN and one SYN|ACK are a round trip and nothing else.
+    let delayed = runs
+        .iter()
+        .find(|run| run.path.loss == 0 && run.path.delay_ms != base.path.delay_ms)
+        .expect("a clean path with a real round trip");
     assert!(
-        retrans_lossy > 0,
-        "2% loss produced no retransmissions, so the netem qdisc did not apply"
+        delayed.connect_ms >= 30 && base.connect_ms < 30,
+        "the handshake took {} ms on {} and {} ms on {}, so the {} ms one-way delay did not \
+         apply",
+        delayed.connect_ms,
+        delayed.path.label,
+        base.connect_ms,
+        base.path.label,
+        delayed.path.delay_ms
     );
+
+    let at = |loss: u32, delay_ms: u32| {
+        runs.iter()
+            .find(|run| run.path.loss == loss && run.path.delay_ms == delay_ms)
+            .expect("the path is in the table")
+    };
+    let five = at(5, base.path.delay_ms);
+    let far = at(2, delayed.path.delay_ms);
     println!(
-        "the carrier under loss: {ms_clean} ms clean, {ms_lossy} ms at 2% \
-         ({retrans_lossy} of {sent_lossy} segments retransmitted, \
-         {frames_lossy} frames delivered intact)"
+        "the carrier on {} paths, {packets} frames each: {} ms clean, {} ms at 5% loss (\
+         {:.1}x), {} ms at 40 ms RTT and 2% loss ({:.1}x), every frame delivered",
+        runs.len(),
+        base.ms,
+        five.ms,
+        five.ms as f64 / base.ms as f64,
+        far.ms,
+        far.ms as f64 / base.ms as f64,
     );
 }

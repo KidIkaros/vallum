@@ -51,8 +51,9 @@ operator must guarantee. The proofs behind the claims live in
   answering ([ADR-0026](adr/0026-censorship-resistance.md)). The TCP carrier is
   the same packets inside one connection per peer: about 1 % larger, one order
   for everything, and no roaming. It is reachability, not censorship resistance —
-  32 MiB that takes 40–90 ms on a clean pair takes 1.0–2.1 s at 2 % loss, measured
-  in `docs/proof/transport.md` §2.8.
+  32 MiB that takes 0.15–0.18 s on a clean pair takes 1.8 s at 2 % loss, 13–18 s at
+  5 %, and 41–48 s at 2 % loss over a 40 ms round trip, measured in
+  `docs/proof/transport.md` §2.8.
 
 ## What is explicitly NOT claimed
 
