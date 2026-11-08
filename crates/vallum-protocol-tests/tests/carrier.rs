@@ -361,6 +361,9 @@ fn lossy_server() {
     let mut reader = FrameReader::new();
     let mut buffer = vec![0u8; 64 * 1024];
     let mut frames = 0usize;
+    // Arrivals that had to wait for a gap to be filled: the receiver's own record
+    // of the path delivering segments out of order.
+    let ofo_before = netstat("TcpExt:", &["TCPOFOQueue"])[0];
     loop {
         match rx.read(&mut buffer) {
             Ok(0) => break,
@@ -373,7 +376,11 @@ fn lossy_server() {
             Err(error) => panic!("read: {error}"),
         }
     }
-    println!("SERVER frames={frames} pruned={}", receive_queue_drops());
+    println!(
+        "SERVER frames={frames} pruned={} reordered={}",
+        receive_queue_drops(),
+        netstat("TcpExt:", &["TCPOFOQueue"])[0].saturating_sub(ofo_before)
+    );
 }
 
 /// The near end: write the frames and report what the path cost.
@@ -531,6 +538,16 @@ struct Measurement {
     /// acknowledgements themselves reporting a gap.
     rto: u64,
     fast: u64,
+    /// What the qdisc saw, which is not what the application wrote: segmentation
+    /// offload coalesces frames into skbs on the way out, and `netem` delays and
+    /// drops per skb. On a clean path the drops are the queue's own, and they were
+    /// zero; on a lossy one they are the loss the qdisc was asked to apply, which
+    /// is why one drop costs a burst of frames.
+    qdisc_pkts: u64,
+    qdisc_drops: u64,
+    /// Segments the far end saw out of order, which is what makes a sender
+    /// retransmit without a timer and without a loss.
+    reordered: u64,
     /// The same traffic as datagrams over the same path.
     datagram: Datagram,
 }
@@ -738,6 +755,8 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
              VALLUM_LOSSY_ROLE=client VALLUM_LOSSY_ADDR=10.99.0.2:41820 \
                  {exe} --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture\n\
              wait \"$server\"\n\
+             tc -s qdisc show dev va \
+                 | sed -n 's/.*bytes \\([0-9]*\\) pkt (dropped \\([0-9]*\\).*/QDISC qdisc_pkts=\\1 qdisc_drops=\\2/p'\n\
              VALLUM_LOSSY_ROLE=udp_server VALLUM_LOSSY_ADDR=10.99.0.2:41821 \
                  nsenter -t \"$holder\" -n {exe} \
                  --exact the_carrier_pays_retransmissions_on_a_lossy_path --nocapture \
@@ -799,6 +818,15 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
                 )
             });
 
+        let qdisc = stdout
+            .lines()
+            .find(|line| line.starts_with("QDISC "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the qdisc reported no statistics at {loss}% loss\nstdout:\n{stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
         let datagram = stdout
             .lines()
             .find(|line| line.starts_with("UDP "))
@@ -830,6 +858,9 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             pruned: field(served, "pruned"),
             rto: field(&lossy, "rto"),
             fast: field(&lossy, "fast"),
+            qdisc_pkts: field(qdisc, "qdisc_pkts"),
+            qdisc_drops: field(qdisc, "qdisc_drops"),
+            reordered: field(served, "reordered"),
             datagram: Datagram {
                 ms: field(&datagram, "ms"),
                 sent: field(&datagram, "datagrams"),
@@ -868,7 +899,7 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         runs[0].packets
     );
     say!(
-        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8}",
+        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8} {:>14} {:>10}",
         "path",
         "connect",
         "time",
@@ -876,11 +907,13 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         "retransmitted",
         "by rto/fast",
         "arrived",
-        "pruned"
+        "pruned",
+        "qdisc pkt/drop",
+        "reordered"
     );
     for run in &runs {
         say!(
-            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8}",
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8} {:>14} {:>10}",
             run.path.label,
             run.connect_ms,
             run.ms,
@@ -889,7 +922,9 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             run.sent,
             format!("{}/{}", run.rto, run.fast),
             run.frames,
-            run.pruned
+            run.pruned,
+            format!("{}/{}", run.qdisc_pkts, run.qdisc_drops),
+            run.reordered
         );
     }
     say!(
@@ -943,14 +978,21 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             // visible in the counters, or it is a qdisc dropping clean traffic
             // and every number below is wrong.
             if run.retrans > 0 {
+                // A fast retransmit on a clean path says a segment arrived out of
+                // order, which needs a reason: the qdisc's own queue limit, or a
+                // reader that stopped reading. Neither being visible means the
+                // path dropped something nobody asked it to, and every number
+                // here is measured on a path that is not the one in the label.
                 assert!(
-                    run.pruned > 0 || run.rto > 0 || run.fast > 0,
+                    run.pruned > 0 || run.qdisc_drops > 0 || run.reordered > 0 || run.rto > 0,
                     "{} retransmitted {} of {} segments with no loss offered, no \
-                     receive-queue drops on the far end, and no timer or duplicate-acknowledgement \
-                     event at the sending end",
+                     receive-queue drops on the far end, nothing dropped by its own qdisc and \
+                     nothing out of order at the far end ({} timers, {} fast retransmits)",
                     run.path.label,
                     run.retrans,
-                    run.sent
+                    run.sent,
+                    run.rto,
+                    run.fast
                 );
                 // Even explained, it has to stay a fraction of a percent: a
                 // reader that cannot keep up with a clean path is not measuring
