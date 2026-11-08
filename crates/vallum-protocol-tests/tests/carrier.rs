@@ -309,6 +309,18 @@ fn reordering_causes() -> (u64, u64, u64, u64) {
     (values[0], values[1], values[2], values[3])
 }
 
+/// How many segments of a repair were duplicate data, and how many blocks said so.
+///
+/// `TCPDSACKRecv` counts DSACK blocks, and one block can cover several re-sent
+/// segments, so on its own it cannot say whether a repair of 32 segments was 32
+/// duplicates or one duplicate and 31 real holes. `TCPDSACKRecvSegs` counts the
+/// segments instead, beside `TCPDSACKOldSent`, which is how many DSACKs the far
+/// end emitted: the difference between the two is the compression.
+fn duplicate_segments() -> (u64, u64) {
+    let values = netstat("TcpExt:", &["TCPDSACKRecvSegs", "TCPDSACKOldSent"]);
+    (values[0], values[1])
+}
+
 fn netstat(block: &str, names_wanted: &[&str]) -> Vec<u64> {
     let text = std::fs::read_to_string("/proc/net/netstat").expect("netstat");
     let mut names: Vec<&str> = Vec::new();
@@ -440,6 +452,7 @@ fn lossy_client() {
     let (retrans_before, out_before) = tcp_segments();
     let (rto_before, fast_before, spurious_before) = retransmission_causes();
     let (dsack_before, ts_before, sack_before, reno_before) = reordering_causes();
+    let (dup_before, dsack_sent_before) = duplicate_segments();
     let started = Instant::now();
     for _ in 0..packets {
         tx.write_all(&framed).expect("write");
@@ -456,13 +469,17 @@ fn lossy_client() {
     let (retrans_after, out_after) = tcp_segments();
     let (rto_after, fast_after, spurious_after) = retransmission_causes();
     let (dsack_after, ts_after, sack_after, reno_after) = reordering_causes();
+    let (dup_after, dsack_sent_after) = duplicate_segments();
     let retransmitted = retrans_after.saturating_sub(retrans_before);
     let sent = out_after.saturating_sub(out_before);
     let dsack = dsack_after.saturating_sub(dsack_before);
+    let duplicate = dup_after.saturating_sub(dup_before);
+    let dsack_sent = dsack_sent_after.saturating_sub(dsack_sent_before);
 
     println!(
         "LOSSY packets={packets} bytes={} ms={} connect={connect_ms} retrans={retransmitted} \
-         sent={sent} rto={} fast={} spurious={} dsack={dsack}",
+         sent={sent} rto={} fast={} spurious={} dsack={dsack} dup_segs={duplicate} \
+         dsack_sent={dsack_sent}",
         packets * framed.len(),
         elapsed.as_millis(),
         rto_after.saturating_sub(rto_before),
@@ -471,7 +488,8 @@ fn lossy_client() {
     );
     if retransmitted > 0 {
         println!(
-            "WHY dsack={dsack} ts_reorder={} sack_reorder={} reno_reorder={}",
+            "WHY dsack={dsack} dup_segs={duplicate} dsack_sent={dsack_sent} ts_reorder={} \
+             sack_reorder={} reno_reorder={}",
             ts_after.saturating_sub(ts_before),
             sack_after.saturating_sub(sack_before),
             reno_after.saturating_sub(reno_before)
@@ -585,6 +603,10 @@ struct Measurement {
     /// data, so the segment it replaced had arrived after all. Retransmissions
     /// without one filled a hole somebody made.
     dsack: u64,
+    /// Segments, rather than blocks, that the sender learned were duplicates. One
+    /// DSACK can cover many segments, so this is the count that can attribute a
+    /// repaired burst segment by segment.
+    duplicate: u64,
     /// The far end's answer in full, for the rows a clean path repaired on: what
     /// it said about the re-sends, and which signal caught the reordering.
     cause: String,
@@ -902,6 +924,7 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             qdisc_drops: field(qdisc, "qdisc_drops"),
             reordered: field(served, "reordered"),
             dsack: field(&lossy, "dsack"),
+            duplicate: field(&lossy, "dup_segs"),
             cause: lossy
                 .lines()
                 .find(|line| line.starts_with("WHY "))
@@ -945,7 +968,7 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         runs[0].packets
     );
     say!(
-        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7}",
+        "{:>18} {:>8} {:>10} {:>8} {:>14} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7} {:>8}",
         "path",
         "connect",
         "time",
@@ -956,11 +979,12 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
         "pruned",
         "qdisc pkt/drop",
         "reordered",
-        "dsack"
+        "dsack",
+        "dup segs"
     );
     for run in &runs {
         say!(
-            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7}",
+            "{:>18} {:>5} ms {:>7} ms {:>8} {:>10} / {:<3} {:>10} {:>8} {:>8} {:>14} {:>10} {:>7} {:>8}",
             run.path.label,
             run.connect_ms,
             run.ms,
@@ -972,7 +996,8 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             run.pruned,
             format!("{}/{}", run.qdisc_pkts, run.qdisc_drops),
             run.reordered,
-            run.dsack
+            run.dsack,
+            run.duplicate
         );
     }
     // A clean path that repaired says why here: the table carries how much, this
@@ -1034,27 +1059,29 @@ fn the_carrier_pays_retransmissions_on_a_lossy_path() {
             // visible in the counters, or it is a qdisc dropping clean traffic
             // and every number below is wrong.
             if run.retrans > 0 {
-                // A fast retransmit on a clean path says a segment arrived out of
-                // order, which needs a reason: the qdisc's own queue limit, a
-                // reader that stopped reading, or the far end saying the re-send
-                // was duplicate data — a DSACK, which means the segment had
-                // arrived after all and the path merely reordered it. None of
-                // them being visible means the path dropped something nobody
-                // asked it to, and every number here is measured on a path that is
-                // not the one in the label.
+                // A fast retransmit on a clean path needs a reason, and arrivals
+                // out of order are not one: this path reorders on rows that
+                // retransmit nothing at all, so queueing a few segments says
+                // nothing about why one was re-sent. The reasons that do count are
+                // a drop somebody can see — the far end's receive queue, or the
+                // qdisc's own — a timer that fired, or the far end reporting the
+                // re-send as duplicate data. Nothing visible means the path dropped
+                // something nobody asked it to, and every number here is measured
+                // on a path that is not the one in the label.
                 assert!(
                     run.pruned > 0
                         || run.qdisc_drops > 0
-                        || run.reordered > 0
                         || run.dsack > 0
+                        || run.duplicate > 0
                         || run.rto > 0,
                     "{} retransmitted {} of {} segments with no loss offered, no \
                      receive-queue drops on the far end, nothing dropped by its own qdisc, \
-                     nothing out of order at the far end and no duplicate seen by the far \
-                     end ({} timers, {} fast retransmits)",
+                     no duplicate seen by the far end and no timer fired ({} out-of-order \
+                     arrivals, {} timers, {} fast retransmits)",
                     run.path.label,
                     run.retrans,
                     run.sent,
+                    run.reordered,
                     run.rto,
                     run.fast
                 );
