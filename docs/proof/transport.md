@@ -284,22 +284,36 @@ percent of a clean path's segments so that a rare repair cannot fail a measureme
 nobody asked to be perfect. Five of the sixteen runs did retransmit on the 40 ms
 clean row — 0–360 segments of 23 182 — and the counters say what happened: every
 one of them was a fast retransmit (`rto` was zero on every clean row of every run),
-the far end's receive queue dropped nothing, and no timer fired. A fast retransmit
-is started by duplicate acknowledgements, and those come from arrivals the far end
-has to queue out of order (`TCPOFOQueue`), of which it reported one to eight in the
-runs that repaired. The re-send then covers the rest of the window, which is why
-one such arrival costs 120 segments rather than one, and why the row's time does
-not move: 0.28–0.58 s with the repairs against 0.28–0.30 s without them.
+the far end's receive queue dropped nothing, and no timer fired. The row's time
+does not move either: 0.28–0.58 s with the repairs against 0.28–0.30 s without
+them.
 
-Whether the gap that starts it is a reordered segment or a dropped one is not
-established, and the qdisc's own drop counter cannot settle it: with `delay` in the
+Reordering is the ordinary state of this path rather than a consequence of a
+repair. Clean rows that re-sent nothing still had the far end queue segments out of
+order (`TCPOFOQueue`): 0 to 32 on the 1 ms row here, and 33 and 54 on the CI host's
+clean rows, with zero retransmissions in both. The path delivers segments late, so
+the question a clean repair raises is only whether it answered a late arrival or a
+lost one.
+
+The far end's DSACK answers that. A re-sent segment that duplicates data already
+received draws one, and the sender counts it in `TCPDSACKRecv`; a re-sent segment
+that fills a real hole draws none. Two runs with the host's CPUs busy re-sent
+exactly one segment each and drew exactly one DSACK, so those repairs were
+duplicates rather than losses. The one quiet run that repaired during this
+investigation re-sent 32 segments behind 33 out-of-order arrivals and drew a single
+DSACK: one of the 32 is accounted for as a duplicate, and the other 31 are not
+accounted for by any counter here. Both ends share one namespace, so these counters
+belong to the pair rather than to one side.
+
+The qdisc's own drop counter cannot settle anything either: with `delay` in the
 qdisc that counter under-reports. A standalone TCP probe through `delay 1ms loss
 2%` counted 149 qdisc drops against 454 retransmitted segments of 22 576, where the
 same probe without `delay` counted 448 against 531. The table shows the same gap:
 on every lossy row its drop column is a fraction of its retransmission column. So
 the clean rows are quoted as what was measured — no timer, nothing lost on
 arrival, every frame delivered, no change in time — and not as a path that is
-provably drop-free. The cause columns stay in the table for the next occurrence.
+provably drop-free. The `dsack` column and the cause line are what settle the next
+occurrence.
 
 The measurement needs a network namespace, `tc` and `nsenter`. The namespace comes
 from `unshare -Urn` where the host allows unprivileged user namespaces, and from
