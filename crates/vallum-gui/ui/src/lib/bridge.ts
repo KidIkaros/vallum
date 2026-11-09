@@ -62,6 +62,40 @@ export async function reportWindowState(focused: boolean, visible: boolean): Pro
   await invoke("window_state", { focused, visible })
 }
 
+export interface ServiceStatus {
+  unit: string
+  active: string
+  enabled: string
+}
+
+export interface LogTail {
+  unit: string
+  lines?: string
+  error?: string
+}
+
+/** Whether the tunnel's systemd unit is up — read unprivileged. */
+export function serviceState(): Promise<ServiceStatus> {
+  if (IN_TAURI) return invoke<ServiceStatus>("service_state")
+  return http<ServiceStatus>("/api/service")
+}
+
+/** Start/stop through polkit; the desktop asks, the console never sees a password. */
+export function serviceAction(action: "start" | "stop" | "restart"): Promise<{ message: string }> {
+  if (IN_TAURI) return invoke("service_action", { action })
+  return http("/api/service", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  })
+}
+
+/** The unit's last log lines, as journald gives them to this user. */
+export function logsTail(lines = 200): Promise<LogTail> {
+  if (IN_TAURI) return invoke<LogTail>("logs_tail", { lines })
+  return http<LogTail>(`/api/logs?lines=${lines}`)
+}
+
 export function onSnapshot(
   handler: (payload: SnapshotPayload) => void,
 ): Promise<UnlistenFn> {

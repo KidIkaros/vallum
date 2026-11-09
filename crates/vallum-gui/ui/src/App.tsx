@@ -13,6 +13,7 @@ import {
   RotateDialog,
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
+import { LogsPanel, ServiceStrip } from "@/components/Service"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
@@ -468,6 +469,7 @@ export default function App() {
           </span>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          <ServiceStrip blocked={blocked} />
           <DeviceDialog
             listenPort={data?.listen_port ?? null}
             fwmark={data?.fwmark ?? null}
@@ -527,6 +529,7 @@ export default function App() {
               <PeerDetail peer={detail} now={now} blocked={blocked} />
             </div>
           </div>
+          <LogsPanel blocked={blocked} />
           <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[10px]">
             <span>updated {lastReply}</span>
             <span>·</span>

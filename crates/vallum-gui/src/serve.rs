@@ -131,6 +131,38 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         }
     }
 
+    if request.path == "/api/service" {
+        let Some(socket) = console.current_socket() else {
+            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            return Ok(());
+        };
+        if request.method == "POST" {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let action = body.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+            match crate::service_action(&socket, action) {
+                Ok(done) => json(&mut stream, "200 OK", &serde_json::to_value(done).unwrap_or_default()),
+                Err(error) => json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": error })),
+            }
+        } else {
+            json(&mut stream, "200 OK", &crate::service_state(&socket));
+        }
+        return Ok(());
+    }
+
+    if request.path.starts_with("/api/logs") {
+        let Some(socket) = console.current_socket() else {
+            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            return Ok(());
+        };
+        let lines = request
+            .path
+            .split_once("lines=")
+            .and_then(|(_, value)| value.parse().ok())
+            .unwrap_or(200u32);
+        json(&mut stream, "200 OK", &crate::logs_tail(&socket, lines));
+        return Ok(());
+    }
+
     if request.path == "/api/interfaces" {
         let entries: Vec<InterfaceEntry> = crate::interfaces();
         json(

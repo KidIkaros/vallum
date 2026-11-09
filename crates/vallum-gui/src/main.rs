@@ -408,6 +408,111 @@ pub(crate) fn dispatch(
     }
 }
 
+/// The systemd unit that owns a socket: `vallum@<interface>` unless the
+/// operator names one (a `vallum-quick@` deployment passes `VALLUM_UNIT`).
+pub(crate) fn unit_for(socket: &std::path::Path) -> String {
+    if let Ok(unit) = std::env::var("VALLUM_UNIT") {
+        if !unit.is_empty() {
+            return unit;
+        }
+    }
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0");
+    format!("vallum@{interface}")
+}
+
+fn systemctl(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("systemctl").args(args).output().ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Service state as systemd reports it, unprivileged.
+pub(crate) fn service_state(socket: &std::path::Path) -> serde_json::Value {
+    let unit = unit_for(socket);
+    serde_json::json!({
+        "unit": unit,
+        "active": systemctl(&["is-active", &unit]).unwrap_or_else(|| "unknown".to_owned()),
+        "enabled": systemctl(&["is-enabled", &unit]).unwrap_or_else(|| "unknown".to_owned()),
+    })
+}
+
+/// Start/stop/restart through polkit. `pkexec` shows the desktop's own
+/// authentication dialog; nothing here ever prompts for a password in the UI.
+pub(crate) fn service_action(
+    socket: &std::path::Path,
+    action: &str,
+) -> Result<Done, String> {
+    if !matches!(action, "start" | "stop" | "restart") {
+        return Err(format!("unknown service action `{action}`"));
+    }
+    let unit = unit_for(socket);
+    let privileged = effective_uid() == 0;
+    let mut command = if privileged {
+        let mut c = std::process::Command::new("systemctl");
+        c.arg(action).arg(&unit);
+        c
+    } else {
+        let mut c = std::process::Command::new("pkexec");
+        c.arg("systemctl").arg(action).arg(&unit);
+        c
+    };
+    match command.spawn() {
+        Ok(_) => Ok(Done {
+            message: format!(
+                "{} {unit} requested{}",
+                action,
+                if privileged { "" } else { " — approve the desktop prompt" }
+            ),
+            command: None,
+        }),
+        Err(error) => Err(format!("cannot {action} {unit}: {error}")),
+    }
+}
+
+/// The unit's last log lines, as journald will give them to this user.
+pub(crate) fn logs_tail(socket: &std::path::Path, lines: u32) -> serde_json::Value {
+    let unit = unit_for(socket);
+    let output = std::process::Command::new("journalctl")
+        .args([
+            "-u",
+            &unit,
+            "-n",
+            &lines.to_string(),
+            "--no-pager",
+            "-o",
+            "cat",
+        ])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => serde_json::json!({
+            "unit": unit,
+            "lines": String::from_utf8_lossy(&output.stdout).trim_end(),
+        }),
+        Ok(output) => serde_json::json!({
+            "unit": unit,
+            "error": String::from_utf8_lossy(&output.stderr).trim(),
+        }),
+        Err(error) => serde_json::json!({ "unit": unit, "error": error.to_string() }),
+    }
+}
+
+/// The effective uid, without pulling libc in for one number.
+fn effective_uid() -> u32 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            if let Some(effective) = rest.split_whitespace().nth(1) {
+                if let Ok(uid) = effective.parse() {
+                    return uid;
+                }
+            }
+        }
+    }
+    65534
+}
+
 fn main() {
     // `--serve`: the console over localhost HTTP instead of a webview. The
     // same UI, the same commands, for machines whose WebKitGTK cannot render.
