@@ -383,6 +383,24 @@ install_docs() {
     # Create the directory now rather than at the next boot: a unit started in
     # between would fail with 226/NAMESPACE, because ReadWritePaths needs the
     # path to already exist.
+    # The recovery path ships with the product: an escape hatch that restores
+    # egress, and a dead-man that removes the block when the tunnel stops
+    # carrying. Installing a fail-closed guard without these is a machine that
+    # can lose its internet and need a human to fix it.
+    for tool in vallum-panic vallum-guard-deadman; do
+        if [ -f "packaging/$tool" ]; then
+            run install -D -m 0755 "packaging/$tool" "/usr/local/sbin/$tool"
+        elif [ -f "$SOURCE_DIR/$tool" ]; then
+            run install -D -m 0755 "$SOURCE_DIR/$tool" "/usr/local/sbin/$tool"
+        fi
+    done
+    for unit in vallum-deadman@.service vallum-deadman@.timer; do
+        if [ -f "packaging/$unit" ]; then
+            run install -D -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
+        fi
+    done
+    run systemctl daemon-reload || true
+
     if [ -f "$TMPFILES_DIR/vallum-tmpfiles.conf" ]; then
         run systemd-tmpfiles --create "$TMPFILES_DIR/vallum-tmpfiles.conf" || true
     fi
@@ -459,6 +477,8 @@ uninstall() {
         run systemctl disable --now "$instance"
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
+    run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
+    run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"
     run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-guard@.service" \
         "$UNIT_DIR/vallum-quick@.service" \
         "$UNIT_DIR/vallum-quick-watch@.service" \

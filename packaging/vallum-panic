@@ -1,0 +1,50 @@
+#!/bin/sh
+# vallum-panic — put this host back on the internet, now.
+#
+# Installed root-owned at /usr/local/sbin/vallum-panic so the console can run it
+# through a narrow sudoers rule. It is the last resort for the failure that
+# actually happened: the egress guard switched on, the tunnel never took the
+# routes, and every packet left the machine into a block with nothing behind it.
+#
+# Order matters: remove the block FIRST (that is what is holding the host down),
+# then the routing, then the daemons. Every step is best-effort; the script's job
+# is to get to the end, not to be tidy.
+set -u
+
+log() { echo "panic: $*"; }
+
+# 1. The block. Removing the nft table is the one action that restores egress.
+for conf in /etc/vallum/*.toml; do
+    [ -f "$conf" ] || continue
+    /usr/bin/vallum policy off --config "$conf" >/dev/null 2>&1 && log "policy off ($conf)"
+done
+nft delete table inet vallum_policy >/dev/null 2>&1 && log "removed the policy table"
+
+# 2. Routing: withdraw anything the tunnel owns, so a dead default route cannot
+#    keep blackholing the host.
+for iface in $(ip -o link show 2>/dev/null | awk -F': ' '/vallum/{print $2}' | cut -d@ -f1); do
+    ip route del default dev "$iface" >/dev/null 2>&1 && log "removed default via $iface"
+    ip -6 route del default dev "$iface" >/dev/null 2>&1
+done
+
+# 3. Units, in reverse dependency order. The guard's own ExecStop repeats step 1.
+systemctl stop 'vallum-quick@*' >/dev/null 2>&1 && log "stopped vallum-quick@*"
+systemctl stop 'vallum-guard@*' >/dev/null 2>&1 && log "stopped vallum-guard@*"
+systemctl stop 'vallum@*' >/dev/null 2>&1 && log "stopped vallum@*"
+
+# 4. If there is still no default route, ask the network manager for one.
+if ! ip route show default | grep -q .; then
+    log "no default route left; asking NetworkManager"
+    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null |
+        awk -F: '$2=="802-11-wireless"||$2=="802-3-ethernet"{print $1; exit}' |
+        while read -r name; do nmcli connection up "$name" >/dev/null 2>&1; done
+    command -v dhclient >/dev/null && dhclient >/dev/null 2>&1
+fi
+
+# 5. Say whether it worked, in terms of the thing the user cares about.
+if ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+    log "internet restored"
+    exit 0
+fi
+log "still no internet — check 'ip route' and 'nft list ruleset' by hand"
+exit 1

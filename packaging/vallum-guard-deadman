@@ -1,0 +1,46 @@
+#!/bin/sh
+# vallum-guard-deadman — remove the egress block if the tunnel stops carrying.
+#
+# The guard is fail-closed by design (ADR-0018): egress leaves only through the
+# tunnel. That is right while the tunnel works and catastrophic when it does
+# not, because the block outlives the thing it protects. This check is the
+# missing half: if the guard is on and the tunnel cannot pass a packet to the
+# far side, the block comes off and the host goes back on the internet.
+#
+# Runs from a systemd timer every 10 s. Three consecutive failures are required
+# so a single lost ICMP echo does not flap the policy.
+set -u
+
+STATE=/run/vallum/deadman.failures
+IFACE=${1:-vallum0}
+CONF=/etc/vallum/$IFACE.toml
+
+# Nothing to do when the guard is not on.
+systemctl is-active --quiet "vallum-guard@$IFACE" || { rm -f "$STATE"; exit 0; }
+
+if ping -c 1 -W 2 10.7.0.1 >/dev/null 2>&1; then
+    rm -f "$STATE"
+    exit 0
+fi
+
+count=0
+[ -f "$STATE" ] && count=$(cat "$STATE" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$STATE"
+
+if [ "$count" -lt 3 ]; then
+    logger -t vallum-deadman "tunnel probe failed ($count/3) on $IFACE"
+    exit 0
+fi
+
+logger -t vallum-deadman "tunnel dead 3 checks running — removing the egress block on $IFACE"
+/usr/bin/vallum policy off --config "$CONF" >/dev/null 2>&1
+nft delete table inet vallum_policy >/dev/null 2>&1
+rm -f "$STATE"
+
+# The routes are the other half of a blackhole; quick's own watch withdraws them,
+# but it may not be running, so take them out here too.
+ip route del default dev "$IFACE" >/dev/null 2>&1
+ip -6 route del default dev "$IFACE" >/dev/null 2>&1
+logger -t vallum-deadman "egress restored; the tunnel is down and unguarded"
+exit 0

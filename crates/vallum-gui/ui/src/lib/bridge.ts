@@ -95,6 +95,26 @@ export function panicNow(): Promise<{ message: string }> {
   return http("/api/panic", { method: "POST" })
 }
 
+export interface PingResult {
+  address: string
+  interface?: string
+  sent?: number
+  received?: number | null
+  avg_ms?: string | null
+  output?: string
+  error?: string
+}
+
+/** Probe a peer over the interface that carries it. */
+export function pingPeer(address: string): Promise<PingResult> {
+  if (IN_TAURI) return invoke<PingResult>("ping_peer", { address })
+  return http<PingResult>("/api/ping", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ address }),
+  })
+}
+
 export interface LogTail {
   unit: string
   lines?: string

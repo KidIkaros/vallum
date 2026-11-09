@@ -1,0 +1,11 @@
+[Unit]
+Description=Vallum egress dead-man timer for %i
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=vallum-deadman@%i.service
+
+[Install]
+WantedBy=timers.target

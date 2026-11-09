@@ -1,0 +1,15 @@
+[Unit]
+Description=Vallum egress dead-man for %i
+Documentation=man:vallum(8)
+# The guard is fail-closed; this is the half that keeps fail-closed from
+# becoming "host has no internet". It runs whether or not anything else is
+# healthy, and it removes the block when the tunnel cannot carry a packet.
+After=vallum-guard@%i.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vallum-guard-deadman %i
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true

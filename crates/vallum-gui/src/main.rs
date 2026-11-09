@@ -748,10 +748,30 @@ pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
 /// everything else is broken, so it runs a root-owned script through the
 /// narrow sudoers rule rather than doing anything itself.
 pub(crate) fn panic() -> Result<Done, String> {
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/sbin/vallum-panic"])
-        .output()
-        .map_err(|error| format!("cannot run vallum-panic: {error}"))?;
+    // `sudo -n` when the installer's rule is present; otherwise polkit, so the
+    // escape hatch works on a host where the rule is missing. The one control
+    // that matters must not depend on a config file being right.
+    let mut attempts: Vec<(&str, Vec<&str>)> = vec![("sudo", vec!["-n", "/usr/local/sbin/vallum-panic"])];
+    if effective_uid() != 0 {
+        attempts.push(("pkexec", vec!["/usr/local/sbin/vallum-panic"]));
+    }
+    let mut last = String::from("cannot run vallum-panic");
+    let mut output = None;
+    for (program, args) in attempts {
+        match std::process::Command::new(program).args(&args).output() {
+            Ok(result) if result.status.success() => {
+                output = Some(result);
+                break;
+            }
+            Ok(result) => {
+                last = String::from_utf8_lossy(&result.stderr).trim().to_owned();
+            }
+            Err(error) => last = format!("{program}: {error}"),
+        }
+    }
+    let Some(output) = output else {
+        return Err(last);
+    };
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -770,6 +790,65 @@ pub(crate) fn panic() -> Result<Done, String> {
 #[tauri::command]
 fn panic_command() -> Result<Done, String> {
     panic()
+}
+
+/// Probe a peer over the interface that carries it.
+///
+/// Bound to the interface on purpose: the host's routing table may prefer a
+/// different tunnel (or the physical link), and a probe that answers from
+/// somewhere else is worse than no probe.
+pub(crate) fn ping(
+    socket: &std::path::Path,
+    address: &str,
+    count: u32,
+) -> serde_json::Value {
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0")
+        .to_owned();
+    let output = std::process::Command::new("ping")
+        .args([
+            "-I",
+            &interface,
+            "-c",
+            &count.to_string(),
+            "-W",
+            "2",
+            address,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return serde_json::json!({ "address": address, "error": "cannot run ping" });
+    };
+    let text = String::from_utf8_lossy(&output.stdout).to_owned();
+    let received = text
+        .lines()
+        .find(|line| line.contains("packets transmitted"))
+        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|value| value.parse::<u32>().ok());
+    let rtt = text
+        .lines()
+        .find(|line| line.starts_with("rtt") || line.starts_with("round-trip"))
+        .and_then(|line| line.split('=').nth(1))
+        .map(|value| value.trim().split('/').nth(1).map(str::to_owned))
+        .flatten();
+    serde_json::json!({
+        "address": address,
+        "interface": interface,
+        "sent": count,
+        "received": received,
+        "avg_ms": rtt,
+        "output": text.trim(),
+    })
+}
+
+#[tauri::command]
+fn ping_peer(console: State<'_, Arc<Console>>, address: String) -> serde_json::Value {
+    console.known_socket().map_or_else(
+        || serde_json::json!({ "error": "no interface selected" }),
+        |socket| ping(&socket, &address, 3),
+    )
 }
 
 fn main() {
@@ -808,6 +887,7 @@ fn main() {
             list_interfaces,
             health_state,
             panic_command,
+            ping_peer,
             select,
             window_state,
             add_peer,

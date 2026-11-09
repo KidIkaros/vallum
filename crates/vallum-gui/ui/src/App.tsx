@@ -12,9 +12,11 @@ import {
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
-import { bytes, hasBridge, health, listInterfaces, onSnapshot, selectInterface, watchWindowState, type Health } from "@/lib/bridge"
+import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, selectInterface, watchWindowState, type Health, type PingResult } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
 import { EgressBadge, HealthPanel, PanicButton } from "@/components/Health"
+import { CopyButton } from "@/components/Copy"
+import { Button } from "@/components/ui/button"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, loadHistory, rateLabel, saveHistory, type Sample } from "@/lib/traffic"
@@ -283,6 +285,8 @@ function PeerDetail({
   now: number
   blocked?: string
 }) {
+  const [probe, setProbe] = useState<PingResult | null>(null)
+  const [probing, setProbing] = useState(false)
   if (!peer) {
     return (
       <Panel title="PEER DETAIL">
@@ -313,11 +317,42 @@ function PeerDetail({
             read-only
           </span>
         )}
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 px-2 text-[10px] uppercase"
+          disabled={probing || peer.allowed_ips.length === 0}
+          title={`ping ${peer.allowed_ips[0] ?? "the peer"}`}
+          onClick={() => {
+            // allowed_ips holds CIDRs; ping wants an address.
+            const target = peer.allowed_ips[0]?.split("/")[0]
+            if (!target) return
+            setProbing(true)
+            pingPeer(target)
+              .then(setProbe)
+              .catch((error: unknown) =>
+                setProbe({ address: target, error: String(error) }),
+              )
+              .finally(() => setProbing(false))
+          }}
+        >
+          {probing ? "…" : "ping"}
+        </Button>
+        <CopyButton value={peer.public_line} label="copy line" title="copy this peer's public line" />
         <EditPeerDialog peer={peer} blocked={blocked} />
         <RotateDialog peer={peer} blocked={blocked} />
         {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
         <RemoveDialog peer={peer} blocked={blocked} />
       </div>
+      {probe && (
+        <p className={`text-[11px] ${probe.received ? "text-live" : "text-fault"}`}>
+          {probe.error
+            ? probe.error
+            : `${probe.received ?? 0}/${probe.sent ?? 0} replies from ${probe.address}${
+                probe.avg_ms ? ` · ${Number(probe.avg_ms).toFixed(1)} ms avg` : ""
+              }`}
+        </p>
+      )}
       <Row label="fingerprint">{peer.fingerprint}</Row>
       <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
       <Row label="allowed">{peer.allowed_ips.join(", ")}</Row>
@@ -644,6 +679,7 @@ export default function App() {
               )}
               <span className="text-muted-foreground">
                 id <span className="text-foreground/80">{data.fingerprint.slice(0, 16)}</span>
+                <CopyButton value={data.public_line} label="copy" title="copy this device's public line" />
               </span>
             </>
           )}

@@ -139,6 +139,21 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         return Ok(());
     }
 
+    if request.path == "/api/ping" && request.method == "POST" {
+        let Some(socket) = console.known_socket() else {
+            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            return Ok(());
+        };
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let address = body.get("address").and_then(|v| v.as_str()).unwrap_or_default();
+        if address.is_empty() {
+            json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": "missing `address`" }));
+            return Ok(());
+        }
+        json(&mut stream, "200 OK", &crate::ping(&socket, address, 3));
+        return Ok(());
+    }
+
     if request.path == "/api/health" {
         let Some(socket) = console.known_socket() else {
             json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
