@@ -45,10 +45,14 @@ missing entry costs the operation, not the tunnel — the same choice MOOR makes
 caller's error now names the file, which is how the missing entry gets found.
 
 **After the fix**, three consecutive 20 MB transfers and a five-transfer burst
-(100 MB): **0 SIGSYS kills**, unit `active` throughout, 7.1–13.9 MB/s. The
-openat no longer recurs in the journal, so the failing call is still unnamed —
-the filter no longer turns it into an outage, but the missing entry is still
-missing and belongs on the list.
+(100 MB): **0 SIGSYS kills**, unit `active` throughout, 7.1–13.9 MB/s.
+
+Then a 165-second continuous stream at 1 MB/s (~165 MB) crossing **2 rekeys**:
+unit `active`, **0 kills**, counters `datagrams_sent 76 429 / failed 0`,
+`packets_delivered 270 141 / failed 0`, `handshakes 3 / refused 0`,
+`fragment drops 0`. The openat no longer recurs in the journal, so the failing
+call is still unnamed — the filter no longer turns it into an outage, but the
+missing entry is still missing and belongs on the list.
 
 ### 2. Web traffic does not traverse the tunnel
 
