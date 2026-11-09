@@ -76,12 +76,23 @@ The list is in `crates/vallum/src/sandbox.rs`, grouped by what each group is for
 is the allocator). 79 syscalls are allowed.
 
 The same exercise, run through the committed script (`scripts/seccomp-trace.sh`),
-runs twice — once per carrier — and sees 27 distinct syscalls over UDP and 35
-over TCP, 36 in union, all of them on the list. The counts differ from the 20
-above because neither exercise is identical to the first derivation: the script
-uses `vallum show` as the control client, pings in both directions, and repeats
-the shutdown the same way every time. No count is the argument: the guard diffs
-the trace against the list, not against this page.
+runs twice — once per carrier — and starts the client daemon under
+`strace -f -o` instead of attaching to it. It sees 40 distinct syscalls over UDP
+and 43 over TCP, 44 in union, all of them on the list.
+
+The checked window begins at the daemon's first `bind`: `commands::run` opens the
+TUN, binds the carrier socket, and only then drops privileges and installs the
+filter, so everything from the bind onward is filtered in production. Starting
+the trace at `execve` rather than after the tunnel is what brings the phase
+between the bind and the tunnel into the window — publishing the control socket
+happens there, and so does the `linkat` that killed the first live `enforce` run.
+A traced daemon is not killed at `SIGTERM` any more either, so its shutdown path
+is in the trace too.
+
+The counts differ from the 20 above because no two exercises are identical: the
+script uses `vallum show` as the control client, pings in both directions, and
+repeats the shutdown the same way every time. No count is the argument: the guard
+diffs the trace against the list, not against this page.
 
 ### What the trace did not reach
 
@@ -89,21 +100,22 @@ The trace shows what a *running* daemon does; it cannot show what the daemon doe
 on a path the exercise did not take. Two gaps remain, and one earlier claim was
 wrong and is corrected below.
 
-1. **Thread creation, entry by entry.** The threads exist by the time the trace
-   attaches over UDP, so the first derivation never saw `clone3`,
-   `set_robust_list`, `rseq`, or `sched_getaffinity`. The TCP leg does see them,
-   because the carrier starts its reader and writer threads on demand rather than
-   at startup — so those entries are observed now, in the leg that creates a
-   thread late. What is still unobserved is the *absence* of threads: 43 of the
-   79 entries appear in neither trace, most of them startup-only (`arch_prctl`,
-   `set_tid_address`, `rt_sigaction`) or libc and allocator fallbacks (`brk`,
-   `clone` where `clone3` is the observed one). They are allowed because the
-   drop happens after them or because a fallback may take them, not because a
-   trace justified each one.
+1. **Thread creation, entry by entry.** The first derivation attached after the
+   tunnel was up, when the threads already existed, so it never saw `clone3`,
+   `set_robust_list`, `rseq`, or `sched_getaffinity`. The trace starts at
+   `execve` now and all four are observed: the window covers the moment the
+   threads are created. What is still unobserved is the *absence* of threads — 35
+   of the 79 entries appear in neither trace, most of them startup-only
+   (`arch_prctl`, `set_tid_address`, `rt_sigaction`) or libc and allocator
+   fallbacks (`brk`, `clone` where `clone3` is the observed one). They are
+   allowed because the drop happens after them or because a fallback may take
+   them, not because a trace justified each one.
 2. **The TCP carrier has teardown paths the exercise stops short of.** The
    carrier itself is now traced: `socket`, `connect`, `poll`, `getsockopt`, and
-   the framed stream's `read`/`write` all appear in the TCP leg. `shutdown` does
-   not, because the connection is closed during shutdown, after the trace stops.
+   the framed stream's   `read`/`write` all appear in the TCP leg. `shutdown` still does not, even with
+   the trace now running through the daemon's exit: the two call sites are
+   teardown paths the exercise does not take, so that entry rests on reading the
+   code.
    `recvmsg`, `sendmsg` and `recvmmsg` appeared in neither trace, and nothing in
    the crate calls them or a `*_vectored` form — the carrier sends with
    `sendmmsg` (batched UDP) and `write` (TCP). An earlier revision of this page
@@ -117,18 +129,22 @@ wrong and is corrected below.
    `vallum tui`, a client that speaks to the control socket, and it runs without
    the daemon's filter. The daemon opens no terminal and no file, so there is no
    gap here — there was an error here.
-4. **The window between the install and `tunnel up`.** `scripts/seccomp-trace.sh`
-   attaches after the tunnel is up, so everything the daemon does *under the
-   filter* but *before* that point is invisible to it — and publishing the
-   control socket happens there. The enforce leg covers that window, and on its
+4. **The window between the install and `tunnel up`.** This one was open: the
+   guard attached after the tunnel was up, so everything the daemon did *under
+   the filter* but *before* that point was invisible to it, and publishing the
+   control socket happens there. The enforce leg covered that window, and on its
    first live run the daemon died in it: publication hard-links a chmodded socket
    out of a staging directory, `fs::hard_link` issues `linkat`, and the list had
-   `unlinkat` but not `linkat`. No trace could have found it; only a run with the
-   filter on could. `linkat` is on the list now with that reason beside it, and
-   `scripts/seccomp-enforce.sh` replays a startup death under `strace` so the next
-   one is named in the failure report rather than costing an investigation — the
-   replay is what rejected `link` (the name one would guess) in favour of
-   `linkat` (the name the binary issues).
+   `unlinkat` but not `linkat`. No trace *at that time* could have found it; only
+   a run with the filter on could. It is closed now: the guard traces from
+   `execve` and cuts the window at the carrier bind, so the publish is inside it,
+   and removing `linkat` from the list makes the guard exit 1 and name it. That
+   negative test is the reason to believe the guard covers what the old one
+   missed. `scripts/seccomp-enforce.sh` still replays a startup death under
+   `strace`, so a syscall this window cannot reach — one made by the drop, or by
+   the install — arrives named in the failure report rather than costing an
+   investigation; that replay is what rejected `link` (the name one would guess)
+   in favour of `linkat` (the name the binary issues).
 
 ## 4. What is deliberately absent
 
@@ -172,10 +188,12 @@ descriptors it was handed.
    enforce mode — the path that died.
 3. **The guard covers the traced paths only.** `scripts/seccomp-trace.sh` (run
    by the `e2e` job in CI) repeats the exercise on both carriers and fails when
-   the daemon's syscalls are not a subset of `vallum sandbox --names`. It has
-   been shown to fail: removing `sendto` from the list made it exit 1 and name
-   that syscall. What it cannot see is §3 — paths the exercise does not take, and
-   the 43 entries no trace justifies individually. The list is as current as the
+   the daemon's syscalls are not a subset of `vallum sandbox --names`, from the
+   carrier bind onward. It has been shown to fail twice: removing `sendto` made
+   it exit 1 and name that syscall, and removing `linkat` — the syscall the old
+   attach-after-tunnel window could not see — made it exit 1 and name that one.
+   What it cannot see is §3 — paths the exercise does not take, and
+   the 35 entries no trace justifies individually. The list is as current as the
    exercise, not as the code.
 4. **Nothing spawns a process after the drop — as of this audit.** Every place
    the daemon could run a program was checked: `nft` (policy installation) is

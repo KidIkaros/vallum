@@ -269,8 +269,15 @@ in the CI log instead of an investigation.
 The guard is checked both ways: it passes on the current list, and removing
 `sendto` from the list made it exit 1 and name that syscall — a guard nobody has
 seen fail is a guard that might not be able to. It traces both carriers: the UDP
-leg sees 27 distinct syscalls, the TCP leg 35, 36 in union, because the carrier
+leg sees 40 distinct syscalls, the TCP leg 43, 44 in union, because the carrier
 dials, waits in `poll`, and starts its reader and writer threads on demand.
+
+It also starts the daemon under `strace` rather than attaching after the tunnel,
+so the window runs from `execve` and is cut at the carrier bind — the last point
+before production drops privileges and installs the filter. That is what brings
+control-socket publication inside the guard: removing `linkat` from the list now
+makes the guard fail and name it, where the old window passed with `linkat`
+missing and the daemon died on it in `enforce` mode.
 
 Enforce mode has a live run too: `scripts/seccomp-enforce.sh` drops to
 `nobody` with the filter in enforce mode and checks from the outside that the

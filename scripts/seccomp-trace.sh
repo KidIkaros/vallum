@@ -32,18 +32,28 @@
 # carrier does. Both are the daemon's syscall surface, so both are traced and the
 # guard diffs the union.
 #
-# strace attaches to daemon A only after the tunnel is up, so the trace is the
-# running daemon's syscall surface: the startup phase (`ip` calls, `openat`,
-# `setuid`) happens before the drop and is deliberately not in the list.
+# strace starts daemon A, so the trace begins at `execve` and nothing the daemon
+# does is missed. The checked window starts at the carrier `bind`: `commands::run`
+# opens the TUN, binds the carrier socket, and only then drops privileges and
+# installs the filter, so from the bind onward everything the daemon does is
+# filtered in production. Tracing from there is therefore a superset of the
+# production window — it can only make this guard stricter, never looser.
 #
-# What this cannot see: syscalls made by threads that already existed when the
-# trace attached (thread creation, `set_robust_list`, `rseq`). `docs/proof/seccomp.md`
-# §3 says which entries rest on reading the code instead of on a trace.
+# The trace config performs no drop (see below), so there is no install to cut
+# at: an unprivileged user namespace denies `setgroups`, and the drop calls it
+# whenever a group is resolved. That is why the boundary is `bind` and not the
+# install, and why the `enforce` leg in CI — real root, a real drop to `nobody` —
+# is what proves the filtered daemon actually lives.
+#
+# Why it had to move: attaching after "tunnel up" left the phase between the
+# install and the tunnel untraced, and publishing the control socket happens
+# there. It cost the daemon its life on `linkat` in the first live `enforce` run.
 #
 # The traced daemon runs without `interface.user`, because the question is what
-# the daemon asks for, not whether the filter installs — and an unprivileged user
-# namespace cannot call `setgroups`, which the privilege drop does. The live
-# enforce run is `scripts/seccomp-enforce.sh`, which needs real root.
+# the daemon asks for, not whether the filter installs — and the drop cannot
+# happen here at all: it calls `setgroups` whenever a group is resolved, and an
+# unprivileged user namespace denies that. The live enforce run is
+# `scripts/seccomp-enforce.sh`, which needs real root.
 #
 # Usage:
 #   scripts/seccomp-trace.sh [path/to/vallum]
@@ -51,8 +61,9 @@
 # Set KEEP=1 to leave the scratch directory (configs, keys, both logs and the raw
 # traces) behind instead of deleting it.
 #
-# Exit status 0 means every syscall in either trace is on the allow-list. Requires
-# Linux with user namespaces (or root), `ip`, `ping`, and `strace`.
+# Exit status 0 means every syscall in either trace, from the carrier bind onward,
+# is on the allow-list. Requires Linux with user namespaces (or root), `ip`,
+# `ping`, and `strace`.
 
 set -uo pipefail
 
@@ -110,8 +121,8 @@ add_route() {
 }
 
 # One exercise: two daemons, a real TUN each, the handshake, three pings each
-# way, a control request, and a shutdown — with strace on A from the moment the
-# tunnel is up. The carrier is the only thing the two calls differ in.
+# way, a control request, and a shutdown — with strace on A from `execve`. The
+# carrier is the only thing the two calls differ in.
 #
 #   leg TAG CARRIER IF_A IF_B TUN_A TUN_B OUTER_A OUTER_B
 leg() {
@@ -157,8 +168,25 @@ EOF
 
     "$W/vallum" run --config "$W/$tag-b.toml" --allow-insecure-key-permissions > "$W/$tag-b.log" 2>&1 &
     pid_b=$!
-    "$W/vallum" run --config "$W/$tag-a.toml" --allow-insecure-key-permissions > "$W/$tag-a.log" 2>&1 &
-    pid_a=$!
+
+    # A is started by strace rather than attached to, because the syscalls that
+    # matter most are the ones before there is anything to attach to.
+    strace -f -o "$W/trace-$tag.txt" "$W/vallum" run --config "$W/$tag-a.toml" \
+        --allow-insecure-key-permissions >> "$W/$tag-a.log" 2>&1 &
+    tracer=$!
+
+    # strace forks and the child execs the daemon, so the daemon is strace's
+    # child rather than `$!`. It has to be found before it can be signalled.
+    pid_a=
+    for _ in $(seq 1 100); do
+        pid_a=$(pgrep -P "$tracer" 2> /dev/null | head -1)
+        [ -n "$pid_a" ] && break
+        sleep 0.1
+    done
+    [ -n "$pid_a" ] || {
+        echo "$tag: strace did not start the daemon: $(tail -3 "$W/$tag-a.log")" >&2
+        exit 1
+    }
 
     # The control socket is published only once the daemon is serving, so it is a
     # better readiness signal than a sleep.
@@ -173,10 +201,6 @@ EOF
 
     add_route "$tun_b/32" "$if_a" "$tag"
     add_route "$tun_a/32" "$if_b" "$tag"
-
-    strace -f -p "$pid_a" -o "$W/trace-$tag.txt" 2> /dev/null &
-    tracer=$!
-    sleep 0.5
 
     # Both directions: each reader and each writer path is exercised once. The
     # source address of a ping into the tunnel is the interface's, so this is the
@@ -199,18 +223,40 @@ EOF
     }
 
     kill -TERM "$pid_a"
-    sleep 1
-    # strace exits with the daemon it traced, so it is usually gone by now.
+    # strace exits when the daemon it started does, so the trace covers the shutdown
+    # path instead of being cut at `SIGTERM`. The daemon is not this shell's child
+    # (strace's is), so its exit is observed rather than waited for, and bounded.
+    for _ in $(seq 1 100); do
+        kill -0 "$pid_a" 2> /dev/null || break
+        sleep 0.1
+    done
     kill "$tracer" 2> /dev/null || true
-    wait "$pid_a" 2> /dev/null || true
+    wait "$tracer" 2> /dev/null || true
     kill -TERM "$pid_b" 2> /dev/null || true
     wait "$pid_b" 2> /dev/null || true
+
+    # The boundary is the carrier `bind` — the address-family one, not the netlink
+    # bind that `net::bind` makes while choosing its fwmark. `execve` has to appear
+    # before it, or the trace started after the daemon did and the window would be
+    # a lie. `|| true` is deliberate on the greps: a missing marker is reported
+    # below rather than aborting under `set -e` with no message.
+    local boundary
+    boundary=$(grep -n ' bind(.*AF_INET' "$W/trace-$tag.txt" | head -1 | cut -d: -f1) || true
+    if [ -z "$boundary" ]; then
+        echo "$tag: the trace shows no bind, so there is no window to check" >&2
+        exit 1
+    fi
+    head -n "$((boundary - 1))" "$W/trace-$tag.txt" | grep -q 'execve(' || {
+        echo "$tag: the trace begins after the daemon started; strace missed the startup" >&2
+        exit 1
+    }
 
     # strace prefixes each line with `[pid N]` when it follows threads and a bare
     # number when it does not; both are stripped before the call name is taken. An
     # empty result is checked by the caller, so a `grep` that finds nothing must
     # not abort the script here.
-    sed -E 's/^\[pid +[0-9]+\] +//; s/^[0-9]+ +//' "$W/trace-$tag.txt" \
+    tail -n "+$boundary" "$W/trace-$tag.txt" \
+        | sed -E 's/^\[pid +[0-9]+\] +//; s/^[0-9]+ +//' \
         | grep -oE '^[a-z_0-9]+\(' | tr -d '(' | sort -u > "$W/traced-$tag.txt" || true
 }
 
@@ -245,7 +291,7 @@ traced=$(wc -l < "$W/traced.txt")
 comm -23 "$W/traced.txt" "$W/allowed.txt" > "$W/unknown.txt"
 
 echo "== udp leg: $(wc -l < "$W/traced-udp.txt") syscalls; tcp leg: $(wc -l < "$W/traced-tcp.txt")"
-echo "== union: $traced distinct syscalls after startup"
+echo "== union: $traced distinct syscalls from the carrier bind onward"
 if [ -s "$W/unknown.txt" ]; then
     echo "== FAIL: the allow-list does not name:" >&2
     sed 's/^/     /' "$W/unknown.txt" >&2
