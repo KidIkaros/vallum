@@ -25,6 +25,10 @@ import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
 const FRESH_SEC = 5 * 60
 
+// The console renders inside the Tauri webview, where `__TAURI_INTERNALS__`
+// is the IPC bridge. A plain browser tab has no bridge and no daemon, so the
+// app says that instead of throwing "cannot read properties of undefined".
+
 function Diamond({ className = "" }: { className?: string }) {
   return (
     <span aria-hidden className={`inline-block size-1.5 rotate-45 bg-signal ${className}`} />
@@ -345,6 +349,24 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
   )
 }
 
+function NoBridge() {
+  return (
+    <section className="bg-card/60 rounded-lg border border-border/70">
+      <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
+        <ShieldOff className="text-muted-foreground size-8" aria-hidden />
+        <div>
+          <p className="font-medium">This is the console's web UI, not the console</p>
+          <p className="text-muted-foreground mt-1 max-w-md text-xs">
+            A browser tab has no bridge to the daemon. The console runs inside the
+            Vallum application, which talks to the control socket directly:
+          </p>
+          <code className="text-signal mt-3 inline-block text-xs">./target/release/vallum-gui</code>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function EmptyState() {
   return (
     <section className="bg-card/60 rounded-lg border border-border/70">
@@ -373,6 +395,7 @@ function EmptyState() {
 }
 
 export default function App() {
+  const inApp = useMemo(() => "__TAURI_INTERNALS__" in window, [])
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
@@ -398,6 +421,7 @@ export default function App() {
   const ingest = ingestRef.current
 
   useEffect(() => {
+    if (!inApp) return
     let cancelled = false
     listInterfaces().then((entries) => {
       if (cancelled) return
@@ -412,6 +436,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!inApp) return
     let unlisten: (() => void) | undefined
     void onSnapshot(ingest).then((fn) => {
       unlisten = fn
@@ -467,7 +492,9 @@ export default function App() {
         </div>
       </header>
 
-      {interfaces.length === 0 ? (
+      {!inApp ? (
+        <NoBridge />
+      ) : interfaces.length === 0 ? (
         <EmptyState />
       ) : (
         <>
