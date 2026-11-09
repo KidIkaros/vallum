@@ -277,7 +277,9 @@ Enforce mode has a live run too: `scripts/seccomp-enforce.sh` drops to
 kernel reports `Seccomp: 2` for the process and for every thread it started,
 that `NoNewPrivs` is set, that the uid is fully dropped, and that the tunnel and
 control plane still work before a clean `SIGTERM`. It needs real root (the drop
-calls `setgroups`), so CI is where it runs. The kill itself is still the unit
+calls `setgroups`), so CI is where it runs. It passes there, all eight checks, and the
+one that matters is the control plane answering in enforce mode — that is the
+`linkat` path reopened under the filter. The kill itself is still the unit
 test's job, as no live run can be asked to take an off-list path on demand.
 
 Open question 1 is settled: its own module (`sandbox.rs`). Question 2 is settled

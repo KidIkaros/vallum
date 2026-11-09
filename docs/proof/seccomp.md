@@ -167,7 +167,9 @@ descriptors it was handed.
    On a development machine the script refuses to run without root (it says so
    and exits 1) rather than quietly testing less.
    It has already paid for itself: its first live run killed the daemon on
-   `linkat` during startup, before any traffic, which is §3's fourth gap.
+   `linkat` during startup, before any traffic, which is §3's fourth gap. The
+   next run passes all eight checks, including the control plane answering in
+   enforce mode — the path that died.
 3. **The guard covers the traced paths only.** `scripts/seccomp-trace.sh` (run
    by the `e2e` job in CI) repeats the exercise on both carriers and fails when
    the daemon's syscalls are not a subset of `vallum sandbox --names`. It has
