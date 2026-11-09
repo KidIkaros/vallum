@@ -132,7 +132,7 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
     }
 
     if request.path == "/api/service" {
-        let Some(socket) = console.current_socket() else {
+        let Some(socket) = console.known_socket() else {
             json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
             return Ok(());
         };
@@ -150,7 +150,7 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
     }
 
     if request.path.starts_with("/api/logs") {
-        let Some(socket) = console.current_socket() else {
+        let Some(socket) = console.known_socket() else {
             json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
             return Ok(());
         };

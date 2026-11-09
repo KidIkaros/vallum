@@ -13,7 +13,7 @@ import {
   RotateDialog,
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
-import { LogsPanel, ServiceStrip } from "@/components/Service"
+import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
@@ -399,6 +399,7 @@ function EmptyState() {
 
 export default function App() {
   const inApp = useMemo(() => hasBridge, [])
+  const { service, refresh: refreshService } = useServiceState(inApp)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
@@ -426,15 +427,23 @@ export default function App() {
   useEffect(() => {
     if (!inApp) return
     let cancelled = false
-    listInterfaces().then((entries) => {
-      if (cancelled) return
-      setInterfaces(entries)
-      // The first socket is the daemon the operator most likely means; picking
-      // it saves a click without hiding the others.
-      if (entries.length > 0) void selectInterface(entries[0].path)
-    })
+    let bound = false
+    const scan = () =>
+      listInterfaces().then((entries) => {
+        if (cancelled) return
+        setInterfaces(entries)
+        // The first socket is the daemon the operator most likely means; picking
+        // it saves a click without hiding the others.
+        if (!bound && entries.length > 0) {
+          bound = true
+          void selectInterface(entries[0].path)
+        }
+      })
+    void scan()
+    const timer = window.setInterval(scan, 5000)
     return () => {
       cancelled = true
+      window.clearInterval(timer)
     }
   }, [])
 
@@ -469,7 +478,7 @@ export default function App() {
           </span>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-          <ServiceStrip blocked={blocked} />
+          <ServiceStrip service={service} onChanged={refreshService} />
           <DeviceDialog
             listenPort={data?.listen_port ?? null}
             fwmark={data?.fwmark ?? null}
@@ -498,6 +507,8 @@ export default function App() {
 
       {!inApp ? (
         <NoBridge />
+      ) : service && service.active !== "active" ? (
+        <StoppedCard service={service} onChanged={refreshService} />
       ) : interfaces.length === 0 ? (
         <EmptyState />
       ) : (
@@ -529,7 +540,7 @@ export default function App() {
               <PeerDetail peer={detail} now={now} blocked={blocked} />
             </div>
           </div>
-          <LogsPanel blocked={blocked} />
+          <LogsPanel />
           <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[10px]">
             <span>updated {lastReply}</span>
             <span>·</span>

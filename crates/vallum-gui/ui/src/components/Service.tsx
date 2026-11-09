@@ -4,50 +4,62 @@ import { Button } from "@/components/ui/button"
 import { logsTail, serviceAction, serviceState, type ServiceStatus } from "@/lib/bridge"
 
 // The lifecycle the console was missing: whether the tunnel's unit is up, and
-// the two buttons that change that. Start/stop go through polkit — the desktop
-// asks for authorisation, the console never sees a password.
+// the two buttons that change that. Start/stop go through polkit (or a narrow
+// sudoers rule) — the desktop asks, the console never sees a password.
 
 const tone = (active: string) =>
-  active === "active"
-    ? "bg-live"
-    : active === "failed"
-      ? "bg-fault"
-      : "bg-muted-foreground/40"
+  active === "active" ? "bg-live" : active === "failed" ? "bg-fault" : "bg-stale"
 
-export function ServiceStrip({ blocked }: { blocked?: string }) {
-  const [state, setState] = useState<ServiceStatus | null>(null)
-  const [pending, setPending] = useState<string | null>(null)
-
+/** Poll the unit's state. Shared by the header strip and the stopped card. */
+export function useServiceState(enabled: boolean) {
+  const [service, setService] = useState<ServiceStatus | null>(null)
   const refresh = useCallback(() => {
+    if (!enabled) return
     serviceState()
-      .then(setState)
-      .catch(() => setState(null))
-  }, [])
-
+      .then(setService)
+      .catch(() => setService(null))
+  }, [enabled])
   useEffect(() => {
     refresh()
     const timer = window.setInterval(refresh, 5000)
     return () => window.clearInterval(timer)
   }, [refresh])
+  return { service, refresh }
+}
 
+/** Run a lifecycle action and report what systemd says afterwards, not intent. */
+function useServiceAction(refresh: () => void) {
+  const [pending, setPending] = useState<string | null>(null)
   const act = async (action: "start" | "stop" | "restart") => {
     setPending(action)
     try {
       const done = await serviceAction(action)
       toast.success(done.message)
-      // systemd needs a moment; the poll catches up either way.
-      window.setTimeout(refresh, 1500)
     } catch (error) {
       toast.error(String(error instanceof Error ? error.message : error))
     } finally {
       setPending(null)
+      refresh()
     }
   }
+  return { pending, act }
+}
 
-  const active = state?.active ?? "unknown"
+export function ServiceStrip({
+  service,
+  onChanged,
+}: {
+  service: ServiceStatus | null
+  onChanged: () => void
+}) {
+  const { pending, act } = useServiceAction(onChanged)
+  const active = service?.active ?? "unknown"
   return (
     <span className="flex items-center gap-2">
-      <span className="flex items-center gap-1.5" title={`systemd: ${active}, ${state?.enabled ?? "unknown"}`}>
+      <span
+        className="flex items-center gap-1.5"
+        title={`systemd: ${active}, ${service?.enabled ?? "unknown"}`}
+      >
         <span aria-hidden className={`inline-block size-1.5 rounded-full ${tone(active)}`} />
         <span className="micro">
           service <span className="text-foreground/80">{active}</span>
@@ -57,7 +69,7 @@ export function ServiceStrip({ blocked }: { blocked?: string }) {
         size="sm"
         variant="outline"
         className="h-6 px-2 text-[10px]"
-        disabled={Boolean(blocked) || pending !== null || active === "active"}
+        disabled={pending !== null || active === "active"}
         onClick={() => void act("start")}
       >
         {pending === "start" ? "…" : "START"}
@@ -66,7 +78,7 @@ export function ServiceStrip({ blocked }: { blocked?: string }) {
         size="sm"
         variant="outline"
         className="h-6 px-2 text-[10px]"
-        disabled={Boolean(blocked) || pending !== null || active !== "active"}
+        disabled={pending !== null || active !== "active"}
         onClick={() => void act("stop")}
       >
         {pending === "stop" ? "…" : "STOP"}
@@ -75,7 +87,45 @@ export function ServiceStrip({ blocked }: { blocked?: string }) {
   )
 }
 
-export function LogsPanel({ blocked }: { blocked?: string }) {
+/** Shown in place of the cockpit when the unit is not running: say so, and act. */
+export function StoppedCard({
+  service,
+  onChanged,
+}: {
+  service: ServiceStatus | null
+  onChanged: () => void
+}) {
+  const { pending, act } = useServiceAction(onChanged)
+  const unit = service?.unit ?? "vallum@vallum0"
+  const failed = service?.active === "failed"
+  return (
+    <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-6">
+      <div className="flex flex-col gap-1">
+        <span className="micro">tunnel</span>
+        <span
+          className={`text-3xl leading-none font-semibold tracking-tight ${
+            failed ? "text-fault" : "text-stale"
+          }`}
+        >
+          {failed ? "FAILED" : "STOPPED"}
+        </span>
+        <span className="text-muted-foreground mt-1 text-xs">
+          {unit} is not running. The console reads a live daemon — start the
+          service to bring the tunnel up.
+        </span>
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={pending !== null} onClick={() => void act("start")}>
+          {pending === "start" ? "starting…" : "START TUNNEL"}
+        </Button>
+        <code className="text-muted-foreground text-[11px]">sudo systemctl start {unit}</code>
+      </div>
+      <LogsPanel />
+    </section>
+  )
+}
+
+export function LogsPanel() {
   const [text, setText] = useState<string>("")
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
@@ -109,7 +159,6 @@ export function LogsPanel({ blocked }: { blocked?: string }) {
           size="sm"
           variant="ghost"
           className="ml-auto h-5 px-2 text-[10px]"
-          disabled={Boolean(blocked)}
           onClick={(event) => {
             event.preventDefault()
             load()

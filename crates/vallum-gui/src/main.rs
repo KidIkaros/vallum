@@ -57,6 +57,8 @@ pub(crate) struct InterfaceEntry {
 #[derive(Debug)]
 struct Inner {
     socket: Option<PathBuf>,
+    /// Where the socket was last seen. Survives the daemon stopping.
+    last_socket: Option<PathBuf>,
     focused: bool,
     visible: bool,
     /// Bumped on every state change so the poller can abandon a sleep early.
@@ -78,6 +80,7 @@ impl Console {
         Self {
             inner: Mutex::new(Inner {
                 socket: None,
+                last_socket: None,
                 // Assume focused until the front-end says otherwise; a window
                 // that just opened is the case where a fresh snapshot is wanted.
                 focused: true,
@@ -91,6 +94,18 @@ impl Console {
 
     pub(crate) fn current_socket(&self) -> Option<PathBuf> {
         self.lock().socket.clone()
+    }
+
+    /// The socket this console is about, even when the daemon behind it has
+    /// stopped and taken the socket file with it. Starting a stopped service is
+    /// exactly the case where the file is gone, so lifecycle work must not
+    /// depend on it existing.
+    pub(crate) fn known_socket(&self) -> Option<PathBuf> {
+        let remembered = {
+            let inner = self.lock();
+            inner.socket.clone().or_else(|| inner.last_socket.clone())
+        };
+        remembered.or_else(discover_socket)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -163,7 +178,8 @@ fn select(console: State<'_, Arc<Console>>, path: String) {
 
 pub(crate) fn select_path(console: &Console, path: String) {
     console.changed(|inner| {
-        inner.socket = Some(PathBuf::from(path));
+        inner.socket = Some(PathBuf::from(path.clone()));
+        inner.last_socket = Some(PathBuf::from(path));
         inner.immediate = true;
     });
 }
@@ -408,6 +424,62 @@ pub(crate) fn dispatch(
     }
 }
 
+/// Which tunnel is this console about when nothing is selected and no socket
+/// exists? A stopped daemon leaves no socket, so ask systemd for the instances
+/// it knows about and derive the socket path they would publish.
+fn discover_socket() -> Option<PathBuf> {
+    let dir = std::env::var_os("VALLUM_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| vallum_config::runtime_dir().to_path_buf());
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("sock") {
+                return Some(path);
+            }
+        }
+    }
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "list-units",
+            "vallum@*",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ])
+        .output()
+        .ok()?;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    // Prefer a unit that is actually running; among equals, the conventional
+    // `vallum0`; a machine can carry stale instances from earlier experiments
+    // and starting one of those would be the console guessing wrong.
+    let mut best: Option<(u8, String)> = None;
+    for line in listing.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (Some(unit), Some(state)) = (fields.first(), fields.get(2)) else {
+            continue;
+        };
+        let Some(instance) = unit
+            .strip_prefix("vallum@")
+            .and_then(|rest| rest.strip_suffix(".service"))
+        else {
+            continue;
+        };
+        let score = if *state == "active" {
+            0
+        } else if instance == "vallum0" {
+            1
+        } else {
+            2
+        };
+        if best.as_ref().is_none_or(|(current, _)| score < *current) {
+            best = Some((score, instance.to_owned()));
+        }
+    }
+    best.map(|(_, instance)| dir.join(format!("{instance}.sock")))
+}
+
 /// The systemd unit that owns a socket: `vallum@<interface>` unless the
 /// operator names one (a `vallum-quick@` deployment passes `VALLUM_UNIT`).
 pub(crate) fn unit_for(socket: &std::path::Path) -> String {
@@ -448,27 +520,39 @@ pub(crate) fn service_action(
         return Err(format!("unknown service action `{action}`"));
     }
     let unit = unit_for(socket);
-    let privileged = effective_uid() == 0;
-    let mut command = if privileged {
-        let mut c = std::process::Command::new("systemctl");
-        c.arg(action).arg(&unit);
-        c
+    // sudo -n first: a console that runs as a login user should not prompt for
+    // every start/stop once the operator has granted the narrow rule. pkexec is
+    // the fallback, and its prompt is the desktop's own.
+    let attempts: Vec<(&str, Vec<&str>)> = if effective_uid() == 0 {
+        vec![("systemctl", vec![action, unit.as_str()])]
     } else {
-        let mut c = std::process::Command::new("pkexec");
-        c.arg("systemctl").arg(action).arg(&unit);
-        c
+        vec![
+            ("sudo", vec!["-n", "systemctl", action, unit.as_str()]),
+            ("pkexec", vec!["systemctl", action, unit.as_str()]),
+        ]
     };
-    match command.spawn() {
-        Ok(_) => Ok(Done {
-            message: format!(
-                "{} {unit} requested{}",
-                action,
-                if privileged { "" } else { " — approve the desktop prompt" }
-            ),
-            command: None,
-        }),
-        Err(error) => Err(format!("cannot {action} {unit}: {error}")),
+    let mut last_error = String::from("no way to run systemctl");
+    for (program, args) in attempts {
+        match std::process::Command::new(program).args(&args).output() {
+            Ok(output) if output.status.success() => {
+                // Report the state that actually resulted, not the intent.
+                let state = service_state(socket);
+                let active = state.get("active").and_then(|v| v.as_str()).unwrap_or("unknown");
+                return Ok(Done {
+                    message: format!("{unit}: {active}"),
+                    command: None,
+                });
+            }
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                if last_error.is_empty() {
+                    last_error = format!("{program} exited {}", output.status);
+                }
+            }
+            Err(error) => last_error = format!("{program}: {error}"),
+        }
     }
+    Err(format!("cannot {action} {unit}: {last_error}"))
 }
 
 /// The unit's last log lines, as journald will give them to this user.
