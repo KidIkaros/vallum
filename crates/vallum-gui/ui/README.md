@@ -32,7 +32,7 @@ cargo build --release -p vallum-gui && ./target/release/vallum-gui
 - The CSP in `tauri.conf.json` allows inline *style attributes* only
   (`style-src 'unsafe-inline'`), because Radix positions popovers and dialogs
   with them. Scripts stay locked to `'self'`; do not loosen that.
-- Verification without a daemon: `npm run build`, then serve `dist/` over
-  HTTP and open it — the empty state renders honestly when no control socket
-  exists. With a daemon running (`vallum-quick up`, as root), the live
+- Verification without a daemon: `npm run build` and open `dist/` (the empty state
+  renders honestly when no control socket
+  exists). With a daemon running (`vallum-quick up`), the live
   snapshot fills the same screen.

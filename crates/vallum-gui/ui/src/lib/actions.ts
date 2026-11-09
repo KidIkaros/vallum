@@ -42,3 +42,7 @@ export const rotatePeer = (name: string, newLine: string) =>
   invoke<Done>("rotate_peer", { name, newLine })
 export const finalizePeer = (name: string) => invoke<Done>("finalize_peer", { name })
 export const invitePeer = (fields: InviteFields) => invoke<Done>("invite_peer", { fields })
+
+/** Change the device's listen port and firewall mark through the daemon. */
+export const applyDevice = (listenPort: string, fwmark: string) =>
+  invoke<Done>("apply_device", { listenPort, fwmark })

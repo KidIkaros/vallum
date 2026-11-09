@@ -1,18 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Copy, ShieldOff } from "lucide-react"
 import { toast } from "sonner"
-import { Badge } from "@/components/ui/badge"
 import { Toaster } from "@/components/ui/sonner"
 import { TrafficBars } from "@/components/TrafficBars"
 import {
   AddPeerDialog,
+  DeviceDialog,
   EditPeerDialog,
   FinalizeButton,
   InviteDialog,
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
-import { demoRequested, startDemo } from "@/lib/demo"
 import { bytes, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
@@ -102,14 +101,12 @@ function Hero({
   now,
   history,
   samples,
-  demo,
   lastReply,
 }: {
   payload: SnapshotPayload | null
   now: number
   history: TrafficHistory
   samples: Sample[]
-  demo: boolean
   lastReply: string
 }) {
   const data = payload?.data
@@ -175,12 +172,8 @@ function Hero({
           ))}
         </div>
       </div>
-      {demo && (
-        <div className="mt-2">
-          <Badge variant="outline" className="border-violet/40 bg-violet/15 text-violet">
-            DEMO DATA
-          </Badge>
-        </div>
+      {payload && !payload.ok && payload.error && (
+        <p className="text-fault mt-2 text-xs">{payload.error}</p>
       )}
     </section>
   )
@@ -386,7 +379,6 @@ export default function App() {
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null)
   const [lastUpdate, setLastUpdate] = useState<number | null>(null)
   const history = useRef(new TrafficHistory())
-  const demo = useMemo(() => demoRequested(), [])
   const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
@@ -406,10 +398,6 @@ export default function App() {
   const ingest = ingestRef.current
 
   useEffect(() => {
-    if (demo) {
-      setInterfaces([{ name: "vallum0", path: "demo" }])
-      return startDemo(ingest)
-    }
     let cancelled = false
     listInterfaces().then((entries) => {
       if (cancelled) return
@@ -421,18 +409,15 @@ export default function App() {
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demo])
+  }, [])
 
   useEffect(() => {
-    if (demo) return
     let unlisten: (() => void) | undefined
     void onSnapshot(ingest).then((fn) => {
       unlisten = fn
     })
     return () => unlisten?.()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demo])
+  }, [])
 
   const data = payload?.data
   if (data && data.peers.length > 0 && selectedPeer === null) {
@@ -440,11 +425,7 @@ export default function App() {
   }
   const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
   // Demo data cannot be written to: the daemon is not there to write to.
-  const blocked = demo
-    ? "demo preview: peer changes need a live daemon"
-    : !data
-      ? "waiting for the first snapshot"
-      : undefined
+  const blocked = data ? undefined : "waiting for the daemon's first snapshot"
   const lastReply =
     lastUpdate !== null ? `${Math.max(0, now - Math.floor(lastUpdate))}s` : "—"
 
@@ -460,6 +441,11 @@ export default function App() {
           </span>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          <DeviceDialog
+            listenPort={data?.listen_port ?? null}
+            fwmark={data?.fwmark ?? null}
+            blocked={blocked}
+          />
           {data && (
             <>
               <span className="text-muted-foreground">
@@ -490,7 +476,6 @@ export default function App() {
             now={now}
             history={history.current}
             samples={samples}
-            demo={demo}
             lastReply={lastReply}
           />
           <div className="flex flex-col gap-3 md:flex-row">
@@ -517,12 +502,6 @@ export default function App() {
             <span>updated {lastReply}</span>
             <span>·</span>
             <span>snapshot stream</span>
-            {demo && (
-              <>
-                <span>·</span>
-                <span className="text-violet">synthetic data (?demo=1)</span>
-              </>
-            )}
           </footer>
         </>
       )}

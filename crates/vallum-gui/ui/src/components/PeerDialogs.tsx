@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import {
   addPeer,
+  applyDevice,
   editPeer,
   emptyPeer,
   finalizePeer,
@@ -400,6 +401,67 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
               className="uppercase"
             >
               invite
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+export function DeviceDialog({
+  listenPort,
+  fwmark,
+  blocked,
+}: {
+  listenPort: number | null
+  fwmark: number | null
+  blocked?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [port, setPort] = useState(listenPort !== null ? String(listenPort) : "")
+  const [mark, setMark] = useState(fwmark !== null ? String(fwmark) : "")
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+          interface
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="text-sm">INTERFACE</DialogTitle>
+          <DialogDescription className="text-xs">
+            Applied through the control plane. A listen-port change rebinds the
+            socket; existing sessions survive it.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            report(applyDevice(port.trim(), mark.trim()), () => setOpen(false))
+          }}
+        >
+          <Field label="listen port" hint="blank keeps the current port">
+            <Input
+              value={port}
+              onChange={(e) => setPort(e.target.value)}
+              inputMode="numeric"
+              placeholder={listenPort !== null ? String(listenPort) : "51820"}
+            />
+          </Field>
+          <Field label="fwmark" hint="blank keeps the current mark">
+            <Input
+              value={mark}
+              onChange={(e) => setMark(e.target.value)}
+              inputMode="numeric"
+              placeholder={fwmark !== null ? String(fwmark) : "0"}
+            />
+          </Field>
+          <DialogFooter>
+            <Button type="submit" size="sm" className="uppercase">
+              apply
             </Button>
           </DialogFooter>
         </form>
