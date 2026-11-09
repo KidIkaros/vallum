@@ -291,6 +291,13 @@ fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result
 
 
 #[tauri::command]
+fn health_state(console: State<'_, Arc<Console>>) -> serde_json::Value {
+    console
+        .known_socket()
+        .map_or(serde_json::Value::Null, |socket| health(&socket))
+}
+
+#[tauri::command]
 fn window_state(console: State<'_, Arc<Console>>, focused: bool, visible: bool) {
     let unchanged = {
         let inner = console.lock();
@@ -609,6 +616,113 @@ fn effective_uid() -> u32 {
     65534
 }
 
+/// Which interface would carry traffic to `address`? `None` when the kernel
+/// has no route at all — which, for v6 behind the guard, is the good answer.
+fn route_device(address: &str, v6: bool) -> Option<String> {
+    let mut command = std::process::Command::new("ip");
+    if v6 {
+        command.arg("-6");
+    }
+    let output = command.args(["route", "get", address]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    fields
+        .iter()
+        .position(|field| *field == "dev")
+        .and_then(|at| fields.get(at + 1))
+        .map(|dev| (*dev).to_owned())
+}
+
+fn nameservers() -> Vec<String> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.trim().strip_prefix("nameserver "))
+                .map(|server| server.trim().to_owned())
+                .filter(|server| !server.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The facts an operator needs to answer "is this actually a VPN right now?".
+/// Every one is measured from the host, not inferred from the config: a config
+/// that says `0.0.0.0/0` and a route that says `wlp0s20f3` are the difference
+/// between a product and a claim.
+pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
+    let unit = unit_for(socket);
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0")
+        .to_owned();
+    let quick = format!("vallum-quick@{interface}");
+    let guard = format!("vallum-guard@{interface}");
+
+    let route4 = route_device("1.1.1.1", false);
+    let route6 = route_device("2001:4860:4860::8888", true);
+    let servers = nameservers();
+    let dns_dev = servers
+        .first()
+        .and_then(|server| route_device(server, server.contains(':')));
+
+    let show = std::process::Command::new("systemctl")
+        .args(["show", &unit, "-p", "NRestarts", "-p", "ExecMainStatus"])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .unwrap_or_default();
+    let field = |name: &str| -> Option<String> {
+        show.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+            .map(str::to_owned)
+    };
+    let restarts: u64 = field("NRestarts").and_then(|v| v.parse().ok()).unwrap_or(0);
+
+    let last_death = std::process::Command::new("journalctl")
+        .args(["-u", &unit, "-n", "400", "--no-pager", "-o", "cat"])
+        .output()
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| {
+                    line.contains("status=31/SYS")
+                        || line.contains("Failed with result")
+                        || line.contains("Main process exited")
+                })
+                .next_back()
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        })
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "unit": unit,
+        "interface": interface,
+        "route4": route4,
+        "route4_via_tunnel": route4.as_deref() == Some(interface.as_str()),
+        "route6": route6,
+        "route6_via_tunnel": route6.as_deref() == Some(interface.as_str()),
+        "dns": servers,
+        "dns_via_tunnel": dns_dev.as_deref() == Some(interface.as_str()),
+        "restarts": restarts,
+        "last_death": last_death,
+        "guard": {
+            "unit": guard,
+            "active": systemctl(&["is-active", &guard]).unwrap_or_else(|| "unknown".to_owned()),
+        },
+        "quick": {
+            "unit": quick,
+            "active": systemctl(&["is-active", &quick]).unwrap_or_else(|| "unknown".to_owned()),
+        },
+    })
+}
+
 fn main() {
     // `--serve`: the console over localhost HTTP instead of a webview. The
     // same UI, the same commands, for machines whose WebKitGTK cannot render.
@@ -643,6 +757,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             ui_report,
             list_interfaces,
+            health_state,
             select,
             window_state,
             add_peer,

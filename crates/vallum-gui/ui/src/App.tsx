@@ -12,8 +12,11 @@ import {
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
-import { bytes, hasBridge, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
+import { bytes, hasBridge, health, listInterfaces, onSnapshot, selectInterface, watchWindowState, type Health } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
+import { HealthPanel } from "@/components/Health"
+import { TrafficChart } from "@/components/TrafficChart"
+import { Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
@@ -29,43 +32,6 @@ const FRESH_SEC = 5 * 60
 // The console renders inside the Tauri webview, where `__TAURI_INTERNALS__`
 // is the IPC bridge. A plain browser tab has no bridge and no daemon, so the
 // app says that instead of throwing "cannot read properties of undefined".
-
-function Diamond({ className = "" }: { className?: string }) {
-  return (
-    <span aria-hidden className={`inline-block size-1.5 rotate-45 bg-signal ${className}`} />
-  )
-}
-
-function PanelTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <Diamond />
-      <span className="text-signal text-xs font-semibold tracking-wide">{children}</span>
-    </div>
-  )
-}
-
-function Panel({
-  title,
-  right,
-  children,
-  className = "",
-}: {
-  title: React.ReactNode
-  right?: React.ReactNode
-  children: React.ReactNode
-  className?: string
-}) {
-  return (
-    <section className={`bg-card/60 rounded-lg border border-border/70 ${className}`}>
-      <div className="flex items-center justify-between px-4 pt-3 pb-1">
-        <PanelTitle>{title}</PanelTitle>
-        {right}
-      </div>
-      <div className="px-4 pb-3.5">{children}</div>
-    </section>
-  )
-}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -400,6 +366,7 @@ function EmptyState() {
 export default function App() {
   const inApp = useMemo(() => hasBridge, [])
   const { service, refresh: refreshService } = useServiceState(inApp)
+  const [hostHealth, setHostHealth] = useState<Health | null>(null)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
@@ -409,6 +376,22 @@ export default function App() {
   const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
+
+  // Health is measured on the host every 5 s: route, v6, DNS, guard, restarts.
+  useEffect(() => {
+    if (!inApp) return
+    let cancelled = false
+    const load = () =>
+      health()
+        .then((value) => !cancelled && setHostHealth(value))
+        .catch(() => !cancelled && setHostHealth(null))
+    void load()
+    const timer = window.setInterval(load, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [inApp])
 
   // One ingestion path for live snapshots and demo ones, so the demo renders
   // exactly what a daemon would — and nothing else.
@@ -520,6 +503,9 @@ export default function App() {
             samples={samples}
             lastReply={lastReply}
           />
+          <Panel title="THROUGHPUT">
+            <TrafficChart samples={samples} />
+          </Panel>
           <div className="flex flex-col gap-3 md:flex-row">
             <div className="flex min-w-0 flex-1 flex-col gap-3">
               <PeersPanel
@@ -535,6 +521,7 @@ export default function App() {
                 }
               />
               <InterfaceData payload={payload} />
+              <HealthPanel health={hostHealth} />
             </div>
             <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
               <PeerDetail peer={detail} now={now} blocked={blocked} />

@@ -68,6 +68,27 @@ export interface ServiceStatus {
   enabled: string
 }
 
+export interface Health {
+  unit: string
+  interface: string
+  route4: string | null
+  route4_via_tunnel: boolean
+  route6: string | null
+  route6_via_tunnel: boolean
+  dns: string[]
+  dns_via_tunnel: boolean
+  restarts: number
+  last_death: string
+  guard: { unit: string; active: string }
+  quick: { unit: string; active: string }
+}
+
+/** Is this actually a VPN right now? Measured on the host, not read from config. */
+export function health(): Promise<Health> {
+  if (IN_TAURI) return invoke<Health>("health_state")
+  return http<Health>("/api/health")
+}
+
 export interface LogTail {
   unit: string
   lines?: string
