@@ -13,7 +13,7 @@ import {
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { EgressBadge, HealthPanel, PanicButton } from "@/components/Health"
+import { EgressBadge, HealthPanel } from "@/components/Health"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
@@ -111,6 +111,12 @@ function Hero({
             {up ? "UP" : unreachable ? "FAULT" : data ? "IDLE" : "…"}
           </span>
           <EgressBadge health={health} />
+          {health && !health.route4_via_tunnel && (
+            <span className="text-stale text-[11px]">
+              traffic leaves via {health.route4 ?? "no route"} — the tunnel carries only
+              its own subnet
+            </span>
+          )}
           <span className="text-muted-foreground mt-0.5 text-xs">
             {data ? (
               <>
@@ -305,7 +311,7 @@ function PeerDetail({
               f === "recent" ? "animate-pulse bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
             }`}
           />
-          <span className="text-foreground/90">{peer.name}</span>
+          <span className="text-foreground/90">peer · {peer.name}</span>
         </span>
       }
       right={peer.has_preshared_key ? <span className="micro">PSK set</span> : undefined}
@@ -342,6 +348,7 @@ function PeerDetail({
         <EditPeerDialog peer={peer} blocked={blocked} />
         <RotateDialog peer={peer} blocked={blocked} />
         {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
+        <span className="border-border/60 mx-1 h-4 border-l" aria-hidden />
         <RemoveDialog peer={peer} blocked={blocked} />
       </div>
       {probe && (
@@ -384,7 +391,19 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
     </div>
   )
   return (
-    <Panel title="INTERFACE DATA">
+    <Panel
+      title="INTERFACE DATA"
+      right={
+        c && (
+          <span className="text-muted-foreground text-[10px]">
+            {c.datagrams_sent.toLocaleString()} out · {c.packets_delivered.toLocaleString()} in
+            {c.datagrams_failed + c.packets_failed > 0 && (
+              <span className="text-fault"> · {c.datagrams_failed + c.packets_failed} failed</span>
+            )}
+          </span>
+        )
+      }
+    >
       <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-3">
         {metric(
           "datagrams · outer",
@@ -645,10 +664,7 @@ export default function App() {
               not installed
             </span>
           ) : (
-            <>
-              <ServiceStrip service={service} onChanged={refreshService} />
-              <PanicButton compact />
-            </>
+            <ServiceStrip service={service} onChanged={refreshService} attached={Boolean(payload?.ok)} />
           )}
           <DeviceDialog
             listenPort={data?.listen_port ?? null}
@@ -657,20 +673,18 @@ export default function App() {
           />
           {data && (
             <>
-              <span className="text-muted-foreground">
-                listen <span className="text-foreground/80">{data.listen_port !== null ? `:${data.listen_port}` : "—"}</span>
-              </span>
-              <span className="text-muted-foreground">
-                suite <span className="text-signal">{data.suite}</span>
-              </span>
-              {data.fwmark !== null && (
-                <span className="text-muted-foreground">
-                  fwmark <span className="text-foreground/80">{data.fwmark}</span>
+              <span className="text-muted-foreground" title={`suite ${data.suite} · fwmark ${data.fwmark ?? 0}`}>
+                listen{" "}
+                <span className="text-foreground/80">
+                  {data.listen_port !== null ? `:${data.listen_port}` : "—"}
                 </span>
-              )}
+                <span className="text-muted-foreground/70"> · {data.suite}</span>
+              </span>
               <span className="text-muted-foreground">
                 id <span className="text-foreground/80">{data.fingerprint.slice(0, 16)}</span>
-                <CopyButton value={data.public_line} label="copy" title="copy this device's public line" />
+                <span className="ml-1.5 inline-block">
+                  <CopyButton value={data.public_line} label="copy" title="copy this device's public line" />
+                </span>
               </span>
             </>
           )}

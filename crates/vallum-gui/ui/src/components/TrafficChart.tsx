@@ -44,16 +44,28 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
   }, [samples])
 
   const seconds = samples.length > 1 ? Math.round((samples.at(-1)!.at - samples[0].at) / 1000) : 0
+  // Below a few hundred bytes a second the plot is a flat line at a scale that
+  // means nothing; saying "idle" is the honest reading.
+  const idle = peak < 256
 
   const peakY = PAD.top + 0.5
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
         <span className="micro">rate · last {seconds || 0}s</span>
-        <span className="text-muted-foreground text-[10px]">
-          scale 0 – <span className="text-foreground/80">{rateLabel(peak)}</span>
-        </span>
+        {!idle && (
+          <span className="text-muted-foreground text-[10px]">
+            scale 0 – <span className="text-foreground/80">{rateLabel(peak)}</span>
+          </span>
+        )}
       </div>
+      {idle ? (
+        <p className="text-muted-foreground py-6 text-center text-[11px]">
+          {peak < 1
+            ? "idle — no traffic in this window"
+            : `low traffic — peak ${rateLabel(peak)}`}
+        </p>
+      ) : (
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="h-[120px] w-full"
@@ -92,14 +104,17 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
         <path d={area(tx, peak, W)} fill="url(#tx-fill)" stroke="var(--color-violet)" strokeWidth="1.2" />
         <path d={area(rx, peak, W)} fill="url(#rx-fill)" stroke="var(--color-signal)" strokeWidth="1.2" />
       </svg>
-      <div className="text-muted-foreground flex justify-between text-[10px]">
-        <span>
-          <span className="text-signal">▼ rx</span> peak {rateLabel(rxPeak)}
-        </span>
-        <span>
-          <span className="text-violet">▲ tx</span> peak {rateLabel(txPeak)}
-        </span>
-      </div>
+      )}
+      {!idle && (
+        <div className="text-muted-foreground flex justify-between text-[10px]">
+          <span>
+            <span className="text-signal">▼ rx</span> peak {rateLabel(rxPeak)}
+          </span>
+          <span>
+            <span className="text-violet">▲ tx</span> peak {rateLabel(txPeak)}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

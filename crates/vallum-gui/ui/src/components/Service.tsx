@@ -48,25 +48,38 @@ function useServiceAction(refresh: () => void) {
 export function ServiceStrip({
   service,
   onChanged,
+  attached = false,
 }: {
   service: ServiceStatus | null
   onChanged: () => void
+  /** The control socket answered: a daemon is running, whatever systemd says. */
+  attached?: boolean
 }) {
   const { pending, act } = useServiceAction(onChanged)
   const active = service?.active ?? "unknown"
   // A daemon can run with no unit behind it (a lab, a hand-run process).
   // Offering START for a unit that does not exist is a button that cannot work.
   const noUnit = service?.enabled === "not-found"
+  // "unit not running" above a tunnel that is plainly UP reads as a
+  // contradiction. When a daemon answers but no unit owns it, say that instead.
+  const unmanaged = attached && active !== "active"
   return (
     <span className="flex items-center gap-2">
       <span
         className="flex items-center gap-1.5"
         title={`systemd: ${active}, ${service?.enabled ?? "unknown"}`}
       >
-        <span aria-hidden className={`inline-block size-1.5 rounded-full ${tone(active)}`} />
+        <span
+          aria-hidden
+          className={`inline-block size-1.5 rounded-full ${
+            unmanaged || noUnit ? "bg-muted-foreground/40" : tone(active)
+          }`}
+        />
         <span className="micro" title="the systemd unit that owns this tunnel">
           unit{" "}
-          <span className="text-foreground/80">{noUnit ? "none" : active}</span>
+          <span className={unmanaged || noUnit ? "text-muted-foreground" : "text-foreground/80"}>
+            {noUnit ? "none" : unmanaged ? "unmanaged" : active === "inactive" ? "not running" : active}
+          </span>
         </span>
       </span>
       <Button

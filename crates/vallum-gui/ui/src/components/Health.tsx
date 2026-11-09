@@ -59,7 +59,15 @@ export function EgressBadge({ health }: { health: Health | null }) {
 
 function Verdict({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
   const tone = ok === null ? "text-muted-foreground" : ok ? "text-live" : "text-fault"
-  return <span className={`${tone} text-xs`}>{children}</span>
+  // A word beside the colour: ~8% of men cannot separate red from green, and a
+  // row that only changes hue says nothing to them.
+  const word = ok === null ? "?" : ok ? "ok" : "fail"
+  return (
+    <span className="text-xs">
+      <span className={`${tone} mr-1.5 font-semibold uppercase`}>{word}</span>
+      <span className={tone}>{children}</span>
+    </span>
+  )
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -112,10 +120,12 @@ export function HealthPanel({ health }: { health: Health | null }) {
   const v6Tunnel = health.route6_via_tunnel
   return (
     <Panel title="EGRESS HEALTH">
-      {health.guard.active === "active" && !v4 && (
+      {!v4 && (
         <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
           <span className="text-fault text-[11px]">
-            the guard is blocking egress and traffic is not going through the tunnel
+            {health.guard.active === "active"
+              ? "the guard is blocking egress and traffic is not going through the tunnel"
+              : "traffic is leaving this host outside the tunnel"}
           </span>
           <PanicButton compact />
         </div>
