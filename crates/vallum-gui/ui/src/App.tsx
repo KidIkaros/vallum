@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ShieldOff } from "lucide-react"
+import { Copy, ShieldOff } from "lucide-react"
+import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
+import { Toaster } from "@/components/ui/sonner"
 import { TrafficBars } from "@/components/TrafficBars"
+import {
+  AddPeerDialog,
+  EditPeerDialog,
+  FinalizeButton,
+  InviteDialog,
+  RemoveDialog,
+  RotateDialog,
+} from "@/components/PeerDialogs"
 import { demoRequested, startDemo } from "@/lib/demo"
 import { bytes, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
@@ -53,9 +63,18 @@ function Panel({
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[110px_1fr] gap-2 py-0.5">
-      <span className="micro pt-0.5">{label}</span>
+    <div className="flex min-w-0 flex-col py-0.5">
+      <span className="micro">{label}</span>
       <span className="text-foreground/90 min-w-0 break-words">{children}</span>
+    </div>
+  )
+}
+
+function Meta({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline gap-1.5">
+      <dt className="micro">{label}</dt>
+      <dd className="text-foreground/90">{children}</dd>
     </div>
   )
 }
@@ -161,11 +180,13 @@ function PeersPanel({
   now,
   selected,
   onSelect,
+  actions,
 }: {
   peers: Peer[]
   now: number
   selected: string | null
   onSelect: (fingerprint: string) => void
+  actions?: React.ReactNode
 }) {
   return (
     <Panel
@@ -174,6 +195,7 @@ function PeersPanel({
           PEERS [<span className="text-foreground">{peers.length}</span>]
         </>
       }
+      right={actions}
       className="min-w-0"
     >
       {peers.length === 0 ? (
@@ -187,7 +209,8 @@ function PeersPanel({
               <li key={peer.fingerprint}>
                 <button
                   onClick={() => onSelect(peer.fingerprint)}
-                  className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left ${
+                  aria-pressed={isSelected}
+                  className={`flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-left focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none ${
                     isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                   }`}
                 >
@@ -197,6 +220,7 @@ function PeersPanel({
                     <span className="text-violet text-[10px] uppercase">rotating</span>
                   )}
                   <span className={`text-[10px] uppercase ${tone}`}>{freshnessLabel[f]}</span>
+                  <span aria-hidden className="text-muted-foreground/60">›</span>
                 </button>
               </li>
             )
@@ -207,7 +231,15 @@ function PeersPanel({
   )
 }
 
-function PeerDetail({ peer, now }: { peer: Peer | null; now: number }) {
+function PeerDetail({
+  peer,
+  now,
+  blocked,
+}: {
+  peer: Peer | null
+  now: number
+  blocked?: string
+}) {
   if (!peer) {
     return (
       <Panel title="PEER DETAIL">
@@ -231,26 +263,35 @@ function PeerDetail({ peer, now }: { peer: Peer | null; now: number }) {
       }
       right={peer.has_preshared_key ? <span className="micro">PSK set</span> : undefined}
     >
+      {/* Actions first: they are what the panel is for. */}
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        {blocked && (
+          <span className="micro text-stale" title={blocked}>
+            read-only
+          </span>
+        )}
+        <EditPeerDialog peer={peer} blocked={blocked} />
+        <RotateDialog peer={peer} blocked={blocked} />
+        {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
+        <RemoveDialog peer={peer} blocked={blocked} />
+      </div>
       <Row label="fingerprint">{peer.fingerprint}</Row>
       <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
       <Row label="allowed">{peer.allowed_ips.join(", ")}</Row>
       <Row label="keepalive">{peer.keepalive !== null ? `${peer.keepalive}s` : "—"}</Row>
+      <Row label="transfer">
+        {bytes(peer.rx_bytes)} ↓ / {bytes(peer.tx_bytes)} ↑
+      </Row>
       <Row label="handshake">
         <span className={tone}>{freshnessLabel[f]}</span>
         <span className="text-muted-foreground">
-          {" · "}
+          {" "}
           {peer.last_handshake_sec === 0
             ? "never"
             : `${Math.max(0, now - peer.last_handshake_sec)}s ago`}
         </span>
       </Row>
-      <Row label="transfer">
-        rx {bytes(peer.rx_bytes)} · tx {bytes(peer.tx_bytes)}
-      </Row>
       <Row label="epoch">{peer.epoch}</Row>
-      <Row label="id tag">
-        <span className="text-subtext break-all">vallum1:0003:{peer.fingerprint}…</span>
-      </Row>
     </Panel>
   )
 }
@@ -259,32 +300,26 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
   const c = payload?.data?.counters
   return (
     <Panel title="INTERFACE DATA">
-      <div className="grid grid-cols-1 gap-x-8 gap-y-2 sm:grid-cols-3">
-        <div className="flex flex-wrap items-baseline gap-x-2">
+      <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-3">
+        <div className="flex flex-col">
           <span className="micro">datagrams</span>
-          <span>
-            sent {c ? c.datagrams_sent.toLocaleString() : "—"} ·{" "}
-            <span className={c && c.datagrams_failed > 0 ? "text-fault" : "text-muted-foreground"}>
-              failed {c?.datagrams_failed ?? "—"}
-            </span>
+          <span>sent {c ? c.datagrams_sent.toLocaleString() : "—"}</span>
+          <span className={c && c.datagrams_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+            failed {c?.datagrams_failed ?? "—"}
           </span>
         </div>
-        <div className="flex flex-wrap items-baseline gap-x-2">
+        <div className="flex flex-col">
           <span className="micro">packets</span>
-          <span>
-            delivered {c ? c.packets_delivered.toLocaleString() : "—"} ·{" "}
-            <span className={c && c.packets_failed > 0 ? "text-fault" : "text-muted-foreground"}>
-              failed {c?.packets_failed ?? "—"}
-            </span>
+          <span>delivered {c ? c.packets_delivered.toLocaleString() : "—"}</span>
+          <span className={c && c.packets_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+            failed {c?.packets_failed ?? "—"}
           </span>
         </div>
-        <div className="flex flex-wrap items-baseline gap-x-2">
+        <div className="flex flex-col">
           <span className="micro">handshakes</span>
-          <span>
-            established {c?.established ?? "—"} ·{" "}
-            <span className={c && c.refusals > 0 ? "text-fault" : "text-muted-foreground"}>
-              refused {c?.refusals ?? "—"}
-            </span>
+          <span>established {c?.established ?? "—"}</span>
+          <span className={c && c.refusals > 0 ? "text-fault" : "text-muted-foreground"}>
+            refused {c?.refusals ?? "—"}
           </span>
         </div>
       </div>
@@ -304,6 +339,15 @@ function EmptyState() {
             with <code className="text-signal">vallum run</code> or{" "}
             <code className="text-signal">vallum-quick up</code>.
           </p>
+          <button
+            className="border-border hover:bg-secondary mt-3 inline-flex cursor-pointer items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none"
+            onClick={() => {
+              void navigator.clipboard.writeText("vallum-quick up")
+              toast.success("copied: vallum-quick up")
+            }}
+          >
+            <Copy className="size-3" aria-hidden /> copy command
+          </button>
         </div>
       </div>
     </section>
@@ -375,6 +419,12 @@ export default function App() {
     setSelectedPeer(data.peers[0].fingerprint)
   }
   const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
+  // Demo data cannot be written to: the daemon is not there to write to.
+  const blocked = demo
+    ? "demo preview: peer changes need a live daemon"
+    : !data
+      ? "waiting for the first snapshot"
+      : undefined
   const lastReply =
     lastUpdate !== null ? `${Math.max(0, now - Math.floor(lastUpdate))}s` : "—"
 
@@ -405,23 +455,18 @@ export default function App() {
               </span>
               <span className="text-muted-foreground"> · last reply {lastReply}</span>
             </div>
-            <div className="text-subtext text-xs">
-              listen{" "}
-              <span className="text-foreground/90">
+            <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
+              <Meta label="listen">
                 {data.listen_port !== null ? `0.0.0.0:${data.listen_port}` : "—"}
-              </span>{" "}
-              · suite <span className="text-signal">{data.suite}</span>
-              <span className="text-muted-foreground"> (tri-hybrid)</span>
-              {data.fwmark !== null && (
-                <>
-                  {" · fwmark "}
-                  <span className="text-foreground/90">{data.fwmark}</span>
-                </>
-              )}{" "}
-              · id <span className="text-foreground/90">{data.fingerprint}</span> ·
-              addresses{" "}
-              <span className="text-foreground/90">{data.addresses.join(", ")}</span>
-            </div>
+              </Meta>
+              <Meta label="suite">
+                <span className="text-signal">{data.suite}</span>
+                <span className="text-muted-foreground"> tri-hybrid</span>
+              </Meta>
+              {data.fwmark !== null && <Meta label="fwmark">{data.fwmark}</Meta>}
+              <Meta label="id">{data.fingerprint}</Meta>
+              <Meta label="addr">{data.addresses.join(", ")}</Meta>
+            </dl>
           </>
         )}
       </header>
@@ -437,12 +482,18 @@ export default function App() {
                 now={now}
                 selected={selectedPeer}
                 onSelect={setSelectedPeer}
+                actions={
+                  <span className="flex gap-1.5">
+                    <InviteDialog blocked={blocked} />
+                    <AddPeerDialog blocked={blocked} />
+                  </span>
+                }
               />
               <InterfaceData payload={payload} />
             </div>
             <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
               <TrafficPanel history={history.current} samples={samples} counters={data?.counters} />
-              <PeerDetail peer={detail} now={now} />
+              <PeerDetail peer={detail} now={now} blocked={blocked} />
             </div>
           </div>
           <footer className="text-muted-foreground flex items-center gap-2 text-[10px]">
@@ -458,6 +509,8 @@ export default function App() {
           </footer>
         </>
       )}
+
+      <Toaster position="bottom-right" />
     </div>
   )
 }

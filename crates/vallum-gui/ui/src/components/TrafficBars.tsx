@@ -19,7 +19,7 @@ export function TrafficBars({
   kind,
   color,
   bars = 60,
-  height = 28,
+  height = 22,
 }: BarsProps) {
   const heights = useMemo(() => {
     const recent = samples.slice(-bars)
