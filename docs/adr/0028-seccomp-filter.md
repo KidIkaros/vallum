@@ -269,8 +269,9 @@ in the CI log instead of an investigation.
 The guard is checked both ways: it passes on the current list, and removing
 `sendto` from the list made it exit 1 and name that syscall — a guard nobody has
 seen fail is a guard that might not be able to. It traces both carriers: the UDP
-leg sees 40 distinct syscalls, the TCP leg 43, 44 in union, because the carrier
-dials, waits in `poll`, and starts its reader and writer threads on demand.
+leg sees about 40 distinct syscalls and the TCP leg about 43 — 42–44 in union
+across runs — because the carrier dials, waits in `poll`, and starts its reader
+and writer threads on demand.
 
 It also starts the daemon under `strace` rather than attaching after the tunnel,
 so the window runs from `execve` and is cut at the carrier bind — the last point

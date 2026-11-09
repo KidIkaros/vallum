@@ -134,7 +134,7 @@ add_route() {
 #   leg TAG CARRIER IF_A IF_B TUN_A TUN_B OUTER_A OUTER_B
 leg() {
     local tag=$1 carrier=$2 if_a=$3 if_b=$4 tun_a=$5 tun_b=$6 outer_a=$7 outer_b=$8
-    local pid_a pid_b tracer
+    local pid_b tracer stopped leader proc
 
     cat > "$W/$tag-a.toml" <<EOF
 [interface]
@@ -182,36 +182,12 @@ EOF
         --allow-insecure-key-permissions >> "$W/$tag-a.log" 2>&1 &
     tracer=$!
 
-    # strace forks and the child execs the daemon, so the daemon is strace's
-    # child rather than `$!`. It has to be found before it can be signalled.
-    # `/proc/<pid>/task/<tid>/children` is the kernel's own answer, which keeps
-    # this free of `pgrep` — a runner without procps has no `pgrep`, and under
-    # `set -e` its absence is a silent abort. The `/proc` scan is the fallback for
-    # a kernel built without `CONFIG_PROC_CHILDREN`.
-    find_daemon() {
-        local children
-        children=$(cat "/proc/$tracer/task/$tracer/children" 2> /dev/null) || true
-        if [ -n "$children" ]; then
-            printf '%s\n' "${children%% *}"
-            return
-        fi
-        # `|| true`: no match yet is the normal state for the first iterations,
-        # and a non-zero return here would be an assignment under `set -e` — a
-        # silent abort in the middle of a wait loop.
-        grep -l "^PPid:[[:space:]]\+$tracer$" /proc/[0-9]*/status 2> /dev/null \
-            | head -1 | cut -d/ -f3 || true
-    }
-    pid_a=
-    for _ in $(seq 1 100); do
-        pid_a=$(find_daemon)
-        [ -n "$pid_a" ] && break
-        sleep 0.1
-    done
-    [ -n "$pid_a" ] || {
-        echo "$tag: strace did not start the daemon: $(tail -3 "$W/$tag-a.log")" >&2
-        exit 1
-    }
-
+    # The daemon is strace's child, not `$!`, and no pid is worth carrying: a
+    # discovery that races the fork, or that picks up a pid which is already gone
+    # by the time the exercise ends, turns `kill` into the thing that fails. The
+    # config path makes the daemon findable when it is time to stop it, and it is
+    # unique to this leg — no other process in the namespace names that file.
+    #
     # The control socket is published only once the daemon is serving, so it is a
     # better readiness signal than a sleep.
     for _ in $(seq 1 100); do
@@ -246,12 +222,32 @@ EOF
         exit 1
     }
 
-    kill -TERM "$pid_a"
+    # Stop the daemon by finding the process that names this leg's config, and only
+    # its group leader: `/proc` lists every thread, and signalling a thread is not
+    # the request. Nothing having been found is not a failure — it means the daemon
+    # already exited, which the tracer's exit then confirms.
+    stopped=0
+    for _ in $(seq 1 100); do
+        for proc in /proc/[0-9]*; do
+            # Readable now, gone a moment later is normal here; skip rather than
+            # let a vanishing `/proc` entry print a redirect error.
+            [ -r "$proc/cmdline" ] || continue
+            leader=${proc#/proc/}
+            [ "$(cat "$proc/comm" 2> /dev/null)" = vallum ] || continue
+            [ "$(awk '/^Tgid:/{print $2}' "$proc/status" 2> /dev/null)" = "$leader" ] || continue
+            tr '\0' '\n' < "$proc/cmdline" 2> /dev/null | grep -qxF -- "$W/$tag-a.toml" || continue
+            kill -TERM "$leader" 2> /dev/null && stopped=1
+        done
+        [ "$stopped" = 1 ] && break
+        sleep 0.1
+    done
+    [ "$stopped" = 1 ] || echo "$tag: the traced daemon was already gone at shutdown" >&2
+
     # strace exits when the daemon it started does, so the trace covers the shutdown
     # path instead of being cut at `SIGTERM`. The daemon is not this shell's child
     # (strace's is), so its exit is observed rather than waited for, and bounded.
     for _ in $(seq 1 100); do
-        kill -0 "$pid_a" 2> /dev/null || break
+        kill -0 "$tracer" 2> /dev/null || break
         sleep 0.1
     done
     kill "$tracer" 2> /dev/null || true
