@@ -81,7 +81,7 @@ git-ignored, because libFuzzer writes new inputs there) before running.
 | Context | Duration per target |
 |---|---|
 | Pull request / push (CI) | 60 s |
-| Nightly (CI, `schedule`) | 900 s |
+| Weekly (CI, `schedule`) | 900 s |
 | Local gate (`scripts/fuzz.sh [seconds]`) | 60 s default |
 
 A crash writes its input to `fuzz/artifacts/<target>/`; the CI job uploads both

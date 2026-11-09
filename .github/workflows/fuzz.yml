@@ -13,11 +13,19 @@
 
 name: fuzz
 
-# `push` is `main` only for the same reason as ci.yml: a fuzz run is six
-# targets, and dependabot's branches would queue them on the one self-hosted
-# runner ahead of `main`. `pull_request` still covers dependency branches, the
-# schedule still covers the long run, and a tag's commit is covered by the
-# `main` push that carried it.
+# `push` is `main` only for the same reason as ci.yml: dependabot's branches
+# would queue fuzz runs on the one self-hosted runner ahead of `main`.
+# `pull_request` still covers dependency branches, the schedule still covers the
+# long run, and a tag's commit is covered by the `main` push that carried it.
+#
+# All six targets run in one job, sequentially, rather than as a six-way matrix.
+# Measured on the runner, each matrix job cost 2.9 min: 143 s in the run step (a
+# fuzz build of roughly 80 s plus 60 s of fuzzing) and the rest in setup,
+# checkout, toolchain and cache restore. The build is identical for all six
+# targets, so the matrix paid it six times and put six separate queue slots in
+# front of every other workflow. One job builds once and then fuzzes for 6 min:
+# the same coverage in roughly half the runner time, and one slot. A failed
+# target does not stop the ones after it; the job fails at the end with the list.
 on:
   push:
     branches: [main]
@@ -39,12 +47,8 @@ env:
 
 jobs:
   fuzz:
-    name: ${{ matrix.target }} (${{ github.event_name == 'schedule' && '900s' || '60s' }})
+    name: fuzz (six targets, ${{ github.event_name == 'schedule' && '900s' || '60s' }} each)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [message_parse, handshake_decode, replay, shaping, enroll_parse, epoch_open]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,8 +57,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
 
       # The fuzz build is a sanitizer, release, single-codegen-unit build of
-      # every crate, and `checkout` cleans the tree between jobs — so without
-      # this each of the six targets recompiles the world from scratch.
+      # every crate. It is paid once per run now, and this is what keeps it from
+      # being paid once per push.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -67,30 +71,42 @@ jobs:
       - name: Restore the corpus
         uses: actions/cache@v6
         with:
-          path: vallum/fuzz/corpus/${{ matrix.target }}
-          key: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: vallum/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
           restore-keys: |
-            fuzz-${{ matrix.target }}-
+            fuzz-corpus-
 
       - name: Run
         working-directory: vallum
         shell: bash
+        # `set -u` but not `-e`: a crashing target must not hide the five that
+        # follow it, and the failure is re-raised once all six have run.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           seconds=60
           if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
-          mkdir -p "fuzz/corpus/${{ matrix.target }}"
-          cp -n "fuzz/seeds/${{ matrix.target }}"/* "fuzz/corpus/${{ matrix.target }}"/ 2>/dev/null || true
-          cargo +nightly fuzz run "${{ matrix.target }}" -- \
-            -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10
+          failed=()
+          for target in message_parse handshake_decode replay shaping enroll_parse epoch_open; do
+            mkdir -p "fuzz/corpus/$target"
+            cp -n "fuzz/seeds/$target"/* "fuzz/corpus/$target"/ 2>/dev/null || true
+            echo "=== $target (${seconds}s)"
+            if ! cargo +nightly fuzz run "$target" -- \
+                -max_total_time="$seconds" -rss_limit_mb=2048 -timeout=10; then
+              failed+=("$target")
+            fi
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "fuzz: targets that failed: ${failed[*]}" >&2
+            exit 1
+          fi
 
       - name: Upload any crash
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts-${{ matrix.target }}
+          name: fuzz-artifacts
           path: |
-            vallum/fuzz/artifacts/${{ matrix.target }}
-            vallum/fuzz/corpus/${{ matrix.target }}
+            vallum/fuzz/artifacts
+            vallum/fuzz/corpus
           if-no-files-found: ignore
           retention-days: 30

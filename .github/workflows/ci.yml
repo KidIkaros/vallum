@@ -126,6 +126,16 @@ jobs:
 
       - name: Test
         working-directory: vallum
+        if: matrix.toolchain == 'stable'
+        # The full suite runs on stable only. The MSRV leg is about whether the
+        # code *compiles* on 1.95 — a new edition feature, a std API that did not
+        # exist yet — and that is a question `cargo check --all-targets` answers.
+        # Running the whole suite twice was half the job's cost (1023 s + 299 s on
+        # 1.95 against 946 s + 292 s on stable) for a class of failure the runtime
+        # cannot see; behavior is judged on the compiler whose lints are current.
+        # The trade is real: a 1.95-only *runtime* difference would now reach
+        # `main`. None is known, and the compile check still walks every target.
+        #
         # The lossy-path measurement in `vallum-protocol-tests` skips itself where
         # `unshare`, `tc` or `nsenter` is missing. On the private self-hosted host
         # that skip would delete the transport's only measured cost with the job
@@ -140,8 +150,24 @@ jobs:
           VALLUM_LOSSY_TABLE: ${{ runner.temp }}/carrier-table.txt
         run: cargo test --workspace
 
+      - name: Compile every target (MSRV)
+        working-directory: vallum
+        if: matrix.toolchain != 'stable'
+        # `--all-targets` includes the test, bench and example targets, so the
+        # suite above still has to compile on 1.95 even though it does not run
+        # there. Default features only: they are the surface the previous 1.95 leg
+        # proved, and the feature-gated code is compiled by the stable clippy step
+        # (`--all-features`) — widening this one would put a new failure mode in a
+        # job whose purpose is the compiler version, not the feature set.
+        run: cargo check --workspace --all-targets
+
+      - name: Compile the lean daemon (MSRV)
+        working-directory: vallum
+        if: matrix.toolchain != 'stable'
+        run: cargo check -p vallum --no-default-features --all-targets
+
       - name: Record the carrier's measured tables
-        if: always()
+        if: always() && matrix.toolchain == 'stable'
         # A green check says the measurement ran; the summary says what it found,
         # so a change in the transport's cost is visible in the run that changed
         # it rather than in a doc nobody re-measures.
@@ -163,10 +189,12 @@ jobs:
 
       - name: Test the lean daemon (no TUI)
         working-directory: vallum
+        if: matrix.toolchain == 'stable'
         run: cargo test -p vallum --no-default-features
 
       - name: Headless TUI snapshot
         working-directory: vallum
+        if: matrix.toolchain == 'stable'
         run: |
           cargo run -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/tui.txt
           grep -q Vallum /tmp/tui.txt
