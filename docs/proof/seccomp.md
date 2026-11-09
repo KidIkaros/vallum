@@ -170,7 +170,9 @@ descriptors it was handed.
    log, no read permission — and exits 2 with the reason, because "no records"
    and "no collection" look identical in a log that was never written. Until a
    deployment has run it over a real window, the list is as informed as the
-   traces in §3, not as informed as production would make it.
+   traces in §3, not as informed as production would make it. The attempt, the
+   blocker that stopped it, and the exact run are in
+   `docs/seccomp-audit-handoff.md`.
 2. **Enforce mode has run live, but its kill has not been seen live.**
    `scripts/seccomp-enforce.sh` runs in CI as root, where the drop can call
    `setgroups`, and asserts six things about a dropped daemon in enforce mode:
