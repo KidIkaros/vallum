@@ -72,6 +72,28 @@ VALLUM_RUNTIME_DIR=~/.hermes/cache/scratch/vallum-dry \
   live). Verified: 14 samples restored, chart opens at `RATE · LAST 13S`
   instead of empty.
 
+## First run (fifth pass)
+
+A host with nothing installed used to get a dashboard with no tunnel and no
+guidance. It now gets **NO TUNNEL ON THIS MACHINE**: three steps with copyable
+commands (`install.sh --dry-run`, `install.sh --local --install-only`, start the
+unit), the next one highlighted, and a **WHAT THIS HOST HAS** panel that reports
+binaries, unit, config, restore tool and dead-man — each read from disk, with
+"not readable" distinguished from "no".
+
+It also reports the socket directory's mode and says why `0750` blocks a
+privilege-dropping daemon — the bug that stopped this machine's real install
+from publishing a socket.
+
+The header drops START, STOP and *restore internet* when nothing is installed:
+a start button for a unit that does not exist, and a red recovery action on a
+host with nothing to recover from, are both noise on a first visit.
+
+Verified by rendering the console against an empty runtime directory with
+`systemctl` shadowed, so the "unit absent" branch is exercised without touching
+the host. The real fresh install is still unverified — that needs a machine that
+has never had Vallum on it.
+
 ## Still open
 
 - Multi-interface: the console shows `[1/1]` but cannot switch.

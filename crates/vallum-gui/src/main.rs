@@ -844,11 +844,66 @@ pub(crate) fn ping(
 }
 
 #[tauri::command]
+fn preflight_state() -> serde_json::Value {
+    preflight()
+}
+
+#[tauri::command]
 fn ping_peer(console: State<'_, Arc<Console>>, address: String) -> serde_json::Value {
     console.known_socket().map_or_else(
         || serde_json::json!({ "error": "no interface selected" }),
         |socket| ping(&socket, &address, 3),
     )
+}
+
+/// What is on this host, before any daemon exists to ask. Every field is a fact
+/// read from disk or systemd — a first-run screen that guesses is worse than one
+/// that says nothing.
+pub(crate) fn preflight() -> serde_json::Value {
+    let exists = |path: &str| std::path::Path::new(path).exists();
+    // A file the console cannot read is not the same as a file that is absent;
+    // saying "no config" when it is merely root-owned sends the operator to
+    // reinstall something they already have.
+    let present = |path: &str| -> Option<bool> {
+        match std::fs::metadata(path) {
+            Ok(_) => Some(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+            Err(_) => None,
+        }
+    };
+    let unit_installed = std::process::Command::new("systemctl")
+        .args(["list-unit-files", "vallum@.service", "--no-legend"])
+        .output()
+        .ok()
+        .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+        .unwrap_or(false);
+    let runtime = vallum_config::runtime_dir();
+    let (mode, group) = std::fs::metadata(runtime)
+        .ok()
+        .and_then(|meta| {
+            use std::os::unix::fs::MetadataExt;
+            Some((format!("{:04o}", meta.mode() & 0o7777), meta.gid()))
+        })
+        .unwrap_or_else(|| ("absent".to_owned(), 0));
+    let sockets = std::fs::read_dir(runtime)
+        .map(|read| {
+            read.flatten()
+                .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("sock"))
+                .count()
+        })
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "vallum": exists("/usr/bin/vallum"),
+        "quick": exists("/usr/bin/vallum-quick"),
+        "panic": exists("/usr/local/sbin/vallum-panic"),
+        "deadman": exists("/usr/local/sbin/vallum-guard-deadman"),
+        "unit": unit_installed,
+        "config": present("/etc/vallum/vallum0.toml"),
+        "runtime_dir": runtime.display().to_string(),
+        "runtime_mode": mode,
+        "sockets": sockets,
+    })
 }
 
 fn main() {
@@ -888,6 +943,7 @@ fn main() {
             health_state,
             panic_command,
             ping_peer,
+            preflight_state,
             select,
             window_state,
             add_peer,

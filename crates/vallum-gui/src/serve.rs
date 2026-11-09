@@ -139,6 +139,11 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         return Ok(());
     }
 
+    if request.path == "/api/preflight" {
+        json(&mut stream, "200 OK", &crate::preflight());
+        return Ok(());
+    }
+
     if request.path == "/api/ping" && request.method == "POST" {
         let Some(socket) = console.known_socket() else {
             json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));

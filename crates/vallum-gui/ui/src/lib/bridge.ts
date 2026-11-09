@@ -95,6 +95,25 @@ export function panicNow(): Promise<{ message: string }> {
   return http("/api/panic", { method: "POST" })
 }
 
+export interface Preflight {
+  vallum: boolean
+  quick: boolean
+  panic: boolean
+  deadman: boolean
+  unit: boolean
+  /** null when the file exists but this user cannot see it. */
+  config: boolean | null
+  runtime_dir: string
+  runtime_mode: string
+  sockets: number
+}
+
+/** What is on this host, read from disk and systemd. Changes nothing. */
+export function preflight(): Promise<Preflight> {
+  if (IN_TAURI) return invoke<Preflight>("preflight_state")
+  return http<Preflight>("/api/preflight")
+}
+
 export interface PingResult {
   address: string
   interface?: string

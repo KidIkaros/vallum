@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Copy, ShieldOff } from "lucide-react"
-import { toast } from "sonner"
+import { ShieldOff } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import { TrafficBars } from "@/components/TrafficBars"
 import {
@@ -12,10 +11,11 @@ import {
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
-import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, selectInterface, watchWindowState, type Health, type PingResult } from "@/lib/bridge"
+import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
 import { EgressBadge, HealthPanel, PanicButton } from "@/components/Health"
 import { CopyButton } from "@/components/Copy"
+import { FirstRun } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Panel, PanelTitle } from "@/components/ui/panel"
@@ -432,32 +432,6 @@ function NoBridge() {
   )
 }
 
-function EmptyState() {
-  return (
-    <section className="bg-card/60 rounded-lg border border-border/70">
-      <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-        <ShieldOff className="text-muted-foreground size-8" aria-hidden />
-        <div>
-          <p className="font-medium">No daemon on this machine</p>
-          <p className="text-muted-foreground mt-1 max-w-md text-xs">
-            The console found no control socket in the runtime directory. Start a daemon
-            with <code className="text-signal">vallum run</code> or{" "}
-            <code className="text-signal">vallum-quick up</code>.
-          </p>
-          <button
-            className="border-border hover:bg-secondary mt-3 inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none"
-            onClick={() => {
-              void navigator.clipboard.writeText("vallum-quick up")
-              toast.success("copied: vallum-quick up")
-            }}
-          >
-            <Copy className="size-3" aria-hidden /> copy command
-          </button>
-        </div>
-      </div>
-    </section>
-  )
-}
 
 export default function App() {
   const inApp = useMemo(() => hasBridge, [])
@@ -466,6 +440,7 @@ export default function App() {
   const [filter, setFilter] = useState("")
   const [sort, setSort] = useState<SortOrder>("handshake")
   const [shortcuts, setShortcuts] = useState(false)
+  const [facts, setFacts] = useState<Preflight | null>(null)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
@@ -475,6 +450,14 @@ export default function App() {
   const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
+
+  // What is installed here, read once: it decides whether the console offers a
+  // start button or an install step.
+  useEffect(() => {
+    preflight()
+      .then(setFacts)
+      .catch(() => setFacts(null))
+  }, [])
 
   // The TUI's keys, as far as the console has actions for them. Deliberately
   // suppressed while a field has focus or a dialog is open: a shortcut that
@@ -657,8 +640,16 @@ export default function App() {
           </span>
         </span>
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-          <ServiceStrip service={service} onChanged={refreshService} />
-          <PanicButton compact />
+          {facts?.unit === false ? (
+            <span className="micro" title="nothing is installed on this host yet">
+              not installed
+            </span>
+          ) : (
+            <>
+              <ServiceStrip service={service} onChanged={refreshService} />
+              <PanicButton compact />
+            </>
+          )}
           <DeviceDialog
             listenPort={data?.listen_port ?? null}
             fwmark={data?.fwmark ?? null}
@@ -688,6 +679,12 @@ export default function App() {
 
       {!inApp ? (
         <NoBridge />
+      ) : facts !== null &&
+        !facts.unit &&
+        interfaces.length === 0 ? (
+        // Nothing installed: show what to run, not a start button for a unit
+        // that does not exist.
+        <FirstRun facts={facts} />
       ) : service && service.active !== "active" && !payload?.ok ? (
         // The unit being down is only the reason the cockpit is empty when the
         // daemon is also unreachable. A daemon can answer with no unit behind it
@@ -695,7 +692,7 @@ export default function App() {
         // has never heard of it is the console lying in the wrong direction.
         <StoppedCard service={service} onChanged={refreshService} />
       ) : interfaces.length === 0 ? (
-        <EmptyState />
+        <FirstRun facts={facts} />
       ) : (
         <>
           <Hero
