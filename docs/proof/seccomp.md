@@ -107,7 +107,8 @@ wrong and is corrected below.
    `set_robust_list`, `rseq`, or `sched_getaffinity`. The trace starts at
    `execve` now and all four are observed: the window covers the moment the
    threads are created. What is still unobserved is the *absence* of threads — 35
-   of the 79 entries appear in neither trace, most of them startup-only
+   to 37 of the 79 entries appear in neither trace, depending on the run, most of
+   them startup-only
    (`arch_prctl`, `set_tid_address`, `rt_sigaction`) or libc and allocator
    fallbacks (`brk`, `clone` where `clone3` is the observed one). They are
    allowed because the drop happens after them or because a fallback may take
@@ -195,7 +196,7 @@ descriptors it was handed.
    it exit 1 and name that syscall, and removing `linkat` — the syscall the old
    attach-after-tunnel window could not see — made it exit 1 and name that one.
    What it cannot see is §3 — paths the exercise does not take, and
-   the 35 entries no trace justifies individually. The list is as current as the
+   the ~36 entries no trace justifies individually. The list is as current as the
    exercise, not as the code.
 4. **Nothing spawns a process after the drop — as of this audit.** Every place
    the daemon could run a program was checked: `nft` (policy installation) is
