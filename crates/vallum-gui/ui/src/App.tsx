@@ -12,7 +12,7 @@ import {
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
-import { bytes, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
+import { bytes, hasBridge, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
@@ -357,10 +357,12 @@ function NoBridge() {
         <div>
           <p className="font-medium">This is the console's web UI, not the console</p>
           <p className="text-muted-foreground mt-1 max-w-md text-xs">
-            A browser tab has no bridge to the daemon. The console runs inside the
-            Vallum application, which talks to the control socket directly:
+            This page has no bridge to the daemon. Open the console inside the
+            Vallum application, or serve it over localhost:
           </p>
-          <code className="text-signal mt-3 inline-block text-xs">./target/release/vallum-gui</code>
+          <code className="text-signal mt-3 inline-block text-xs">
+            ./target/release/vallum-gui --serve 7317
+          </code>
         </div>
       </div>
     </section>
@@ -395,7 +397,7 @@ function EmptyState() {
 }
 
 export default function App() {
-  const inApp = useMemo(() => "__TAURI_INTERNALS__" in window, [])
+  const inApp = useMemo(() => hasBridge, [])
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])

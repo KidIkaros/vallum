@@ -2,25 +2,81 @@ import { invoke } from "@tauri-apps/api/core"
 import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 import type { InterfaceEntry, SnapshotPayload } from "@/types"
 
-// Every function here is one hop over the Tauri bridge. Nothing invents a
-// value the Rust side did not send: an absent field stays absent in the UI.
+// One console, two transports. Inside the Tauri webview the bridge is IPC
+// (`window.__TAURI_INTERNALS__`); served by `vallum-gui --serve` it is plain
+// localhost HTTP with the same commands and the same payloads. Everything
+// above this file is transport-blind.
+
+const IN_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+const OVER_HTTP =
+  typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)
+
+/** True when the console can actually reach a daemon, by either transport. */
+export const hasBridge = IN_TAURI || OVER_HTTP
+
+async function http<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init)
+  if (!response.ok) {
+    let detail = response.statusText
+    try {
+      const body = (await response.json()) as { error?: string }
+      if (body.error) detail = body.error
+    } catch {
+      /* a non-JSON error body keeps the status text */
+    }
+    throw new Error(detail)
+  }
+  return (await response.json()) as T
+}
+
+/** Invoke a console command over whichever transport is available. */
+export async function command<T>(name: string, args?: unknown): Promise<T> {
+  if (IN_TAURI) return invoke<T>(name, (args ?? {}) as Record<string, unknown>)
+  return http<T>(`/api/cmd/${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(args ?? {}),
+  })
+}
 
 export async function listInterfaces(): Promise<InterfaceEntry[]> {
-  return invoke<InterfaceEntry[]>("list_interfaces")
+  if (IN_TAURI) return invoke<InterfaceEntry[]>("list_interfaces")
+  return http<InterfaceEntry[]>("/api/interfaces")
 }
 
 export async function selectInterface(path: string): Promise<void> {
-  await invoke("select", { path })
+  if (IN_TAURI) {
+    await invoke("select", { path })
+    return
+  }
+  await http("/api/select", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+  })
 }
 
 export async function reportWindowState(focused: boolean, visible: boolean): Promise<void> {
+  // The HTTP transport has no window; its cadence is fixed server-side.
+  if (!IN_TAURI) return
   await invoke("window_state", { focused, visible })
 }
 
 export function onSnapshot(
   handler: (payload: SnapshotPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<SnapshotPayload>("snapshot", (event) => handler(event.payload))
+  if (IN_TAURI) {
+    return listen<SnapshotPayload>("snapshot", (event) => handler(event.payload))
+  }
+  const source = new EventSource("/api/stream")
+  source.onmessage = (event) => {
+    try {
+      handler(JSON.parse(event.data) as SnapshotPayload)
+    } catch {
+      /* a malformed frame is skipped, not fatal */
+    }
+  }
+  return Promise.resolve(() => source.close())
 }
 
 /** The window's own focus/visibility, for the poller's cadence. */

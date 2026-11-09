@@ -1,9 +1,9 @@
-import { invoke } from "@tauri-apps/api/core"
+import { command } from "@/lib/bridge"
 
-// The console's write surface. Every function is one Tauri command from
-// crates/vallum-gui/src/main.rs; the payload shapes match PeerFields and
-// InviteFields in actions.rs, which are `#[serde(default)]` — a blank field
-// means "not set", exactly as the daemon's parsers read it.
+// The console's write surface, transport-blind: every function goes through
+// the bridge, which is IPC inside Tauri and localhost HTTP under `--serve`.
+// The payload shapes match PeerFields and InviteFields in actions.rs, which
+// are `#[serde(default)]` — a blank field means "not set".
 
 export interface Done {
   message: string
@@ -35,14 +35,14 @@ export const emptyPeer = (): PeerFields => ({
   preshared_key: "",
 })
 
-export const addPeer = (fields: PeerFields) => invoke<Done>("add_peer", { fields })
-export const editPeer = (fields: PeerFields) => invoke<Done>("edit_peer", { fields })
-export const removePeer = (publicLine: string) => invoke<Done>("remove_peer", { publicLine })
+export const addPeer = (fields: PeerFields) => command<Done>("add_peer", { fields })
+export const editPeer = (fields: PeerFields) => command<Done>("edit_peer", { fields })
+export const removePeer = (publicLine: string) => command<Done>("remove_peer", { publicLine })
 export const rotatePeer = (name: string, newLine: string) =>
-  invoke<Done>("rotate_peer", { name, newLine })
-export const finalizePeer = (name: string) => invoke<Done>("finalize_peer", { name })
-export const invitePeer = (fields: InviteFields) => invoke<Done>("invite_peer", { fields })
+  command<Done>("rotate_peer", { name, newLine })
+export const finalizePeer = (name: string) => command<Done>("finalize_peer", { name })
+export const invitePeer = (fields: InviteFields) => command<Done>("invite_peer", { fields })
 
 /** Change the device's listen port and firewall mark through the daemon. */
 export const applyDevice = (listenPort: string, fwmark: string) =>
-  invoke<Done>("apply_device", { listenPort, fwmark })
+  command<Done>("apply_device", { listenPort, fwmark })

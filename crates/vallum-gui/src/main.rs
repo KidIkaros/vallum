@@ -15,7 +15,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
-mod snapshot;
+pub(crate) mod serve;
+pub(crate) mod snapshot;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -40,7 +41,7 @@ const UNFOCUSED: Duration = Duration::from_secs(10);
 
 /// What the front-end receives on every poll.
 #[derive(Clone, Debug, Serialize)]
-struct Payload {
+pub(crate) struct Payload {
     ok: bool,
     error: Option<String>,
     data: Option<Snapshot>,
@@ -48,7 +49,7 @@ struct Payload {
 
 /// One offer of a control socket, by display name and path.
 #[derive(Debug, Serialize)]
-struct InterfaceEntry {
+pub(crate) struct InterfaceEntry {
     name: String,
     path: String,
 }
@@ -67,7 +68,7 @@ struct Inner {
 /// Shared poller state. One mutex, one condvar: the UI thread only ever needs to
 /// say "the window changed", so nothing more elaborate is warranted.
 #[derive(Debug)]
-struct Console {
+pub(crate) struct Console {
     inner: Mutex<Inner>,
     wake: Condvar,
 }
@@ -88,6 +89,10 @@ impl Console {
         }
     }
 
+    pub(crate) fn current_socket(&self) -> Option<PathBuf> {
+        self.lock().socket.clone()
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -100,6 +105,17 @@ impl Console {
     }
 }
 
+/// Startup diagnostics from the page: what it rendered, whether the bridge is
+/// there, and any boot errors. Called by the probe through `window.__TAURI__`,
+/// so it works even when the app bundle failed to load.
+#[tauri::command]
+fn ui_report(rendered: usize, bridge: String, errors: Vec<String>) {
+    eprintln!(
+        "vallum-gui: ui_report rendered={rendered} bridge={bridge} errors={:?}",
+        errors
+    );
+}
+
 /// The control sockets this host can offer.
 ///
 /// Discovery reads the runtime directory the daemon binds its socket in, which
@@ -107,6 +123,10 @@ impl Console {
 /// a machine with no daemon shows no interfaces.
 #[tauri::command]
 fn list_interfaces() -> Vec<InterfaceEntry> {
+    interfaces()
+}
+
+pub(crate) fn interfaces() -> Vec<InterfaceEntry> {
     let mut entries: Vec<InterfaceEntry> = Vec::new();
     // `VALLUM_RUNTIME_DIR` lets a daemon that cannot own /run/vallum publish
     // its socket where the console can read it — the lab and the test runs use
@@ -138,6 +158,10 @@ fn list_interfaces() -> Vec<InterfaceEntry> {
 /// Point the poller at one socket.
 #[tauri::command]
 fn select(console: State<'_, Arc<Console>>, path: String) {
+    select_path(&console, path);
+}
+
+pub(crate) fn select_path(console: &Console, path: String) {
     console.changed(|inner| {
         inner.socket = Some(PathBuf::from(path));
         inner.immediate = true;
@@ -182,45 +206,35 @@ fn apply_device(
     actions::apply_device(&selected(&console)?, &listen_port, &fwmark)
 }
 
-#[tauri::command]
-fn rotate_peer(
-    console: State<'_, Arc<Console>>,
-    name: String,
-    new_line: String,
-) -> Result<Done, String> {
-    let socket = selected(&console)?;
-    let config = config_of(&socket).ok_or_else(|| {
+fn rotate_at(socket: &std::path::Path, name: &str, new_line: &str) -> Result<Done, String> {
+    let config = config_of(socket).ok_or_else(|| {
         format!(
             "no readable config under {CONFIG_DIR} names this socket — run the console as root to rotate the stored identity"
         )
     })?;
-    let suite = snapshot::fetch(&socket)
+    let suite = snapshot::fetch(socket)
         .ok()
         .map(|snapshot| snapshot.suite_id());
-    actions::rotate(&config, &name, &new_line, suite)
+    actions::rotate(&config, name, new_line, suite)
 }
 
-#[tauri::command]
-fn finalize_peer(console: State<'_, Arc<Console>>, name: String) -> Result<Done, String> {
-    let socket = selected(&console)?;
-    let config = config_of(&socket).ok_or_else(|| {
+fn finalize_at(socket: &std::path::Path, name: &str) -> Result<Done, String> {
+    let config = config_of(socket).ok_or_else(|| {
         format!(
             "no readable config under {CONFIG_DIR} names this socket — run the console as root to finalise"
         )
     })?;
-    actions::finalize(&config, &name)
+    actions::finalize(&config, name)
 }
 
-#[tauri::command]
-fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result<Done, String> {
-    let socket = selected(&console)?;
+fn invite_at(socket: &std::path::Path, fields: &InviteFields) -> Result<Done, String> {
     let interface = socket
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("vallum0")
         .to_owned();
-    let device = snapshot::fetch(&socket).ok();
-    let config = config_of(&socket);
+    let device = snapshot::fetch(socket).ok();
+    let config = config_of(socket);
     let listen = device
         .as_ref()
         .and_then(|snapshot| snapshot.listen_port)
@@ -233,11 +247,33 @@ fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result
         config.as_deref(),
         listen.as_deref(),
         &public_line,
-        &fields,
+        fields,
     )
 }
 
-/// Tell the poller how the window is behaving, so it can pick a cadence.
+#[tauri::command]
+fn rotate_peer(
+    console: State<'_, Arc<Console>>,
+    name: String,
+    new_line: String,
+) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    rotate_at(&socket, &name, &new_line)
+}
+
+#[tauri::command]
+fn finalize_peer(console: State<'_, Arc<Console>>, name: String) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    finalize_at(&socket, &name)
+}
+
+#[tauri::command]
+fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    invite_at(&socket, &fields)
+}
+
+
 #[tauri::command]
 fn window_state(console: State<'_, Arc<Console>>, focused: bool, visible: bool) {
     let unchanged = {
@@ -257,11 +293,17 @@ fn window_state(console: State<'_, Arc<Console>>, focused: bool, visible: bool) 
 ///
 /// It holds no lock while the daemon is answering: a 5 s request timeout must
 /// never block the UI thread that is trying to change the window state.
+static FIRST_SNAPSHOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
     loop {
         let socket = {
             let mut inner = console.lock();
-            while !inner.visible || inner.socket.is_none() {
+            // Poll whenever a socket is selected. Visibility and focus pick the
+            // cadence, never whether to read at all: a webview that reports
+            // itself hidden (occluded, minimised, or a quirk of the toolkit)
+            // must not leave the console showing a dead zero state.
+            while inner.socket.is_none() {
                 inner = console
                     .wake
                     .wait(inner)
@@ -271,7 +313,7 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
                 inner.immediate = false;
                 inner.socket.clone()
             } else {
-                let interval = if inner.focused { FOCUSED } else { UNFOCUSED };
+                let interval = if inner.focused && inner.visible { FOCUSED } else { UNFOCUSED };
                 let generation = inner.generation;
                 let deadline = Instant::now() + interval;
                 let mut current = inner;
@@ -289,7 +331,7 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
                 }
                 // A change during the sleep means the cadence or the target moved;
                 // spend the next iteration re-reading state instead of a stale socket.
-                if current.generation != generation || !current.visible {
+                if current.generation != generation {
                     None
                 } else {
                     current.socket.clone()
@@ -300,6 +342,7 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
         let Some(path) = socket else {
             continue;
         };
+        let first = FIRST_SNAPSHOT.swap(false, std::sync::atomic::Ordering::Relaxed);
         let payload = match snapshot::fetch(&path) {
             Ok(data) => Payload {
                 ok: true,
@@ -312,6 +355,15 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
                 data: None,
             },
         };
+        if first {
+            eprintln!(
+                "vallum-gui: first payload from {} ok={} error={:?} peers={}",
+                path.display(),
+                payload.ok,
+                payload.error,
+                payload.data.as_ref().map_or(0, |d| d.peers.len())
+            );
+        }
         // A failed emit means the window is gone; the poller has no work left.
         if app.emit("snapshot", payload).is_err() {
             return;
@@ -319,13 +371,76 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
     }
 }
 
+/// The write surface over HTTP: the same functions the Tauri commands call,
+/// dispatched from a JSON body. One implementation, two transports.
+pub(crate) fn dispatch(
+    console: &Arc<Console>,
+    name: &str,
+    body: serde_json::Value,
+) -> Result<Done, String> {
+    let socket = console
+        .current_socket()
+        .ok_or_else(|| "no interface selected".to_owned())?;
+    let text = |key: &str| -> Result<String, String> {
+        body.get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing `{key}`"))
+    };
+    match name {
+        "add_peer" => {
+            let fields: PeerFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
+            actions::add(&socket, &fields)
+        }
+        "edit_peer" => {
+            let fields: PeerFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
+            actions::edit(&socket, &fields)
+        }
+        "remove_peer" => actions::remove(&socket, &text("publicLine")?),
+        "rotate_peer" => rotate_at(&socket, &text("name")?, &text("newLine")?),
+        "finalize_peer" => finalize_at(&socket, &text("name")?),
+        "invite_peer" => {
+            let fields: InviteFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
+            invite_at(&socket, &fields)
+        }
+        "apply_device" => actions::apply_device(&socket, &text("listenPort")?, &text("fwmark")?),
+        other => Err(format!("unknown command `{other}`")),
+    }
+}
+
 fn main() {
+    // `--serve`: the console over localhost HTTP instead of a webview. The
+    // same UI, the same commands, for machines whose WebKitGTK cannot render.
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--serve") {
+        let port = args
+            .iter()
+            .position(|arg| arg == "--serve")
+            .and_then(|at| args.get(at + 1))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(7317u16);
+        let ui = args
+            .iter()
+            .position(|arg| arg == "--ui")
+            .and_then(|at| args.get(at + 1))
+            .cloned()
+            .or_else(|| std::env::var("VALLUM_UI_DIR").ok())
+            .unwrap_or_else(|| "crates/vallum-gui/ui/dist".to_owned());
+        let console = Arc::new(Console::new());
+        if let Err(error) = serve::serve(port, PathBuf::from(ui), console) {
+            eprintln!("vallum-gui: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let console = Arc::new(Console::new());
     let poller = Arc::clone(&console);
 
     let outcome = tauri::Builder::default()
         .manage(console)
         .invoke_handler(tauri::generate_handler![
+            ui_report,
             list_interfaces,
             select,
             window_state,
@@ -338,6 +453,37 @@ fn main() {
             invite_peer
         ])
         .setup(move |app| {
+            // One-shot startup report on stderr: which URL the webview loaded,
+            // whether the IPC bridge exists, and what it rendered. This is the
+            // difference between "blank page" and "page ran and refused".
+            let probe = app.handle().clone();
+            std::thread::spawn(move || {
+                use tauri::Manager;
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if let Some(window) = probe.get_webview_window("main") {
+                    let _ = window.eval(
+                        "(function(){ \
+                          const t = window.__TAURI__; \
+                          const info = { \
+                            internals: typeof window.__TAURI_INTERNALS__, \
+                            global: typeof t, \
+                            body: document.body ? document.body.innerHTML.length : -1, \
+                            errs: window.__bootErrors || [] }; \
+                          if (t && t.core) { \
+                            t.core.invoke('ui_report', { rendered: info.body, \
+                              bridge: 'global:' + info.global + ',internals:' + info.internals, \
+                              errors: info.errs }).catch(function(e){ \
+                                t.core.invoke('ui_report', { rendered: -2, bridge: 'invoke-failed:' + String(e), errors: [] }).catch(function(){}); \
+                              }); \
+                          } else { document.title = 'NOGLOBAL ' + JSON.stringify(info); } \
+                        })()",
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    eprintln!("vallum-gui: url={:?} title={:?}", window.url(), window.title());
+                } else {
+                    eprintln!("vallum-gui: no window labelled main");
+                }
+            });
             let handle = app.handle().clone();
             std::thread::Builder::new()
                 .name("snapshot-poller".to_owned())

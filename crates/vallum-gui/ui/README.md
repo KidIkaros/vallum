@@ -25,6 +25,21 @@ serves the embedded `dist`:
 cargo build --release -p vallum-gui && ./target/release/vallum-gui
 ```
 
+## Two transports
+
+The console runs in two places with one frontend:
+
+- **Inside Tauri** (the window): IPC via `window.__TAURI_INTERNALS__`.
+- **`vallum-gui --serve [port] [--ui dir]`**: the same UI over localhost HTTP —
+  `/api/interfaces`, `/api/select`, `/api/stream` (SSE, one snapshot per
+  second) and `POST /api/cmd/<name>`, all backed by the same Rust functions the
+  Tauri commands call. Use it where the webview cannot render (WebKitGTK on
+  some GPU/driver combinations loads pages blank); open
+  `http://127.0.0.1:7317` in any browser.
+
+`src/lib/bridge.ts` picks the transport; nothing above it knows which one is
+in use.
+
 ## Conventions
 
 - No runtime dependency on any component library: shadcn components are
