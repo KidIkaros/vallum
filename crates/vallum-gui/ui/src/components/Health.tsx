@@ -1,5 +1,8 @@
+import { useState } from "react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
-import type { Health } from "@/lib/bridge"
+import { panicNow, type Health } from "@/lib/bridge"
 
 // "Is this actually a VPN right now?" — answered from the host, not the config.
 // A config that says 0.0.0.0/0 and a route that says wlp0s20f3 are different
@@ -19,6 +22,34 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+/** The escape hatch, in the place the failure is visible. */
+export function PanicButton({ compact = false }: { compact?: boolean }) {
+  const [busy, setBusy] = useState(false)
+  const run = async () => {
+    setBusy(true)
+    try {
+      const done = await panicNow()
+      toast.success(done.message)
+    } catch (error) {
+      toast.error(String(error instanceof Error ? error.message : error))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-[10px]" : ""}`}
+      disabled={busy}
+      onClick={() => void run()}
+      title="Remove the egress block and put this host back on the internet"
+    >
+      {busy ? "restoring…" : "PANIC"}
+    </Button>
+  )
+}
+
 export function HealthPanel({ health }: { health: Health | null }) {
   if (!health) {
     return (
@@ -32,6 +63,14 @@ export function HealthPanel({ health }: { health: Health | null }) {
   const v6Tunnel = health.route6_via_tunnel
   return (
     <Panel title="EGRESS HEALTH">
+      {health.guard.active === "active" && !v4 && (
+        <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
+          <span className="text-fault text-[11px]">
+            the guard is blocking egress and traffic is not going through the tunnel
+          </span>
+          <PanicButton compact />
+        </div>
+      )}
       <Row label="default route">
         <Verdict ok={v4}>
           {health.route4 ? `via ${health.route4}` : "no route"}

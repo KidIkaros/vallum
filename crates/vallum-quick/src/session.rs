@@ -86,7 +86,12 @@ pub(crate) fn interface_missing(
 
 /// Long enough for several handshake retries before a dead server is
 /// declared; short enough that a failed unit reports promptly.
-const SESSION_WAIT: Duration = Duration::from_secs(20);
+/// How long `attach` waits for a handshake before refusing to route a full
+/// tunnel. 45 s, not 20: a fresh daemon's first handshake can legitimately take
+/// longer than 20 s on a slow uplink, and a false refusal leaves the host
+/// un-routed while the egress guard is already on — which is a machine with no
+/// internet, not a machine with a dead tunnel.
+const SESSION_WAIT: Duration = Duration::from_secs(45);
 
 /// Readiness is a handshake, not an interface. A full tunnel attaches by
 /// policy-routing every packet through the peer — if that peer never

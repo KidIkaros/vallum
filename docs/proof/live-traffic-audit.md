@@ -123,3 +123,34 @@ the sudoers rule allows `reset-failed`.
   always-print status banners and a `--check-relay` reachability test. The
   equivalent here is a restart counter and last death reason in the console,
   because right now a SIGSYS kill and a healthy tunnel look identical.
+
+## The outage (2026-11-09, ~20 minutes)
+
+Turning the full tunnel on took this host's internet away. The chain, in the
+order it happened:
+
+1. `vallum-guard@vallum0` came up first and switched the egress block **on** —
+   by design, `Before=` the daemon so there is no fail-open window.
+2. `vallum-quick@vallum0` waited 20 s for a handshake and refused:
+   *"the tunnel is up but the server is not answering, and routing the host's
+   traffic into it would blackhole this machine"*. The refusal is correct; the
+   criterion was not. The daemon rekeys every 120 s, so a healthy tunnel can
+   produce no handshake inside a 20 s window.
+3. With the routes never applied and the block on, every packet left the host
+   into a block with nothing behind it. The guard outlived the failure it was
+   supposed to protect.
+
+Three changes, in order of what would have prevented it:
+
+- **A dead-man** (`vallum-deadman@.timer`, every 10 s): if the guard is on and
+  the tunnel cannot pass a packet to the far side three checks running, the
+  block comes off by itself. Fail-closed must not mean "host has no internet".
+- **`vallum-panic`** (`/usr/local/sbin/vallum-panic`, and a PANIC control in the
+  console): policy off, tunnel routes withdrawn, units stopped, default route
+  restored, and it says whether the internet is back.
+- **A deploy that cannot brick the host**: prove the tunnel carries, then switch
+  config, then arm the dead-man, then the guard, then the routes — verifying at
+  every step and running the panic path on any failure. There is no longer an
+  ordering in which the block is on and the routes are not.
+- `vallum-quick`'s handshake wait is 45 s, not 20 s: a false refusal while the
+  guard is on is a brick, not a warning.

@@ -723,6 +723,34 @@ pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
     })
 }
 
+/// Put the host back on the internet. The one control that must work when
+/// everything else is broken, so it runs a root-owned script through the
+/// narrow sudoers rule rather than doing anything itself.
+pub(crate) fn panic() -> Result<Done, String> {
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/sbin/vallum-panic"])
+        .output()
+        .map_err(|error| format!("cannot run vallum-panic: {error}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        Ok(Done {
+            message: text.trim().lines().last().unwrap_or("internet restored").to_owned(),
+            command: None,
+        })
+    } else {
+        Err(text.trim().to_owned())
+    }
+}
+
+#[tauri::command]
+fn panic_command() -> Result<Done, String> {
+    panic()
+}
+
 fn main() {
     // `--serve`: the console over localhost HTTP instead of a webview. The
     // same UI, the same commands, for machines whose WebKitGTK cannot render.
@@ -758,6 +786,7 @@ fn main() {
             ui_report,
             list_interfaces,
             health_state,
+            panic_command,
             select,
             window_state,
             add_peer,

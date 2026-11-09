@@ -131,6 +131,14 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         }
     }
 
+    if request.path == "/api/panic" && request.method == "POST" {
+        match crate::panic() {
+            Ok(done) => json(&mut stream, "200 OK", &serde_json::to_value(done).unwrap_or_default()),
+            Err(error) => json(&mut stream, "500 Internal Server Error", &serde_json::json!({ "error": error })),
+        }
+        return Ok(());
+    }
+
     if request.path == "/api/health" {
         let Some(socket) = console.known_socket() else {
             json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));

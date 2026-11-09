@@ -89,6 +89,12 @@ export function health(): Promise<Health> {
   return http<Health>("/api/health")
 }
 
+/** Restore this host's internet: policy off, routes back, units stopped. */
+export function panicNow(): Promise<{ message: string }> {
+  if (IN_TAURI) return invoke("panic_command")
+  return http("/api/panic", { method: "POST" })
+}
+
 export interface LogTail {
   unit: string
   lines?: string

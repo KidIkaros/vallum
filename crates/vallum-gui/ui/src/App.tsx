@@ -14,7 +14,7 @@ import {
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, selectInterface, watchWindowState, type Health } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { HealthPanel } from "@/components/Health"
+import { HealthPanel, PanicButton } from "@/components/Health"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
@@ -462,6 +462,7 @@ export default function App() {
         )}
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
           <ServiceStrip service={service} onChanged={refreshService} />
+          <PanicButton compact />
           <DeviceDialog
             listenPort={data?.listen_port ?? null}
             fwmark={data?.fwmark ?? null}
