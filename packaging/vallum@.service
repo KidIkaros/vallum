@@ -18,9 +18,13 @@ Restart=on-failure
 RestartSec=2s
 WatchdogSec=30s
 
-# The daemon needs the interface and socket, then drops to `interface.user`.
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+# The daemon needs the interface and socket, then drops to `interface.user` —
+# and that drop is `setgroups([])`, `setgid`, `setuid`, so the bounding set must
+# carry the id-changing capabilities or every config with `user` set fails at
+# `setgroups: EPERM`. They are ambient only for the drop; nothing after it can
+# use them, because the filter is installed in the same breath.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
