@@ -149,6 +149,8 @@ pub mod field {
     /// Request markers and flags.
     pub const SET: &str = "set=1";
     /// Request markers and flags.
+    pub const STOP: &str = "stop=1";
+    /// Request markers and flags.
     pub const REPLACE_PEERS: &str = "replace_peers";
     /// Request markers and flags.
     pub const REMOVE: &str = "remove";
@@ -167,6 +169,14 @@ pub enum Request {
     Get,
     /// `set=1`, with the transaction that followed.
     Set(Set),
+    /// `stop=1`: ask the daemon to shut down.
+    ///
+    /// Answered where the request is read rather than on the tunnel thread, so
+    /// the reply reaches the client before the loop stops — a stop that returns
+    /// before its own acknowledgement is indistinguishable from a stop that
+    /// failed. The socket is same-user and `0600`, so this is no wider a
+    /// permission than signalling the pid, and it does not require finding one.
+    Stop,
 }
 
 /// A `set=1` transaction.
@@ -234,6 +244,12 @@ pub fn parse(text: &str) -> Result<Request, String> {
                 return Err("`get=1` must be the only line".to_owned());
             }
             Ok(Request::Get)
+        }
+        field::STOP => {
+            if lines.next().is_some() {
+                return Err("`stop=1` must be the only line".to_owned());
+            }
+            Ok(Request::Stop)
         }
         field::SET => {
             let mut set = Set::default();
@@ -1161,6 +1177,15 @@ mod tests {
         assert_eq!(parse("get=1\n"), Ok(Request::Get));
         assert!(parse("get=1\nlisten_port=1\n").is_err());
         assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn a_stop_is_one_line_and_nothing_else() {
+        assert_eq!(parse("stop=1\n"), Ok(Request::Stop));
+        // A stop that carried a transaction would be a request whose second half
+        // nobody reads: refuse it rather than stop and ignore the rest.
+        assert!(parse("stop=1\nlisten_port=1\n").is_err());
+        assert!(parse("stop=0\n").is_err());
     }
 
     #[test]

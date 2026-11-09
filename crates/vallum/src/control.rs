@@ -32,7 +32,7 @@ use vallum_tunnel::{Device, PeerConfig};
 
 use crate::run::{Input, Shutdown};
 use crate::uapi::errno::{EADDRINUSE, EADDRNOTAVAIL, EEXIST, EINVAL, ENOENT, EPERM, ETIMEDOUT};
-use crate::uapi::{self, Request, Set};
+use crate::uapi::{self, errno, Request, Set};
 
 /// How long a client may take to send its request before the connection is
 /// dropped.
@@ -223,6 +223,7 @@ pub(crate) fn serve(
     path: PathBuf,
     tx: mpsc::SyncSender<Input>,
     shutdown: Shutdown,
+    tunnel: Shutdown,
 ) -> io::Result<JoinHandle<()>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -292,7 +293,17 @@ pub(crate) fn serve(
                         Err(_) => break,
                     }
                 }
+                // `stop=1` is answered here, not on the tunnel thread: the reply
+                // has to be on the wire before the loop stops. A client that asks
+                // a daemon to stop and is then told nothing cannot tell success
+                // from a dead socket, and the process may exit while this thread
+                // is still writing.
+                let mut stop_after_reply = false;
                 let reply = match uapi::parse(&text) {
+                    Ok(Request::Stop) => {
+                        stop_after_reply = true;
+                        uapi::render_ok()
+                    }
                     Ok(request) => {
                         let (reply_tx, reply_rx) = mpsc::channel();
                         if tx
@@ -311,6 +322,14 @@ pub(crate) fn serve(
                     Err(_) => uapi::render_errno(EINVAL),
                 };
                 let _ = stream.write_all(reply.as_bytes());
+                if stop_after_reply {
+                    // The reply is written; the loop stops on the next iteration.
+                    // This thread stops too, because a stopped tunnel has nothing
+                    // left for a control plane to report.
+                    let _ = stream.shutdown(NetShutdown::Both);
+                    tunnel.trigger();
+                    break;
+                }
             }
         })
 }
@@ -370,6 +389,11 @@ pub fn handle(device: &mut Device, context: &mut ControlContext, request: Reques
             Ok(()) => uapi::render_ok(),
             Err(errno) => uapi::render_errno(errno),
         },
+        // Never reached: the control thread answers `stop=1` itself, because the
+        // loop it would stop cannot be the one to acknowledge the stop. This arm
+        // exists so the enum stays exhaustive, and says so if a caller routes one
+        // here anyway.
+        Request::Stop => uapi::render_errno(errno::ENOSYS),
     }
 }
 
@@ -942,6 +966,36 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
+    /// `stop=1` is acknowledged, and it stops the tunnel.
+    ///
+    /// The ordering is the claim: a daemon that stopped first and answered after
+    /// would leave the client holding a closed socket, which is
+    /// indistinguishable from asking a daemon that had already died.
+    #[test]
+    fn a_stop_is_acknowledged_before_the_tunnel_stops() {
+        let dir = std::env::temp_dir().join(format!("vallum-stop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("ctl.sock");
+
+        // Nothing answers on the channel: a stop must not need the loop.
+        let (tx, _rx) = mpsc::sync_channel(8);
+        let shutdown = Shutdown::new();
+        let tunnel = Shutdown::new();
+        let handle = serve(path.clone(), tx, shutdown.clone(), tunnel.clone()).expect("serve");
+
+        let reply = request(&path, "stop=1\n").expect("a stop is answered");
+        assert!(reply.contains("errno=0"), "got {reply:?}");
+        assert!(
+            tunnel.is_triggered(),
+            "the stop was acknowledged but not acted on"
+        );
+
+        // The control thread stops with the tunnel, so this returns.
+        let _ = handle.join();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A client that drips one byte at a time must not hold the plane.
     ///
     /// A per-read timeout is not a deadline: each byte resets it, so the first
@@ -964,7 +1018,7 @@ mod tests {
                 }
             }
         });
-        let handle = serve(path.clone(), tx, shutdown.clone()).expect("serve");
+        let handle = serve(path.clone(), tx, shutdown.clone(), Shutdown::new()).expect("serve");
 
         // One byte every two seconds: always under the five-second read timeout.
         let drip = {

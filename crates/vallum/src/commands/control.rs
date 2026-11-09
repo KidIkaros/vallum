@@ -66,6 +66,17 @@ pub struct ShowconfArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct StopArgs {
+    /// The configuration file, for its `control` path.
+    #[arg(long, short, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// The control socket path, instead of a config.
+    #[arg(long, value_name = "SOCKET")]
+    control: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 pub struct SetconfArgs {
     /// The configuration file to apply.
     #[arg(value_name = "FILE")]
@@ -429,6 +440,20 @@ fn device_lines(desired: &crate::config::Resolved, seed: &SharedSecret, current:
         out.push_str(&format!("fwmark={}\n", desired.fwmark));
     }
     out
+}
+
+/// Ask a running daemon to stop, and wait for its acknowledgement.
+///
+/// The daemon acknowledges before it stops, so `Ok` means the request was taken —
+/// not that the process is already gone. There is no signal and no pid: the
+/// socket is already same-user and `0600`, which is the same trust boundary, and
+/// unlike a signal it works for a daemon whose pid nobody wrote down.
+pub fn stop(args: &StopArgs) -> Result<(), Error> {
+    let path = control_path(args.config.as_deref(), args.control.as_deref())?;
+    let reply = control::request(&path, "stop=1\n")?;
+    expect_ok(&path, &reply)?;
+    crate::say!("asked the daemon on {} to stop", path.display());
+    Ok(())
 }
 
 pub fn setconf(args: &SetconfArgs, replace: bool) -> Result<(), Error> {

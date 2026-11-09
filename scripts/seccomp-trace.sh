@@ -134,7 +134,7 @@ add_route() {
 #   leg TAG CARRIER IF_A IF_B TUN_A TUN_B OUTER_A OUTER_B
 leg() {
     local tag=$1 carrier=$2 if_a=$3 if_b=$4 tun_a=$5 tun_b=$6 outer_a=$7 outer_b=$8
-    local pid_b tracer stopped leader proc
+    local pid_b tracer
 
     cat > "$W/$tag-a.toml" <<EOF
 [interface]
@@ -222,26 +222,15 @@ EOF
         exit 1
     }
 
-    # Stop the daemon by finding the process that names this leg's config, and only
-    # its group leader: `/proc` lists every thread, and signalling a thread is not
-    # the request. Nothing having been found is not a failure — it means the daemon
-    # already exited, which the tracer's exit then confirms.
-    stopped=0
-    for _ in $(seq 1 100); do
-        for proc in /proc/[0-9]*; do
-            # Readable now, gone a moment later is normal here; skip rather than
-            # let a vanishing `/proc` entry print a redirect error.
-            [ -r "$proc/cmdline" ] || continue
-            leader=${proc#/proc/}
-            [ "$(cat "$proc/comm" 2> /dev/null)" = vallum ] || continue
-            [ "$(awk '/^Tgid:/{print $2}' "$proc/status" 2> /dev/null)" = "$leader" ] || continue
-            tr '\0' '\n' < "$proc/cmdline" 2> /dev/null | grep -qxF -- "$W/$tag-a.toml" || continue
-            kill -TERM "$leader" 2> /dev/null && stopped=1
-        done
-        [ "$stopped" = 1 ] && break
-        sleep 0.1
-    done
-    [ "$stopped" = 1 ] || echo "$tag: the traced daemon was already gone at shutdown" >&2
+    # Stop the daemon through its own control plane. The socket is the handle this
+    # script already has, and `stop=1` is acknowledged before the daemon stops, so
+    # a successful command means the request was taken. The alternative — a pid
+    # discovered when strace forked — is what failed in CI: `kill` said "No such
+    # process" while the daemon was still answering on this very socket.
+    timeout 5 "$W/vallum" stop --control "$W/ctl-$tag.sock" > "$W/stop-$tag.log" 2>&1 || {
+        echo "$tag: the daemon did not take the stop request: $(tail -2 "$W/stop-$tag.log")" >&2
+        exit 1
+    }
 
     # strace exits when the daemon it started does, so the trace covers the shutdown
     # path instead of being cut at `SIGTERM`. The daemon is not this shell's child

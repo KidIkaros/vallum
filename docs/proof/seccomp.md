@@ -220,7 +220,7 @@ KEEP=1 scripts/seccomp-trace.sh       # keep the configs, logs and raw trace
 
 The script builds the same exercise — two configs that differ only in name,
 address, listen port and peer, a real TUN each, the outer path over loopback, a
-handshake, three pings each way, a control request, `SIGTERM` — twice: once over
+handshake, three pings each way, a control request, `stop=1` — twice: once over
 UDP and once over the TCP carrier, inside one network namespace, attaching
 `strace -f -p` to the client daemon after each tunnel is up. It reads the
 allow-list back from the binary, so it needs no privileges of its own beyond the

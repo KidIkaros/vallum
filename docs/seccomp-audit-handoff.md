@@ -117,11 +117,13 @@ syscall on one path — that is what `linkat` was.
 | 4 | CI wall clock under an hour for a push | **done** — 27m15s measured, from ~79 min; fuzz is one job, the MSRV leg compiles instead of testing | `.github/workflows/ci.yml`, `fuzz.yml` |
 | 5 | Trace the daemon from startup, not from "tunnel up" | **done** — window starts at the carrier bind; removing `linkat` now fails the guard | `scripts/seccomp-trace.sh`, `proof/seccomp.md` §3 gap 4 |
 | 6 | Run the collector against a real auditd window | **blocked** — this page | needs root + `auditd` |
-| 7 | Give the daemon a control-plane stop verb | **open** — scripts find the daemon's pid to stop it, and the trace guard had to learn to do that without caching a pid | `crates/vallum/src/control.rs`, `scripts/seccomp-trace.sh` |
+| 7 | Give the daemon a control-plane stop verb | **done** — `vallum stop`, i.e. `stop=1`, answered before the daemon stops; the trace guard stops the daemon through it | `crates/vallum/src/control.rs`, `docs/proof/uapi.md` |
 | 8 | Make a push's checks independent of what is queued on the one runner | **open** — a second runner, or splitting jobs across hosted runners, is infrastructure this repo does not have | `.github/workflows/` |
 
 Item 7 is the one with a bug story behind it: stopping the traced daemon by a
 pid discovered at startup failed in CI with "No such process" while the daemon
-was still serving. That is a smell in the test first, but a stop verb on the
-control plane would make it disappear from every script that has to stop a
-daemon.
+was still serving, and the two attempts to fix it from the test side (a
+`/proc` lookup, then a shutdown by config path) were both workarounds for a
+missing verb. `stop=1` is that verb: the socket is the handle the caller already
+has, and the reply is written before the daemon stops, so the client can tell a
+stop it caused from a socket that had already closed.

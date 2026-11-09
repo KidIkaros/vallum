@@ -462,6 +462,7 @@ pub fn run(
             path.clone(),
             tx.clone(),
             control_shutdown.clone(),
+            shutdown.clone(),
         )?)
     } else {
         // A daemon with no control socket cannot be reconfigured, inspected, or
@@ -522,7 +523,12 @@ pub fn run(
                     );
                     control_shutdown.trigger();
                     control_shutdown = Shutdown::new();
-                    match control::serve(path.clone(), tx.clone(), control_shutdown.clone()) {
+                    match control::serve(
+                        path.clone(),
+                        tx.clone(),
+                        control_shutdown.clone(),
+                        shutdown.clone(),
+                    ) {
                         Ok(handle) => {
                             _control_handle = Some(handle);
                         }

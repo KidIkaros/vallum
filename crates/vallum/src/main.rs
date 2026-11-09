@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use vallum::commands::bench::BenchArgs;
 use vallum::commands::client::ClientArgs;
-use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs};
+use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs, StopArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::identity::IdentityArgs;
 use vallum::commands::import::ImportArgs;
@@ -80,6 +80,8 @@ enum Command {
     Syncconf(SetconfArgs),
     /// Export a running daemon as a config (secrets are not included).
     Showconf(ShowconfArgs),
+    /// Ask a running daemon to stop, and wait for its acknowledgement.
+    Stop(StopArgs),
     /// Measure the data plane's seal/open cost on this host.
     Bench(BenchArgs),
     /// Check the platform, config, control socket, and helper tools.
@@ -192,6 +194,7 @@ fn main() -> ExitCode {
             }
         }),
         Command::Showconf(args) => control::showconf(&args),
+        Command::Stop(args) => control::stop(&args),
         Command::Bench(args) => bench::bench(&args),
         Command::Doctor(args) => doctor::doctor(&args),
         Command::Policy(args) => policy::policy(&args),

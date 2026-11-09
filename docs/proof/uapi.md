@@ -96,6 +96,19 @@ errno=0
 
 `errno=0` is success; `errno=<positive>` is the failure.
 
+`stop=1` asks the daemon to shut down, and takes no other line:
+
+```
+stop=1
+
+```
+
+It is answered `errno=0` *before* the daemon stops, and the daemon stops after
+answering — a stop that replied from a process already gone would be
+indistinguishable from a socket that died. It is the same permission as
+signalling the pid (the socket is same-user and `0600`) without the part where
+the caller has to find one. `vallum stop --control <socket>` sends it.
+
 ---
 
 ## 4. CLI
