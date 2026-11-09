@@ -30,7 +30,7 @@ cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== supply chain"

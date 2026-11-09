@@ -245,18 +245,26 @@ run with the privileges it was meant to shed."*
 
 | Step | State |
 |---|---|
-| 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 81 entries that cover it |
+| 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 79 entries that cover it |
 | 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
-| 3. Empty the log | **not done** — the list has been traced once, not exercised; this is where the real work is |
+| 3. Empty the log | **in progress** — `scripts/seccomp-log.sh` reads the kernel's `SECCOMP` audit records and reports the syscalls a run would have died on, refusing to report zero when auditing is off or the log is unreadable; the production window that fills it is not something code can do |
 | 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise over both carriers and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
 | 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
 
 What has been verified: the filter installs and kills what the list does not
 name (a test re-executes itself, installs enforce mode, and asserts the child
 dies on `SIGSYS` when it tries `execve`), and every syscall in the post-startup
-trace is on the list. What has not: a live daemon in enforce mode, because the
+trace is on the list. A live daemon in enforce mode cannot run here, because the
 privilege drop calls `setgroups`, which an unprivileged user namespace denies —
 that run belongs to CI, where the drop happens under `sudo`.
+
+It ran there, and failed, and the failure was the point: the daemon died on
+`linkat` while publishing its control socket, a syscall the exercise's trace
+cannot see because it attaches after startup. `linkat` is on the list now with
+its reason; three entries that neither trace nor caller justified (`recvmsg`,
+`sendmsg`, `recvmmsg`) are off it. The leg now replays a startup death under
+`strace` and prints the killing call, so the next one arrives as a named syscall
+in the CI log instead of an investigation.
 
 The guard is checked both ways: it passes on the current list, and removing
 `sendto` from the list made it exit 1 and name that syscall — a guard nobody has

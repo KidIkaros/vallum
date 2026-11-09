@@ -28,6 +28,11 @@
 # filter in enforce mode, and asserts the child dies on `SIGSYS` when it calls
 # `execve`.
 #
+# If a daemon dies during startup the report replays it under `strace` and prints
+# the syscall that killed it, because `SIGSYS` names no syscall and the guard's
+# trace attaches after startup. The first live run of this leg is how `linkat` was
+# found on the control-socket path; see `docs/proof/seccomp.md` §3.
+#
 # This needs real root. Run it as:
 #
 #   bash scripts/seccomp-enforce.sh || sudo -E bash scripts/seccomp-enforce.sh
@@ -95,6 +100,47 @@ status_field() { # pid, field
     sed -n "s/^$2:[[:space:]]*//p" "/proc/$1/status"
 }
 
+# A daemon killed by its own filter exits with "Bad system call" and nothing
+# else: `SIGSYS` does not say which syscall. strace does, so a startup death is
+# replayed under it and the killing call is printed — otherwise the first live
+# run of this leg costs an investigation instead of a fix. That is how `linkat`
+# was found: publishing the control socket hard-links a chmodded socket into
+# place, and the list had `unlinkat` but not `linkat`, because the guarded trace
+# attaches after startup.
+name_the_kill() { # config, tag
+    local config=$1 tag=$2
+    command -v strace > /dev/null 2>&1 || {
+        echo '     (no strace here: the killing syscall is not named)' >&2
+        return 0
+    }
+    # The dead daemon leaves its socket name behind and a second publication
+    # refuses an occupied path, so the name is cleared before the replay.
+    rm -f "$W/ctl-$tag.sock"
+    timeout 15 strace -f -o "$W/$tag.kill.trace" -- "$W/vallum" run --config "$config" \
+        --allow-insecure-key-permissions > "$W/$tag.kill.log" 2>&1 || true
+    # A path that is timing-dependent may survive the replay; do not leave that
+    # daemon running inside the namespace.
+    pkill -TERM -f "$config" 2> /dev/null || true
+    if grep -q 'SIGSYS' "$W/$tag.kill.trace" 2> /dev/null; then
+        echo '     the killing syscall:' >&2
+        grep -B2 -m1 'SIGSYS' "$W/$tag.kill.trace" | sed 's/^/       /' >&2
+    else
+        echo "     the replay did not die; see $W/$tag.kill.log" >&2
+    fi
+    return 0
+}
+
+die_at_startup() {
+    if grep -q 'syscall filter installed in enforce mode' "$W/a.log" 2> /dev/null; then
+        echo '  FAIL  the filter killed the daemon after it installed: a syscall on the startup path is not on the allow-list' >&2
+    else
+        echo '  FAIL  the daemon exited before installing the filter: it could not drop, or could not install' >&2
+    fi
+    cat "$W/a.log" >&2
+    name_the_kill "$W/a.toml" a
+    exit 1
+}
+
 ip link set lo up
 
 "$W/vallum" keygen --output "$W/a.key" --suite 3 > "$W/a.pub"
@@ -158,10 +204,7 @@ for _ in $(seq 1 100); do
     kill -0 "$pid_a" 2> /dev/null || break
     sleep 0.1
 done
-kill -0 "$pid_a" 2> /dev/null || {
-    cat "$W/a.log" >&2
-    fail "the daemon exited during startup: it could not install the filter, or could not drop"
-}
+kill -0 "$pid_a" 2> /dev/null || die_at_startup
 [ -S "$W/ctl-a.sock" ] || fail "daemon A never published its control socket"
 
 # 1. What the daemon says.

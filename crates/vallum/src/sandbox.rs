@@ -86,22 +86,28 @@ const ALLOWED: &[(&str, i64)] = {
         ("recvfrom", c::SYS_recvfrom),
         ("sendto", c::SYS_sendto),
         ("sendmmsg", c::SYS_sendmmsg),
-        ("recvmmsg", c::SYS_recvmmsg),
-        // The stream carrier (ADR-0026): it dials and marks after the drop.
+        // The stream carrier (ADR-0026): it dials and marks after the drop. It
+        // reads and writes each frame with `read`/`write`; nothing in the crate
+        // calls `sendmsg`, `recvmsg`, `recvmmsg` or a `*_vectored` form, and no
+        // trace has ever seen one, so none is allowed. `shutdown` is: the
+        // carrier takes a stream down deliberately when a peer stops answering.
         ("socket", c::SYS_socket),
         ("connect", c::SYS_connect),
-        ("recvmsg", c::SYS_recvmsg),
-        ("sendmsg", c::SYS_sendmsg),
         ("shutdown", c::SYS_shutdown),
         ("setsockopt", c::SYS_setsockopt),
         ("getsockopt", c::SYS_getsockopt),
         ("getsockname", c::SYS_getsockname),
         ("getpeername", c::SYS_getpeername),
         // The control plane: `control::serve` runs after the drop and publishes
-        // its socket by rename.
+        // its socket by hard-linking a chmodded socket out of a staging
+        // directory, so the published name is never reachable with a provisional
+        // mode. `linkat` is what `fs::hard_link` issues; the initiator is a
+        // staged socket this process just created, and the link is a name in a
+        // directory the daemon already writes to.
         ("bind", c::SYS_bind),
         ("listen", c::SYS_listen),
         ("accept4", c::SYS_accept4),
+        ("linkat", c::SYS_linkat),
         ("unlink", c::SYS_unlink),
         ("unlinkat", c::SYS_unlinkat),
         ("mkdir", c::SYS_mkdir),

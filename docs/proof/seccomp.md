@@ -73,7 +73,7 @@ the daemon cannot spawn a process or open a file.
 
 The list is in `crates/vallum/src/sandbox.rs`, grouped by what each group is for
 (one group is the tunnel, one is the control plane, one is thread creation, one
-is the allocator). 81 syscalls are allowed.
+is the allocator). 79 syscalls are allowed.
 
 The same exercise, run through the committed script (`scripts/seccomp-trace.sh`),
 runs twice — once per carrier — and sees 27 distinct syscalls over UDP and 35
@@ -94,8 +94,8 @@ wrong and is corrected below.
    `set_robust_list`, `rseq`, or `sched_getaffinity`. The TCP leg does see them,
    because the carrier starts its reader and writer threads on demand rather than
    at startup — so those entries are observed now, in the leg that creates a
-   thread late. What is still unobserved is the *absence* of threads: 45 of the
-   81 entries appear in neither trace, most of them startup-only (`arch_prctl`,
+   thread late. What is still unobserved is the *absence* of threads: 43 of the
+   79 entries appear in neither trace, most of them startup-only (`arch_prctl`,
    `set_tid_address`, `rt_sigaction`) or libc and allocator fallbacks (`brk`,
    `clone` where `clone3` is the observed one). They are allowed because the
    drop happens after them or because a fallback may take them, not because a
@@ -104,17 +104,31 @@ wrong and is corrected below.
    carrier itself is now traced: `socket`, `connect`, `poll`, `getsockopt`, and
    the framed stream's `read`/`write` all appear in the TCP leg. `shutdown` does
    not, because the connection is closed during shutdown, after the trace stops.
-   `recvmsg`, `sendmsg` and `recvmmsg` appear in neither trace and are called
-   nowhere in the daemon — the carrier sends with `sendmmsg` (batched UDP) and
-   `write` (TCP), not with vectored or ancillary calls. They stay on the list as
-   the entries a libc fallback would use, and this paragraph is what that rests
-   on: nothing measured.
+   `recvmsg`, `sendmsg` and `recvmmsg` appeared in neither trace, and nothing in
+   the crate calls them or a `*_vectored` form — the carrier sends with
+   `sendmmsg` (batched UDP) and `write` (TCP). An earlier revision of this page
+   kept all three "for a libc fallback"; on inspection there is no fallback to
+   take them, so they are gone from the list rather than carried unexplained. A
+   syscall an allowed call cannot decompose into is not something a fallback
+   reaches.
 3. **The terminal is a different process, not a path in this one.** An earlier
    revision of this document claimed a daemon started with `--tui` would lose its
    console in enforce mode. There is no `--tui` on `run`: the dashboard is
    `vallum tui`, a client that speaks to the control socket, and it runs without
    the daemon's filter. The daemon opens no terminal and no file, so there is no
    gap here — there was an error here.
+4. **The window between the install and `tunnel up`.** `scripts/seccomp-trace.sh`
+   attaches after the tunnel is up, so everything the daemon does *under the
+   filter* but *before* that point is invisible to it — and publishing the
+   control socket happens there. The enforce leg covers that window, and on its
+   first live run the daemon died in it: publication hard-links a chmodded socket
+   out of a staging directory, `fs::hard_link` issues `linkat`, and the list had
+   `unlinkat` but not `linkat`. No trace could have found it; only a run with the
+   filter on could. `linkat` is on the list now with that reason beside it, and
+   `scripts/seccomp-enforce.sh` replays a startup death under `strace` so the next
+   one is named in the failure report rather than costing an investigation — the
+   replay is what rejected `link` (the name one would guess) in favour of
+   `linkat` (the name the binary issues).
 
 ## 4. What is deliberately absent
 
@@ -128,9 +142,16 @@ descriptors it was handed.
 
 ## 5. What is not established
 
-1. **The log has not been emptied.** No production exercise has run with the
+1. **The log has not been emptied in production.** No deployment has run the
    filter in log mode long enough to collect what it would have killed on paths
-   nobody traced. That is ADR-0028's step 3, and it is not a coding task.
+   nobody traced — that is ADR-0028's step 3, and it is not a coding task. The
+   reading half now exists: `scripts/seccomp-log.sh` aggregates the kernel's
+   `SECCOMP` audit records for the daemon and names the syscalls a run would have
+   died on. It refuses to answer when it cannot see them — auditing disabled, no
+   log, no read permission — and exits 2 with the reason, because "no records"
+   and "no collection" look identical in a log that was never written. Until a
+   deployment has run it over a real window, the list is as informed as the
+   traces in §3, not as informed as production would make it.
 2. **Enforce mode has run live, but its kill has not been seen live.**
    `scripts/seccomp-enforce.sh` runs in CI as root, where the drop can call
    `setgroups`, and asserts six things about a dropped daemon in enforce mode:
@@ -145,12 +166,14 @@ descriptors it was handed.
    `execve`.
    On a development machine the script refuses to run without root (it says so
    and exits 1) rather than quietly testing less.
+   It has already paid for itself: its first live run killed the daemon on
+   `linkat` during startup, before any traffic, which is §3's fourth gap.
 3. **The guard covers the traced paths only.** `scripts/seccomp-trace.sh` (run
    by the `e2e` job in CI) repeats the exercise on both carriers and fails when
    the daemon's syscalls are not a subset of `vallum sandbox --names`. It has
    been shown to fail: removing `sendto` from the list made it exit 1 and name
    that syscall. What it cannot see is §3 — paths the exercise does not take, and
-   the 45 entries no trace justifies individually. The list is as current as the
+   the 43 entries no trace justifies individually. The list is as current as the
    exercise, not as the code.
 4. **Nothing spawns a process after the drop — as of this audit.** Every place
    the daemon could run a program was checked: `nft` (policy installation) is
@@ -192,4 +215,22 @@ because the daemon's own log is a claim, not evidence.
 
 When it fails it prints the syscalls the list does not name, keeps the scratch
 directory, and points at the raw trace — which is the whole edit: add them to
-`ALLOWED` in `crates/vallum/src/sandbox.rs`, or stop making the call.
+`ALLOWED` in `crates/vallum/src/sandbox.rs`, or stop making the call. When a
+daemon dies during startup instead, it replays that daemon under `strace` and
+prints the call that killed it, because the exit status says only "Bad system
+call" and the guard's trace starts after the window in question.
+
+Step 3 needs a third script, root, and `auditd` running:
+
+```
+sudo scripts/seccomp-log.sh                        # /var/log/audit/audit.log
+sudo scripts/seccomp-log.sh /var/log/audit/audit.log.1
+```
+
+It counts the `SECCOMP` records whose `comm` is the daemon, names the syscalls
+when `ausearch` is available and prints the numbers when it is not, and exits 1
+if there is one such record at all. It exits 2 — rather than report zero — when
+it cannot see any records: no audit log, no read permission, or `auditctl -s`
+saying auditing is off. That distinction is the point; a collector that answers
+"clean" when it was collecting nothing would turn ADR-0028's step 3 into a
+green check that proves nothing.
