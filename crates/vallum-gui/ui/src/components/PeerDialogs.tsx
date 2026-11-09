@@ -27,6 +27,7 @@ import {
   type PeerFields,
 } from "@/lib/actions"
 import type { Peer } from "@/types"
+import { ResultPanel } from "@/components/Result"
 import {
   allowedIpsProblem,
   endpointProblem,
@@ -412,10 +413,11 @@ export function RemoveDialog({ peer, blocked }: { peer: Peer; blocked?: string }
 
 export function InviteDialog({ blocked }: { blocked?: string }) {
   const [open, setOpen] = useState(false)
+  const [result, setResult] = useState<Done | null>(null)
   const [fields, setFields] = useState<InviteFields>({
     name: "",
     ttl_minutes: "",
-    pinned: "false",
+    pinned: "",
   })
   const set = (key: keyof InviteFields) => (value: string) =>
     setFields((f) => ({ ...f, [key]: value }))
@@ -433,12 +435,24 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
             Mint a one-time ticket the other end can join with.
           </DialogDescription>
         </DialogHeader>
+        {result ? (
+          <ResultPanel
+            message={result.message}
+            command={result.command}
+            onDone={() => {
+              setResult(null)
+              setOpen(false)
+            }}
+          />
+        ) : (
         <form
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault()
             if (fields.name.trim() === "") return
-            report(invitePeer(fields), () => setOpen(false))
+            invitePeer(fields)
+              .then((done) => setResult(done))
+              .catch((error) => toast.error(String(error), { duration: 8000 }))
           }}
         >
           <Field label="name">
@@ -450,7 +464,7 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
             />
           </Field>
           <div className="grid grid-cols-2 gap-3">
-            <Field label="ttl (minutes)" hint="blank = the daemon's default">
+            <Field label="ttl (minutes)" hint="blank = 60">
               <Input
                 value={fields.ttl_minutes}
                 onChange={(e) => set("ttl_minutes")(e.target.value)}
@@ -458,11 +472,17 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
                 inputMode="numeric"
               />
             </Field>
-            <Field label="pin address" hint="true / false">
+            <Field
+              label="pin to a key"
+              hint="optional — only this public line can redeem"
+              error={
+                fields.pinned.trim() === "" ? null : publicLineProblem(fields.pinned)
+              }
+            >
               <Input
                 value={fields.pinned}
                 onChange={(e) => set("pinned")(e.target.value)}
-                placeholder="false"
+                placeholder="blank = anyone with the token"
               />
             </Field>
           </div>
@@ -477,6 +497,7 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
             </Button>
           </DialogFooter>
         </form>
+        )}
       </DialogContent>
     </Dialog>
   )

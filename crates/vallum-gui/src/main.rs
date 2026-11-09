@@ -195,7 +195,11 @@ fn selected(console: &Console) -> Result<PathBuf, String> {
 
 /// The config that owns the selected socket, when this process can read it.
 fn config_of(socket: &std::path::Path) -> Option<PathBuf> {
+    // The installed layout keeps configs in /etc/vallum. A lab or a hand-run
+    // daemon keeps its config beside the socket it publishes, and the console
+    // should find that too rather than reporting "no config" at the operator.
     actions::config_for(socket, std::path::Path::new(CONFIG_DIR))
+        .or_else(|| socket.parent().and_then(|dir| actions::config_for(socket, dir)))
 }
 
 #[tauri::command]

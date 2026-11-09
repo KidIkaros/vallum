@@ -43,6 +43,23 @@ VALLUM_RUNTIME_DIR=~/.hermes/cache/scratch/vallum-dry \
   field"* rather than a greyed-out button with no reason. The submit button
   states the first blocking problem beside it.
 
+## Multi-interface, and results that stay on screen (third pass)
+
+- **Tab cycles interfaces**, and the header count is a button — `[1/2] vallum8 ▾`
+  → `[2/2] vallum9`, with the hero following. Verified with two lab daemons.
+- **An invite keeps its ticket**: the join command is shown in the dialog with a
+  copy button instead of a toast that expires. That is the difference between an
+  invitation you can hand over and one you have to remember.
+- **Three lies removed**: the TTL hint said "blank = the daemon's default" and
+  blank was rejected (now blank = 60); the "pin address" field defaulted to the
+  literal `false` while the daemon read it as a public line (now "pin to a key",
+  blank = anyone); and a ticket whose target was `<server>` was minted happily
+  (now refused with the config key that fixes it).
+- **The runtime directory resolves the same way everywhere**: `VALLUM_RUN_DIR`
+  and `VALLUM_RUNTIME_DIR` are one override, so an invite lands where the daemon
+  looks. Config discovery falls back to the socket's own directory and then to
+  the interface name, which is what makes a lab or container deployment usable.
+
 ## Still open
 
 - Multi-interface: the console shows `[1/1]` but cannot switch.

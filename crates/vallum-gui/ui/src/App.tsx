@@ -485,6 +485,10 @@ export default function App() {
           event.preventDefault()
           document.getElementById("peer-filter")?.focus()
           break
+        case "Tab":
+          event.preventDefault()
+          switchRef.current()
+          break
         case "o":
           event.preventDefault()
           setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
@@ -560,6 +564,22 @@ export default function App() {
   }, [])
 
   const data = payload?.data
+  const currentName = data?.interface ?? interfaces[0]?.name ?? ""
+  const currentIndex = Math.max(
+    0,
+    interfaces.findIndex((entry) => entry.name === currentName),
+  )
+  const switchInterface = () => {
+    if (interfaces.length < 2) return
+    const next = interfaces[(currentIndex + 1) % interfaces.length]
+    setSelectedPeer(null)
+    setPayload(null)
+    void selectInterface(next.path)
+  }
+  // The key handler is registered once; this keeps it pointed at the latest
+  // interface list without re-binding on every snapshot.
+  const switchRef = useRef(switchInterface)
+  switchRef.current = switchInterface
   if (data && data.peers.length > 0 && selectedPeer === null) {
     setSelectedPeer(data.peers[0].fingerprint)
   }
@@ -575,11 +595,18 @@ export default function App() {
         <PanelTitle>
           <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
         </PanelTitle>
-        {interfaces.length > 0 && (
-          <span className="text-subtext text-xs">
-            [1/{interfaces.length}] {data?.interface ?? interfaces[0]?.name}
-          </span>
-        )}
+        {interfaces.length > 0 &&
+          (interfaces.length === 1 ? (
+            <span className="text-subtext text-xs">[1/1] {currentName}</span>
+          ) : (
+            <button
+              onClick={switchInterface}
+              className="text-subtext hover:text-foreground focus-visible:ring-signal cursor-pointer rounded px-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+              title="switch interface (tab)"
+            >
+              [{currentIndex + 1}/{interfaces.length}] {currentName} ▾
+            </button>
+          ))}
         <span className="micro" title="the control socket answered">
           daemon{" "}
           <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>

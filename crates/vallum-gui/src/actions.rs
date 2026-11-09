@@ -253,11 +253,18 @@ pub fn invite(
     if name.is_empty() {
         return Err("peer name is required".to_owned());
     }
-    let minutes: u64 = fields
-        .ttl_minutes
-        .trim()
-        .parse()
-        .map_err(|_| "TTL must be a positive number of minutes".to_owned())?;
+    // A blank TTL is the common case — the operator wants "an invite, now".
+    // The field says blank means the default, so blank must mean the default.
+    const DEFAULT_TTL_MINUTES: u64 = 60;
+    let minutes: u64 = if fields.ttl_minutes.trim().is_empty() {
+        DEFAULT_TTL_MINUTES
+    } else {
+        fields
+            .ttl_minutes
+            .trim()
+            .parse()
+            .map_err(|_| "TTL must be a whole number of minutes".to_owned())?
+    };
     if minutes == 0 {
         return Err("TTL must be at least 1 minute".to_owned());
     }
@@ -272,6 +279,15 @@ pub fn invite(
         enroll::issue_invite(interface, name, minutes * 60, pinned).map_err(invite_privileged)?;
     let loaded = config.and_then(|path| Config::load(path).ok());
     let target = enroll::join_target(loaded.as_ref(), listen);
+    // A ticket that says `<server>` cannot be redeemed. Refusing here costs one
+    // click; handing it over costs a support conversation on the other device.
+    if target.starts_with("<server>") {
+        return Err(
+            "this config has no `[interface] public_endpoint`, so the ticket would \
+             say `<server>`. Set it to the address peers dial (host:port) and mint again."
+                .to_owned(),
+        );
+    }
     let ticket = enroll::JoinTicket {
         server: target,
         name: name.to_owned(),
@@ -295,6 +311,8 @@ pub fn invite(
 #[must_use]
 pub fn config_for(socket: &Path, config_dir: &Path) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(config_dir).ok()?;
+    let wanted = socket.file_stem().and_then(|stem| stem.to_str());
+    let mut by_name: Option<std::path::PathBuf> = None;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
@@ -303,15 +321,20 @@ pub fn config_for(socket: &Path, config_dir: &Path) -> Option<std::path::PathBuf
         let Ok(config) = Config::load(&path) else {
             continue;
         };
-        let Some(declared) = config.interface.control.as_ref() else {
-            continue;
-        };
-        let candidate = vallum::config::resolve_key_path(&path, declared);
-        if candidate == socket {
-            return Some(path);
+        // Exact match first: the config names the socket this console is using.
+        if let Some(declared) = config.interface.control.as_ref() {
+            if vallum::config::resolve_key_path(&path, declared) == socket {
+                return Some(path);
+            }
+        }
+        // Then by interface name: a lab or a container sees the socket through a
+        // different path than the config declares, and refusing to find the
+        // config over that difference helps nobody.
+        if by_name.is_none() && config.interface.name.as_deref() == wanted {
+            by_name = Some(path);
         }
     }
-    None
+    by_name
 }
 
 fn build(fields: &PeerFields, suite: u16, update_only: bool) -> Result<Peer, String> {
