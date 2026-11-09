@@ -17,7 +17,7 @@ import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/compone
 import { EgressBadge, HealthPanel, PanicButton } from "@/components/Health"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Panel, PanelTitle } from "@/components/ui/panel"
-import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
+import { TrafficHistory, freshness, freshnessLabel, loadHistory, rateLabel, saveHistory, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
 // The console is the TUI's dashboard rendered in the webview: same vocabulary
@@ -527,6 +527,7 @@ export default function App() {
       const tx = payload.data.peers.reduce((sum, p) => sum + p.tx_bytes, 0)
       history.current.push(rx, tx)
       setSamples([...history.current.recent()])
+      if (payload.data?.interface) saveHistory(payload.data.interface, history.current.recent())
     }
   })
   const ingest = ingestRef.current
@@ -564,6 +565,13 @@ export default function App() {
   }, [])
 
   const data = payload?.data
+  if (data?.interface && samples.length === 0) {
+    const restored = loadHistory(data.interface)
+    if (restored.length > 1) {
+      history.current.restore(restored)
+      setSamples([...history.current.recent()])
+    }
+  }
   const currentName = data?.interface ?? interfaces[0]?.name ?? ""
   const currentIndex = Math.max(
     0,

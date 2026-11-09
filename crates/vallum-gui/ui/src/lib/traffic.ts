@@ -15,12 +15,49 @@ export interface Sample {
 /** Samples retained for the sparkline. The TUI keeps 180; so do we. */
 const WINDOW = 180
 
+// The ring is memory-only, so a console opened mid-session starts with an empty
+// chart and the operator cannot tell "idle" from "not watching yet". Persist the
+// window per interface; drop it when it is old enough that it would be a lie.
+const STORAGE_PREFIX = "vallum.traffic.v1."
+const STALE_MS = 10 * 60 * 1000
+
+export function loadHistory(interfaceName: string): Sample[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + interfaceName)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as { at: number; samples: Sample[] }
+    if (!Array.isArray(parsed.samples) || parsed.samples.length === 0) return []
+    const newest = parsed.samples[parsed.samples.length - 1].at
+    if (Date.now() - newest > STALE_MS) return []
+    return parsed.samples
+  } catch {
+    return []
+  }
+}
+
+export function saveHistory(interfaceName: string, samples: Sample[]): void {
+  try {
+    localStorage.setItem(
+      STORAGE_PREFIX + interfaceName,
+      JSON.stringify({ at: Date.now(), samples: samples.slice(-WINDOW) }),
+    )
+  } catch {
+    /* a full or disabled store is not worth failing a poll over */
+  }
+}
+
 export class TrafficHistory {
   private samples: Sample[] = []
 
   push(rx: number, tx: number, at: number = Date.now()): void {
     this.samples.push({ at, rx, tx })
     if (this.samples.length > WINDOW) this.samples.shift()
+  }
+
+  /** Seed the ring from a previous visit, so the chart opens with history. */
+  restore(samples: Sample[]): void {
+    if (samples.length === 0 || this.samples.length > 1) return
+    this.samples = samples.slice(-WINDOW)
   }
 
   /** Recent samples; consecutive equal totals are dropped by the caller's rate math, not here. */

@@ -296,6 +296,8 @@ export function EditPeerDialog({ peer, blocked }: { peer: Peer; blocked?: string
 export function RotateDialog({ peer, blocked }: { peer: Peer; blocked?: string }) {
   const [open, setOpen] = useState(false)
   const [line, setLine] = useState("")
+  const [staged, setStaged] = useState<Done | null>(null)
+  const [finishing, setFinishing] = useState(false)
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -311,15 +313,55 @@ export function RotateDialog({ peer, blocked }: { peer: Peer; blocked?: string }
             the far end, then finalize.
           </DialogDescription>
         </DialogHeader>
+        {staged ? (
+          <div className="flex flex-col gap-3">
+            <p className="text-foreground/90 text-xs">{staged.message}</p>
+            <p className="text-muted-foreground text-[11px]">
+              Both keys are live. Cut the far end over, then finalize to retire
+              the old one — until then the peer shows as rotating.
+            </p>
+            <div className="flex items-center gap-2 self-end">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setStaged(null)
+                  setOpen(false)
+                }}
+              >
+                later
+              </Button>
+              <Button
+                size="sm"
+                disabled={finishing}
+                onClick={() => {
+                  setFinishing(true)
+                  finalizePeer(peer.name)
+                    .then((done) => {
+                      toast.success(done.message)
+                      setStaged(null)
+                      setOpen(false)
+                    })
+                    .catch((error) => toast.error(String(error), { duration: 8000 }))
+                    .finally(() => setFinishing(false))
+                }}
+              >
+                {finishing ? "finalizing…" : "finalize now"}
+              </Button>
+            </div>
+          </div>
+        ) : (
         <form
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault()
             if (line.trim() === "") return
-            report(rotatePeer(peer.name, line.trim()), () => {
-              setOpen(false)
-              setLine("")
-            })
+            rotatePeer(peer.name, line.trim())
+              .then((done) => {
+                setStaged(done)
+                setLine("")
+              })
+              .catch((error) => toast.error(String(error), { duration: 8000 }))
           }}
         >
           <Field label="new public line" hint="the peer's new vallum1:0003:… line">
@@ -337,6 +379,7 @@ export function RotateDialog({ peer, blocked }: { peer: Peer; blocked?: string }
             </Button>
           </DialogFooter>
         </form>
+        )}
       </DialogContent>
     </Dialog>
   )

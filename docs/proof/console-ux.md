@@ -60,6 +60,18 @@ VALLUM_RUNTIME_DIR=~/.hermes/cache/scratch/vallum-dry \
   looks. Config discovery falls back to the socket's own directory and then to
   the interface name, which is what makes a lab or container deployment usable.
 
+## Rotation, and a chart that remembers (fourth pass)
+
+- **Rotate stages in place and finishes there.** The dialog says *"rotated
+  `vps` — the old key is accepted until you finalise"*, explains that both keys
+  are live, and offers **finalize now** beside **later** — so the two-step
+  protocol the daemon implements is one flow in the UI. Verified: rotate →
+  finalize → *"finalised `vps` — previous key retired"*, no rotating marker left.
+- **The throughput window survives a reload**, per interface
+  (`localStorage`, dropped after 10 minutes so it cannot show a stale chart as
+  live). Verified: 14 samples restored, chart opens at `RATE · LAST 13S`
+  instead of empty.
+
 ## Still open
 
 - Multi-interface: the console shows `[1/1]` but cannot switch.
