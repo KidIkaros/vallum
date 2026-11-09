@@ -1,0 +1,26 @@
+# The console's webview UI
+
+React 19 + TypeScript on Vite, styled with Tailwind v4 and shadcn/ui
+(new-york, neutral). `npm run build` emits `dist/`, which
+`tauri.conf.json` names as `frontendDist`; `tauri dev` runs the Vite dev
+server itself through `beforeDevCommand`.
+
+## Contract
+
+`src/types.ts` mirrors what the Rust side serialises — `Snapshot`, `Peer`,
+`Counters` in `crates/vallum-gui/src/snapshot.rs`, and the `#[tauri::command]`
+signatures in `src/main.rs`. `src/lib/bridge.ts` is the only code that touches
+the bridge: everything the UI renders comes from one `snapshot` event and a
+handful of invocations. A field added on the Rust side lands here first.
+
+## Conventions
+
+- No runtime dependency on any component library: shadcn components are
+  vendored source in `src/components/ui`, owned here like the rest.
+- The CSP in `tauri.conf.json` allows inline *style attributes* only
+  (`style-src 'unsafe-inline'`), because Radix positions popovers and dialogs
+  with them. Scripts stay locked to `'self'`; do not loosen that.
+- Verification without a daemon: `npm run build`, then serve `dist/` over
+  HTTP and open it — the empty state renders honestly when no control socket
+  exists. With a daemon running (`vallum-quick up`, as root), the live
+  snapshot fills the same screen.

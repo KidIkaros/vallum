@@ -4,7 +4,10 @@
   "version": "1.6.4",
   "identifier": "com.ikaros.vallum",
   "build": {
-    "frontendDist": "ui"
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --prefix ui run build",
+    "frontendDist": "ui/dist"
   },
   "app": {
     "withGlobalTauri": true,
@@ -19,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-ancestors 'none'; object-src 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; frame-ancestors 'none'; object-src 'none'"
     }
   },
   "bundle": {
