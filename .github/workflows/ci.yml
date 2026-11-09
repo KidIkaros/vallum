@@ -217,6 +217,15 @@ jobs:
           command -v strace > /dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq strace)
           bash scripts/seccomp-trace.sh || sudo -E bash scripts/seccomp-trace.sh
 
+      - name: Run the enforce-mode leg
+        working-directory: vallum
+        # `docs/proof/seccomp.md` §5.2: enforce mode had never run against a live
+        # daemon, because the drop calls `setgroups` and an unprivileged user
+        # namespace denies it. This asserts the kernel really has the filter on
+        # the dropped daemon, that every thread it starts inherits it, and that
+        # the tunnel still carries traffic — as root, where the drop works.
+        run: bash scripts/seccomp-enforce.sh || sudo -E bash scripts/seccomp-enforce.sh
+
   audit:
     name: advisories and supply chain
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

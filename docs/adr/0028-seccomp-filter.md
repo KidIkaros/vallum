@@ -209,8 +209,10 @@ run with the privileges it was meant to shed."*
 ### Risks
 
 - **A wrong entry kills the daemon on a rare path.** Mitigation: the log stage,
-  and a test that runs the full exercise with the filter in enforce mode before
-  the mode can be the default.
+  and `scripts/seccomp-enforce.sh`, which runs the full exercise in enforce mode
+  as root before the mode can be the default — it asserts the filter is on the
+  dropped daemon, inherited by every thread, and that it still carries traffic
+  and shuts down cleanly.
 - **The list drifts from the code.** Mitigation: derive it in CI from an
   `strace` of the test suite and fail the build when the observed set contains a
   syscall the filter does not allow. This is the only mitigation that survives
@@ -246,7 +248,7 @@ run with the privileges it was meant to shed."*
 | 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 81 entries that cover it |
 | 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
 | 3. Empty the log | **not done** — the list has been traced once, not exercised; this is where the real work is |
-| 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
+| 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise over both carriers and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
 | 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
 
 What has been verified: the filter installs and kills what the list does not
@@ -258,7 +260,17 @@ that run belongs to CI, where the drop happens under `sudo`.
 
 The guard is checked both ways: it passes on the current list, and removing
 `sendto` from the list made it exit 1 and name that syscall — a guard nobody has
-seen fail is a guard that might not be able to.
+seen fail is a guard that might not be able to. It traces both carriers: the UDP
+leg sees 27 distinct syscalls, the TCP leg 35, 36 in union, because the carrier
+dials, waits in `poll`, and starts its reader and writer threads on demand.
+
+Enforce mode has a live run too: `scripts/seccomp-enforce.sh` drops to
+`nobody` with the filter in enforce mode and checks from the outside that the
+kernel reports `Seccomp: 2` for the process and for every thread it started,
+that `NoNewPrivs` is set, that the uid is fully dropped, and that the tunnel and
+control plane still work before a clean `SIGTERM`. It needs real root (the drop
+calls `setgroups`), so CI is where it runs. The kill itself is still the unit
+test's job, as no live run can be asked to take an off-list path on demand.
 
 Open question 1 is settled: its own module (`sandbox.rs`). Question 2 is settled
 too: the mode is a startup log line, `vallum doctor` reports it (with `FAIL` when

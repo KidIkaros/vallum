@@ -76,32 +76,45 @@ The list is in `crates/vallum/src/sandbox.rs`, grouped by what each group is for
 is the allocator). 81 syscalls are allowed.
 
 The same exercise, run through the committed script (`scripts/seccomp-trace.sh`),
-sees 27 distinct syscalls, all of them on the list. The two counts differ because
-the exercises are not identical — the script uses `vallum show` as the control
-client and runs the shutdown the same way every time. Neither count is the
-argument: the guard diffs the trace against the list, not against this page.
+runs twice — once per carrier — and sees 27 distinct syscalls over UDP and 35
+over TCP, 36 in union, all of them on the list. The counts differ from the 20
+above because neither exercise is identical to the first derivation: the script
+uses `vallum show` as the control client, pings in both directions, and repeats
+the shutdown the same way every time. No count is the argument: the guard diffs
+the trace against the list, not against this page.
 
 ### What the trace did not reach
 
-The trace shows what a *running* daemon does; it cannot show what the daemon
-does on a path that exercise did not take. Three of those paths need entries the
-trace cannot justify on its own:
+The trace shows what a *running* daemon does; it cannot show what the daemon does
+on a path the exercise did not take. Two gaps remain, and one earlier claim was
+wrong and is corrected below.
 
-1. **Thread creation.** The threads already existed when the trace attached, so
-   `clone3`, `set_robust_list`, `rseq`, and `sched_getaffinity` never appear —
-   but the control server and every reader start *after* the filter, so they must
-   be allowed. They are, and they are the entries a reviewer should look at
-   first.
-2. **The TCP carrier** (ADR-0026) is not the default carrier and was not in this
-   exercise: `recvmsg`, `sendmsg`, `shutdown`, `poll`, and `ppoll` are on the
-   list because the carrier's code path calls them, not because the trace saw
-   them.
-3. **The terminal console** (`--tui`, on in the default feature set) opens
-   `/dev/tty` and uses `ioctl`, which the list allows, but it also uses `openat`,
-   which the list does not. A daemon started with `--tui` will lose that console
-   in enforce mode. That is stated here rather than fixed: the console is a
-   debugging surface, and widening the list for it would undo the property for
-   every deployment that does not use it.
+1. **Thread creation, entry by entry.** The threads exist by the time the trace
+   attaches over UDP, so the first derivation never saw `clone3`,
+   `set_robust_list`, `rseq`, or `sched_getaffinity`. The TCP leg does see them,
+   because the carrier starts its reader and writer threads on demand rather than
+   at startup — so those entries are observed now, in the leg that creates a
+   thread late. What is still unobserved is the *absence* of threads: 45 of the
+   81 entries appear in neither trace, most of them startup-only (`arch_prctl`,
+   `set_tid_address`, `rt_sigaction`) or libc and allocator fallbacks (`brk`,
+   `clone` where `clone3` is the observed one). They are allowed because the
+   drop happens after them or because a fallback may take them, not because a
+   trace justified each one.
+2. **The TCP carrier has teardown paths the exercise stops short of.** The
+   carrier itself is now traced: `socket`, `connect`, `poll`, `getsockopt`, and
+   the framed stream's `read`/`write` all appear in the TCP leg. `shutdown` does
+   not, because the connection is closed during shutdown, after the trace stops.
+   `recvmsg`, `sendmsg` and `recvmmsg` appear in neither trace and are called
+   nowhere in the daemon — the carrier sends with `sendmmsg` (batched UDP) and
+   `write` (TCP), not with vectored or ancillary calls. They stay on the list as
+   the entries a libc fallback would use, and this paragraph is what that rests
+   on: nothing measured.
+3. **The terminal is a different process, not a path in this one.** An earlier
+   revision of this document claimed a daemon started with `--tui` would lose its
+   console in enforce mode. There is no `--tui` on `run`: the dashboard is
+   `vallum tui`, a client that speaks to the control socket, and it runs without
+   the daemon's filter. The daemon opens no terminal and no file, so there is no
+   gap here — there was an error here.
 
 ## 4. What is deliberately absent
 
@@ -118,23 +131,27 @@ descriptors it was handed.
 1. **The log has not been emptied.** No production exercise has run with the
    filter in log mode long enough to collect what it would have killed on paths
    nobody traced. That is ADR-0028's step 3, and it is not a coding task.
-2. **Enforce mode has not run against a live daemon here.** The daemon installs
-   the filter as part of the privilege drop, and a privilege drop inside an
-   unprivileged user namespace cannot call `setgroups` (`EPERM`), so the
-   end-to-end exercise could not take that path on a development machine. What
-   was verified: the filter installs and kills what the list does not name (a
-   unit test re-executes itself, installs enforce mode, and asserts the child
-   dies on `SIGSYS` when it tries `execve`), and the 20-syscall post-startup
-   trace is entirely inside the list. The live run belongs to CI, where the
-   privilege drop is exercised under `sudo`.
+2. **Enforce mode has run live, but its kill has not been seen live.**
+   `scripts/seccomp-enforce.sh` runs in CI as root, where the drop can call
+   `setgroups`, and asserts six things about a dropped daemon in enforce mode:
+   that it reports installing the filter, that the kernel reports `Seccomp: 2`
+   and `NoNewPrivs: 1` for it, that the uid is fully dropped, that every thread
+   it started after the install inherited the filter, that a ping crosses the
+   tunnel and the control plane answers while filtered, and that `SIGTERM` still
+   exits 0. What no live run can show is the kill: there is no way to ask the
+   daemon to take an off-list path on demand without a debugger inside it. That
+   half stays with the unit test, which re-executes itself, installs the same
+   filter in enforce mode, and asserts the child dies on `SIGSYS` when it calls
+   `execve`.
+   On a development machine the script refuses to run without root (it says so
+   and exits 1) rather than quietly testing less.
 3. **The guard covers the traced paths only.** `scripts/seccomp-trace.sh` (run
-   by the `e2e` job in CI) repeats the exercise and fails when the daemon's
-   syscalls are not a subset of `vallum sandbox --names`. It has been shown to
-   fail: removing `sendto` from the list made it exit 1 and name that syscall.
-   What it cannot see is §3's list of gaps — threads that existed when `strace`
-   attached, the TCP carrier, `--tui`. A syscall added on one of those paths
-   still reaches a deployment before anything notices. The list is as current as
-   the exercise, not as the code.
+   by the `e2e` job in CI) repeats the exercise on both carriers and fails when
+   the daemon's syscalls are not a subset of `vallum sandbox --names`. It has
+   been shown to fail: removing `sendto` from the list made it exit 1 and name
+   that syscall. What it cannot see is §3 — paths the exercise does not take, and
+   the 45 entries no trace justifies individually. The list is as current as the
+   exercise, not as the code.
 4. **Nothing spawns a process after the drop — as of this audit.** Every place
    the daemon could run a program was checked: `nft` (policy installation) is
    called from `vallum policy`, `status`, and `metrics`, never from `run`; `ip`
@@ -154,12 +171,24 @@ KEEP=1 scripts/seccomp-trace.sh       # keep the configs, logs and raw trace
 ```
 
 The script builds the same exercise — two configs that differ only in name,
-address, listen port and peer, a real TUN each, the outer path over loopback
-UDP, a handshake, three pings, a control request, `SIGTERM` — inside one network
-namespace and attaches `strace -f -p` to the client daemon after the tunnel is
-up. It reads the allow-list back from the binary, so it needs no privileges of
-its own beyond the user namespace (or `sudo` where user namespaces are
-restricted), and `ip`, `ping`, and `strace`.
+address, listen port and peer, a real TUN each, the outer path over loopback, a
+handshake, three pings each way, a control request, `SIGTERM` — twice: once over
+UDP and once over the TCP carrier, inside one network namespace, attaching
+`strace -f -p` to the client daemon after each tunnel is up. It reads the
+allow-list back from the binary, so it needs no privileges of its own beyond the
+user namespace (or `sudo` where user namespaces are restricted), and `ip`,
+`ping`, and `strace`.
+
+`scripts/seccomp-enforce.sh` is the other half, and it needs real root:
+
+```
+bash scripts/seccomp-enforce.sh || sudo -E bash scripts/seccomp-enforce.sh
+```
+
+It runs one exercise with `user`, `group`, and `seccomp = "enforce"` on both
+daemons and checks the filter from the outside — `/proc/<pid>/status`,
+`/proc/<pid>/task/*/status`, the ping, the control request, the exit status —
+because the daemon's own log is a claim, not evidence.
 
 When it fails it prints the syscalls the list does not name, keeps the scratch
 directory, and points at the raw trace — which is the whole edit: add them to
