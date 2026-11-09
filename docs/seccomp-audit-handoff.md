@@ -1,6 +1,11 @@
 # ADR-0028 step 3 — the audit run, and the work left around it
 
-**Status:** blocked on the machine, not on the code. This page exists so someone
+**Status:** resolved on 2026-11-09 — the run this page asked for happened, on
+this machine, without host root. The way around the block, the outcome, and
+what the window does and does not establish are in "The run that happened,
+2026-11-09" below; the blocked attempt is kept as written, because the method
+that got around it only makes sense against what stopped the first one.
+This page exists so someone
 with root on a host that has `auditd` can finish the step without re-deriving
 what was already tried.
 
@@ -23,6 +28,61 @@ died on. It refuses to answer when it cannot see records — exit 0 means read a
 clean, exit 1 means records were found, exit 2 means the collector could not
 observe anything — because "no records" and "no collection" look identical in a
 log that was never written.
+
+## The run that happened, 2026-11-09
+
+The block was around, not through: this account is in the `docker` group, and a
+rootful container is effective root without touching host state. No `auditctl`
+on the host was ever installed; everything ran inside.
+
+**Method.** An image from `debian:stable-slim` with `auditd` 4.0.2,
+`iproute2` and `iputils-ping`; the container run with `--privileged
+--network=host --pid=host`, the repo mounted read-only. The two daemons ran in
+two *private* network namespaces joined by a veth pair, so no host interface or
+route was touched, and kernel auditing was restored to `enabled 0` (its state
+before the window) when the container exited. Binary: `target/debug/vallum`
+built from `ab45af2`, the tree this page's follow-ups were finished on.
+
+A lesson worth keeping: after any `auditd` has registered and died, the kernel
+**refuses audit control requests from processes in a private PID namespace**
+with `EPERM` — even `auditctl -s`. The first container's abrupt `auditd` death
+wedged every later non-`--pid=host` container this way; sharing the host's PID
+namespace is what makes `auditctl` work again. The `--network=host` half is
+older and better known: `auditd` only runs in the initial network namespace.
+
+**The window.** Both daemons configured with `user = "nobody"`, `group =
+"nogroup"`, `seccomp` at its default (`log`), a control socket on A, a 1 s
+keepalive on B. One lifecycle per carrier:
+
+* UDP: handshake both roles, pings both directions, a 1228-byte payload,
+  `show` / `show --dump` / `show --json`, `syncconf`, a keepalive window, a
+  full rekey to **epoch 1** with traffic on both sides of it, then A stopped by
+  `stop=1` and B by `SIGTERM` — the informative ending this page asked for.
+* TCP (`carrier = "tcp"` on both ends): handshake, pings both directions, a
+  control `show --dump`, a rekey to epoch 1, then `stop=1` and `SIGTERM`.
+
+`Seccomp: 2` and `Seccomp_filters: 1` were read from the daemon's
+`/proc/<pid>/status`, and the daemon's own log line names the mode.
+
+**The answer.** `scripts/seccomp-log.sh` exited **0**: no `SECCOMP` record for
+`comm="vallum"` in either window, with auditing verified `enabled 1` and
+`auditd` running (pid visible in `auditctl -s`), and the log's line count
+recorded before and after.
+
+**The positive control.** A zero is only an answer if the pipeline was live, so
+a standalone probe — `seccompiler` 0.5, the allow-list shape (allow the mapped
+call, log everything else, same as `sandbox.rs`) — ran in the same setup and
+made four off-list calls under `SECCOMP_RET_LOG`. The kernel wrote them as
+`SECCOMP` records; the collector named them (`write`, `sigaltstack`,
+`munmap`, `exit_group`), printed the window's first timestamp, and exited 1.
+The daemon's zero is therefore a real answer, not a deaf one.
+
+**What this does not establish.** No production deployment has run log mode:
+no 40-minute idle window, no roaming peer, no fault-injected outer path, no
+carrier teardown past `shutdown`. A window proves the paths it took. The
+unobserved-entry count in `docs/proof/seccomp.md` §3 stays a range; step 5
+(flip the default to `enforce`) is now unblocked but remains the maintainer's
+release decision.
 
 ## The attempt on 2026-11-09, and what stopped it
 
@@ -124,7 +184,7 @@ syscall on one path — that is what `linkat` was.
 | 3 | A log-mode collection path for step 3 | **built** — `scripts/seccomp-log.sh`, exit 0/1/2 | `scripts/seccomp-log.sh`, `proof/seccomp.md` §6 |
 | 4 | CI wall clock under an hour for a push | **done** — 27m15s of work measured, from ~79 min; fuzz is one job, the MSRV leg compiles instead of testing | `.github/workflows/ci.yml`, `fuzz.yml` |
 | 5 | Trace the daemon from startup, not from "tunnel up" | **done** — window starts at the carrier bind; removing `linkat` now fails the guard | `scripts/seccomp-trace.sh`, `proof/seccomp.md` §3 gap 4 |
-| 6 | Run the collector against a real auditd window | **blocked** — this page | needs root + `auditd` |
+| 6 | Run the collector against a real auditd window | **done** — 2026-11-09, in a rootful container (`docker` group = effective root): collector exit 0 across both carriers with a rekey to epoch 1; positive control exit 1 in the same setup — see "The run that happened" above | `docs/proof/seccomp.md` §5.1, ADR-0028 step 3 |
 | 7 | Give the daemon a control-plane stop verb | **done** — `vallum stop`, i.e. `stop=1`, answered before the daemon stops; the trace guard stops the daemon through it | `crates/vallum/src/control.rs`, `docs/proof/uapi.md` |
 | 8 | Make a push's checks independent of what is queued on the one runner | **open** — a second runner, or splitting jobs across hosted runners, is infrastructure this repo does not have. The `074b32b` run sat 9 minutes before its first job started, which is why item 4 is quoted as work done rather than wall clock | `.github/workflows/` |
 

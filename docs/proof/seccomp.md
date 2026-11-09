@@ -112,7 +112,10 @@ wrong and is corrected below.
    (`arch_prctl`, `set_tid_address`, `rt_sigaction`) or libc and allocator
    fallbacks (`brk`, `clone` where `clone3` is the observed one). They are
    allowed because the drop happens after them or because a fallback may take
-   them, not because a trace justified each one.
+   them, not because a trace justified each one. The log window of §5 adds one
+   kind of evidence for the paths it took — the full exercise under the filter,
+   both carriers, across a rekey — and none for the entries it did not reach;
+   the count stays a range.
 2. **The TCP carrier has teardown paths the exercise stops short of.** The
    carrier itself is now traced: `socket`, `connect`, `poll`, `getsockopt`, and
    the framed stream's   `read`/`write` all appear in the TCP leg. `shutdown` still does not, even with
@@ -161,18 +164,31 @@ descriptors it was handed.
 
 ## 5. What is not established
 
-1. **The log has not been emptied in production.** No deployment has run the
-   filter in log mode long enough to collect what it would have killed on paths
-   nobody traced — that is ADR-0028's step 3, and it is not a coding task. The
-   reading half now exists: `scripts/seccomp-log.sh` aggregates the kernel's
-   `SECCOMP` audit records for the daemon and names the syscalls a run would have
-   died on. It refuses to answer when it cannot see them — auditing disabled, no
-   log, no read permission — and exits 2 with the reason, because "no records"
-   and "no collection" look identical in a log that was never written. Until a
-   deployment has run it over a real window, the list is as informed as the
-   traces in §3, not as informed as production would make it. The attempt, the
-   blocker that stopped it, and the exact run are in
-   `docs/seccomp-audit-handoff.md`.
+1. **The log has been emptied over the exercise; production still has not run
+   it.** On 2026-11-09 the filter ran in log mode across a real `auditd` window
+   on this kernel, on tree `ab45af2` (the handoff page was written against
+   `074b32b`; nothing in the sandbox changed between them). The
+   development host has no `auditd` and no password-free `sudo`, so the window
+   ran inside a rootful container — the blocked attempt, and the method that
+   got around it, are in `docs/seccomp-audit-handoff.md`. The window: two
+   daemons, each dropping to `nobody:nogroup` with the filter installed and
+   `Seccomp: 2` confirmed on the process, one lifecycle per carrier; traffic
+   both directions plus a 1228-byte payload, the control plane (`show`,
+   `show --dump`, `show --json`, `syncconf`), a keepalive window, a full rekey
+   to epoch 1 with traffic on both sides of it, and one daemon stopped by
+   `stop=1`, the other by `SIGTERM`. `scripts/seccomp-log.sh` read the kernel's
+   records — auditing verified `enabled 1`, `auditd` running — and exited 0:
+   no would-kill record for the daemon across either window.
+   The pipeline was proven live rather than assumed. A standalone filter (the
+   same `seccompiler`, the allow-list shape: allow the mapped call, log
+   everything else) made four off-list calls under `SECCOMP_RET_LOG`; the
+   kernel wrote them as `SECCOMP` records and the collector named them
+   (`write`, `sigaltstack`, `munmap`, `exit_group`) and exited 1. So the
+   daemon window's zero is a real answer, not a deaf one.
+   What this does not establish: no production deployment has run log mode
+   long — no 40-minute idle window, no roaming peer, no fault-injected outer
+   path — and a window proves only the paths it took. The list remains as
+   informed as §3's traces plus this window, not as production would make it.
 2. **Enforce mode has run live, but its kill has not been seen live.**
    `scripts/seccomp-enforce.sh` runs in CI as root, where the drop can call
    `setgroups`, and asserts six things about a dropped daemon in enforce mode:
@@ -259,3 +275,11 @@ it cannot see any records: no audit log, no read permission, or `auditctl -s`
 saying auditing is off. That distinction is the point; a collector that answers
 "clean" when it was collecting nothing would turn ADR-0028's step 3 into a
 green check that proves nothing.
+
+The 2026-11-09 window ran without host root, in a rootful container: `auditd`
+installed inside it, `--network=host --pid=host` (the audit control netlink
+refuses a private PID namespace once any auditd has registered), the repo
+mounted read-only, the two daemons in private network namespaces so no host
+interface was touched, and kernel auditing restored to `enabled 0` on the way
+out. The container image, the harness, and the positive-control probe are
+described in `docs/seccomp-audit-handoff.md`.

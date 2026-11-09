@@ -247,7 +247,7 @@ run with the privileges it was meant to shed."*
 |---|---|
 | 1. Derive the list | **done** — `docs/proof/seccomp.md` records the exercise, the 20-syscall post-startup trace it produced, and the 79 entries that cover it |
 | 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
-| 3. Empty the log | **in progress** — `scripts/seccomp-log.sh` reads the kernel's `SECCOMP` audit records and reports the syscalls a run would have died on, refusing to report zero when auditing is off or the log is unreadable; the production window that fills it is not something code can do |
+| 3. Empty the log | **done** — a real `auditd` window on 2026-11-09, inside a rootful container because the dev host has neither `auditd` nor password-free `sudo`: dropped daemons under the log-mode filter over both carriers, the full exercise plus a rekey to epoch 1, and `scripts/seccomp-log.sh` exited 0 with no would-kill record; a positive control in the same setup made the collector exit 1 and name off-list syscalls, so the zero is proven live rather than assumed — `docs/seccomp-audit-handoff.md`, `docs/proof/seccomp.md` §5 |
 | 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise over both carriers and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
 | 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
 
