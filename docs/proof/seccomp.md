@@ -77,8 +77,9 @@ is the allocator). 79 syscalls are allowed.
 
 The same exercise, run through the committed script (`scripts/seccomp-trace.sh`),
 runs twice — once per carrier — and starts the client daemon under
-`strace -f -o` instead of attaching to it. It sees 40 distinct syscalls over UDP
-and 43 over TCP, 44 in union, all of them on the list.
+`strace -f -o` instead of attaching to it. It sees 40–42 distinct syscalls over
+UDP and 43 over TCP, 44 in union — the per-leg count moves by one or two with
+timing, the union does not — all of them on the list.
 
 The checked window begins at the daemon's first `bind`: `commands::run` opens the
 TUN, binds the carrier socket, and only then drops privileges and installs the

@@ -97,7 +97,14 @@ cp "$BIN" "$W/vallum" || die "cannot copy the binary into $W"
 cat > "$W/inner.sh" << 'INNER'
 #!/usr/bin/env bash
 # Runs inside the namespace: keys, two carriers, four daemons, two traces.
-set -euo pipefail
+set -Eeuo pipefail
+
+# A command failing under `set -e` is otherwise silent — the outer script can
+# only print what the daemon wrote, which says nothing about the script. This
+# names it. It is here because a missing `pgrep` cost a CI cycle exactly that
+# way: no message, 2.5 s, and the trace gate red.
+trap 'echo "inner: failed at $(caller): $BASH_COMMAND" >&2' ERR
+
 cd "$W"
 
 ip link set lo up
@@ -177,9 +184,26 @@ EOF
 
     # strace forks and the child execs the daemon, so the daemon is strace's
     # child rather than `$!`. It has to be found before it can be signalled.
+    # `/proc/<pid>/task/<tid>/children` is the kernel's own answer, which keeps
+    # this free of `pgrep` — a runner without procps has no `pgrep`, and under
+    # `set -e` its absence is a silent abort. The `/proc` scan is the fallback for
+    # a kernel built without `CONFIG_PROC_CHILDREN`.
+    find_daemon() {
+        local children
+        children=$(cat "/proc/$tracer/task/$tracer/children" 2> /dev/null) || true
+        if [ -n "$children" ]; then
+            printf '%s\n' "${children%% *}"
+            return
+        fi
+        # `|| true`: no match yet is the normal state for the first iterations,
+        # and a non-zero return here would be an assignment under `set -e` — a
+        # silent abort in the middle of a wait loop.
+        grep -l "^PPid:[[:space:]]\+$tracer$" /proc/[0-9]*/status 2> /dev/null \
+            | head -1 | cut -d/ -f3 || true
+    }
     pid_a=
     for _ in $(seq 1 100); do
-        pid_a=$(pgrep -P "$tracer" 2> /dev/null | head -1)
+        pid_a=$(find_daemon)
         [ -n "$pid_a" ] && break
         sleep 0.1
     done
