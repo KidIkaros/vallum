@@ -4,6 +4,11 @@
 with root on a host that has `auditd` can finish the step without re-deriving
 what was already tried.
 
+The tree this page was written against is `074b32b`: `scripts/verify.sh` passes,
+and CI is green end to end on that commit (run `42608252621` — stable 18m11, MSRV
+5m55, e2e 2m58, audit 20s; 36 minutes wall clock, of which the first 9 were the
+runner still being busy).
+
 ## Why this is open
 
 Step 3 of [ADR-0028](adr/0028-seccomp-filter.md) is "empty the log": run the
@@ -80,7 +85,10 @@ ls -l /var/log/audit/audit.log
 sudo vallum run --config /etc/vallum/handoff.toml
 
 # 4. exercise it: ping a peer address through the tunnel, `vallum show
-#    --control ...`, then SIGTERM the daemon
+#    --control ...`, then stop it. `vallum stop --control ...` sends `stop=1`,
+#    which is acknowledged before the tunnel stops; SIGTERM works too and is the
+#    path systemd takes, so a window that ends with both is the more
+#    informative one.
 
 # 5. read what the filter would have killed
 sudo scripts/seccomp-log.sh
@@ -114,11 +122,11 @@ syscall on one path — that is what `linkat` was.
 | 1 | Enforce-mode leg failing in CI | **done** — the daemon died on `linkat` while publishing its control socket; entry added, replay added | `crates/vallum/src/sandbox.rs`, `scripts/seccomp-enforce.sh` |
 | 2 | Prune entries no trace and no caller justifies | **done** — `recvmsg`, `sendmsg`, `recvmmsg` removed; 81 → 79 entries | `crates/vallum/src/sandbox.rs`, `proof/seccomp.md` §3 |
 | 3 | A log-mode collection path for step 3 | **built** — `scripts/seccomp-log.sh`, exit 0/1/2 | `scripts/seccomp-log.sh`, `proof/seccomp.md` §6 |
-| 4 | CI wall clock under an hour for a push | **done** — 27m15s measured, from ~79 min; fuzz is one job, the MSRV leg compiles instead of testing | `.github/workflows/ci.yml`, `fuzz.yml` |
+| 4 | CI wall clock under an hour for a push | **done** — 27m15s of work measured, from ~79 min; fuzz is one job, the MSRV leg compiles instead of testing | `.github/workflows/ci.yml`, `fuzz.yml` |
 | 5 | Trace the daemon from startup, not from "tunnel up" | **done** — window starts at the carrier bind; removing `linkat` now fails the guard | `scripts/seccomp-trace.sh`, `proof/seccomp.md` §3 gap 4 |
 | 6 | Run the collector against a real auditd window | **blocked** — this page | needs root + `auditd` |
 | 7 | Give the daemon a control-plane stop verb | **done** — `vallum stop`, i.e. `stop=1`, answered before the daemon stops; the trace guard stops the daemon through it | `crates/vallum/src/control.rs`, `docs/proof/uapi.md` |
-| 8 | Make a push's checks independent of what is queued on the one runner | **open** — a second runner, or splitting jobs across hosted runners, is infrastructure this repo does not have | `.github/workflows/` |
+| 8 | Make a push's checks independent of what is queued on the one runner | **open** — a second runner, or splitting jobs across hosted runners, is infrastructure this repo does not have. The `074b32b` run sat 9 minutes before its first job started, which is why item 4 is quoted as work done rather than wall clock | `.github/workflows/` |
 
 Item 7 is the one with a bug story behind it: stopping the traced daemon by a
 pid discovered at startup failed in CI with "No such process" while the daemon
