@@ -49,7 +49,7 @@ export function TrafficBars({
       {heights.map((v, i) => (
         <div
           key={i}
-          className={`flex-1 rounded-[1px] ${v === 0 ? "bg-secondary/60" : color === "signal" ? "bg-signal/80" : "bg-violet/80"}`}
+          className={`flex-1 rounded-[1px] transition-[height] duration-300 ease-out ${v === 0 ? "bg-secondary/60" : color === "signal" ? "bg-signal/80" : "bg-violet/80"}`}
           style={{ height: `${v * 100}%`, minHeight: v === 0 ? 1 : 2 }}
         />
       ))}

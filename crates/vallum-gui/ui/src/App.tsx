@@ -15,12 +15,14 @@ import {
 import { demoRequested, startDemo } from "@/lib/demo"
 import { bytes, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
-import type { Counters, InterfaceEntry, Peer, SnapshotPayload } from "@/types"
+import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
-// The console is the TUI's dashboard rendered in the webview: same header
-// grammar (◆ Vallum ) TUNNEL CONTROL), same semantic palette, same traffic
-// bars, same peer-detail shape. Where a value is absent the panel says so
-// rather than rendering a plausible zero.
+// The console is the TUI's dashboard rendered in the webview: same vocabulary
+// (◆ Vallum ) TUNNEL CONTROL, the semantic palette, traffic bars, the peer
+// detail shape) but composed for a window instead of a terminal. The design
+// rule: state first, then rate, then detail — each at its own size, so the eye
+// lands on "is my tunnel up" before anything else. Where a value is absent the
+// surface says so rather than rendering a plausible zero.
 
 const FRESH_SEC = 5 * 60
 
@@ -51,12 +53,12 @@ function Panel({
   className?: string
 }) {
   return (
-    <section className={`rounded-md border border-border bg-card ${className}`}>
-      <div className="border-border/60 flex items-center justify-between border-b px-3 py-1.5">
+    <section className={`bg-card/60 rounded-lg border border-border/70 ${className}`}>
+      <div className="flex items-center justify-between px-4 pt-3 pb-1">
         <PanelTitle>{title}</PanelTitle>
         {right}
       </div>
-      <div className="p-2.5">{children}</div>
+      <div className="px-4 pb-3.5">{children}</div>
     </section>
   )
 }
@@ -70,15 +72,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
-function Meta({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline gap-1.5">
-      <dt className="micro">{label}</dt>
-      <dd className="text-foreground/90">{children}</dd>
-    </div>
-  )
-}
-
 const freshnessTone: Record<string, string> = {
   never: "text-muted-foreground",
   recent: "text-live",
@@ -86,87 +79,110 @@ const freshnessTone: Record<string, string> = {
   old: "text-fault",
 }
 
-function Verdict({
-  payload,
-  now,
-  demo,
-}: {
-  payload: SnapshotPayload | null
-  now: number
-  demo: boolean
-}) {
-  const lastOk = useRef<number | null>(null)
-  if (payload?.ok) lastOk.current = now
-  const live = lastOk.current !== null && now - lastOk.current < 10
-  const anyUp = payload?.data?.peers.some(
-    (p) => p.last_handshake_sec > 0 && now - p.last_handshake_sec < FRESH_SEC,
-  )
+function anyPeerUp(payload: SnapshotPayload | null, now: number): boolean {
   return (
-    <div className="flex items-center gap-2" data-testid="verdict">
-      {anyUp ? (
-        <Badge className="border-live/40 bg-live/15 text-live" variant="outline">
-          ● ACTIVE TUNNEL CONTROL
-        </Badge>
-      ) : payload && !payload.ok ? (
-        <Badge className="border-fault/40 bg-fault/15 text-fault" variant="outline">
-          ● CONTROL FAULT
-        </Badge>
-      ) : (
-        <Badge variant="outline" className="text-muted-foreground">
-          ● {live ? "CONTROL LIVE" : "CONNECTING"}
-        </Badge>
-      )}
-      {demo && (
-        <Badge variant="outline" className="border-violet/40 bg-violet/15 text-violet">
-          DEMO DATA
-        </Badge>
-      )}
-    </div>
+    payload?.data?.peers.some(
+      (p) => p.last_handshake_sec > 0 && now - p.last_handshake_sec < FRESH_SEC,
+    ) ?? false
   )
 }
 
-function TrafficPanel({
+function useLiveClock(): number {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((t) => t + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  return useMemo(() => Math.floor(Date.now() / 1000), [tick])
+}
+
+/** State, rate, and freshness at three sizes — the screen's focal point. */
+function Hero({
+  payload,
+  now,
   history,
   samples,
-  counters,
+  demo,
+  lastReply,
 }: {
+  payload: SnapshotPayload | null
+  now: number
   history: TrafficHistory
   samples: Sample[]
-  counters?: Counters
+  demo: boolean
+  lastReply: string
 }) {
+  const data = payload?.data
+  const up = anyPeerUp(payload, now)
+  const unreachable = payload !== null && !payload.ok
+  const handshake = data?.peers
+    .map((p) => p.last_handshake_sec)
+    .filter((s) => s > 0)
+    .sort((a, b) => b - a)[0]
   const rx = history.rate("rx")
   const tx = history.rate("tx")
   const last = samples.at(-1) ?? { rx: 0, tx: 0 }
-  // Packet counts are the daemon's own: delivered in, datagrams out.
-  const pk = (n: number | undefined) =>
-    n === undefined ? "—" : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : n.toString()
+
   return (
-    <Panel title="TRAFFIC" className="min-w-[260px] flex-1">
-      <div className="flex flex-col gap-3">
-        <div>
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <span className="text-signal">▼ RX {rateLabel(rx)}</span>
-            <span className="text-muted-foreground text-xs">
-              Σ {bytes(last.rx)} · pk {pk(counters?.packets_delivered)}
+    <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-4">
+      <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
+        <div className="flex flex-col gap-1">
+          <span className="micro">tunnel</span>
+          <span
+            className={`text-3xl leading-none font-semibold tracking-tight ${
+              up ? "text-live" : unreachable ? "text-fault" : "text-foreground/80"
+            }`}
+          >
+            {up ? "UP" : unreachable ? "FAULT" : data ? "IDLE" : "…"}
+          </span>
+          <span className="text-muted-foreground mt-0.5 text-xs">
+            {data ? (
+              <>
+                {data.interface} · {data.addresses.join(" · ")} ·{" "}
+                {handshake ? `established ${Math.max(0, now - handshake)}s ago` : "no session yet"}
+              </>
+            ) : (
+              "waiting for the daemon's first snapshot"
+            )}
+            <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
+              {" "}
+              · control {lastReply}
             </span>
-          </div>
-          <div className="mt-1">
-            <TrafficBars samples={samples} kind="rx" color="signal" />
-          </div>
+          </span>
         </div>
-        <div>
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <span className="text-violet">▲ TX {rateLabel(tx)}</span>
-            <span className="text-muted-foreground text-xs">
-              Σ {bytes(last.tx)} · pk {pk(counters?.datagrams_sent)}
-            </span>
-          </div>
-          <div className="mt-1">
-            <TrafficBars samples={samples} kind="tx" color="violet" />
-          </div>
+
+        <div className="flex items-end gap-8">
+          {(
+            [
+              ["▼ rx", rx, last.rx, "signal"] as const,
+              ["▲ tx", tx, last.tx, "violet"] as const,
+            ]
+          ).map(([label, rate, total, tone]) => (
+            <div key={label} className="flex flex-col gap-1">
+              <span className={`micro ${tone === "signal" ? "text-signal/80" : "text-violet/80"}`}>
+                {label}
+              </span>
+              <span
+                className={`text-2xl leading-none font-medium tracking-tight ${
+                  tone === "signal" ? "text-signal" : "text-violet"
+                }`}
+              >
+                {rateLabel(rate)}
+              </span>
+              <span className="text-muted-foreground text-[10px]">Σ {bytes(total)}</span>
+              <TrafficBars samples={samples} kind={tone === "signal" ? "rx" : "tx"} color={tone} bars={40} height={20} />
+            </div>
+          ))}
         </div>
       </div>
-    </Panel>
+      {demo && (
+        <div className="mt-2">
+          <Badge variant="outline" className="border-violet/40 bg-violet/15 text-violet">
+            DEMO DATA
+          </Badge>
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -199,7 +215,7 @@ function PeersPanel({
       className="min-w-0"
     >
       {peers.length === 0 ? (
-        <p className="text-muted-foreground py-4 text-xs">no peers configured</p>
+        <p className="text-muted-foreground py-3 text-xs">no peers configured</p>
       ) : (
         <ul className="flex flex-col">
           {peers.map((peer) => {
@@ -210,7 +226,7 @@ function PeersPanel({
                 <button
                   onClick={() => onSelect(peer.fingerprint)}
                   aria-pressed={isSelected}
-                  className={`flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-left focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none ${
+                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-colors focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none ${
                     isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                   }`}
                 >
@@ -220,7 +236,9 @@ function PeersPanel({
                     <span className="text-violet text-[10px] uppercase">rotating</span>
                   )}
                   <span className={`text-[10px] uppercase ${tone}`}>{freshnessLabel[f]}</span>
-                  <span aria-hidden className="text-muted-foreground/60">›</span>
+                  <span aria-hidden className="text-muted-foreground/60">
+                    ›
+                  </span>
                 </button>
               </li>
             )
@@ -243,7 +261,7 @@ function PeerDetail({
   if (!peer) {
     return (
       <Panel title="PEER DETAIL">
-        <p className="text-muted-foreground py-4 text-xs">select a peer</p>
+        <p className="text-muted-foreground py-3 text-xs">select a peer</p>
       </Panel>
     )
   }
@@ -255,7 +273,7 @@ function PeerDetail({
           <span
             aria-hidden
             className={`inline-block size-1.5 rounded-full ${
-              f === "recent" ? "bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
+              f === "recent" ? "animate-pulse bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
             }`}
           />
           <span className="text-foreground/90">{peer.name}</span>
@@ -298,30 +316,37 @@ function PeerDetail({
 
 function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
   const c = payload?.data?.counters
+  const metric = (label: string, primary: string, secondary: React.ReactNode) => (
+    <div className="flex flex-col">
+      <span className="micro">{label}</span>
+      <span>{primary}</span>
+      <span className="text-muted-foreground text-xs">{secondary}</span>
+    </div>
+  )
   return (
     <Panel title="INTERFACE DATA">
       <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-3">
-        <div className="flex flex-col">
-          <span className="micro">datagrams</span>
-          <span>sent {c ? c.datagrams_sent.toLocaleString() : "—"}</span>
-          <span className={c && c.datagrams_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+        {metric(
+          "datagrams",
+          `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
+          <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
             failed {c?.datagrams_failed ?? "—"}
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="micro">packets</span>
-          <span>delivered {c ? c.packets_delivered.toLocaleString() : "—"}</span>
-          <span className={c && c.packets_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+          </span>,
+        )}
+        {metric(
+          "packets",
+          `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
+          <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
             failed {c?.packets_failed ?? "—"}
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="micro">handshakes</span>
-          <span>established {c?.established ?? "—"}</span>
-          <span className={c && c.refusals > 0 ? "text-fault" : "text-muted-foreground"}>
+          </span>,
+        )}
+        {metric(
+          "handshakes",
+          `established ${c?.established ?? "—"}`,
+          <span className={c && c.refusals > 0 ? "text-fault" : ""}>
             refused {c?.refusals ?? "—"}
-          </span>
-        </div>
+          </span>,
+        )}
       </div>
     </Panel>
   )
@@ -329,7 +354,7 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
 
 function EmptyState() {
   return (
-    <section className="rounded-md border border-border bg-card">
+    <section className="bg-card/60 rounded-lg border border-border/70">
       <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
         <ShieldOff className="text-muted-foreground size-8" aria-hidden />
         <div>
@@ -340,7 +365,7 @@ function EmptyState() {
             <code className="text-signal">vallum-quick up</code>.
           </p>
           <button
-            className="border-border hover:bg-secondary mt-3 inline-flex cursor-pointer items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none"
+            className="border-border hover:bg-secondary mt-3 inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none"
             onClick={() => {
               void navigator.clipboard.writeText("vallum-quick up")
               toast.success("copied: vallum-quick up")
@@ -359,16 +384,12 @@ export default function App() {
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null)
-  const [, setTick] = useState(0)
   const [lastUpdate, setLastUpdate] = useState<number | null>(null)
   const history = useRef(new TrafficHistory())
   const demo = useMemo(() => demoRequested(), [])
+  const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
-  useEffect(() => {
-    const timer = window.setInterval(() => setTick((t) => t + 1), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
 
   // One ingestion path for live snapshots and demo ones, so the demo renders
   // exactly what a daemon would — and nothing else.
@@ -413,7 +434,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [demo])
 
-  const now = Math.floor(Date.now() / 1000) // `tick` re-renders once a second
   const data = payload?.data
   if (data && data.peers.length > 0 && selectedPeer === null) {
     setSelectedPeer(data.peers[0].fingerprint)
@@ -430,51 +450,49 @@ export default function App() {
 
   return (
     <div className="mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4">
-      <header className="flex flex-col gap-1.5">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <PanelTitle>
-            <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
-          </PanelTitle>
-          <Verdict payload={payload} now={now} demo={demo} />
-          {interfaces.length > 0 && (
-            <span className="text-subtext text-xs">
-              [1/{interfaces.length}] {data?.interface ?? interfaces[0]?.name}
-            </span>
-          )}
-          {demo && (
-            <span className="micro ml-auto">
-              browser preview — the built console runs from the binary
-            </span>
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
+        <PanelTitle>
+          <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
+        </PanelTitle>
+        {interfaces.length > 0 && (
+          <span className="text-subtext text-xs">
+            [1/{interfaces.length}] {data?.interface ?? interfaces[0]?.name}
+          </span>
+        )}
+        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+          {data && (
+            <>
+              <span className="text-muted-foreground">
+                listen <span className="text-foreground/80">{data.listen_port !== null ? `:${data.listen_port}` : "—"}</span>
+              </span>
+              <span className="text-muted-foreground">
+                suite <span className="text-signal">{data.suite}</span>
+              </span>
+              {data.fwmark !== null && (
+                <span className="text-muted-foreground">
+                  fwmark <span className="text-foreground/80">{data.fwmark}</span>
+                </span>
+              )}
+              <span className="text-muted-foreground">
+                id <span className="text-foreground/80">{data.fingerprint.slice(0, 16)}</span>
+              </span>
+            </>
           )}
         </div>
-        {data && (
-          <>
-            <div className="text-xs">
-              <span className={payload?.ok ? "text-live" : "text-fault"}>
-                {payload?.ok ? "CONTROL LIVE" : "CONTROL UNREACHABLE"}
-              </span>
-              <span className="text-muted-foreground"> · last reply {lastReply}</span>
-            </div>
-            <dl className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
-              <Meta label="listen">
-                {data.listen_port !== null ? `0.0.0.0:${data.listen_port}` : "—"}
-              </Meta>
-              <Meta label="suite">
-                <span className="text-signal">{data.suite}</span>
-                <span className="text-muted-foreground"> tri-hybrid</span>
-              </Meta>
-              {data.fwmark !== null && <Meta label="fwmark">{data.fwmark}</Meta>}
-              <Meta label="id">{data.fingerprint}</Meta>
-              <Meta label="addr">{data.addresses.join(", ")}</Meta>
-            </dl>
-          </>
-        )}
       </header>
 
       {interfaces.length === 0 ? (
         <EmptyState />
       ) : (
         <>
+          <Hero
+            payload={payload}
+            now={now}
+            history={history.current}
+            samples={samples}
+            demo={demo}
+            lastReply={lastReply}
+          />
           <div className="flex flex-col gap-3 md:flex-row">
             <div className="flex min-w-0 flex-1 flex-col gap-3">
               <PeersPanel
@@ -492,14 +510,13 @@ export default function App() {
               <InterfaceData payload={payload} />
             </div>
             <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
-              <TrafficPanel history={history.current} samples={samples} counters={data?.counters} />
               <PeerDetail peer={detail} now={now} blocked={blocked} />
             </div>
           </div>
-          <footer className="text-muted-foreground flex items-center gap-2 text-[10px]">
+          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[10px]">
             <span>updated {lastReply}</span>
             <span>·</span>
-            <span>snapshot stream from /run/vallum</span>
+            <span>snapshot stream</span>
             {demo && (
               <>
                 <span>·</span>

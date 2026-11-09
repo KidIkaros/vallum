@@ -108,7 +108,13 @@ impl Console {
 #[tauri::command]
 fn list_interfaces() -> Vec<InterfaceEntry> {
     let mut entries: Vec<InterfaceEntry> = Vec::new();
-    if let Ok(read) = std::fs::read_dir(vallum_config::runtime_dir()) {
+    // `VALLUM_RUNTIME_DIR` lets a daemon that cannot own /run/vallum publish
+    // its socket where the console can read it — the lab and the test runs use
+    // it; a normal install never sets it.
+    let dir = std::env::var_os("VALLUM_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| vallum_config::runtime_dir().to_path_buf());
+    if let Ok(read) = std::fs::read_dir(&dir) {
         for entry in read.flatten() {
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("sock") {
