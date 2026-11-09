@@ -313,8 +313,8 @@ fn check_sandbox(resolved: &crate::config::Resolved) -> Check {
     Check::new(
         "seccomp",
         Status::Warn,
-        "log mode: a syscall off the allow-list is logged and allowed; \
-         `interface.seccomp = \"enforce\"` kills the daemon instead",
+        "log mode, set explicitly in the config: a syscall off the allow-list is \
+         logged and allowed — remove `interface.seccomp = \"log\"` to enforce",
     )
 }
 

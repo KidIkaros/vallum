@@ -1,7 +1,7 @@
 # ADR-0028: A seccomp filter, derived from the daemon's own syscall surface
 
 **Date**: 2026-11-08
-**Status**: accepted — implemented in log mode (see “Implementation status”)
+**Status**: accepted — enforced by default since 1.6.5 (see "Implementation status")
 **Deciders**: the maintainer
 **Relates to**: ADR-0005 / ADR-0011 (Linux-only scope), ADR-0017 (runtime directory), ADR-0027 (mesh agent)
 
@@ -249,7 +249,7 @@ run with the privileges it was meant to shed."*
 | 2. Install in log mode | **done** — `crates/vallum/src/sandbox.rs`, `interface.seccomp`, default `log`, installed immediately after `drop_to` |
 | 3. Empty the log | **done** — a real `auditd` window on 2026-11-09, inside a rootful container because the dev host has neither `auditd` nor password-free `sudo`: dropped daemons under the log-mode filter over both carriers, the full exercise plus a rekey to epoch 1, and `scripts/seccomp-log.sh` exited 0 with no would-kill record; a positive control in the same setup made the collector exit 1 and name off-list syscalls, so the zero is proven live rather than assumed — `docs/seccomp-audit-handoff.md`, `docs/proof/seccomp.md` §5 |
 | 4. Add the CI guard | **done** — `scripts/seccomp-trace.sh` traces the exercise over both carriers and fails when the daemon's syscalls are not a subset of `vallum sandbox --names`; the `e2e` job runs it |
-| 5. Flip the default to `enforce` | **not done** — the default is `log` until step 3 finishes |
+| 5. Flip the default to `enforce` | **done** — the default is `enforce` since 1.6.5: step 3's audit window came back clean, and `seccomp = "log"` remains the explicit opt-out, reported at startup and by `doctor`. The release notes say the property now holds, as the ADR required |
 
 What has been verified: the filter installs and kills what the list does not
 name (a test re-executes itself, installs enforce mode, and asserts the child

@@ -25,8 +25,9 @@
 //! exercised, and the operator sees a crash rather than a diagnostic. So the
 //! filter has two modes: [`Mode::Log`] asks the kernel to log and allow the
 //! syscalls the list does not name, and [`Mode::Enforce`] kills the process.
-//! Both are selectable with `interface.seccomp`; the default is `log`, and it
-//! stays that way until the log is empty across a full exercise.
+//! Both are selectable with `interface.seccomp`; the default is `enforce`
+//! since 1.6.5 — the log stage found its last entry and the audit window came
+//! back clean — and `log` remains the explicit debugging opt-out.
 //!
 //! # How the list was derived
 //!
@@ -44,11 +45,13 @@ use crate::error::Error;
 /// What the kernel does with a syscall the allow-list does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Log the syscall and let it through. The stage that finds the mistakes.
+    /// Kill the process. The default: the stage that holds the property.
     #[default]
-    Log,
-    /// Kill the process. The stage that holds the property.
     Enforce,
+    /// Log the syscall and let it through. The debugging opt-out: it finds a
+    /// missing entry without costing the daemon its life, and a config that
+    /// names it says the property is off rather than assuming it.
+    Log,
 }
 
 impl Mode {
@@ -356,7 +359,9 @@ mod tests {
     fn modes_have_stable_names() {
         assert_eq!(Mode::Log.as_str(), "log");
         assert_eq!(Mode::Enforce.as_str(), "enforce");
-        assert_eq!(Mode::default(), Mode::Log);
+        // The default is a security posture, not an accident: unset `seccomp`
+        // enforces, and `log` is reachable only by naming it in the config.
+        assert_eq!(Mode::default(), Mode::Enforce);
     }
 
     /// The filter only means something in enforce mode, so the one property

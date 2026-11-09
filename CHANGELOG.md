@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **The syscall filter enforces by default.** ADR-0028's plan was two stages:
+  derive the list from a trace, ship it in `log` mode, empty the log over a real
+  exercise, and only then let the kernel kill. All four are done — the last on
+  2026-11-09, when an `auditd` window over the full exercise on both carriers,
+  including a live rekey, produced zero would-kill records (with a positive
+  control proving the collector would have named a violation). So `interface.seccomp`
+  now defaults to `enforce`: a syscall off the allow-list kills the daemon instead
+  of being logged and allowed, and the property the project documented as missing
+  in three places now holds on a default deployment. `seccomp = "log"` remains
+  for debugging — it finds a missing entry without costing the daemon its life,
+  and `vallum doctor` reports it as the explicit opt-out it is. A config that
+  names no `user` or `group` installs no filter, exactly as before: the filter
+  is installed with the privilege drop, and the two are one posture.
+
 ## 1.6.4 — 2026-11-05
 
 - **The control socket's name is published only once something listens on it.**

@@ -285,10 +285,12 @@ pub struct Interface {
     /// What the syscall filter does with a syscall the allow-list does not name.
     ///
     /// `log` installs the filter and asks the kernel to log — and allow —
-    /// anything the list is missing; `enforce` kills the process instead. The
-    /// default is `log`, and it stays that way until the log is empty across a
-    /// full exercise: a wrong entry in an enforcing filter is a daemon that dies
-    /// on the one path nobody tested. See ADR-0028.
+    /// anything the list is missing; `enforce` kills the process instead.
+    /// The default is `enforce` since 1.6.5: the list was derived by trace,
+    /// held in CI against the binary on both carriers, and emptied by a real
+    /// auditd window across the full exercise (ADR-0028 steps 1–4).
+    /// `log` remains for debugging — a config that names it runs with the
+    /// property off, and says so at startup.
     ///
     /// Only meaningful with `user` or `group`: the filter is installed as part
     /// of the privilege drop, and setting this without one is refused rather

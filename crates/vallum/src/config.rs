@@ -431,7 +431,13 @@ impl ResolveConfig for Config {
                 });
             }
             Some(vallum_config::Seccomp::Enforce) => crate::sandbox::Mode::Enforce,
-            _ => crate::sandbox::Mode::Log,
+            // The unset default enforces: the list was derived by trace
+            // (ADR-0028 step 1), the CI guard holds it against the binary on
+            // both carriers (step 4), and a real auditd window over the full
+            // exercise came back clean (step 3). `seccomp = "log"` remains the
+            // explicit opt-out for debugging a missing entry.
+            None => crate::sandbox::Mode::Enforce,
+            Some(vallum_config::Seccomp::Log) => crate::sandbox::Mode::Log,
         };
         let identity = keys::identity(suite, &secret)?;
         let issuer = match self.interface.identity_issuer.as_deref() {

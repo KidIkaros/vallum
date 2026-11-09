@@ -56,7 +56,7 @@ pub fn list(args: &SandboxArgs) -> Result<(), Error> {
         entries.len()
     );
     say!(
-        "`interface.seccomp` selects `log` (the default) or `enforce`; the filter is \
+        "`interface.seccomp` selects `enforce` (the default) or `log` for debugging; the filter is \
          installed with the privilege drop, so it needs `interface.user` or `interface.group`."
     );
     say!("");

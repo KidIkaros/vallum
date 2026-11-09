@@ -1,7 +1,7 @@
 # The syscall filter
 
 **Date**: 2026-11-08
-**Status**: shipped in log mode, not yet enforced
+**Status**: enforced by default since 1.6.5; `seccomp = "log"` is the debugging opt-out
 **Decision**: ADR-0028
 
 ## 1. What this claims
@@ -11,9 +11,12 @@ no others. The list is derived from a trace of the daemon, not from reading the
 source, and it is installed before any thread is spawned, so every thread the
 process will ever have inherits it.
 
-It does **not** claim that the list is complete. The filter ships in log mode for
-exactly that reason: the kernel logs what the list would have killed, and the
-list is corrected from those logs. Section 5 says what has not been done.
+It did **not** claim, while it shipped in log mode, that the list was complete:
+the kernel logged what the list would have killed, and the list was corrected
+from those logs. The log stage is over — the audit window of §5 came back clean
+on 2026-11-09, and the filter enforces by default since 1.6.5. What §5 says has
+not been done is still not done: a window proves the paths it took, not every
+path there is.
 
 ## 2. Where it is installed
 
@@ -35,7 +38,8 @@ is how an operator comes to believe they hardened something they did not.
 ```toml
 [interface]
 user = "vallum"
-seccomp = "log"      # or "enforce"; "log" is the default
+# unset is "enforce"; "log" is the debugging opt-out
+seccomp = "log"
 ```
 
 The mode is printed at startup (`syscall filter installed in log mode`).
