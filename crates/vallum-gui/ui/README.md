@@ -13,6 +13,18 @@ signatures in `src/main.rs`. `src/lib/bridge.ts` is the only code that touches
 the bridge: everything the UI renders comes from one `snapshot` event and a
 handful of invocations. A field added on the Rust side lands here first.
 
+## Debug builds load the dev server, not `dist`
+
+`tauri.conf.json` names a `devUrl` (`http://localhost:5173`) because `tauri dev`
+needs it. A **debug** binary launched directly therefore loads that URL — with
+no Vite server running, the window is blank, with no error anywhere. Either run
+`npm run dev` beside a debug binary, or use the release build, which always
+serves the embedded `dist`:
+
+```
+cargo build --release -p vallum-gui && ./target/release/vallum-gui
+```
+
 ## Conventions
 
 - No runtime dependency on any component library: shadcn components are

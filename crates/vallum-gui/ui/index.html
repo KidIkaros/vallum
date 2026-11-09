@@ -8,6 +8,15 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Boot diagnostics: the console reports what the webview rendered and
+      // the first error it hit, so a blank window names its own cause.
+      window.__bootErrors = []
+      window.addEventListener("error", (e) =>
+        window.__bootErrors.push(`${e.message} @ ${e.filename}:${e.lineno}`))
+      window.addEventListener("unhandledrejection", (e) =>
+        window.__bootErrors.push(`unhandled: ${e.reason}`))
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
