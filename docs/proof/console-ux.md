@@ -30,10 +30,23 @@ VALLUM_RUNTIME_DIR=~/.hermes/cache/scratch/vallum-dry \
 | `datagrams` vs `packets` unexplained | two layers, one vocabulary | `datagrams · outer`, `packets · inner` |
 | START offered for a unit that does not exist | enabled state ignored | disabled with the reason when the unit is `not-found` |
 
+## Keyboard and validation (second pass)
+
+- **Keys**, suppressed while a field has focus or a dialog is open: `a` add,
+  `e` edit, `d` remove, `/` filter, `o` cycle sort (handshake → name → epoch),
+  `Esc` clear the filter, `?` the list. Verified in the lab: `?` opens the
+  overlay, `a` opens the add dialog, `/` focuses the filter, typing `vp` narrows
+  `PEERS [1]/2`, `o` reaches `SORT NAME`.
+- **Inline validation** (`lib/validate.ts`): public line, name, endpoint,
+  keepalive, allowed IPs and preshared key each get a sentence under the field
+  once it is touched — *"expected vallum1:<suite>:<kem>:<signing|-> — found 1
+  field"* rather than a greyed-out button with no reason. The submit button
+  states the first blocking problem beside it.
+
 ## Still open
 
-- The add form's required-field gate covers the name but not the public line;
-  the daemon's error is the only feedback for a malformed line.
-- Errors arrive as transient toasts, not inline field messages.
-- No keyboard path: the TUI's `a`/`e`/`d`/`/`/`o` have no console equivalent yet.
 - Multi-interface: the console shows `[1/1]` but cannot switch.
+- Rotate and invite still answer only by toast; neither shows the new key in
+  place where an operator would copy it.
+- The chart has no history when the console opens mid-session (the ring starts
+  empty); a persisted last-N-minutes would read better.

@@ -27,6 +27,14 @@ import {
   type PeerFields,
 } from "@/lib/actions"
 import type { Peer } from "@/types"
+import {
+  allowedIpsProblem,
+  endpointProblem,
+  keepaliveProblem,
+  nameProblem,
+  presharedKeyProblem,
+  publicLineProblem,
+} from "@/lib/validate"
 
 // Peer management, mirroring the TUI's action set: add, edit, remove,
 // rotate/finalize, invite. Design rules applied here:
@@ -41,17 +49,25 @@ import type { Peer } from "@/types"
 function Field({
   label,
   hint,
+  error,
   children,
 }: {
   label: string
   hint?: string
+  error?: string | null
   children: ReactNode
 }) {
   return (
     <div className="flex flex-col gap-1">
       <Label className="micro">{label}</Label>
       {children}
-      {hint && <span className="text-muted-foreground text-[10px]">{hint}</span>}
+      {/* The complaint replaces the hint: two lines of small text under one
+          field is noise, and the complaint is the one that matters now. */}
+      {error ? (
+        <span className="text-fault text-[10px]">{error}</span>
+      ) : (
+        hint && <span className="text-muted-foreground text-[10px]">{hint}</span>
+      )}
     </div>
   )
 }
@@ -93,7 +109,23 @@ function PeerForm({
   )
   const set = (key: keyof PeerFields) => (value: string) =>
     setFields((f) => ({ ...f, [key]: value }))
-  const ready = fields.name.trim() !== "" && fields.public_line.trim() !== ""
+  const [touched, setTouched] = useState<Record<string, boolean>>({})
+  const mark = (key: string) => () => setTouched((t) => ({ ...t, [key]: true }))
+
+  const problems = {
+    name: nameProblem(fields.name),
+    public_line: editing ? null : publicLineProblem(fields.public_line),
+    endpoint: endpointProblem(fields.endpoint),
+    keepalive: keepaliveProblem(fields.keepalive),
+    allowed_ips: allowedIpsProblem(fields.allowed_ips),
+    preshared_key: presharedKeyProblem(fields.preshared_key),
+  }
+  const blocking = Object.entries(problems).filter(([, problem]) => problem !== null)
+  const ready = blocking.length === 0
+  // Only complain about a field the operator has touched, or one that is
+  // already wrong after they tried to submit.
+  const show = (key: keyof typeof problems) =>
+    touched[key] || touched.submit ? problems[key] : null
 
   return (
     <form
@@ -103,16 +135,19 @@ function PeerForm({
         if (ready) onSubmit(fields)
       }}
     >
-      <Field label="name">
+      <Field label="name" error={show("name")}>
         <Input
           value={fields.name}
           onChange={(e) => set("name")(e.target.value)}
+          onBlur={mark("name")}
           placeholder="laptop"
           autoFocus
+          aria-invalid={show("name") !== null}
         />
       </Field>
       <Field
         label="public line"
+        error={show("public_line")}
         hint={
           editing
             ? "identity is locked while editing — a new line is a different peer"
@@ -126,41 +161,62 @@ function PeerForm({
           rows={2}
           className={editing ? "opacity-60" : ""}
           placeholder="vallum1:0003:…"
+          onBlur={mark("public_line")}
+          aria-invalid={show("public_line") !== null}
         />
       </Field>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="endpoint" hint="blank = this peer roams">
+        <Field label="endpoint" hint="blank = this peer roams" error={show("endpoint")}>
           <Input
             value={fields.endpoint}
             onChange={(e) => set("endpoint")(e.target.value)}
             placeholder="203.0.113.7:51820"
+            onBlur={mark("endpoint")}
           />
         </Field>
-        <Field label="keepalive (s)">
+        <Field label="keepalive (s)" error={show("keepalive")}>
           <Input
             value={fields.keepalive}
             onChange={(e) => set("keepalive")(e.target.value)}
             placeholder="25"
             inputMode="numeric"
+            onBlur={mark("keepalive")}
           />
         </Field>
       </div>
-      <Field label="allowed IPs" hint="CIDRs, comma separated">
+      <Field label="allowed IPs" hint="CIDRs, comma separated" error={show("allowed_ips")}>
         <Input
           value={fields.allowed_ips}
           onChange={(e) => set("allowed_ips")(e.target.value)}
           placeholder="10.7.0.2/32"
+          onBlur={mark("allowed_ips")}
         />
       </Field>
-      <Field label="preshared key" hint={editing ? "blank keeps the stored key" : "optional"}>
+      <Field
+        label="preshared key"
+        hint={editing ? "blank keeps the stored key" : "optional"}
+        error={show("preshared_key")}
+      >
         <Input
           value={fields.preshared_key}
           onChange={(e) => set("preshared_key")(e.target.value)}
           placeholder="64 hex characters"
+          onBlur={mark("preshared_key")}
         />
       </Field>
-      <DialogFooter className="mt-2">
-        <Button type="submit" size="sm" disabled={!ready} className="uppercase">
+      <DialogFooter className="mt-2 items-center gap-3">
+        {!ready && (
+          <span className="text-muted-foreground mr-auto text-[10px]">
+            {blocking[0][1]}
+          </span>
+        )}
+        <Button
+          type="submit"
+          size="sm"
+          disabled={!ready}
+          className="uppercase"
+          onClick={() => setTouched((t) => ({ ...t, submit: true }))}
+        >
           {submitLabel}
         </Button>
       </DialogFooter>
@@ -180,7 +236,7 @@ export function AddPeerDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="add-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
           + add peer
         </Button>
       </DialogTrigger>
@@ -217,7 +273,7 @@ export function EditPeerDialog({ peer, blocked }: { peer: Peer; blocked?: string
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="edit-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
           edit
         </Button>
       </DialogTrigger>

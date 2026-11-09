@@ -42,6 +42,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+type SortOrder = "handshake" | "name" | "epoch"
+const SORT_CYCLE: SortOrder[] = ["handshake", "name", "epoch"]
+
 const freshnessTone: Record<string, string> = {
   never: "text-muted-foreground",
   recent: "text-live",
@@ -164,28 +167,78 @@ function PeersPanel({
   selected,
   onSelect,
   actions,
+  filter,
+  onFilter,
+  sort,
+  onSort,
 }: {
   peers: Peer[]
   now: number
   selected: string | null
   onSelect: (fingerprint: string) => void
   actions?: React.ReactNode
+  filter: string
+  onFilter: (value: string) => void
+  sort: SortOrder
+  onSort: () => void
 }) {
+  const shown = useMemo(() => {
+    const needle = filter.trim().toLowerCase()
+    const matching = needle
+      ? peers.filter(
+          (peer) =>
+            peer.name.toLowerCase().includes(needle) ||
+            peer.allowed_ips.some((ip) => ip.includes(needle)),
+        )
+      : peers
+    const order = [...matching]
+    if (sort === "name") order.sort((a, b) => a.name.localeCompare(b.name))
+    else if (sort === "epoch") order.sort((a, b) => b.epoch - a.epoch)
+    else order.sort((a, b) => b.last_handshake_sec - a.last_handshake_sec)
+    return order
+  }, [peers, filter, sort])
+
   return (
     <Panel
       title={
         <>
-          PEERS [<span className="text-foreground">{peers.length}</span>]
+          PEERS [<span className="text-foreground">{shown.length}</span>]
+          {shown.length !== peers.length && (
+            <span className="text-muted-foreground">/{peers.length}</span>
+          )}
         </>
       }
-      right={actions}
+      right={
+        <span className="flex items-center gap-1.5">
+          <button
+            onClick={onSort}
+            className="micro hover:text-foreground cursor-pointer rounded px-1 py-0.5 uppercase"
+            title="cycle sort: handshake → name → epoch (o)"
+          >
+            sort {sort}
+          </button>
+          {actions}
+        </span>
+      }
       className="min-w-0"
     >
+      <div className="mb-2 flex items-center gap-2">
+        <input
+          id="peer-filter"
+          value={filter}
+          onChange={(event) => onFilter(event.target.value)}
+          placeholder="filter by name or address   ( / )"
+          className="border-border/70 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal w-full rounded-md border px-2 py-1 text-[11px] focus-visible:ring-1 focus-visible:outline-none"
+          aria-label="filter peers"
+        />
+      </div>
       {peers.length === 0 ? (
         <p className="text-muted-foreground py-3 text-xs">no peers configured</p>
+      ) : shown.length === 0 ? (
+        <p className="text-muted-foreground py-3 text-xs">nothing matches “{filter}”</p>
       ) : (
         <ul className="flex flex-col">
-          {peers.map((peer) => {
+          {shown.map((peer) => {
             const { f, tone } = peerState(peer, now)
             const isSelected = peer.fingerprint === selected
             return (
@@ -375,6 +428,9 @@ export default function App() {
   const inApp = useMemo(() => hasBridge, [])
   const { service, refresh: refreshService } = useServiceState(inApp)
   const [hostHealth, setHostHealth] = useState<Health | null>(null)
+  const [filter, setFilter] = useState("")
+  const [sort, setSort] = useState<SortOrder>("handshake")
+  const [shortcuts, setShortcuts] = useState(false)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
@@ -384,6 +440,62 @@ export default function App() {
   const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
+
+  // The TUI's keys, as far as the console has actions for them. Deliberately
+  // suppressed while a field has focus or a dialog is open: a shortcut that
+  // fires mid-typing is worse than no shortcut.
+  useEffect(() => {
+    const typing = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null
+      if (!element) return false
+      const tag = element.tagName
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || element.isContentEditable
+    }
+    const dialogOpen = () => document.querySelector("[role=dialog]") !== null
+    const click = (id: string) =>
+      (document.getElementById(id) as HTMLButtonElement | null)?.click()
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.key === "Escape") {
+        setFilter("")
+        return
+      }
+      if (typing(event.target)) return
+      if (event.key === "?") {
+        event.preventDefault()
+        setShortcuts((open) => !open)
+        return
+      }
+      if (dialogOpen()) return
+      switch (event.key) {
+        case "a":
+          event.preventDefault()
+          click("add-peer-btn")
+          break
+        case "e":
+          event.preventDefault()
+          click("edit-peer-btn")
+          break
+        case "d":
+          event.preventDefault()
+          click("remove-peer-btn")
+          break
+        case "/":
+          event.preventDefault()
+          document.getElementById("peer-filter")?.focus()
+          break
+        case "o":
+          event.preventDefault()
+          setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
+          break
+        default:
+          break
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
 
   // Health is measured on the host every 5 s: route, v6, DNS, guard, restarts.
   useEffect(() => {
@@ -533,6 +645,12 @@ export default function App() {
                 now={now}
                 selected={selectedPeer}
                 onSelect={setSelectedPeer}
+                filter={filter}
+                onFilter={setFilter}
+                sort={sort}
+                onSort={() =>
+                  setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
+                }
                 actions={
                   <span className="flex gap-1.5">
                     <InviteDialog blocked={blocked} />
@@ -556,6 +674,42 @@ export default function App() {
         </>
       )}
 
+      {shortcuts && (
+        <div
+          role="dialog"
+          aria-label="keyboard shortcuts"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setShortcuts(false)}
+        >
+          <div
+            className="bg-card border-border w-full max-w-sm rounded-lg border p-5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <p className="text-signal mb-3 text-xs font-semibold tracking-wide uppercase">
+              keyboard
+            </p>
+            <dl className="grid grid-cols-[3rem_1fr] gap-x-3 gap-y-1.5 text-xs">
+              {[
+                ["a", "add peer"],
+                ["e", "edit the selected peer"],
+                ["d", "remove the selected peer"],
+                ["/", "filter peers"],
+                ["o", "cycle sort order"],
+                ["esc", "clear the filter"],
+                ["?", "this list"],
+              ].map(([key, meaning]) => (
+                <div key={key} className="contents">
+                  <dt className="text-foreground/80 font-mono">{key}</dt>
+                  <dd className="text-muted-foreground">{meaning}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="text-muted-foreground mt-3 text-[10px]">
+              Shortcuts are off while a field has focus.
+            </p>
+          </div>
+        </div>
+      )}
       <Toaster position="bottom-right" />
     </div>
   )
