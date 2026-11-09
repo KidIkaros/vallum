@@ -404,6 +404,13 @@ pub(crate) fn dispatch(
     let socket = console
         .current_socket()
         .ok_or_else(|| "no interface selected".to_owned())?;
+    // The Tauri commands take `fields: PeerFields` (a named argument, so the
+    // IPC body is `{"fields": {...}}`); the HTTP body is the arguments object
+    // itself. Unwrap once here so both transports feed the same functions.
+    let body = match body.get("fields") {
+        Some(inner) => inner.clone(),
+        None => body,
+    };
     let text = |key: &str| -> Result<String, String> {
         body.get(key)
             .and_then(|value| value.as_str())
@@ -412,8 +419,18 @@ pub(crate) fn dispatch(
     };
     match name {
         "add_peer" => {
-            let fields: PeerFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
-            actions::add(&socket, &fields)
+            let fields: PeerFields = serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
+            let result = actions::add(&socket, &fields);
+            if let Err(error) = &result {
+                // A rejected write is the one case where the exact request
+                // matters; log the shape (never the private key, which is not
+                // in this body) so the operator can see what was sent.
+                eprintln!(
+                    "vallum-gui: add_peer rejected: {error} | name={:?} allowed={:?} keepalive={:?} endpoint={:?} line_len={}",
+                    fields.name, fields.allowed_ips, fields.keepalive, fields.endpoint, fields.public_line.len()
+                );
+            }
+            result
         }
         "edit_peer" => {
             let fields: PeerFields = serde_json::from_value(body).map_err(|e| e.to_string())?;

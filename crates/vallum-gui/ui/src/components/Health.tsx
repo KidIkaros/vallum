@@ -8,6 +8,55 @@ import { panicNow, type Health } from "@/lib/bridge"
 // A config that says 0.0.0.0/0 and a route that says wlp0s20f3 are different
 // products; this panel is the difference made visible.
 
+/**
+ * The one sentence this console exists to say: is traffic going through the
+ * tunnel, or is it going around it? Everything else is detail.
+ */
+export type Egress = {
+  label: string
+  detail: string
+  tone: "live" | "stale" | "fault" | "muted"
+}
+
+export function egressVerdict(health: Health | null): Egress {
+  if (!health) return { label: "UNKNOWN", detail: "no host reading yet", tone: "muted" }
+  const tunnelled = health.route4_via_tunnel
+  const guarded = health.guard.active === "active"
+  const v6Leaks = health.route6 !== null && !health.route6_via_tunnel
+  if (tunnelled && !v6Leaks) {
+    return { label: "PROTECTED", detail: `default route via ${health.route4}`, tone: "live" }
+  }
+  if (tunnelled && v6Leaks) {
+    return { label: "V6 LEAK", detail: `IPv6 leaves via ${health.route6}`, tone: "fault" }
+  }
+  if (guarded) {
+    return { label: "UNPROTECTED", detail: "guard is on but traffic is not tunnelled", tone: "fault" }
+  }
+  return {
+    label: "SPLIT",
+    detail: `traffic leaves via ${health.route4 ?? "no route"} — the tunnel carries only its own subnet`,
+    tone: "stale",
+  }
+}
+
+export function EgressBadge({ health }: { health: Health | null }) {
+  const verdict = egressVerdict(health)
+  const colour = {
+    live: "text-live border-live/40",
+    stale: "text-stale border-stale/40",
+    fault: "text-fault border-fault/40",
+    muted: "text-muted-foreground border-border",
+  }[verdict.tone]
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] tracking-wider uppercase ${colour}`}
+      title={verdict.detail}
+    >
+      egress <span className="font-semibold">{verdict.label}</span>
+    </span>
+  )
+}
+
 function Verdict({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
   const tone = ok === null ? "text-muted-foreground" : ok ? "text-live" : "text-fault"
   return <span className={`${tone} text-xs`}>{children}</span>

@@ -14,7 +14,7 @@ import {
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, selectInterface, watchWindowState, type Health } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { HealthPanel, PanicButton } from "@/components/Health"
+import { EgressBadge, HealthPanel, PanicButton } from "@/components/Health"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
@@ -73,12 +73,14 @@ function Hero({
   history,
   samples,
   lastReply,
+  health,
 }: {
   payload: SnapshotPayload | null
   now: number
   history: TrafficHistory
   samples: Sample[]
   lastReply: string
+  health: Health | null
 }) {
   const data = payload?.data
   const up = anyPeerUp(payload, now)
@@ -103,6 +105,7 @@ function Hero({
           >
             {up ? "UP" : unreachable ? "FAULT" : data ? "IDLE" : "…"}
           </span>
+          <EgressBadge health={health} />
           <span className="text-muted-foreground mt-0.5 text-xs">
             {data ? (
               <>
@@ -199,7 +202,12 @@ function PeersPanel({
                   {peer.rotating && (
                     <span className="text-violet text-[10px] uppercase">rotating</span>
                   )}
-                  <span className={`text-[10px] uppercase ${tone}`}>{freshnessLabel[f]}</span>
+                  <span className={`text-[10px] uppercase ${tone}`}>
+                    {freshnessLabel[f]}
+                    {peer.last_handshake_sec > 0 && (
+                      <span className="text-muted-foreground"> {Math.max(0, now - peer.last_handshake_sec)}s</span>
+                    )}
+                  </span>
                   <span aria-hidden className="text-muted-foreground/60">
                     ›
                   </span>
@@ -291,14 +299,14 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
     <Panel title="INTERFACE DATA">
       <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-3">
         {metric(
-          "datagrams",
+          "datagrams · outer",
           `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
           <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
             failed {c?.datagrams_failed ?? "—"}
           </span>,
         )}
         {metric(
-          "packets",
+          "packets · inner",
           `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
           <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
             failed {c?.packets_failed ?? "—"}
@@ -446,8 +454,8 @@ export default function App() {
   const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
   // Demo data cannot be written to: the daemon is not there to write to.
   const blocked = data ? undefined : "waiting for the daemon's first snapshot"
-  const lastReply =
-    lastUpdate !== null ? `${Math.max(0, now - Math.floor(lastUpdate))}s` : "—"
+  const replyAge = lastUpdate !== null ? Math.max(0, now - Math.floor(lastUpdate)) : null
+  const lastReply = replyAge === null ? "—" : replyAge < 1 ? "live" : `${replyAge}s`
 
   return (
     <div className="mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4">
@@ -460,6 +468,12 @@ export default function App() {
             [1/{interfaces.length}] {data?.interface ?? interfaces[0]?.name}
           </span>
         )}
+        <span className="micro" title="the control socket answered">
+          daemon{" "}
+          <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
+            {payload?.ok ? "attached" : "silent"}
+          </span>
+        </span>
         <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
           <ServiceStrip service={service} onChanged={refreshService} />
           <PanicButton compact />
@@ -491,7 +505,11 @@ export default function App() {
 
       {!inApp ? (
         <NoBridge />
-      ) : service && service.active !== "active" ? (
+      ) : service && service.active !== "active" && !payload?.ok ? (
+        // The unit being down is only the reason the cockpit is empty when the
+        // daemon is also unreachable. A daemon can answer with no unit behind it
+        // (a lab, a hand-run process), and hiding a live tunnel because systemd
+        // has never heard of it is the console lying in the wrong direction.
         <StoppedCard service={service} onChanged={refreshService} />
       ) : interfaces.length === 0 ? (
         <EmptyState />
@@ -503,6 +521,7 @@ export default function App() {
             history={history.current}
             samples={samples}
             lastReply={lastReply}
+            health={hostHealth}
           />
           <Panel title="THROUGHPUT">
             <TrafficChart samples={samples} />
@@ -517,7 +536,7 @@ export default function App() {
                 actions={
                   <span className="flex gap-1.5">
                     <InviteDialog blocked={blocked} />
-                    <AddPeerDialog blocked={blocked} />
+                    <AddPeerDialog blocked={blocked} peers={data?.peers ?? []} />
                   </span>
                 }
               />

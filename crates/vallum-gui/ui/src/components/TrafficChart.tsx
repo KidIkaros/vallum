@@ -8,7 +8,7 @@ import { rateLabel } from "@/lib/traffic"
 // the same rule the bars use: no normalisation, no smoothing that hides a gap.
 
 const W = 720
-const H = 120
+const H = 96
 const PAD = { left: 0, right: 0, top: 6, bottom: 14 }
 
 function series(samples: Sample[], kind: "rx" | "tx"): number[] {
@@ -45,12 +45,13 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
 
   const seconds = samples.length > 1 ? Math.round((samples.at(-1)!.at - samples[0].at) / 1000) : 0
 
+  const peakY = PAD.top + 0.5
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
-        <span className="micro">throughput · last {seconds || 0}s</span>
+        <span className="micro">rate · last {seconds || 0}s</span>
         <span className="text-muted-foreground text-[10px]">
-          peak <span className="text-foreground/80">{rateLabel(peak)}</span>
+          scale 0 – <span className="text-foreground/80">{rateLabel(peak)}</span>
         </span>
       </div>
       <svg
@@ -69,6 +70,16 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
             <stop offset="100%" stopColor="var(--color-violet)" stopOpacity="0.02" />
           </linearGradient>
         </defs>
+        {/* The top of the scale, drawn: a reader can measure against it. */}
+        <line
+          x1={0}
+          y1={peakY}
+          x2={W}
+          y2={peakY}
+          stroke="var(--color-border)"
+          strokeWidth="1"
+          strokeDasharray="3 3"
+        />
         {/* Baseline: zero is where the chart says it is. */}
         <line
           x1={0}

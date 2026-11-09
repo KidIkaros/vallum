@@ -366,7 +366,8 @@ fn describe(errno: i32) -> String {
         1 => "the daemon refused: not permitted",
         2 => "no such peer",
         7 => "the request is larger than the control socket accepts",
-        22 => "the daemon rejected one of the values",
+        17 => "a peer with that public key already exists",
+        22 => "the daemon rejected a value — a duplicate public key, or an allowed IP that overlaps the interface",
         95 => "the running daemon does not support that",
         _ => "the daemon returned an error",
     };

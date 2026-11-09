@@ -54,6 +54,9 @@ export function ServiceStrip({
 }) {
   const { pending, act } = useServiceAction(onChanged)
   const active = service?.active ?? "unknown"
+  // A daemon can run with no unit behind it (a lab, a hand-run process).
+  // Offering START for a unit that does not exist is a button that cannot work.
+  const noUnit = service?.enabled === "not-found"
   return (
     <span className="flex items-center gap-2">
       <span
@@ -61,15 +64,17 @@ export function ServiceStrip({
         title={`systemd: ${active}, ${service?.enabled ?? "unknown"}`}
       >
         <span aria-hidden className={`inline-block size-1.5 rounded-full ${tone(active)}`} />
-        <span className="micro">
-          service <span className="text-foreground/80">{active}</span>
+        <span className="micro" title="the systemd unit that owns this tunnel">
+          unit{" "}
+          <span className="text-foreground/80">{noUnit ? "none" : active}</span>
         </span>
       </span>
       <Button
         size="sm"
         variant="outline"
         className="h-6 px-2 text-[10px]"
-        disabled={pending !== null || active === "active"}
+        disabled={pending !== null || active === "active" || noUnit}
+        title={noUnit ? "no systemd unit owns this interface — start it yourself" : undefined}
         onClick={() => void act("start")}
       >
         {pending === "start" ? "…" : "START"}
@@ -78,7 +83,8 @@ export function ServiceStrip({
         size="sm"
         variant="outline"
         className="h-6 px-2 text-[10px]"
-        disabled={pending !== null || active !== "active"}
+        disabled={pending !== null || active !== "active" || noUnit}
+        title={noUnit ? "no systemd unit owns this interface" : undefined}
         onClick={() => void act("stop")}
       >
         {pending === "stop" ? "…" : "STOP"}

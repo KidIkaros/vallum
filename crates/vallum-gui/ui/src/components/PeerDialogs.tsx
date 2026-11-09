@@ -168,7 +168,14 @@ function PeerForm({
   )
 }
 
-export function AddPeerDialog({ blocked }: { blocked?: string }) {
+export function AddPeerDialog({
+  blocked,
+  peers = [],
+}: {
+  blocked?: string
+  /** Existing peers, so a duplicate key is caught before the daemon refuses it. */
+  peers?: { name: string; public_line: string }[]
+}) {
   const [open, setOpen] = useState(false)
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -188,7 +195,17 @@ export function AddPeerDialog({ blocked }: { blocked?: string }) {
         <PeerForm
           peer={null}
           submitLabel="add peer"
-          onSubmit={(fields) => report(addPeer(fields), () => setOpen(false))}
+          onSubmit={(fields) => {
+            const typed = fields.public_line.trim()
+            const existing = peers.find((peer) => peer.public_line.trim() === typed)
+            if (existing) {
+              // The daemon answers EINVAL for this, which reads as "a value was
+              // wrong" and sends the operator hunting. Name the peer instead.
+              toast.error(`already a peer: ${existing.name || existing.public_line.slice(0, 20)}`)
+              return
+            }
+            report(addPeer(fields), () => setOpen(false))
+          }}
         />
       </DialogContent>
     </Dialog>
