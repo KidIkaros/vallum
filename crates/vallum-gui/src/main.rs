@@ -531,6 +531,18 @@ pub(crate) fn service_action(
             ("pkexec", vec!["systemctl", action, unit.as_str()]),
         ]
     };
+    // A unit that has been killed a few times refuses to start until its
+    // failure counter is cleared; START must be able to do that too, or the
+    // console reports a failure it caused.
+    if action == "start" {
+        let reset: &[&str] = if effective_uid() == 0 {
+            &["systemctl", "reset-failed", unit.as_str()]
+        } else {
+            &["sudo", "-n", "systemctl", "reset-failed", unit.as_str()]
+        };
+        let _ = std::process::Command::new(reset[0]).args(&reset[1..]).output();
+    }
+
     let mut last_error = String::from("no way to run systemctl");
     for (program, args) in attempts {
         match std::process::Command::new(program).args(&args).output() {

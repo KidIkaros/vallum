@@ -45,7 +45,14 @@ use crate::error::Error;
 /// What the kernel does with a syscall the allow-list does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Kill the process. The default: the stage that holds the property.
+    /// Fail the syscall with `EPERM`. The default.
+    ///
+    /// Killing is the stronger-looking choice and the weaker one in practice:
+    /// a missing entry turns into a dead tunnel, and a dead tunnel on a
+    /// fail-open host is traffic that leaves through the physical interface
+    /// with nobody watching. `EPERM` keeps the tunnel carrying while the one
+    /// operation that was not allowed fails — and the failure names itself in
+    /// the caller's error, which is how a missing entry gets found at all.
     #[default]
     Enforce,
     /// Log the syscall and let it through. The debugging opt-out: it finds a
@@ -217,7 +224,8 @@ pub fn install(mode: Mode) -> Result<(), Error> {
 
     let mismatch = match mode {
         Mode::Log => SeccompAction::Log,
-        Mode::Enforce => SeccompAction::KillProcess,
+        // EPERM, not KillProcess: see `Mode::Enforce`.
+        Mode::Enforce => SeccompAction::Errno(1),
     };
     // An empty rule vector matches the syscall whatever its arguments, which is
     // what an allow-list wants: the daemon does not need to police arguments to
@@ -365,37 +373,40 @@ mod tests {
     }
 
     /// The filter only means something in enforce mode, so the one property
-    /// worth testing is that it kills what the list does not name. It cannot be
-    /// tested in-process — installing it is irrevocable — so the test re-executes
+    /// worth testing is that it denies what the list does not name — and that
+    /// denial costs the operation, not the daemon. It cannot be tested
+    /// in-process — installing it is irrevocable — so the test re-executes
     /// itself and checks the child.
     #[test]
-    fn enforce_kills_a_syscall_the_list_does_not_name() {
+    fn enforce_denies_a_syscall_the_list_does_not_name() {
         const MARKER: &str = "VALLUM_SANDBOX_SELFTEST";
 
         if std::env::var_os(MARKER).is_some() {
             install(Mode::Enforce).expect("install the filter");
-            // `Command::status` clones (allowed) and then asks for `execve`,
-            // which the list does not name: the child must die before `/bin/true`
-            // runs, not fail to spawn.
-            let _ = std::process::Command::new("/bin/true").status();
-            // Reaching this line means the filter permitted `execve`.
-            std::process::exit(0);
+            // `Command::status` needs `execve`, which the list does not name:
+            // the spawn must fail with EPERM and this process must survive to
+            // report it.
+            let result = std::process::Command::new("/bin/true").status();
+            let denied = matches!(
+                &result,
+                Err(error) if error.raw_os_error() == Some(nix::libc::EPERM)
+            );
+            std::process::exit(if denied { 0 } else { 1 });
         }
 
         let exe = std::env::current_exe().expect("current exe");
         let output = std::process::Command::new(exe)
             .args([
                 "--exact",
-                "sandbox::tests::enforce_kills_a_syscall_the_list_does_not_name",
+                "sandbox::tests::enforce_denies_a_syscall_the_list_does_not_name",
             ])
             .env(MARKER, "1")
             .output()
             .expect("spawn the self-test child");
-        use std::os::unix::process::ExitStatusExt;
         assert_eq!(
-            output.status.signal(),
-            Some(nix::libc::SIGSYS),
-            "the enforcing filter did not kill the child: {output:?}"
+            output.status.code(),
+            Some(0),
+            "the enforcing filter did not fail the denied syscall with EPERM: {output:?}"
         );
     }
 }
