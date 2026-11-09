@@ -1,306 +1,463 @@
-import { useEffect, useState } from "react"
-import { Activity, Moon, ShieldOff, Sun, Unplug } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { ShieldOff } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import { Separator } from "@/components/ui/separator"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import { Toaster } from "@/components/ui/sonner"
-import {
-  ago,
-  bytes,
-  listInterfaces,
-  onSnapshot,
-  peerIsUp,
-  selectInterface,
-  watchWindowState,
-} from "@/lib/bridge"
-import type { InterfaceEntry, SnapshotPayload } from "@/types"
+import { TrafficBars } from "@/components/TrafficBars"
+import { demoRequested, startDemo } from "@/lib/demo"
+import { bytes, listInterfaces, onSnapshot, selectInterface, watchWindowState } from "@/lib/bridge"
+import { TrafficHistory, freshness, freshnessLabel, rateLabel, type Sample } from "@/lib/traffic"
+import type { Counters, InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
-function useTheme() {
-  const [dark, setDark] = useState(
-    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
-  )
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark)
-  }, [dark])
-  return {
-    dark,
-    toggle: () => setDark((value) => !value),
-  }
-}
+// The console is the TUI's dashboard rendered in the webview: same header
+// grammar (◆ Vallum ) TUNNEL CONTROL), same semantic palette, same traffic
+// bars, same peer-detail shape. Where a value is absent the panel says so
+// rather than rendering a plausible zero.
 
-function Verdict({ payload }: { payload: SnapshotPayload | null }) {
-  let label = "connecting"
-  let tone = "text-muted-foreground border-border"
-  if (payload) {
-    if (!payload.ok) {
-      label = "unreachable"
-      tone = "text-destructive border-destructive/40 bg-destructive/10"
-    } else if (payload.data && payload.data.peers.some((p) => peerIsUp(p.last_handshake_sec))) {
-      label = "up"
-      tone = "text-emerald-600 border-emerald-600/40 bg-emerald-600/10 dark:text-emerald-400"
-    } else {
-      label = "no session"
-      tone = "text-amber-600 border-amber-600/40 bg-amber-600/10 dark:text-amber-400"
-    }
-  }
+const FRESH_SEC = 5 * 60
+
+function Diamond({ className = "" }: { className?: string }) {
   return (
-    <Badge variant="outline" className={`gap-1.5 ${tone}`} data-testid="verdict">
-      <Activity className="size-3" aria-hidden />
-      {label}
-    </Badge>
+    <span aria-hidden className={`inline-block size-1.5 rotate-45 bg-signal ${className}`} />
   )
 }
 
-function Counter({ label, value }: { label: string; value: string }) {
+function PanelTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1">
-      <span className="text-muted-foreground text-xs">{label}</span>
-      <span className="font-mono text-sm tabular-nums">{value}</span>
+    <div className="flex items-center gap-1.5">
+      <Diamond />
+      <span className="text-signal text-xs font-semibold tracking-wide">{children}</span>
     </div>
   )
 }
 
-function DeviceCard({ payload }: { payload: SnapshotPayload | null }) {
-  const data = payload?.data
+function Panel({
+  title,
+  right,
+  children,
+  className = "",
+}: {
+  title: React.ReactNode
+  right?: React.ReactNode
+  children: React.ReactNode
+  className?: string
+}) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Device</CardTitle>
-      </CardHeader>
-      <CardContent className="grid grid-cols-2 gap-x-6 gap-y-4">
-        <Counter label="interface" value={data?.interface ?? "—"} />
-        <Counter label="listen port" value={data?.listen_port?.toString() ?? "—"} />
-        <Counter label="addresses" value={data?.addresses.join(", ") || "—"} />
-        <Counter
-          label="suite"
-          value={data ? `0x${Number(data.suite).toString(16).padStart(4, "0")}` : "—"}
-        />
-        <Counter label="fingerprint" value={data ? `${data.fingerprint.slice(0, 16)}…` : "—"} />
-        <div className="flex flex-col gap-1">
-          <span className="text-muted-foreground text-xs">offload / batching</span>
-          <span className="flex gap-1.5">
-            <Badge variant={data?.offload ? "secondary" : "outline"}>
-              {data?.offload ? "on" : "off"}
-            </Badge>
-            <Badge variant={data?.batching ? "secondary" : "outline"}>
-              {data?.batching ? "on" : "off"}
-            </Badge>
+    <section className={`rounded-md border border-border bg-card ${className}`}>
+      <div className="border-border/60 flex items-center justify-between border-b px-3 py-1.5">
+        <PanelTitle>{title}</PanelTitle>
+        {right}
+      </div>
+      <div className="p-2.5">{children}</div>
+    </section>
+  )
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[110px_1fr] gap-2 py-0.5">
+      <span className="micro pt-0.5">{label}</span>
+      <span className="text-foreground/90 min-w-0 break-words">{children}</span>
+    </div>
+  )
+}
+
+const freshnessTone: Record<string, string> = {
+  never: "text-muted-foreground",
+  recent: "text-live",
+  aging: "text-stale",
+  old: "text-fault",
+}
+
+function Verdict({
+  payload,
+  now,
+  demo,
+}: {
+  payload: SnapshotPayload | null
+  now: number
+  demo: boolean
+}) {
+  const lastOk = useRef<number | null>(null)
+  if (payload?.ok) lastOk.current = now
+  const live = lastOk.current !== null && now - lastOk.current < 10
+  const anyUp = payload?.data?.peers.some(
+    (p) => p.last_handshake_sec > 0 && now - p.last_handshake_sec < FRESH_SEC,
+  )
+  return (
+    <div className="flex items-center gap-2" data-testid="verdict">
+      {anyUp ? (
+        <Badge className="border-live/40 bg-live/15 text-live" variant="outline">
+          ● ACTIVE TUNNEL CONTROL
+        </Badge>
+      ) : payload && !payload.ok ? (
+        <Badge className="border-fault/40 bg-fault/15 text-fault" variant="outline">
+          ● CONTROL FAULT
+        </Badge>
+      ) : (
+        <Badge variant="outline" className="text-muted-foreground">
+          ● {live ? "CONTROL LIVE" : "CONNECTING"}
+        </Badge>
+      )}
+      {demo && (
+        <Badge variant="outline" className="border-violet/40 bg-violet/15 text-violet">
+          DEMO DATA
+        </Badge>
+      )}
+    </div>
+  )
+}
+
+function TrafficPanel({
+  history,
+  samples,
+  counters,
+}: {
+  history: TrafficHistory
+  samples: Sample[]
+  counters?: Counters
+}) {
+  const rx = history.rate("rx")
+  const tx = history.rate("tx")
+  const last = samples.at(-1) ?? { rx: 0, tx: 0 }
+  // Packet counts are the daemon's own: delivered in, datagrams out.
+  const pk = (n: number | undefined) =>
+    n === undefined ? "—" : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : n.toString()
+  return (
+    <Panel title="TRAFFIC" className="min-w-[260px] flex-1">
+      <div className="flex flex-col gap-3">
+        <div>
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-signal">▼ RX {rateLabel(rx)}</span>
+            <span className="text-muted-foreground text-xs">
+              Σ {bytes(last.rx)} · pk {pk(counters?.packets_delivered)}
+            </span>
+          </div>
+          <div className="mt-1">
+            <TrafficBars samples={samples} kind="rx" color="signal" />
+          </div>
+        </div>
+        <div>
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-violet">▲ TX {rateLabel(tx)}</span>
+            <span className="text-muted-foreground text-xs">
+              Σ {bytes(last.tx)} · pk {pk(counters?.datagrams_sent)}
+            </span>
+          </div>
+          <div className="mt-1">
+            <TrafficBars samples={samples} kind="tx" color="violet" />
+          </div>
+        </div>
+      </div>
+    </Panel>
+  )
+}
+
+function peerState(peer: Peer, now: number) {
+  const f = freshness(peer.last_handshake_sec, now)
+  return { f, tone: freshnessTone[f] }
+}
+
+function PeersPanel({
+  peers,
+  now,
+  selected,
+  onSelect,
+}: {
+  peers: Peer[]
+  now: number
+  selected: string | null
+  onSelect: (fingerprint: string) => void
+}) {
+  return (
+    <Panel
+      title={
+        <>
+          PEERS [<span className="text-foreground">{peers.length}</span>]
+        </>
+      }
+      className="min-w-0"
+    >
+      {peers.length === 0 ? (
+        <p className="text-muted-foreground py-4 text-xs">no peers configured</p>
+      ) : (
+        <ul className="flex flex-col">
+          {peers.map((peer) => {
+            const { f, tone } = peerState(peer, now)
+            const isSelected = peer.fingerprint === selected
+            return (
+              <li key={peer.fingerprint}>
+                <button
+                  onClick={() => onSelect(peer.fingerprint)}
+                  className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left ${
+                    isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
+                  }`}
+                >
+                  <span className={isSelected ? "text-signal" : "text-transparent"}>)</span>
+                  <span className="min-w-0 flex-1 truncate">{peer.name}</span>
+                  {peer.rotating && (
+                    <span className="text-violet text-[10px] uppercase">rotating</span>
+                  )}
+                  <span className={`text-[10px] uppercase ${tone}`}>{freshnessLabel[f]}</span>
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </Panel>
+  )
+}
+
+function PeerDetail({ peer, now }: { peer: Peer | null; now: number }) {
+  if (!peer) {
+    return (
+      <Panel title="PEER DETAIL">
+        <p className="text-muted-foreground py-4 text-xs">select a peer</p>
+      </Panel>
+    )
+  }
+  const { f, tone } = peerState(peer, now)
+  return (
+    <Panel
+      title={
+        <span className="flex items-center gap-1.5">
+          <span
+            aria-hidden
+            className={`inline-block size-1.5 rounded-full ${
+              f === "recent" ? "bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
+            }`}
+          />
+          <span className="text-foreground/90">{peer.name}</span>
+        </span>
+      }
+      right={peer.has_preshared_key ? <span className="micro">PSK set</span> : undefined}
+    >
+      <Row label="fingerprint">{peer.fingerprint}</Row>
+      <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
+      <Row label="allowed">{peer.allowed_ips.join(", ")}</Row>
+      <Row label="keepalive">{peer.keepalive !== null ? `${peer.keepalive}s` : "—"}</Row>
+      <Row label="handshake">
+        <span className={tone}>{freshnessLabel[f]}</span>
+        <span className="text-muted-foreground">
+          {" · "}
+          {peer.last_handshake_sec === 0
+            ? "never"
+            : `${Math.max(0, now - peer.last_handshake_sec)}s ago`}
+        </span>
+      </Row>
+      <Row label="transfer">
+        rx {bytes(peer.rx_bytes)} · tx {bytes(peer.tx_bytes)}
+      </Row>
+      <Row label="epoch">{peer.epoch}</Row>
+      <Row label="id tag">
+        <span className="text-subtext break-all">vallum1:0003:{peer.fingerprint}…</span>
+      </Row>
+    </Panel>
+  )
+}
+
+function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
+  const c = payload?.data?.counters
+  return (
+    <Panel title="INTERFACE DATA">
+      <div className="grid grid-cols-1 gap-x-8 gap-y-2 sm:grid-cols-3">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="micro">datagrams</span>
+          <span>
+            sent {c ? c.datagrams_sent.toLocaleString() : "—"} ·{" "}
+            <span className={c && c.datagrams_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+              failed {c?.datagrams_failed ?? "—"}
+            </span>
           </span>
         </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function CountersCard({ payload }: { payload: SnapshotPayload | null }) {
-  const counters = payload?.data?.counters
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Counters</CardTitle>
-      </CardHeader>
-      <CardContent className="grid grid-cols-4 gap-x-6 gap-y-4">
-        <Counter label="datagrams out" value={counters ? bytes(counters.datagrams_sent) : "—"} />
-        <Counter label="out failed" value={counters?.datagrams_failed.toString() ?? "—"} />
-        <Counter label="packets in" value={counters ? bytes(counters.packets_delivered) : "—"} />
-        <Counter label="in failed" value={counters?.packets_failed.toString() ?? "—"} />
-        <Counter label="handshakes" value={counters?.established.toString() ?? "—"} />
-        <Counter label="refusals" value={counters?.refusals.toString() ?? "—"} />
-        <Counter label="reassembled" value={counters?.reassembled.toString() ?? "—"} />
-        <Counter label="frag dropped" value={counters?.fragments_dropped.toString() ?? "—"} />
-      </CardContent>
-    </Card>
-  )
-}
-
-function PeersCard({ payload }: { payload: SnapshotPayload | null }) {
-  const peers = payload?.data?.peers ?? []
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">
-          Peers
-          {peers.length > 0 && (
-            <span className="text-muted-foreground ml-2 text-sm font-normal">{peers.length}</span>
-          )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {peers.length === 0 ? (
-          <p className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
-            <Unplug className="size-4" aria-hidden />
-            No peers configured on this interface.
-          </p>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>peer</TableHead>
-                <TableHead>endpoint</TableHead>
-                <TableHead>allowed IPs</TableHead>
-                <TableHead className="text-right">tx</TableHead>
-                <TableHead className="text-right">rx</TableHead>
-                <TableHead>handshake</TableHead>
-                <TableHead>epoch</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {peers.map((peer) => (
-                <TableRow key={peer.fingerprint}>
-                  <TableCell className="font-medium">
-                    <span className="flex items-center gap-2">
-                      <span
-                        aria-hidden
-                        className={`size-2 rounded-full ${peerIsUp(peer.last_handshake_sec) ? "bg-emerald-500" : "bg-muted-foreground/30"}`}
-                      />
-                      {peer.name}
-                      {peer.rotating && (
-                        <Badge variant="outline" className="text-amber-600 dark:text-amber-400">
-                          rotating
-                        </Badge>
-                      )}
-                    </span>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">{peer.endpoint || "roaming"}</TableCell>
-                  <TableCell className="font-mono text-xs">{peer.allowed_ips.join(", ")}</TableCell>
-                  <TableCell className="text-right font-mono text-xs tabular-nums">
-                    {bytes(peer.tx_bytes)}
-                  </TableCell>
-                  <TableCell className="text-right font-mono text-xs tabular-nums">
-                    {bytes(peer.rx_bytes)}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
-                    {ago(peer.last_handshake_sec)}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs tabular-nums">
-                    {peer.epoch}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
-    </Card>
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="micro">packets</span>
+          <span>
+            delivered {c ? c.packets_delivered.toLocaleString() : "—"} ·{" "}
+            <span className={c && c.packets_failed > 0 ? "text-fault" : "text-muted-foreground"}>
+              failed {c?.packets_failed ?? "—"}
+            </span>
+          </span>
+        </div>
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className="micro">handshakes</span>
+          <span>
+            established {c?.established ?? "—"} ·{" "}
+            <span className={c && c.refusals > 0 ? "text-fault" : "text-muted-foreground"}>
+              refused {c?.refusals ?? "—"}
+            </span>
+          </span>
+        </div>
+      </div>
+    </Panel>
   )
 }
 
 function EmptyState() {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+    <section className="rounded-md border border-border bg-card">
+      <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
         <ShieldOff className="text-muted-foreground size-8" aria-hidden />
         <div>
           <p className="font-medium">No daemon on this machine</p>
-          <p className="text-muted-foreground mt-1 text-sm">
-            The console found no control socket in the runtime directory. Start a
-            daemon with <code className="font-mono text-xs">vallum run</code> or{" "}
-            <code className="font-mono text-xs">vallum-quick up</code>.
+          <p className="text-muted-foreground mt-1 max-w-md text-xs">
+            The console found no control socket in the runtime directory. Start a daemon
+            with <code className="text-signal">vallum run</code> or{" "}
+            <code className="text-signal">vallum-quick up</code>.
           </p>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   )
 }
 
 export default function App() {
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
-  const [selected, setSelected] = useState<string | null>(null)
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
-  const { dark, toggle } = useTheme()
+  const [samples, setSamples] = useState<Sample[]>([])
+  const [selectedPeer, setSelectedPeer] = useState<string | null>(null)
+  const [, setTick] = useState(0)
+  const [lastUpdate, setLastUpdate] = useState<number | null>(null)
+  const history = useRef(new TrafficHistory())
+  const demo = useMemo(() => demoRequested(), [])
 
   useEffect(() => watchWindowState(), [])
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((t) => t + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  // One ingestion path for live snapshots and demo ones, so the demo renders
+  // exactly what a daemon would — and nothing else.
+  const ingestRef = useRef((payload: SnapshotPayload) => {
+    setPayload(payload)
+    setLastUpdate(Date.now() / 1000)
+    if (payload.data) {
+      const rx = payload.data.peers.reduce((sum, p) => sum + p.rx_bytes, 0)
+      const tx = payload.data.peers.reduce((sum, p) => sum + p.tx_bytes, 0)
+      history.current.push(rx, tx)
+      setSamples([...history.current.recent()])
+    }
+  })
+  const ingest = ingestRef.current
 
   useEffect(() => {
+    if (demo) {
+      setInterfaces([{ name: "vallum0", path: "demo" }])
+      return startDemo(ingest)
+    }
     let cancelled = false
     listInterfaces().then((entries) => {
       if (cancelled) return
       setInterfaces(entries)
       // The first socket is the daemon the operator most likely means; picking
       // it saves a click without hiding the others.
-      if (entries.length > 0) {
-        setSelected(entries[0].path)
-        void selectInterface(entries[0].path)
-      }
+      if (entries.length > 0) void selectInterface(entries[0].path)
     })
     return () => {
       cancelled = true
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo])
 
   useEffect(() => {
+    if (demo) return
     let unlisten: (() => void) | undefined
-    void onSnapshot(setPayload).then((fn) => {
+    void onSnapshot(ingest).then((fn) => {
       unlisten = fn
     })
     return () => unlisten?.()
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo])
 
-  const pick = (path: string) => {
-    setSelected(path)
-    void selectInterface(path)
+  const now = Math.floor(Date.now() / 1000) // `tick` re-renders once a second
+  const data = payload?.data
+  if (data && data.peers.length > 0 && selectedPeer === null) {
+    setSelectedPeer(data.peers[0].fingerprint)
   }
+  const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
+  const lastReply =
+    lastUpdate !== null ? `${Math.max(0, now - Math.floor(lastUpdate))}s` : "—"
 
   return (
-    <div className="mx-auto flex min-h-svh max-w-4xl flex-col gap-6 p-6">
-      <header className="flex items-center gap-3">
-        <h1 className="text-lg font-semibold tracking-tight">Vallum</h1>
-        <Verdict payload={payload} />
-        <div className="ml-auto flex items-center gap-2">
+    <div className="mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4">
+      <header className="flex flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <PanelTitle>
+            <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
+          </PanelTitle>
+          <Verdict payload={payload} now={now} demo={demo} />
           {interfaces.length > 0 && (
-            <Select value={selected ?? undefined} onValueChange={pick}>
-              <SelectTrigger className="w-44" aria-label="Interface">
-                <SelectValue placeholder="interface" />
-              </SelectTrigger>
-              <SelectContent>
-                {interfaces.map((entry) => (
-                  <SelectItem key={entry.path} value={entry.path}>
-                    {entry.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <span className="text-subtext text-xs">
+              [1/{interfaces.length}] {data?.interface ?? interfaces[0]?.name}
+            </span>
           )}
-          <button
-            onClick={toggle}
-            aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
-            className="hover:bg-accent inline-flex size-8 items-center justify-center rounded-md"
-          >
-            {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-          </button>
+          {demo && (
+            <span className="micro ml-auto">
+              browser preview — the built console runs from the binary
+            </span>
+          )}
         </div>
+        {data && (
+          <>
+            <div className="text-xs">
+              <span className={payload?.ok ? "text-live" : "text-fault"}>
+                {payload?.ok ? "CONTROL LIVE" : "CONTROL UNREACHABLE"}
+              </span>
+              <span className="text-muted-foreground"> · last reply {lastReply}</span>
+            </div>
+            <div className="text-subtext text-xs">
+              listen{" "}
+              <span className="text-foreground/90">
+                {data.listen_port !== null ? `0.0.0.0:${data.listen_port}` : "—"}
+              </span>{" "}
+              · suite <span className="text-signal">{data.suite}</span>
+              <span className="text-muted-foreground"> (tri-hybrid)</span>
+              {data.fwmark !== null && (
+                <>
+                  {" · fwmark "}
+                  <span className="text-foreground/90">{data.fwmark}</span>
+                </>
+              )}{" "}
+              · id <span className="text-foreground/90">{data.fingerprint}</span> ·
+              addresses{" "}
+              <span className="text-foreground/90">{data.addresses.join(", ")}</span>
+            </div>
+          </>
+        )}
       </header>
-
-      <Separator />
 
       {interfaces.length === 0 ? (
         <EmptyState />
       ) : (
-        <main className="flex flex-col gap-6">
-          <div className="grid gap-6 md:grid-cols-2">
-            <DeviceCard payload={payload} />
-            <CountersCard payload={payload} />
+        <>
+          <div className="flex flex-col gap-3 md:flex-row">
+            <div className="flex min-w-0 flex-1 flex-col gap-3">
+              <PeersPanel
+                peers={data?.peers ?? []}
+                now={now}
+                selected={selectedPeer}
+                onSelect={setSelectedPeer}
+              />
+              <InterfaceData payload={payload} />
+            </div>
+            <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
+              <TrafficPanel history={history.current} samples={samples} counters={data?.counters} />
+              <PeerDetail peer={detail} now={now} />
+            </div>
           </div>
-          <PeersCard payload={payload} />
-        </main>
+          <footer className="text-muted-foreground flex items-center gap-2 text-[10px]">
+            <span>updated {lastReply}</span>
+            <span>·</span>
+            <span>snapshot stream from /run/vallum</span>
+            {demo && (
+              <>
+                <span>·</span>
+                <span className="text-violet">synthetic data (?demo=1)</span>
+              </>
+            )}
+          </footer>
+        </>
       )}
-
-      <Toaster position="bottom-right" />
     </div>
   )
 }

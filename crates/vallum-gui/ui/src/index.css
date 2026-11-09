@@ -1,56 +1,51 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@custom-variant dark (&:is(.dark *));
+/* The console's palette is the TUI's, taken from assets/vallum-cockpit.svg
+   (the rendered form of the brand kit in assets/vallum-brandkit.png):
+   canvas 0d1117, panels 161b22, borders 30363d, text c9d1d9, muted 6e7681,
+   signal cyan 39c5cf (focus/live), live green 3fb950 (healthy),
+   tx violet bc8cff (outbound/rotating), stale amber d29922 (aging/warn),
+   fault coral e4573d (unavailable — brandkit §05). Like the TUI it mirrors,
+   the console is a dark surface; there is no light theme. */
 
-/* shadcn/ui neutral theme, CSS-variable form (Tailwind v4). The Tauri webview
-   follows the OS theme through the `dark` class set from Tauri's theme API. */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --radius: 0.25rem;
+  /* The console's typography is the TUI's: JetBrains Mono everywhere,
+     tabular numerals, zero jitter (brandkit §06). */
+  --font-mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, "SF Mono",
+    Menlo, Consolas, monospace;
+  --background: #0d1117;
+  --foreground: #c9d1d9;
+  --card: #161b22;
+  --card-foreground: #c9d1d9;
+  --popover: #161b22;
+  --popover-foreground: #c9d1d9;
+  --primary: #39c5cf;
+  --primary-foreground: #0d1117;
+  --secondary: #182a3a;
+  --secondary-foreground: #c9d1d9;
+  --muted: #182a3a;
+  --muted-foreground: #6e7681;
+  --accent: #182a3a;
+  --accent-foreground: #c9d1d9;
+  --destructive: #e4573d;
+  --destructive-foreground: #c9d1d9;
+  --border: #30363d;
+  --input: #30363d;
+  --ring: #39c5cf;
+  /* Semantic signal palette, brandkit §05, rendered values. */
+  --signal: #39c5cf;
+  --live: #3fb950;
+  --stale: #d29922;
+  --fault: #e4573d;
+  --violet: #bc8cff;
+  --subtext: #8b949e;
 }
 
 @theme inline {
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-mono);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -70,9 +65,15 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
+  --color-signal: var(--signal);
+  --color-live: var(--live);
+  --color-stale: var(--stale);
+  --color-fault: var(--fault);
+  --color-violet: var(--violet);
+  --color-subtext: var(--subtext);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
   --radius-xl: calc(var(--radius) + 4px);
 }
 
@@ -82,5 +83,17 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+}
+
+@layer utilities {
+  /* The TUI's micro-labels: uppercase, letter-spaced, muted. */
+  .micro {
+    @apply text-muted-foreground text-[10px] uppercase;
+    letter-spacing: 0.08em;
   }
 }
