@@ -1,0 +1,23 @@
+[Unit]
+Description=Vallum boot-time network cleanup (restore floor)
+Documentation=man:vallum(8)
+# The floor of the four-layer restore rule: at power-up, before any Vallum
+# unit can start, remove everything a crashed previous session left behind —
+# an egress policy table that outlived its tunnel, a resolver pointing into a
+# dead tunnel, stale tunnel interfaces. After this unit, the network is the
+# host's own; anything Vallum does next is deliberate and owned by a running
+# unit.
+Before=vallum@.service vallum-guard@.service vallum-quick@.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vallum-cleanup
+# The floor must never become a boot-failure source: the script is
+# best-effort by design and always exits 0.
+RemainAfterExit=yes
+
+[Install]
+# Enabled by the installer — the one deliberate exception to "the installer
+# enables nothing" (see docs/plan-2026-11-09.md, Phase 0.5): the cleanup is
+# not a tunnel feature, it is what makes a restart always work.
+WantedBy=multi-user.target

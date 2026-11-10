@@ -1,0 +1,84 @@
+#!/bin/sh
+# vallum-cleanup — the boot-time floor of the four-layer restore rule.
+#
+# Runs once at every power-up, before any Vallum unit can start, and removes
+# everything a crashed previous session could have left behind:
+#
+#   1. the egress policy table (a guard that outlived its tunnel)
+#   2. a resolver pointing into a tunnel that no longer exists
+#   3. stale vallum* interfaces (nothing is running yet at boot, so any
+#      vallum* interface — including one leaked by a lab container with
+#      host networking — is stale by definition)
+#
+# This makes "a power cycle restores the network" true by construction rather
+# than by luck. It must never fail the boot: every step is best-effort and the
+# script always exits 0.
+#
+# Enabled at install time. This is the installer's single deliberate exception
+# to "the installer enables nothing": the cleanup is not a tunnel feature, it
+# is the floor under every failure mode, and an unenabled floor is decoration.
+#
+# Usage: vallum-cleanup [table]   (table defaults to vallum_policy; the
+#                                  parameter exists so tests can exercise the
+#                                  path without touching a live host table)
+set -u
+
+TABLE=${1:-vallum_policy}
+RUNTIME=/run/vallum
+CHANGES=""
+
+log() { logger -t vallum-cleanup "$*"; }
+
+# 1. The egress policy table. `nft list table` fails when it does not exist,
+#    which is the common (healthy) case.
+if nft list table inet "$TABLE" >/dev/null 2>&1; then
+    nft delete table inet "$TABLE" >/dev/null 2>&1
+    CHANGES="$CHANGES removed nft table $TABLE;"
+    log "removed leftover nft table $TABLE"
+fi
+
+# 2. A resolver left pointing into a dead tunnel. The daemon and the trial
+#    path both save the previous resolver before rewriting it; at boot, before
+#    any tunnel can start, a rewrite that is still in place is a crash leftover.
+LATEST=""
+for bak in "$RUNTIME"/*.resolv.conf.bak "$RUNTIME"/trial-resolv.bak; do
+    [ -f "$bak" ] || continue
+    if [ -z "$LATEST" ] || [ "$bak" -nt "$LATEST" ]; then LATEST=$bak; fi
+done
+if [ -n "$LATEST" ] && grep -q '^nameserver' "$LATEST" 2>/dev/null; then
+    if ! cmp -s "$LATEST" /etc/resolv.conf 2>/dev/null; then
+        cp "$LATEST" /etc/resolv.conf 2>/dev/null
+        CHANGES="$CHANGES restored resolv.conf from $LATEST;"
+        log "restored /etc/resolv.conf from $LATEST"
+    fi
+    rm -f "$RUNTIME"/*.resolv.conf.bak "$RUNTIME"/trial-resolv.bak
+fi
+
+# 3. Stale tunnel interfaces. At boot no Vallum daemon is running yet (the
+#    cleanup unit is ordered Before= every vallum unit), so any vallum*
+#    interface is a leftover — including one leaked by a lab container with
+#    host networking, whose routes poison the host table.
+#
+#    Fail-closed on the destructive step: interfaces are deleted only when
+#    systemd state is verifiable AND no tunnel unit is active. A lab container
+#    shares this network namespace but has no systemd, so "cannot verify"
+#    means the interface belongs to someone this script cannot see — leave it.
+if systemctl list-units --type=service --state=active 'vallum@*' --no-legend >/dev/null 2>&1 \
+        && systemctl list-units --type=service --state=active 'vallum@*' --no-legend | grep -q .; then
+    log "a vallum tunnel unit is active — leaving interfaces alone"
+else
+    for ifc in /sys/class/net/vallum*; do
+    [ -e "$ifc" ] || continue
+    name=${ifc##*/}
+        ip link del "$name" 2>/dev/null
+        CHANGES="$CHANGES deleted stale interface $name;"
+        log "deleted stale interface $name"
+    done
+fi
+
+if [ -n "$CHANGES" ]; then
+    log "boot cleanup complete:$CHANGES"
+else
+    log "boot cleanup: nothing to do"
+fi
+exit 0

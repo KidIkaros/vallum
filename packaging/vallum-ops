@@ -22,6 +22,16 @@ case "${1:-}" in
 full-tunnel)
     exec bash "$SRC/go-full-tunnel.sh"
     ;;
+sync)
+    # Deployment automation: make the host match the build under test, then
+    # stop. Never runs the cleanup itself — the floor fires at boot only.
+    exec bash "$REPO/scripts/vallum-sync.sh"
+    ;;
+self-update)
+    install -m 755 "$REPO/packaging/vallum-ops" /usr/local/sbin/vallum-ops
+    echo "dispatcher updated"
+    exit 0
+    ;;
 revert)
     /usr/local/sbin/vallum-panic
     install -m 600 -o root -g root "$SRC/vallum0-split.toml" "$CONF"

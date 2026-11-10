@@ -365,6 +365,7 @@ install_docs() {
     local unit
     for unit in vallum@.service vallum-guard@.service vallum-quick@.service \
         vallum-quick-watch@.service vallum-enroll@.service \
+        vallum-cleanup.service \
         vallum-metrics.service vallum-metrics.timer; do
         if [ -f "$SOURCE_DIR/$unit" ]; then
             run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
@@ -387,7 +388,7 @@ install_docs() {
     # egress, and a dead-man that removes the block when the tunnel stops
     # carrying. Installing a fail-closed guard without these is a machine that
     # can lose its internet and need a human to fix it.
-    for tool in vallum-panic vallum-guard-deadman; do
+    for tool in vallum-panic vallum-guard-deadman vallum-cleanup; do
         if [ -f "packaging/$tool" ]; then
             run install -D -m 0755 "packaging/$tool" "/usr/local/sbin/$tool"
         elif [ -f "$SOURCE_DIR/$tool" ]; then
@@ -399,6 +400,13 @@ install_docs() {
             run install -D -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
         fi
     done
+    # The restore floor is the installer's single deliberate enable (Phase 0.5):
+    # every other unit starts only on explicit choice, but "a power cycle
+    # restores the network" has to be true on machines where nobody ever
+    # enables a tunnel at all.
+    if [ -f "$UNIT_DIR/vallum-cleanup.service" ]; then
+        run systemctl enable vallum-cleanup || true
+    fi
     run systemctl daemon-reload || true
 
     if [ -f "$TMPFILES_DIR/vallum-tmpfiles.conf" ]; then
@@ -478,6 +486,8 @@ uninstall() {
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
+    run systemctl disable vallum-cleanup 2>/dev/null || true
+    run rm -f "$UNIT_DIR/vallum-cleanup.service"
     run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"
     run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-guard@.service" \
         "$UNIT_DIR/vallum-quick@.service" \
