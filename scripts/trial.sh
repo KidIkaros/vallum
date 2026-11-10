@@ -55,7 +55,7 @@ fi
 
 # 1. Remember enough to put it back.
 BEFORE_ROUTE=$(ip route show default | head -1)
-BEFORE_RESOLV=$(mktemp)
+BEFORE_RESOLV=/run/vallum/trial-resolv.bak
 cp /etc/resolv.conf "$BEFORE_RESOLV" 2>/dev/null || true
 
 revert() {
@@ -70,6 +70,7 @@ revert() {
         ip route add ${BEFORE_ROUTE#default } >/dev/null 2>&1
     fi
     cp "$BEFORE_RESOLV" /etc/resolv.conf 2>/dev/null || true
+    rm -f "$BEFORE_RESOLV"
     echo "reverted. default route: $(ip route show default | head -1)"
 }
 
@@ -77,7 +78,7 @@ revert() {
 #    this script dying.
 rm -f "$MARK"
 systemd-run --quiet --on-active="${TRIAL}s" --unit="vallum-trial-$IFACE" \
-    /bin/sh -c "[ -f $MARK ] || { /usr/bin/vallum policy off --config $CONFIG; nft delete table inet vallum_policy; systemctl stop vallum-quick@$IFACE; systemctl stop vallum-guard@$IFACE; ip route del default dev $IFACE; logger -t vallum-trial 'trial expired unreverted — restored egress'; }" \
+    /bin/sh -c "[ -f $MARK ] || { /usr/bin/vallum policy off --config $CONFIG; nft delete table inet vallum_policy; systemctl stop vallum-quick@$IFACE; systemctl stop vallum-guard@$IFACE; ip route del default dev $IFACE; [ -f $BEFORE_RESOLV ] && cp $BEFORE_RESOLV /etc/resolv.conf; logger -t vallum-trial 'trial expired unreverted — restored egress and DNS'; }" \
     || { echo "cannot arm the revert timer; refusing to change anything" >&2; exit 1; }
 
 # 3. The change.

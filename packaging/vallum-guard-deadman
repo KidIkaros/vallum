@@ -37,6 +37,12 @@ logger -t vallum-deadman "tunnel dead 3 checks running — removing the egress b
 /usr/bin/vallum policy off --config "$CONF" >/dev/null 2>&1
 nft delete table inet vallum_policy >/dev/null 2>&1
 rm -f "$STATE"
+# If the tunnel's attach had rewritten the resolver, put the old one back: a
+# broken DNS is the failure mode that survives a power cycle.
+BAK=/run/vallum/$IFACE.resolv.conf.bak
+if [ -f "$BAK" ] && grep -q '^nameserver' /etc/resolv.conf 2>/dev/null; then
+    cp "$BAK" /etc/resolv.conf 2>/dev/null && logger -t vallum-deadman "restored resolv.conf from $BAK"
+fi
 
 # The routes are the other half of a blackhole; quick's own watch withdraws them,
 # but it may not be running, so take them out here too.
