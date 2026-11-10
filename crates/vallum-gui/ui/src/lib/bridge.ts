@@ -77,6 +77,7 @@ export interface Health {
   route6_via_tunnel: boolean
   dns: string[]
   dns_via_tunnel: boolean
+  dns_upstream?: string[]
   restarts: number
   last_death: string
   guard: { unit: string; active: string }

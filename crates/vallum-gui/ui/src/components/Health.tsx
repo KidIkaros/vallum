@@ -116,7 +116,11 @@ export function HealthPanel({ health }: { health: Health | null }) {
     )
   }
   const v4 = health.route4_via_tunnel
-  const v6Blocked = health.route6 === null
+  const guardOn = health.guard.active === "active"
+  // A route outside the tunnel is only a leak if nothing drops it: with the
+  // guard active, v6 packets are dropped by policy, so the route is a corpse,
+  // not an exit.
+  const v6Blocked = health.route6 === null || (guardOn && !health.route6_via_tunnel)
   const v6Tunnel = health.route6_via_tunnel
   return (
     <Panel title="EGRESS HEALTH">
@@ -138,12 +142,22 @@ export function HealthPanel({ health }: { health: Health | null }) {
       </Row>
       <Row label="ipv6">
         <Verdict ok={v6Blocked || v6Tunnel}>
-          {v6Blocked ? "blocked" : v6Tunnel ? `tunnelled via ${health.route6}` : `leaks via ${health.route6}`}
+          {v6Blocked
+            ? guardOn && !v6Tunnel
+              ? `blocked by the guard${health.route6 ? ` · route via ${health.route6} dropped` : ""}`
+              : "no route"
+            : v6Tunnel
+              ? `tunnelled via ${health.route6}`
+              : `leaks via ${health.route6}`}
         </Verdict>
       </Row>
       <Row label="dns">
         <Verdict ok={health.dns.length > 0 && health.dns_via_tunnel}>
-          {health.dns.length > 0 ? health.dns.join(" · ") : "none"}
+          {health.dns_via_tunnel && health.dns_upstream && health.dns_upstream.length > 0
+            ? `${health.dns[0]} → ${health.dns_upstream.join(" · ")} (tunnel)`
+            : health.dns.length > 0
+              ? health.dns.join(" · ")
+              : "none"}
           {health.dns.length > 0 && !health.dns_via_tunnel ? " · outside the tunnel" : ""}
         </Verdict>
       </Row>

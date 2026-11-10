@@ -689,6 +689,25 @@ pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
     let dns_dev = servers
         .first()
         .and_then(|server| route_device(server, server.contains(':')));
+    // The system resolver is usually systemd-resolved's stub (127.0.0.53);
+    // what decides "DNS rides the tunnel" is whether the tunnel LINK carries
+    // upstream servers — resolved forwards there. Reading only resolv.conf
+    // turns a working setup into a false FAIL.
+    let link_dns: Vec<String> = std::process::Command::new("resolvectl")
+        .args(["dns", &interface])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| {
+            text.lines().next().and_then(|line| line.split_once(':')).map(|(_, tail)| tail.to_owned())
+        })
+        .map(|tail| {
+            tail.split_whitespace()
+                .filter(|token| token.parse::<std::net::IpAddr>().is_ok())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
 
     let show = std::process::Command::new("systemctl")
         .args(["show", &unit, "-p", "NRestarts", "-p", "ExecMainStatus"])
@@ -730,7 +749,8 @@ pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
         "route6": route6,
         "route6_via_tunnel": route6.as_deref() == Some(interface.as_str()),
         "dns": servers,
-        "dns_via_tunnel": dns_dev.as_deref() == Some(interface.as_str()),
+        "dns_via_tunnel": dns_dev.as_deref() == Some(interface.as_str()) || !link_dns.is_empty(),
+        "dns_upstream": link_dns,
         "restarts": restarts,
         "last_death": last_death,
         "guard": {
