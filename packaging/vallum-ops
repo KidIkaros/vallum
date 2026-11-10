@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# vallum-ops: the operator shim for Vallum host networking.
+#
+# Installed root-owned at /usr/local/sbin/vallum-ops and allowed once in
+# /etc/sudoers.d/vallum-ops as NOPASSWD. Each subcommand is a named,
+# audited operation — the sudoers file grants this dispatcher, not a
+# wildcard, so `vallum-ops -h` lists everything root can be asked to do.
+#
+#   vallum-ops full-tunnel   # the phase-3 trial (drift check, 90s revert timer)
+#   vallum-ops revert        # panic, restore split config, restart unit
+#   vallum-ops status        # units, route, handshake, resolver, public IP
+#   vallum-ops journal [N]   # last N lines from the vallum units' journals
+set -uo pipefail
+
+SRC=/home/ikaaros/.hermes/cache/scratch/vallum-real
+REPO=/home/ikaaros/Coding/Gold/vallum
+CONF=/etc/vallum/vallum0.toml
+IFACE=vallum0
+UNIT=vallum@$IFACE
+
+case "${1:-}" in
+full-tunnel)
+    exec bash "$SRC/go-full-tunnel.sh"
+    ;;
+revert)
+    /usr/local/sbin/vallum-panic
+    install -m 600 -o root -g root "$SRC/vallum0-split.toml" "$CONF"
+    systemctl reset-failed "$UNIT" 2>/dev/null || true
+    systemctl restart "$UNIT"
+    sleep 3
+    echo "reverted; internet: $(ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && echo ok || echo DOWN)"
+    ;;
+status)
+    echo "unit:      $(systemctl is-active "$UNIT") ($(systemctl is-enabled "$UNIT" 2>&1))"
+    echo "guard:     $(systemctl is-active vallum-guard@$IFACE 2>&1)"
+    echo "quick:     $(systemctl is-active vallum-quick@$IFACE 2>&1)"
+    echo "dead-man:  $(systemctl is-active vallum-deadman@$IFACE.timer 2>&1)"
+    echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
+    echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
+    echo "handshake: $(/usr/bin/vallum show --control /run/vallum/$IFACE.sock 2>/dev/null | grep -m1 last_handshake_time_sec || echo none)"
+    echo "public ip: $(curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo unknown)"
+    ;;
+journal)
+    journalctl -u "$UNIT" -u "vallum-quick@$IFACE" -u "vallum-guard@$IFACE" \
+        --no-pager -o short-iso -n "${2:-40}"
+    ;;
+*)
+    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]}" >&2
+    exit 2
+    ;;
+esac
