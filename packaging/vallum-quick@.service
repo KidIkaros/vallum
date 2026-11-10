@@ -16,8 +16,11 @@ ExecStart=/usr/bin/vallum-quick attach /etc/vallum/%i.toml
 ExecStop=/usr/bin/vallum-quick detach /etc/vallum/%i.toml
 TimeoutStartSec=60s
 
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+# CAP_DAC_OVERRIDE is not decoration: the daemon publishes its control socket
+# 0600 to the tunnel's owner, and the session gate has to read it. Root without
+# the capability is just a user the socket does not belong to.
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE
 NoNewPrivileges=true
 PrivateTmp=true
 

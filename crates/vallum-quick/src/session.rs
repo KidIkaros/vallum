@@ -131,13 +131,26 @@ pub(crate) fn wait_for_session(
     let deadline = started + SESSION_WAIT;
     let mut reported = 0u64;
     while std::time::Instant::now() < deadline {
-        if let Ok(reply) = uapi_get(&socket) {
-            let established = reply
-                .lines()
-                .any(|line| line.starts_with("last_handshake_time_sec=") && !line.ends_with("=0"));
-            if established {
-                return Ok(());
+        match uapi_get(&socket) {
+            Ok(reply) => {
+                let established = reply.lines().any(|line| {
+                    line.starts_with("last_handshake_time_sec=") && !line.ends_with("=0")
+                });
+                if established {
+                    return Ok(());
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                // A socket we are not allowed to open is not "no handshake
+                // yet" — no amount of waiting fixes permissions. Name the
+                // errno and the usual cause instead of burning the window.
+                return Err(format!(
+                    "cannot open the control socket {}: {e} — the daemon publishes it 0600 to the tunnel's owner, and this process's capability set does not include CAP_DAC_OVERRIDE (systemd unit sandboxes trim it); fix the unit's bounding set",
+                    socket.display()
+                )
+                .into());
+            }
+            Err(_) => {} // daemon starting or socket not published yet: keep waiting
         }
         // A silent wait is indistinguishable from a hang, and this one can last
         // twenty seconds. Say we are still waiting, and for how long, so the
