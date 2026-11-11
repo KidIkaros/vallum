@@ -1,7 +1,7 @@
 # ADR-0030: Admission control on the fragment path
 
 **Date**: 2026-11-11
-**Status**: proposed
+**Status**: accepted and implemented; amended below with what it measured
 **Deciders**: Vallum maintainers
 
 ## Context
@@ -46,6 +46,35 @@ Constraints that shape the decision:
    session's data on the basis of the bucket alone if the source has a peer:
    the peer's own `allowed_ips` and session state remain the authority. The
    bucket only decides whether a datagram is worth parsing now.
+
+## Implementation status, and what the bucket does not fix
+
+Implemented (`4297e18`) and measured against the production server with the same
+1452-byte fragment, the same path, and the same 5 s burst that produced the
+finding:
+
+| Run | Packets | Server CPU | µs per packet |
+|---|---|---|---|
+| Before | 155,889 | 4.10 s | **26.3** |
+| After | 167,776 | 3.26 s | **19.4** |
+| Floor: 1-byte flood | 417,326 | 3.62 s | **8.7** |
+
+The bucket does what it was written to do — 162,501 datagrams were refused
+before reassembly and the counter says so — but it buys a factor of 1.36, not an
+order of magnitude. The third row is the reason: a one-byte datagram that is
+refused immediately still costs 8.7 µs, and a refused 1452-byte one costs 19.4.
+The dominant cost is the userspace datagram path itself — receive, allocate,
+hand to the loop — not the parsing the bucket skips.
+
+**The next step is therefore placement, not policy**: the allowance belongs in
+the socket reader thread, before the buffer is allocated and before the channel
+hop, which is where the 8.7 µs floor lives. That needs the reader to know the
+peer endpoints, which the loop owns, so it is a shared snapshot rather than a
+method call — a design this ADR does not authorise, and the honest successor to
+it.
+
+Attacker ceiling per core: ~38k pps before, ~51k pps after. Stated plainly
+because "rate limited" suggests more than it delivers.
 
 ## Alternatives Considered
 

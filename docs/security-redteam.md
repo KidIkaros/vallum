@@ -38,8 +38,15 @@ answers a repeated *whole* initiation from its cached reply, so fragment replay
 is strictly cheaper for the attacker than init replay.
 
 Precedent in-tree: the enroll service already runs a per-source limiter **before**
-its cookie gate (`RATE_PER_SECOND`, `RATE_LIMIT_SOURCES`). The tunnel path has no
+its cookie gate (`RATE_PER_SECOND`, `RATE_LIMIT_SOURCES`). The tunnel path had no
 equivalent. See ADR-0030.
+
+**Status: mitigated, not closed.** ADR-0030's bucket is implemented (`4297e18`)
+and moves the cost from 26.3 to 19.4 µs per packet — the attacker's ceiling per
+core goes from ~38k to ~51k pps. A one-byte flood that is refused outright still
+costs 8.7 µs, which is the userspace receive path, not the parse; closing the
+rest means moving the allowance into the reader thread. The bucket is worth
+keeping and is not sufficient on its own.
 
 ### H2 — The enroll port is firewalled off while the config says it is on (high, functional)
 
