@@ -502,6 +502,11 @@ pub fn run(
     // Sources relayed because this interface forwards: one line per source,
     // once, for the same reason. Every subsequent packet is silent.
     let mut relayed_sources_noted: HashSet<std::net::IpAddr> = HashSet::new();
+    // Destinations whose sends are failing. Once per destination, like the two
+    // sets above: a send that fails is the difference between "the path is gone"
+    // and "the peer is silent", and UDP reports neither — the kernel says only
+    // that the write failed, and at debug level nobody sees it.
+    let mut send_failed: HashSet<SocketAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
     let mut last_control_check = Instant::now();
@@ -720,7 +725,16 @@ pub fn run(
                                 );
                             }
                         } else {
-                            log_debug!(log, "send to {destination} failed: {error}");
+                            if send_failed.insert(*destination) {
+                                log_warn!(
+                                    log,
+                                    "send to {destination} failed: {error} — the tunnel \
+                                     cannot reach its endpoint; this repeats silently \
+                                     until the path comes back"
+                                );
+                            } else {
+                                log_debug!(log, "send to {destination} failed: {error}");
+                            }
                         }
                     }
                 }
