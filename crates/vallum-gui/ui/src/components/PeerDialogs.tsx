@@ -261,7 +261,7 @@ export function AddPeerDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="add-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="add-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked}>
           + add peer
         </Button>
       </DialogTrigger>
@@ -297,7 +297,7 @@ export function EditPeerDialog({ peer, blocked }: { peer: Peer; blocked?: string
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="edit-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="edit-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked}>
           edit
         </Button>
       </DialogTrigger>
@@ -325,7 +325,7 @@ export function RotateDialog({ peer, blocked }: { peer: Peer; blocked?: string }
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="rotate-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="rotate-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked}>
           rotate
         </Button>
       </DialogTrigger>
@@ -417,7 +417,7 @@ export function FinalizeButton({ peer, blocked }: { peer: Peer; blocked?: string
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="finalize-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="finalize-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked}>
           finalize
         </Button>
       </DialogTrigger>
@@ -455,7 +455,7 @@ export function RemoveDialog({ peer, blocked }: { peer: Peer; blocked?: string }
           variant="outline"
           size="sm"
           disabled={!!blocked}
-          className="micro text-fault hover:text-fault"
+          className="micro text-fault uppercase hover:text-fault"
           title={blocked}
         >
           remove
@@ -504,7 +504,7 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
       if (!next) setResult(null)
     }}>
       <DialogTrigger asChild>
-        <Button id="invite-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked}>
+        <Button id="invite-peer-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked}>
           invite
         </Button>
       </DialogTrigger>
@@ -689,7 +689,7 @@ export function ExportBundleDialog({ peer, blocked }: { peer: Peer; blocked?: st
       if (!next) setResult(null)
     }}>
       <DialogTrigger asChild>
-        <Button id="export-bundle-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked ?? "mint a client bundle for this peer: config plus a fresh key, downloaded as one file"}>
+        <Button id="export-bundle-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked ?? "mint a client bundle for this peer: config plus a fresh key, downloaded as one file"}>
           bundle
         </Button>
       </DialogTrigger>
@@ -768,7 +768,7 @@ export function ImportBundleDialog({ blocked }: { blocked?: string }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="import-bundle-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked ?? "install a client bundle file onto this machine"}>
+        <Button id="import-bundle-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked ?? "install a client bundle file onto this machine"}>
           import
         </Button>
       </DialogTrigger>
@@ -855,7 +855,7 @@ export function KeygenButton({ blocked }: { blocked?: string }) {
     )
   }
   return (
-    <Button id="generate-key-btn" variant="outline" size="sm" disabled={!!blocked || busy} className="micro" title={blocked ?? "mint a fresh identity key and download it as a .key file"} onClick={mint}>
+    <Button id="generate-key-btn" variant="outline" size="sm" disabled={!!blocked || busy} className="micro uppercase" title={blocked ?? "mint a fresh identity key and download it as a .key file"} onClick={mint}>
       {busy ? "…" : "key"}
     </Button>
   )
@@ -885,7 +885,7 @@ export function ConfigDialog({ blocked }: { blocked?: string }) {
       }
     }}>
       <DialogTrigger asChild>
-        <Button id="config-editor-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked ?? "edit the on-disk interface config: validated before it lands, backed up first"}>
+        <Button id="config-editor-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked ?? "edit the on-disk interface config: validated before it lands, backed up first"}>
           config
         </Button>
       </DialogTrigger>
@@ -961,7 +961,7 @@ export function DeviceDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button id="device-form-btn" variant="outline" size="sm" disabled={!!blocked} className="micro" title={blocked ?? "runtime device form: listen port and firewall mark"}>
+        <Button id="device-form-btn" variant="outline" size="sm" disabled={!!blocked} className="micro uppercase" title={blocked ?? "runtime device form: listen port and firewall mark"}>
           device
         </Button>
       </DialogTrigger>

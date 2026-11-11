@@ -111,7 +111,7 @@ export function PanicButton({ compact = false }: { compact?: boolean }) {
     <Button
       size="sm"
       variant="outline"
-      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-xs" : ""}`}
+      className={`border-fault/60 text-fault uppercase hover:bg-fault/10 ${compact ? "h-6 px-2 text-xs" : ""}`}
       disabled={busy}
       onClick={() => void run()}
       title="Remove the egress block, withdraw the tunnel's routes and put this host back on the internet"

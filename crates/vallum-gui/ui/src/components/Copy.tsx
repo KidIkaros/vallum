@@ -52,7 +52,7 @@ export function CopyButton({
       disabled={disabled}
       onClick={() => void copy()}
       title={title ?? "copy to clipboard"}
-      className={`micro hover:text-foreground border-border/60 hover:border-border cursor-pointer rounded border px-1.5 py-0.5 ${className}`}
+      className={`micro hover:text-foreground border-border/60 hover:border-border cursor-pointer rounded border px-1.5 py-0.5 uppercase ${className}`}
     >
       {state === "copied" ? "copied" : state === "failed" ? "copy failed" : label}
     </button>

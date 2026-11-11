@@ -172,6 +172,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
             />
             <Button
               size="sm"
+              className="uppercase"
               disabled={!armed || busy}
               onClick={() => run()}
               title="Arms the trial: revert timer first, then the routes. Any failed check reverts automatically."
@@ -189,7 +190,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
                     ? "Click again: panic, restore the split config, restart the unit"
                     : "Stop the trial now and converge back on the split tunnel"
                 }
-                className={confirmCancel ? "border-fault/60 text-fault" : ""}
+                className={confirmCancel ? "border-fault/60 text-fault uppercase" : "uppercase"}
               >
                 {cancelling ? "reverting…" : confirmCancel ? "confirm: stop and revert?" : "stop and revert"}
               </Button>
@@ -197,7 +198,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
             {busy && !backgrounded && (
               <button
                 onClick={stop}
-                className="text-muted-foreground hover:text-foreground cursor-pointer rounded text-xs underline-offset-2 hover:underline"
+                className="text-muted-foreground hover:text-foreground cursor-pointer rounded text-xs uppercase underline-offset-2 hover:underline"
                 title="Hide this wait — the trial keeps running with its own revert timer; the output lands here when it finishes."
               >
                 hide this wait

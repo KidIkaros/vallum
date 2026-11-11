@@ -94,7 +94,7 @@ export function ServiceStrip({
         id="service-start-btn"
         size="sm"
         variant="outline"
-        className="h-7 px-2.5 text-xs"
+        className="h-7 px-2.5 text-xs uppercase"
         disabled={pending !== null || active === "active" || noUnit}
         title={noUnit ? "no systemd unit owns this interface — start it yourself" : "start the tunnel service"}
         onClick={() => void act("start")}
@@ -105,7 +105,7 @@ export function ServiceStrip({
         id="service-stop-btn"
         size="sm"
         variant="outline"
-        className={`h-7 px-2.5 text-xs ${confirmStop ? "border-fault/60 text-fault" : ""}`}
+        className={`h-7 px-2.5 text-xs uppercase ${confirmStop ? "border-fault/60 text-fault" : ""}`}
         disabled={pending !== null || active !== "active" || noUnit}
         title={
           noUnit
@@ -157,7 +157,7 @@ export function StoppedCard({
         </span>
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={pending !== null} onClick={() => void act("start")}>
+        <Button size="sm" className="uppercase" disabled={pending !== null} onClick={() => void act("start")}>
           {pending === "start" ? "Starting…" : "Start tunnel"}
         </Button>
         <code className="text-muted-foreground text-xs">sudo systemctl start {unit}</code>
@@ -200,7 +200,7 @@ export function LogsPanel() {
         <Button
           size="sm"
           variant="ghost"
-          className="ml-auto h-5 px-2 text-xs"
+          className="ml-auto h-5 px-2 text-xs uppercase"
           onClick={(event) => {
             event.preventDefault()
             load()

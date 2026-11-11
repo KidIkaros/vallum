@@ -33,7 +33,7 @@ export function ResultPanel({
             {command}
           </pre>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={() => void copy()}>
+            <Button size="sm" variant="outline" className="uppercase" onClick={() => void copy()}>
               {copied ? "copied" : "copy command"}
             </Button>
             <span className="text-muted-foreground text-xs">

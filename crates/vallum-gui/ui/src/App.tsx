@@ -170,8 +170,8 @@ function Hero({
         <div className="flex items-end gap-8">
           {(
             [
-              ["Download", rx, last.rx, "signal"] as const,
-              ["Upload", tx, last.tx, "violet"] as const,
+              ["DOWNLOAD", rx, last.rx, "signal"] as const,
+              ["UPLOAD", tx, last.tx, "violet"] as const,
             ]
           ).map(([label, rate, total, tone]) => (
             <div key={label} className="flex flex-col gap-1">
@@ -367,7 +367,7 @@ function PeerDetail({
           id="ping-peer-btn"
           size="sm"
           variant="outline"
-          className="h-7 px-2.5 text-xs"
+          className="h-7 px-2.5 text-xs uppercase"
           disabled={probing || peer.allowed_ips.length === 0}
           title={`ping ${peer.allowed_ips[0] ?? "the peer"}`}
           onClick={() => {
@@ -881,7 +881,7 @@ export default function App() {
                       <Button
                         variant="outline"
                         size="sm"
-                        className="micro"
+                        className="micro uppercase"
                         onClick={() => setPalette(true)}
                         title="command palette: verbs and peers in one box (: opens it, ⌘K works too)"
                       >
@@ -917,7 +917,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setComfortable((c) => !c)}
-              className="hover:text-foreground cursor-pointer rounded"
+              className="hover:text-foreground cursor-pointer rounded uppercase"
               title="Text size: comfortable raises controls and text above minimum touch targets"
             >
               text size: {comfortable ? "comfortable" : "compact"}
@@ -925,7 +925,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setShortcuts(true)}
-              className="hover:text-foreground cursor-pointer rounded"
+              className="hover:text-foreground cursor-pointer rounded uppercase"
               title="Keyboard shortcuts (?) — experts keep their speed without forcing novices to memorize"
             >
               shortcuts
