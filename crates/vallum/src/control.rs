@@ -61,7 +61,10 @@ const MAX_REQUEST: usize = 16 * 1024 * 1024;
 /// line (~4.7 KB). This is the relation that broke at thirteen peers, so it is
 /// asserted rather than remembered: a cap below the product's own peer target
 /// is a defect that only appears in someone's rollout.
-const _: () = assert!(MAX_REQUEST >= 2_000 * 4_900, "MAX_REQUEST cannot carry the peer target");
+const _: () = assert!(
+    MAX_REQUEST >= 2_000 * 4_900,
+    "MAX_REQUEST cannot carry the peer target"
+);
 
 /// How long a client waits for a reply.
 ///
