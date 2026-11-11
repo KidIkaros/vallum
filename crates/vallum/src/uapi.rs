@@ -159,6 +159,9 @@ pub mod field {
     pub const VALLUM_DROPPED_MALFORMED: &str = "vallum_dropped_malformed";
     /// Datagrams dropped because the sender index matched no peer session.
     pub const VALLUM_DROPPED_UNKNOWN_INDEX: &str = "vallum_dropped_unknown_index";
+    /// Datagrams refused by the per-source admission bucket before reassembly:
+    /// a source that is not a configured peer, over its allowance (ADR-0030).
+    pub const VALLUM_FRAGMENTS_RATE_LIMITED: &str = "vallum_fragments_rate_limited";
     /// Initiations the responder dropped, by reason. Silent on the wire by
     /// design — an unauthenticated datagram gets no oracle — so these counters
     /// are the only account of a refusal. A server that receives an initiation
@@ -627,6 +630,10 @@ pub fn render_get(state: &DeviceState) -> String {
         (
             field::VALLUM_DROPPED_UNKNOWN_INDEX,
             stats.dropped_unknown_index,
+        ),
+        (
+            field::VALLUM_FRAGMENTS_RATE_LIMITED,
+            stats.fragments_rate_limited,
         ),
         (
             field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,

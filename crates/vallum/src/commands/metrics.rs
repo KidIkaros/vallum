@@ -289,6 +289,11 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             "Fragments refused or half-assembled messages abandoned.",
         ),
         (
+            uapi::field::VALLUM_FRAGMENTS_RATE_LIMITED,
+            "fragments_rate_limited_total",
+            "Datagrams refused by the per-source admission bucket before reassembly.",
+        ),
+        (
             uapi::field::VALLUM_DROPPED_MALFORMED,
             "loop_dropped_malformed_total",
             "Datagrams dropped because they did not parse as a transport message.",

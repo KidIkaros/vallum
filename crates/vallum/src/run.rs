@@ -33,7 +33,7 @@
 //! The count is advisory and can be wrong for one tick; it exists to make the
 //! device's own fail-closed behaviour engage, not to be a measurement.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -163,6 +163,7 @@ pub struct SharedStats {
     fragments_dropped: AtomicU64,
     dropped_malformed: AtomicU64,
     dropped_unknown_index: AtomicU64,
+    fragments_rate_limited: AtomicU64,
 }
 
 impl SharedStats {
@@ -185,6 +186,8 @@ impl SharedStats {
             .store(stats.dropped_malformed, Ordering::Relaxed);
         self.dropped_unknown_index
             .store(stats.dropped_unknown_index, Ordering::Relaxed);
+        self.fragments_rate_limited
+            .store(stats.fragments_rate_limited, Ordering::Relaxed);
     }
 
     /// Read every counter as one [`LoopStats`].
@@ -201,6 +204,7 @@ impl SharedStats {
             fragments_dropped: self.fragments_dropped.load(Ordering::Relaxed),
             dropped_malformed: self.dropped_malformed.load(Ordering::Relaxed),
             dropped_unknown_index: self.dropped_unknown_index.load(Ordering::Relaxed),
+            fragments_rate_limited: self.fragments_rate_limited.load(Ordering::Relaxed),
         }
     }
 }
@@ -228,6 +232,9 @@ pub struct LoopStats {
     pub dropped_malformed: u64,
     /// Datagrams dropped because the sender index matched no session.
     pub dropped_unknown_index: u64,
+    /// Datagrams refused by the per-source admission bucket before reassembly:
+    /// sources that are not a configured peer, over their allowance (ADR-0030).
+    pub fragments_rate_limited: u64,
 }
 
 /// Everything the loop needs from the operating system.
@@ -432,6 +439,83 @@ mod outbound_source_tests {
     }
 }
 
+/// Per-source admission for datagrams from sources that are not a peer.
+///
+/// A captured fragment replayed at line rate costs the responder ~26 µs of its
+/// only loop thread per packet, and nothing about it can be authenticated before
+/// reassembly — an initiation is itself fragmented (ADR-0030). The bucket gives
+/// a stranger an allowance and refuses the rest, counted, so a flood reads as a
+/// symptom instead of silence.
+///
+/// Two generations rather than one map: when the current generation is full the
+/// previous one is dropped and the current becomes previous. That is an O(1)
+/// approximation of least-recently-seen eviction, which matters because the case
+/// it defends against is the one where every packet carries a new source.
+struct Admission {
+    current: HashMap<std::net::IpAddr, Bucket>,
+    previous: HashMap<std::net::IpAddr, Bucket>,
+}
+
+#[derive(Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    last_ms: u64,
+}
+
+/// One full initiation is ~20 fragments; a peer's first contact must fit.
+const ADMISSION_BURST: f64 = 64.0;
+/// Per source, per second, once the burst is spent.
+const ADMISSION_PER_SECOND: f64 = 50.0;
+/// Distinct sources tracked per generation.
+const ADMISSION_SOURCES: usize = 4096;
+
+impl Admission {
+    fn new() -> Self {
+        Self {
+            current: HashMap::new(),
+            previous: HashMap::new(),
+        }
+    }
+
+    /// Whether a datagram from `source` may be parsed now.
+    fn allow(&mut self, source: std::net::IpAddr, now_ms: u64) -> bool {
+        if let Some(bucket) = self.current.get_mut(&source) {
+            return bucket.take(now_ms);
+        }
+        // Seen in the previous generation: keep its allowance rather than
+        // granting a fresh burst on every sweep.
+        if let Some(bucket) = self.previous.get_mut(&source) {
+            let allowed = bucket.take(now_ms);
+            self.current.insert(source, *bucket);
+            return allowed;
+        }
+        if self.current.len() >= ADMISSION_SOURCES {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        let mut bucket = Bucket {
+            tokens: ADMISSION_BURST,
+            last_ms: now_ms,
+        };
+        let allowed = bucket.take(now_ms);
+        self.current.insert(source, bucket);
+        allowed
+    }
+}
+
+impl Bucket {
+    fn take(&mut self, now_ms: u64) -> bool {
+        let elapsed = now_ms.saturating_sub(self.last_ms) as f64;
+        self.tokens = (self.tokens + elapsed * ADMISSION_PER_SECOND / 1000.0).min(ADMISSION_BURST);
+        self.last_ms = now_ms;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub fn run(
     device: Device,
     attached: Attached,
@@ -532,6 +616,9 @@ pub fn run(
     // so `datagrams_failed` stays 0), nothing comes back, and the daemon looks
     // perfectly healthy from the inside.
     let mut silent: HashSet<usize> = HashSet::new();
+    // Admission for strangers, before any parsing (ADR-0030).
+    let mut admission = Admission::new();
+    let mut rate_limited: u64 = 0;
     let mut last_control_check = Instant::now();
 
     loop {
@@ -578,6 +665,7 @@ pub fn run(
                 // the request handler takes its snapshot.
                 stats.reassembled = segments.reassembled();
                 stats.fragments_dropped = segments.dropped();
+                stats.fragments_rate_limited = rate_limited;
                 stats.dropped_malformed = device.dropped_malformed();
                 stats.dropped_unknown_index = device.dropped_unknown_index();
                 shared_stats.publish(&stats);
@@ -638,12 +726,24 @@ pub fn run(
             }
             Ok(Input::Datagram(source, bytes)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
-                // A fragment is held here; only a whole message is an event. The
-                // loop still ticks, which is what expires a half-assembled
-                // message that never finished.
-                segments
-                    .inbound(clock.monotonic_ms(), source, bytes)
-                    .map(|bytes| Event::Datagram { source, bytes })
+                // A configured peer's traffic is exempt: its fragments are the
+                // tunnel's own, and a bucket a peer trips is worse than none.
+                // Everything else gets an allowance before it is parsed, because
+                // a replayed fragment costs this loop 26 µs and its sender
+                // nothing (ADR-0030).
+                if !device.owns_endpoint(source)
+                    && !admission.allow(source.ip(), clock.monotonic_ms())
+                {
+                    rate_limited = rate_limited.saturating_add(1);
+                    None
+                } else {
+                    // A fragment is held here; only a whole message is an event.
+                    // The loop still ticks, which is what expires a half-assembled
+                    // message that never finished.
+                    segments
+                        .inbound(clock.monotonic_ms(), source, bytes)
+                        .map(|bytes| Event::Datagram { source, bytes })
+                }
             }
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -809,6 +909,7 @@ pub fn run(
     }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();
+    stats.fragments_rate_limited = rate_limited;
     stats.dropped_malformed = device.dropped_malformed();
     stats.dropped_unknown_index = device.dropped_unknown_index();
 
@@ -966,6 +1067,39 @@ mod tests {
         // first signal of a flood becomes a blocked producer instead of a
         // cookie.
         const { assert!(QUEUE_CAPACITY >= DEFAULT_UNDER_LOAD_DEPTH * 4) };
+    }
+
+    #[test]
+    fn the_admission_bucket_grants_a_burst_then_refuses() {
+        // Sized so one full initiation (~20 fragments) and a peer's first
+        // contact fit; past that a stranger is refused until it refills.
+        let mut admission = super::Admission::new();
+        let source = "198.51.100.7".parse().expect("an address");
+        let allowed = (0..64).filter(|_| admission.allow(source, 1_000)).count();
+        assert_eq!(allowed, 64, "the burst must be granted in full");
+        assert!(
+            !admission.allow(source, 1_000),
+            "past the burst, at the same instant, it must refuse"
+        );
+        // A second later the refill is 50 packets.
+        let refilled = (0..50).filter(|_| admission.allow(source, 2_000)).count();
+        assert_eq!(refilled, 50, "the bucket must refill at its stated rate");
+        assert!(!admission.allow(source, 2_000), "and then refuse again");
+    }
+
+    #[test]
+    fn the_admission_bucket_is_per_source() {
+        let mut admission = super::Admission::new();
+        let attacker = "198.51.100.7".parse().expect("an address");
+        let peer = "203.0.113.9".parse().expect("an address");
+        for _ in 0..64 {
+            admission.allow(attacker, 1_000);
+        }
+        assert!(!admission.allow(attacker, 1_000));
+        assert!(
+            admission.allow(peer, 1_000),
+            "one source exhausting its allowance must not touch another's"
+        );
     }
 
     #[test]

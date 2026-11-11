@@ -847,6 +847,15 @@ impl Device {
         self.dropped_unknown_index
     }
 
+    /// Whether `source` is a configured peer's endpoint.
+    ///
+    /// The loop asks this to exempt a peer's own traffic from the per-source
+    /// admission bucket: a bucket that a peer trips is worse than no bucket.
+    #[must_use]
+    pub fn owns_endpoint(&self, source: std::net::SocketAddr) -> bool {
+        self.peer_owning_endpoint(source).is_some()
+    }
+
     /// Initiations this responder dropped, by reason.
     ///
     /// The reasons are silent on the wire, so this is the only way an operator
