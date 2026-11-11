@@ -56,6 +56,14 @@ export function ServiceStrip({
   attached?: boolean
 }) {
   const { pending, act } = useServiceAction(onChanged)
+  // Stopping takes the tunnel away from every user of this machine, so the
+  // button asks once, names the effect, and disarms itself after 4 s.
+  const [confirmStop, setConfirmStop] = useState(false)
+  useEffect(() => {
+    if (!confirmStop) return
+    const timer = window.setTimeout(() => setConfirmStop(false), 4000)
+    return () => window.clearTimeout(timer)
+  }, [confirmStop])
   const active = service?.active ?? "unknown"
   // A daemon can run with no unit behind it (a lab, a hand-run process).
   // Offering START for a unit that does not exist is a button that cannot work.
@@ -95,12 +103,25 @@ export function ServiceStrip({
       <Button
         size="sm"
         variant="outline"
-        className="h-6 px-2 text-[10px]"
+        className={`h-6 px-2 text-[10px] ${confirmStop ? "border-fault/60 text-fault" : ""}`}
         disabled={pending !== null || active !== "active" || noUnit}
-        title={noUnit ? "no systemd unit owns this interface" : undefined}
-        onClick={() => void act("stop")}
+        title={
+          noUnit
+            ? "no systemd unit owns this interface"
+            : confirmStop
+              ? "click again: the tunnel stops and traffic returns to the physical interface"
+              : "stops the tunnel; traffic returns to the physical interface"
+        }
+        onClick={() => {
+          if (!confirmStop) {
+            setConfirmStop(true)
+            return
+          }
+          setConfirmStop(false)
+          void act("stop")
+        }}
       >
-        {pending === "stop" ? "…" : "STOP"}
+        {pending === "stop" ? "…" : confirmStop ? "CONFIRM STOP" : "STOP"}
       </Button>
     </span>
   )

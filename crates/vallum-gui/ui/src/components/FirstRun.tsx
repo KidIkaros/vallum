@@ -19,17 +19,18 @@ function stepsFor(preflight: Preflight | null): Step[] {
   const installed = preflight.vallum && preflight.quick
   return [
     {
-      title: "preview the install",
-      detail: "prints every action and changes nothing",
-      command: "sudo scripts/install.sh --dry-run",
-      // A preview is never "done": it is a thing to run before the others.
-      done: false,
-    },
-    {
       title: "install",
-      detail: "binaries, units, the socket directory and the recovery tools",
+      detail: "binaries, units, the socket directory and the recovery tools — preview it first with --dry-run",
       command: "sudo scripts/install.sh --local --install-only",
       done: installed && preflight.unit && preflight.panic,
+    },
+    {
+      title: "join a server",
+      detail: "paste the ticket the server printed with `vallum peer invite <name>`",
+      command: "sudo vallum join <ticket>",
+      // The join writes the config and its key; a config we cannot see still
+      // counts as present (the file may be root-only and that is correct).
+      done: preflight.config !== false,
     },
     {
       title: "start the tunnel",
