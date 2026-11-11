@@ -29,10 +29,10 @@ pub fn refresh(app: &mut App) {
                 .as_deref()
                 .and_then(systemd_service_state);
             interface.set_service_state(state);
-            let guard = interface
-                .config_path
-                .as_deref()
-                .and_then(|config| unit_state(config, "vallum-guard"));
+            // The unit name needs only the interface name: the config may be
+            // root-only and unreadable to the operator, but the guard's state
+            // is not a secret.
+            let guard = unit_state(&interface.name, "vallum-guard");
             interface.set_guard_state(guard);
         }
     }
@@ -41,12 +41,11 @@ pub fn refresh(app: &mut App) {
 }
 
 fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {
-    unit_state(config, "vallum@")
+    unit_state(config.file_stem()?.to_str()?, "vallum@")
 }
 
-/// The state of `prefix{stem}.service` for a config file's interface.
-fn unit_state(config: &std::path::Path, prefix: &str) -> Option<ServiceState> {
-    let stem = config.file_stem()?.to_str()?;
+/// The state of `prefix{stem}.service` for an interface name.
+fn unit_state(stem: &str, prefix: &str) -> Option<ServiceState> {
     let unit = format!("{prefix}{stem}.service");
     let output = Command::new("systemctl")
         .args(["--no-ask-password", "is-active", &unit])

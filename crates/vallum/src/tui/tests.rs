@@ -209,6 +209,44 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
 }
 
 #[test]
+fn the_guard_pill_appears_only_when_full_tunnel_is_armed() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn frame(egress: &str, guard: Option<super::app::ServiceState>) -> String {
+        let mut interface = super::app::Interface::new(
+            "vallum0".to_owned(),
+            None,
+            std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+        );
+        interface.set_device(super::app::DeviceView {
+            interface: "vallum0".to_owned(),
+            egress: egress.to_owned(),
+            ..super::app::DeviceView::default()
+        });
+        interface.set_service_state(Some(super::app::ServiceState::Active));
+        interface.set_guard_state(guard);
+        let app = App::new(vec![interface]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+        terminal
+            .draw(|f| super::ui::draw(f, &app))
+            .expect("draw dashboard");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    // Full tunnel armed: the guard's state is shown, both ways.
+    assert!(frame("full", Some(super::app::ServiceState::Active)).contains("GUARD ON"));
+    assert!(frame("full", Some(super::app::ServiceState::Inactive)).contains("GUARD OFF"));
+    // Split: the guard is not needed, so no pill at all.
+    assert!(!frame("split", Some(super::app::ServiceState::Active)).contains("GUARD"));
+}
+
+#[test]
 fn handshake_freshness_labels_use_documented_boundaries() {
     use super::app::HandshakeFreshness;
 

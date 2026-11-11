@@ -93,7 +93,9 @@ sed -i 's/^allowed_ips = .*/allowed_ips = ["0.0.0.0\/0"]/' "${CONF}.work"
 if grep -q '^fwmark' "${CONF}.work"; then
     sed -i 's/^fwmark.*/fwmark = 51820/' "${CONF}.work"
 else
-    sed -i '0,/^\[peer\]/s//fwmark = 51820\n[peer]/' "${CONF}.work"
+    # Peers are [[peer]] array-of-tables, so anchor on [interface] instead:
+    # fwmark belongs in that table and the header always exists.
+    sed -i '0,/^\[interface\]/s//[interface]\nfwmark = 51820/' "${CONF}.work"
 fi
 # DNS rides the tunnel: quick attaches the resolver to the tunnel link.
 grep -q '^\[quick\]' "${CONF}.work" || printf '\n[quick]\ndns = ["1.1.1.1"]\n' >> "${CONF}.work"

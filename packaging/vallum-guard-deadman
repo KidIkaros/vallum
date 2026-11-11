@@ -37,6 +37,11 @@ logger -t vallum-deadman "tunnel dead 3 checks running — removing the egress b
 /usr/bin/vallum policy off --config "$CONF" >/dev/null 2>&1
 nft delete table inet vallum_policy >/dev/null 2>&1
 rm -f "$STATE"
+# Leave honest state: a guard unit that says active while its block is gone
+# reads as protection and is not (v6 leaks through the hole, and the console
+# shows a green guard). Stop it; the operator decides whether to re-arm.
+systemctl stop "vallum-guard@$IFACE" >/dev/null 2>&1 || true
+logger -t vallum-deadman "guard stopped — egress is open until re-armed"
 # If the tunnel's attach had rewritten the resolver, put the old one back: a
 # broken DNS is the failure mode that survives a power cycle.
 BAK=/run/vallum/$IFACE.resolv.conf.bak
