@@ -31,6 +31,8 @@ pub(crate) struct HostFacts {
     /// What the config says this host should be doing: a peer with 0.0.0.0/0
     /// means full tunnel was armed; anything else is split by design.
     pub expected_full: bool,
+    /// The daemon's build hash, for fleet-parity display.
+    pub build: String,
     /// When the unit last went inactive — systemd's own record, so "how long
     /// has this machine been unprotected" is measured, not guessed.
     pub down_since: Option<String>,
@@ -66,9 +68,15 @@ impl HostFacts {
 /// Read the host: routes, resolvers, unit state, the last death.
 pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
     // The daemon decides the expected mode (vallum_egress) — one source.
-    let expected_full = crate::snapshot::fetch(socket)
+    let snap = crate::snapshot::fetch(socket).ok();
+    let expected_full = snap
+        .as_ref()
         .map(|snap| snap.expected_egress == "full")
         .unwrap_or(false);
+    let build = snap
+        .as_ref()
+        .map(|snap| snap.build.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
     let unit = crate::unit_for(socket);
     let interface = socket
         .file_stem()
@@ -129,6 +137,7 @@ pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
         quick_active: crate::systemctl(&["is-active", &quick])
             .unwrap_or_else(|| "unknown".to_owned()),
         expected_full,
+        build,
         unit_active: crate::systemctl(&["is-active", &unit])
             .unwrap_or_else(|| "unknown".to_owned()),
         interface_present: std::path::Path::new(&format!("/sys/class/net/{interface}")).exists(),
@@ -179,6 +188,7 @@ pub(crate) fn health_json(facts: &HostFacts) -> serde_json::Value {
         },
         "unit_active": facts.unit_active,
         "expected_full": facts.expected_full,
+        "build": facts.build,
         "interface_present": facts.interface_present,
         "down_since": facts.down_since,
     })
@@ -317,6 +327,7 @@ mod plan_tests {
             quick_active: "inactive".to_owned(),
             unit_active: "inactive".to_owned(),
             expected_full: false,
+            build: "test".to_owned(),
             interface_present: true,
             down_since: None,
         }

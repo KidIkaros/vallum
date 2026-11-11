@@ -135,6 +135,33 @@ pub fn resolve(
 /// [`Error::Privileges`] if any system call fails, or if the verification after
 /// them disagrees with the target. The daemon must not continue in that case.
 #[cfg(target_os = "linux")]
+/// Pin currently-mapped pages so key material cannot be written to swap.
+///
+/// Called before the privilege drop: `mlockall` needs `RLIMIT_MEMLOCK`, which
+/// a dropped daemon may not have. `MCL_CURRENT` only, deliberately — MOOR's
+/// note applies here too: `MCL_FUTURE` fights pthread stack allocation under
+/// typical memlock limits.
+///
+/// Best-effort by design: a host with a tiny memlock limit should warn, not
+/// refuse to run the tunnel.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)] // mlockall has no safe wrapper; see the SAFETY note.
+pub fn lock_memory() -> Result<(), String> {
+    // SAFETY: mlockall takes no pointers and cannot violate memory safety; a
+    // failure is reported through errno.
+    let result = unsafe { libc::mlockall(libc::MCL_CURRENT) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().to_string())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lock_memory() -> Result<(), String> {
+    Err("mlockall is only implemented for Linux".to_owned())
+}
+
 pub fn drop_to(privileges: &Privileges) -> Result<(), Error> {
     use nix::unistd::{getegid, geteuid, setgid, setgroups, setuid, Gid, Uid};
 

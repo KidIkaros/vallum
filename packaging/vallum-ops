@@ -24,6 +24,54 @@ case "${1:-}" in
 full-tunnel)
     exec bash "$LIB/go-full-tunnel.sh"
     ;;
+enable)
+    # Boot persistence: the tunnel comes up after every power-up, in the
+    # config's current mode (split unless the operator applied the full tunnel).
+    # The restore floor (vallum-cleanup) runs before it by unit ordering.
+    systemctl enable "vallum@$IFACE"
+    systemctl is-enabled "vallum@$IFACE"
+    ;;
+disable)
+    # Nothing Vallum starts at boot. quick/guard are session units: an enabled
+    # guard installs the egress block before any tunnel exists — the outage
+    # class this project already paid for once.
+    systemctl disable "vallum@$IFACE" "vallum-quick@$IFACE" "vallum-guard@$IFACE" 2>/dev/null || true
+    for u in vallum@$IFACE vallum-quick@$IFACE vallum-guard@$IFACE; do
+        if systemctl is-enabled --quiet "$u" 2>/dev/null; then
+            printf '  %s: enabled\n' "$u"
+        else
+            printf '  %s: disabled\n' "$u"
+        fi
+    done
+    ;;
+trace)
+    # Phase 2's deferred diagnostic: name the openat that the seccomp filter
+    # EPERMs under load. Bounded at 60 s, read-only attach, output kept.
+    pid=$(systemctl show -p MainPID --value "vallum@$IFACE")
+    [ -n "$pid" ] && [ "$pid" != "0" ] || { echo "daemon not running" >&2; exit 1; }
+    echo "tracing openat on pid $pid for 60 s under load..."
+    # strace's own stderr goes into the log: a silent tracer that attaches to
+    # nothing is worse than no tracer.
+    timeout 60 strace -f -p "$pid" -e trace=openat -o /tmp/vallum-openat.log 2>>/tmp/vallum-openat.log &
+    tracer=$!
+    sleep 2
+    # Load: the profile that historically triggered it — bulk transfer through
+    # the tunnel plus the console's polling (already running).
+    # The dispatcher runs as root: root has no ssh config, so the key and port
+    # are explicit here. The transfer must be real — an idle-daemon trace
+    # answers nothing.
+    load=$(timeout 50 ssh -p 2222 -i /home/ikaaros/.ssh/id_ed25519_basanite_vps \
+        -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        buffy@10.7.0.1 'dd if=/dev/zero bs=1M count=150 2>/dev/null' 2>/dev/null | wc -c)
+    echo "load: $load bytes through the tunnel"
+    wait "$tracer" 2>/dev/null
+    total=$(grep -c 'openat(' /tmp/vallum-openat.log 2>/dev/null || echo 0)
+    failed=$(grep -cE 'openat\(.*= -1 ' /tmp/vallum-openat.log 2>/dev/null || echo 0)
+    echo "openat calls: $total, failed: $failed"
+    echo "--- the calls:"
+    grep 'openat(' /tmp/vallum-openat.log 2>/dev/null | sed 's/^/  /' | head -20
+    echo "--- full log: /tmp/vallum-openat.log"
+    ;;
 sync)
     # Deployment automation: make the host match the build under test, then
     # stop. Never runs the cleanup itself — the floor fires at boot only.
@@ -57,7 +105,7 @@ journal)
         --no-pager -o short-iso -n "${2:-40}"
     ;;
 *)
-    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]}" >&2
+    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]|enable|disable|trace|sync|self-update}" >&2
     exit 2
     ;;
 esac

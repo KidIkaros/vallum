@@ -17,6 +17,10 @@ StartLimitBurst=3
 # 2026-11-11 server outage). Heal it on every start; the helper reads the
 # group from the config itself.
 ExecStartPre=+/usr/local/sbin/vallum-heal-runtime-dir /etc/vallum/%i.toml
+# systemd's default RLIMIT_MEMLOCK (64K) makes mlockall(MCL_CURRENT) fail, so
+# key pages silently stay swappable. Pin them: MOOR's memory hygiene needs the
+# limit raised, not just the syscall.
+LimitMEMLOCK=infinity
 
 Type=notify
 ExecStart=/usr/bin/vallum run --config /etc/vallum/%i.toml

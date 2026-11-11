@@ -23,6 +23,9 @@ vallum-crypto-sdk.workspace = true
 vallum-tunnel.workspace = true
 vallum-config = { path = "../vallum-config" }
 ipnet.workspace = true
+# One syscall std does not expose: mlockall(MCL_CURRENT) pins the pages that
+# hold key material so they cannot reach swap. MOOR's memory hygiene, adopted.
+libc = "0.2"
 
 # Configuration is the operator's surface, so the parser is a hard dependency
 # rather than a hand-rolled one: a mis-parse here is a security bug.

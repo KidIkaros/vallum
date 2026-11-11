@@ -64,6 +64,50 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_warn!(log, "{warning}");
     }
 
+    // A peer whose endpoint is one of this host's own addresses cannot carry a
+    // tunnel through itself — the packets would loop back into the interface
+    // they left. This is the class that bit the lab (a host-network container
+    // seeding routes to itself); the config now refuses instead of failing
+    // mysteriously later.
+    {
+        let own = crate::net::local_addresses();
+        for peer in &resolved.peers {
+            let Some(endpoint) = peer.endpoint() else {
+                continue;
+            };
+            let host = endpoint.ip().to_string();
+            if own.iter().any(|address| address == &host) {
+                return Err(Error::Precondition(format!(
+                    "peer `{}` endpoint {endpoint} is this host's own address — a tunnel \
+                     cannot carry through itself",
+                    peer.name()
+                )));
+            }
+        }
+    }
+
+    // A peer whose endpoint is one of this host's own addresses cannot carry a
+    // tunnel through itself — the packets would loop back into the interface
+    // they left. This is the class that bit the lab (a host-network container
+    // seeding routes to itself); the config now refuses instead of failing
+    // mysteriously later.
+    {
+        let own = crate::net::local_addresses();
+        for peer in &resolved.peers {
+            let Some(endpoint) = peer.endpoint() else {
+                continue;
+            };
+            let host = endpoint.ip().to_string();
+            if own.iter().any(|address| address == &host) {
+                return Err(Error::Precondition(format!(
+                    "peer `{}` endpoint {endpoint} is this host's own address — a tunnel \
+                     cannot carry through itself",
+                    peer.name()
+                )));
+            }
+        }
+    }
+
     let clock = Arc::new(SystemClock::new());
     let mut rng = entropy::OsRng::new();
 
@@ -144,6 +188,12 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     // and the key has been read. From here the daemon needs no more than the two
     // file descriptors it already holds, so it sheds what it was started with.
     if let Some(privileges) = &resolved.privileges {
+        // Pin key pages before the drop: after setuid the memlock limit may be
+        // gone. A failure warns — an unpinned key is worse than a warning, and
+        // a tunnel that refuses to start over mlock is worse than both.
+        if let Err(error) = privileges::lock_memory() {
+            log_warn!(log, "cannot pin key material in memory (mlockall): {error}");
+        }
         privileges::drop_to(privileges)?;
         log_info!(log, "dropped privileges to {}", privileges.describe());
         // Before any thread exists: the control server, the readers, and the

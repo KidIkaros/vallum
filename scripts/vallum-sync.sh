@@ -24,7 +24,8 @@ for b in vallum vallum-quick; do
 done
 
 for u in vallum@.service vallum-quick@.service vallum-guard@.service \
-    vallum-deadman@.service vallum-deadman@.timer vallum-cleanup.service; do
+    vallum-deadman@.service vallum-deadman@.timer vallum-cleanup.service \
+    vallum-netlink-watch.service; do
     if ! cmp -s "$REPO/packaging/$u" "/etc/systemd/system/$u"; then
         echo "sync: unit $u is stale — updating"
         install -m 644 "$REPO/packaging/$u" "/etc/systemd/system/$u"
@@ -63,6 +64,9 @@ fi
 
 # The restore floor: enabled at install, fires at boot only.
 systemctl enable vallum-cleanup >/dev/null 2>&1 && echo "sync: vallum-cleanup enabled"
+# The link-event recorder is read-only and harmless: start it here because the
+# operator's sudoers rule does not cover it.
+systemctl enable --now vallum-netlink-watch >/dev/null 2>&1 && echo "sync: link-event recorder running"
 
 echo "sync complete ($([ "$CHANGES" = 1 ] && echo 'changes applied' || echo 'host already current'))"
 systemctl is-enabled vallum-cleanup 2>/dev/null | sed 's/^/  cleanup unit: /'

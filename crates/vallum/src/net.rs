@@ -1013,6 +1013,36 @@ fn poisoned<T>(_: T) -> io::Error {
 /// operator who already knew the number, which is not the same as discovering
 /// it.
 #[cfg(target_os = "linux")]
+/// Every IP address this host currently holds, CIDR stripped.
+///
+/// The same `ip -o addr` shell-out the health probes use: std has no
+/// `getifaddrs`, and a wrong answer here would refuse a legitimate config.
+pub fn local_addresses() -> Vec<String> {
+    let output = match std::process::Command::new("ip")
+        .args(["-o", "addr", "show"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // "2: eth0    inet 10.0.0.2/24 brd ..." — the address is the token
+            // after inet/inet6.
+            let mut fields = line.split_whitespace();
+            let mut previous = "";
+            for field in fields.by_ref() {
+                if previous == "inet" || previous == "inet6" {
+                    return field.split('/').next().map(str::to_owned);
+                }
+                previous = field;
+            }
+            None
+        })
+        .collect()
+}
+
 pub fn path_mtu(endpoint: SocketAddr) -> io::Result<u16> {
     let any = SocketAddr::new(
         if endpoint.is_ipv4() {

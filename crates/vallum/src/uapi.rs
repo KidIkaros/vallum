@@ -59,6 +59,10 @@ pub mod field {
     /// 0.0.0.0/0 (or ::/0) through the tunnel, `split` otherwise. The one
     /// place this decision is made; every surface reads it.
     pub const VALLUM_EGRESS: &str = "vallum_egress";
+    /// The build this daemon came from (git hash). Two ends on different
+    /// builds are a fleet-parity problem; this makes it visible instead of
+    /// discovered by a mismatched behaviour.
+    pub const VALLUM_BUILD: &str = "vallum_build";
     /// Device and peer.
     pub const VALLUM_PUBLIC_LINE: &str = "vallum_public_line";
     /// Device and peer.
@@ -543,6 +547,11 @@ pub fn render_get(state: &DeviceState) -> String {
         "split"
     };
     out.push_str(&format!("{}={egress}\n", field::VALLUM_EGRESS));
+    out.push_str(&format!(
+        "{}={}\n",
+        field::VALLUM_BUILD,
+        env!("VALLUM_BUILD_ID")
+    ));
     out.push_str(&format!("{}={}\n", field::VALLUM_OFFLOAD, state.offload));
     out.push_str(&format!("{}={}\n", field::VALLUM_BATCHING, state.batching));
     for address in &state.addresses {

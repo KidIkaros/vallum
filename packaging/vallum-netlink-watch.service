@@ -1,0 +1,23 @@
+[Unit]
+Description=Vallum link-event recorder (attribution for interface churn)
+Documentation=man:vallum(8)
+# The 2026-11-10 interface deletion was never attributed: by the time anyone
+# looked, only the effects remained. This records every link event with a
+# timestamp and the kernel's view, so the next strike names its actor — the
+# journal interleaves with NetworkManager and tailscaled messages.
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c 'exec ip monitor link'
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vallum-link-watch
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

@@ -49,7 +49,10 @@ origin-crypto-sdk = { git = "https://github.com/KidIkaros/OriginSDK", tag = "v0.
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
-unsafe_code = "forbid"
+# Denied, not forbidden: `privileges::lock_memory` is the single justified
+# `unsafe` in the tree (mlockall has no safe wrapper) and allows it locally
+# with its own SAFETY note. `forbid` cannot be overridden, so this is `deny`.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

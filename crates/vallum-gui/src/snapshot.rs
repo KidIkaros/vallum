@@ -30,6 +30,8 @@ pub struct Snapshot {
     /// `full` when the daemon's peer allowlists route everything through the
     /// tunnel; the daemon decides, this just carries it.
     pub expected_egress: String,
+    /// The daemon's build (git hash) — fleet parity, visible.
+    pub build: String,
     pub peers: Vec<Peer>,
 }
 
@@ -111,6 +113,10 @@ impl Snapshot {
                 .to_owned(),
             offload: device(field::VALLUM_OFFLOAD) == Some("1"),
             batching: device(field::VALLUM_BATCHING) == Some("1"),
+            build: device(field::VALLUM_BUILD)
+                .map(str::to_owned)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "unknown".to_owned()),
             expected_egress: device(field::VALLUM_EGRESS)
                 .map(str::to_owned)
                 .filter(|value| !value.is_empty())

@@ -37,7 +37,10 @@
 //! is replaced, nothing in this crate changes except the one line that builds the
 //! suite.
 
-#![forbid(unsafe_code)]
+// Denied, not forbidden: `privileges::lock_memory` carries the single
+// justified `unsafe` (mlockall has no safe wrapper in std) and allows it
+// locally with its own SAFETY note. Everything else stays unsafe-free.
+#![deny(unsafe_code)]
 
 pub mod bundle;
 pub mod clock;
