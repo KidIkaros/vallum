@@ -2012,3 +2012,55 @@ fn a_restarted_server_reinitiates_when_a_client_keeps_sending() {
         "the tunnel re-established but carries no traffic"
     );
 }
+
+// ── the field failure: a client that gave up and never came back ─────
+
+/// Measured on the real link, 2026-11-11: the client established at epoch 123
+/// and then logged nothing for 71 minutes while `systemctl` said `active`, the
+/// interface stayed present and the server stayed reachable. The peer carries a
+/// 25 s persistent keepalive, which is supposed to dial when there is no
+/// session — so something between "the rekey gave up" and "dial again" is
+/// broken. This is the reproducer: the same outage, compressed to one process.
+#[test]
+fn a_client_whose_rekey_gave_up_dials_again_once_the_peer_returns() {
+    // A dials B, and keeps its path warm the way the deployed client does.
+    let mut net = net_full(
+        Vec::new(),
+        Shape::ROAMING,
+        Some(Duration::from_secs(25)),
+        None,
+    );
+    // A has something to send, so it dials B and the session comes up.
+    net.outbound(0, ipv4(A_IP, B_IP, b"ping"));
+    net.settle();
+    assert!(
+        net.hosts[0].established_once(),
+        "the session never came up at all"
+    );
+
+    // The server goes away for 200 s. The rekey attempts exhaust their budget
+    // (90 s) and the key expires (180 s); every datagram the client emits is
+    // dropped on the floor, which is what an unreachable peer does.
+    for _ in 0..40 {
+        net.advance(5_000);
+        let clock = net.clock();
+        let host = &mut net.hosts[0];
+        let _ = host.device.poll(clock, &mut host.rng);
+    }
+
+    // The server is back, and nobody touches the client. Time has to move:
+    // `pump` only delivers and ticks, and a frozen clock can never fire a timer
+    // — a recovery window that does not advance measures nothing.
+    let before = net.hosts[0].established.len();
+    for _ in 0..12 {
+        net.advance(1_000);
+        net.pump(4);
+    }
+
+    assert!(
+        net.hosts[0].established.len() > before,
+        "the client never re-established after the outage: established={:?} \
+         (the tunnel is dead until a human restarts it)",
+        net.hosts[0].established
+    );
+}
