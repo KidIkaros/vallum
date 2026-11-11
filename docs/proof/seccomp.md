@@ -287,3 +287,30 @@ mounted read-only, the two daemons in private network namespaces so no host
 interface was touched, and kernel auditing restored to `enabled 0` on the way
 out. The container image, the harness, and the positive-control probe are
 described in `docs/seccomp-audit-handoff.md`.
+
+
+## The missing syscall, named (2026-11-11)
+
+Phase 2's deferred diagnostic closed with `vallum-ops trace` (60 s strace of
+the running daemon under a real 150 MB transfer through the tunnel, console
+polling live):
+
+```
+openat(AT_FDCWD, "/proc/sys/vm/overcommit_memory", O_RDONLY|O_CLOEXEC) = -1 EPERM
+```
+
+**The file is `/proc/sys/vm/overcommit_memory`** — the allocator's lazy
+overcommit probe. It fires under memory pressure (bulk traffic), not at
+startup, which is why the startup trace never saw it and why the deaths
+needed load to reproduce.
+
+**Why it is harmless now:** the probe is optional — the allocator falls back
+to its default strategy on EPERM. Before the EPERM action shipped, the same
+call was a SIGSYS kill: one optional probe took the whole tunnel down.
+seccomp cannot filter by path (only by syscall number), so the honest choice
+is the one already made: deny openat wholesale and let this one probe degrade,
+rather than allow every file open to keep one probe happy.
+
+**Rationale, one line:** the daemon needs no file opens at runtime; the only
+openat it makes is a best-effort allocator probe whose failure is designed to
+be survivable — EPERM is the correct answer, and the filter stays closed.
