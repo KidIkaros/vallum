@@ -14,7 +14,12 @@ workspace = true
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:qrcode"]
+tui = ["dep:ratatui", "dep:crossterm", "qr"]
+# The frame codec behind the animated bundle QR, without the terminal UI:
+# consoles that render the code themselves (GUI canvas, HTTP clients) enable
+# `qr` and get the same `VALLUM1` frames the TUI animates. No new dependency
+# — `qrcode` was already in the lockfile for the TUI.
+qr = ["dep:qrcode"]
 
 [dependencies]
 vallum-core.workspace = true

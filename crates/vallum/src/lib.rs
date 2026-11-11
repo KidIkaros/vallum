@@ -59,6 +59,8 @@ pub mod net;
 pub mod notify;
 pub mod policy;
 pub mod privileges;
+#[cfg(feature = "qr")]
+pub mod qr_frames;
 pub mod run;
 pub mod sandbox;
 pub mod style;
