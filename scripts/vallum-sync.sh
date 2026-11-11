@@ -41,7 +41,7 @@ for lib in trial.sh go-full-tunnel.sh; do
     fi
 done
 
-for tool in vallum-panic vallum-guard-deadman vallum-cleanup; do
+for tool in vallum-panic vallum-guard-deadman vallum-cleanup vallum-heal-runtime-dir; do
     if ! cmp -s "$REPO/packaging/$tool" "/usr/local/sbin/$tool"; then
         echo "sync: tool $tool is stale — updating"
         install -m 755 "$REPO/packaging/$tool" "/usr/local/sbin/$tool"

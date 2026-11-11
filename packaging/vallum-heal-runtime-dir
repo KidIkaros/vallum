@@ -1,0 +1,32 @@
+#!/bin/sh
+# vallum-heal-runtime-dir — make the runtime dir publishable by the dropping
+# daemon, using the group the config itself declares.
+#
+# Why this exists: /run/vallum's ownership drifts back to root:root whenever
+# systemd-tmpfiles re-applies its rule (boot, or any config-touching command
+# that runs tmpfiles) — and a dropping daemon then cannot publish its socket,
+# failing with "cannot tell whether it is in use: Permission denied". The
+# installer's one-time chgrp does not survive that. Healing at every unit
+# start does: this is ExecStartPre of vallum@.service, run with full
+# privileges before the daemon drops.
+#
+# Usage: vallum-heal-runtime-dir [config] [runtime-dir]
+set -u
+
+CONF=${1:-/etc/vallum/vallum0.toml}
+DIR=${2:-/run/vallum}
+
+[ -f "$CONF" ] || { echo "no config at $CONF" >&2; exit 0; }  # nothing to heal yet
+
+grp=$(sed -n 's/^group = //p' "$CONF" | head -n1 | tr -d '"')
+if [ -z "$grp" ]; then
+    usr=$(sed -n 's/^user = //p' "$CONF" | head -n1 | tr -d '"')
+    grp=$(id -gn "$usr" 2>/dev/null)
+fi
+
+install -d -m 0770 "$DIR"
+if [ -n "$grp" ]; then
+    chgrp "$grp" "$DIR" 2>/dev/null || true
+fi
+chmod 0770 "$DIR"
+exit 0

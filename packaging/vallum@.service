@@ -12,6 +12,12 @@ StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
+# The runtime dir's group drifts back to root whenever tmpfiles re-applies
+# its rule — and a dropping daemon then cannot publish its socket (the
+# 2026-11-11 server outage). Heal it on every start; the helper reads the
+# group from the config itself.
+ExecStartPre=+/usr/local/sbin/vallum-heal-runtime-dir /etc/vallum/%i.toml
+
 Type=notify
 ExecStart=/usr/bin/vallum run --config /etc/vallum/%i.toml
 Restart=on-failure

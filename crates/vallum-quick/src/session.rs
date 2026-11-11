@@ -35,11 +35,15 @@ const INTERFACE_POLL: Duration = Duration::from_millis(100);
 pub(crate) fn wait_for_interface(interface: &str) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + INTERFACE_WAIT;
     while Instant::now() < deadline {
+        // `ip` missing (not the interface) must say so: a swallowed spawn
+        // error becomes "interface did not appear" and sends the operator
+        // hunting a ghost.
         let status = Command::new("ip")
             .args(["link", "show", interface])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()?;
+            .status()
+            .map_err(|error| format!("cannot run `ip` ({error}) — is iproute2 installed?"))?;
         if status.success() {
             return Ok(());
         }

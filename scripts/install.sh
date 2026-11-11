@@ -388,7 +388,7 @@ install_docs() {
     # egress, and a dead-man that removes the block when the tunnel stops
     # carrying. Installing a fail-closed guard without these is a machine that
     # can lose its internet and need a human to fix it.
-    for tool in vallum-panic vallum-guard-deadman vallum-cleanup; do
+    for tool in vallum-panic vallum-guard-deadman vallum-cleanup vallum-heal-runtime-dir; do
         if [ -f "packaging/$tool" ]; then
             run install -D -m 0755 "packaging/$tool" "/usr/local/sbin/$tool"
         elif [ -f "$SOURCE_DIR/$tool" ]; then
@@ -398,6 +398,9 @@ install_docs() {
     # The console's privileged path and the full-tunnel deploy scripts ship
     # with the product: without them the plan-before-apply panel is a button
     # that prints a sudo error (see the premortem, 2026-11-11).
+    # vallum-quick shells out to `ip` for its interface gate; a machine
+    # without iproute2 would fail attach with a message blaming the interface.
+    run sh -c 'command -v ip >/dev/null || { echo "iproute2 is required (command ip not found)" >&2; exit 1; }'
     run install -d -m 0755 /usr/local/lib/vallum
     for lib in trial.sh go-full-tunnel.sh; do
         if [ -f "scripts/$lib" ]; then

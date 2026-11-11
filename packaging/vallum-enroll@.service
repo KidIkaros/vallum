@@ -13,8 +13,12 @@ RestartSec=2
 UMask=0077
 
 # It binds a high port and speaks UDP; nothing else is needed.
-CapabilityBoundingSet=
-AmbientCapabilities=
+# CAP_DAC_OVERRIDE is required: the responder must open the daemon's control
+# socket, which is 0600 owned by the drop user — root without the capability
+# is just a user the socket does not belong to (the same class as the
+# vallum-quick@ session-gate bug).
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
