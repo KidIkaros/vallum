@@ -45,9 +45,23 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The largest request the control plane will read.
 ///
-/// A request is a handful of short lines. Without a cap a client could stream
+/// A request is a handful of short lines — except `setconf`, which carries a
+/// whole configuration. That config is not small: a hybrid post-quantum public
+/// line is ~4.7 KB, so 64 KiB ran out at thirteen peers and the daemon closed
+/// the connection mid-write. The operator saw "Connection reset by peer" on the
+/// fourteenth device, with the file already edited and the daemon not.
+///
+/// The bound is now set by the peer target (2,000 peers × ~5 KB ≈ 10 MB) with
+/// headroom, because a cap below the product's own capacity claim is a bug that
+/// only shows up in someone's rollout. Without any cap a client could stream
 /// bytes at the serial loop until the process ran out of memory.
-const MAX_REQUEST: usize = 64 * 1024;
+const MAX_REQUEST: usize = 16 * 1024 * 1024;
+
+/// A `setconf` carries the whole config, and one peer costs a hybrid public
+/// line (~4.7 KB). This is the relation that broke at thirteen peers, so it is
+/// asserted rather than remembered: a cap below the product's own peer target
+/// is a defect that only appears in someone's rollout.
+const _: () = assert!(MAX_REQUEST >= 2_000 * 4_900, "MAX_REQUEST cannot carry the peer target");
 
 /// How long a client waits for a reply.
 ///
