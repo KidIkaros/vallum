@@ -512,6 +512,30 @@ fn a_client_that_restarts_re_establishes() {
 }
 
 #[test]
+fn a_stale_initiation_is_accepted_once_the_session_has_expired() {
+    // ADR-0031: the timestamp guard protects a session that exists. With none,
+    // a stale initiation is not a replay of anything and refusing it only locks
+    // out a peer whose clock stepped back — for as long as the skew lasts.
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    net.pump(1);
+    let init = net.hosts[0].sent.last().cloned().expect("an initiation");
+
+    // Past REJECT_AFTER_TIME: the responder's session is spent.
+    net.advance(200_000);
+
+    let before = net.hosts[1].device.handshake_drops();
+    net.hosts[1].inbox.push_back((endpoint(A_EP), init));
+    net.pump(2);
+    let after = net.hosts[1].device.handshake_drops();
+
+    assert_eq!(
+        after.stale, before.stale,
+        "with no live session there is nothing for the guard to protect"
+    );
+}
+
+#[test]
 fn a_restart_with_a_clock_that_did_not_move_is_refused_and_counted() {
     // The other half of the restart story. If the fresh client's first
     // initiation is not newer than the last one this responder accepted — a

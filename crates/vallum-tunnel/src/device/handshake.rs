@@ -106,8 +106,17 @@ impl Device {
         // (4) The timestamp, read-only. Committing here would let one forged
         //     `InitHello` lock the real peer out forever, because the guard would
         //     then reject the peer's own, genuine retransmission.
+        // (4) The timestamp, read-only. A stale stamp is only a replay risk
+        //     while this peer still has a session to replay into: with no live
+        //     session there is nothing to protect, and refusing would lock out a
+        //     client whose clock stepped backwards — a laptop resuming from
+        //     sleep, an NTP correction — for as long as the skew lasts, with no
+        //     way out but fixing the clock (ADR-0031). Bounded instead: the
+        //     refusal lasts until the session expires, at most one rekey.
         let stamp = Tai64n::from_bytes(*info.timestamp());
-        if self.peers[index].timestamp_guard.check(stamp).is_err() {
+        if self.peers[index].is_established()
+            && self.peers[index].timestamp_guard.check(stamp).is_err()
+        {
             self.handshake_drops.stale = self.handshake_drops.stale.saturating_add(1);
             return;
         }

@@ -32,3 +32,4 @@
 | [0028](0028-seccomp-filter.md) | A seccomp filter, derived from the daemon's own syscall surface | accepted (log mode) | 2026-11-08 |
 | [0029](0029-ops-trust-model.md) | Ops trust model — dev dispatcher vs production pinning | accepted for development | 2026-11-10 |
 | [0030](0030-fragment-admission-control.md) | Admission control on the fragment path, before reassembly | proposed | 2026-11-11 |
+| [0031](0031-stale-timestamp-scope.md) | A stale initiation is refused only while a session exists | accepted | 2026-11-11 |
