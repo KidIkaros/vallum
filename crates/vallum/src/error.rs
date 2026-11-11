@@ -118,6 +118,30 @@ pub enum Error {
     Sandbox(String),
 }
 
+/// Why a readable-looking file is not readable by the daemon.
+///
+/// The service runs with a narrow capability bounding set, which means no
+/// CAP_DAC_OVERRIDE: root is only root for files it owns. An operator who
+/// copies a config in as their own user gets a bare "Permission denied" that
+/// looks like a bug in the daemon rather than an ownership mistake.
+fn permission_hint(path: &std::path::Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => format!(
+            "`{}` is mode {:o}, owned by uid {} gid {}. The daemon runs without \
+             CAP_DAC_OVERRIDE, so it can only read files owned by the user it runs as \
+             (root). Fix it with `sudo chown root:root {} && sudo chmod 600 {}`.",
+            path.display(),
+            meta.mode() & 0o777,
+            meta.uid(),
+            meta.gid(),
+            path.display(),
+            path.display()
+        ),
+        Err(_) => "the file is not readable by the user the daemon runs as".to_owned(),
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -139,7 +163,17 @@ impl fmt::Display for Error {
                 action,
                 path,
                 source,
-            } => write!(f, "{action} `{}`: {source}", path.display()),
+            } => {
+                write!(f, "{action} `{}`: {source}", path.display())?;
+                // The unit's CapabilityBoundingSet drops CAP_DAC_OVERRIDE, so the
+                // daemon is subject to ordinary file permissions even as root: a
+                // config owned by anyone else is unreadable, and "Permission
+                // denied" names the symptom but not the one thing to change.
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    write!(f, "\n  hint: {}", permission_hint(path))?;
+                }
+                Ok(())
+            }
             Self::Toml { path, source } => {
                 write!(f, "{}: {source}", path.display())
             }
