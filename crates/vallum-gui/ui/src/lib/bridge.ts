@@ -109,6 +109,9 @@ export interface Health {
   dns: string[]
   dns_via_tunnel: boolean
   dns_upstream?: string[]
+  unit_active?: string
+  interface_present?: boolean
+  down_since?: string | null
   restarts: number
   last_death: string
   guard: { unit: string; active: string }

@@ -127,9 +127,12 @@ export function HealthPanel({ health }: { health: Health | null }) {
       {!v4 && (
         <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
           <span className="text-fault text-[11px]">
-            {health.guard.active === "active"
-              ? "the guard is blocking egress and traffic is not going through the tunnel"
-              : "traffic is leaving this host outside the tunnel"}
+            {health.unit_active === "active" && health.interface_present === false
+              ? "the daemon is running but its interface is gone — the dead-man has restored your internet; restart the tunnel"
+              : health.guard.active === "active"
+                ? "the guard is blocking egress and traffic is not going through the tunnel"
+                : "traffic is leaving this host outside the tunnel"}
+            {health.down_since ? ` — unprotected since ${health.down_since}` : ""}
           </span>
           <PanicButton compact />
         </div>

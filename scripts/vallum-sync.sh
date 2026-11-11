@@ -49,6 +49,14 @@ for tool in vallum-panic vallum-guard-deadman vallum-cleanup; do
     fi
 done
 
+# Server-init backups of the enroll unit accumulate forever; the live unit
+# ships with the installer, so every dated backup is a leftover.
+bak_left=$(ls /etc/systemd/system/vallum-*.bak.* 2>/dev/null | wc -l)
+if [ "$bak_left" -gt 0 ]; then
+    rm -f /etc/systemd/system/vallum-*.bak.*
+    echo "sync: removed $bak_left dated unit backups"
+fi
+
 if [ "$CHANGES" = 1 ]; then
     systemctl daemon-reload
 fi

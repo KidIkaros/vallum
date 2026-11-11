@@ -26,6 +26,11 @@ pub(crate) struct HostFacts {
     pub last_death: String,
     pub guard_active: String,
     pub quick_active: String,
+    pub unit_active: String,
+    pub interface_present: bool,
+    /// When the unit last went inactive — systemd's own record, so "how long
+    /// has this machine been unprotected" is measured, not guessed.
+    pub down_since: Option<String>,
 }
 
 impl HostFacts {
@@ -104,8 +109,8 @@ pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
         .unwrap_or_default();
 
     HostFacts {
-        unit,
-        interface,
+        unit: unit.clone(),
+        interface: interface.clone(),
         route4,
         route6,
         dns: servers,
@@ -116,6 +121,28 @@ pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
             .unwrap_or_else(|| "unknown".to_owned()),
         quick_active: crate::systemctl(&["is-active", &quick])
             .unwrap_or_else(|| "unknown".to_owned()),
+        unit_active: crate::systemctl(&["is-active", &unit])
+            .unwrap_or_else(|| "unknown".to_owned()),
+        interface_present: std::path::Path::new(&format!("/sys/class/net/{interface}")).exists(),
+        down_since: {
+            let active = crate::systemctl(&["is-active", &unit]);
+            let field = |name: &str| -> Option<String> {
+                let show = std::process::Command::new("systemctl")
+                    .args(["show", &unit, "-p", name])
+                    .output()
+                    .ok()
+                    .and_then(|out| String::from_utf8(out.stdout).ok())?;
+                show.lines()
+                    .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            };
+            if active.as_deref() != Some("active") {
+                field("InactiveEnterTimestamp")
+            } else {
+                None
+            }
+        },
     }
 }
 
@@ -142,6 +169,9 @@ pub(crate) fn health_json(facts: &HostFacts) -> serde_json::Value {
             "unit": format!("vallum-quick@{}", facts.interface),
             "active": facts.quick_active,
         },
+        "unit_active": facts.unit_active,
+        "interface_present": facts.interface_present,
+        "down_since": facts.down_since,
     })
 }
 
@@ -279,6 +309,9 @@ mod plan_tests {
             last_death: String::new(),
             guard_active: "inactive".to_owned(),
             quick_active: "inactive".to_owned(),
+            unit_active: "inactive".to_owned(),
+            interface_present: true,
+            down_since: None,
         }
     }
 
