@@ -32,10 +32,38 @@ a team-scale VPN. Anyone who needs more runs `0x0002` or more cores. It must be
 said in the README, because a customer discovering it during rollout is a
 support incident.
 
-**Unmeasured:** packets per second, memory per peer, and throughput. The queue
-bounds are known (`MAX_QUEUED_PACKETS` 256, `MAX_QUEUED_BYTES` 4 MiB per peer),
-but no load test has produced a pps figure. **Do not quote a throughput number
-until one exists.**
+**The first ceiling is not on that table: it is the address plan (measured).**
+`vallum server init` wrote `10.7.0.1/24`, and `vallum peer add` allocates each
+device's inner address from that prefix. Enrolling peers one at a time into a
+running daemon succeeds **253 times** and then stops with "the tunnel has no free
+address left", having handed out 10.7.0.2 through 10.7.0.254. A default install
+therefore capped at 253 devices — eight times below the target above — and no
+amount of handshake headroom changes it. The fix is one line: a wider prefix
+(`/20`, 4,094 devices, is the default from this release).
+
+**Memory per peer (measured).** 6.9 MB resident with no peers, 15.7 MB at 1,000,
+24.8 MB at 2,000 → **8.9 KB per peer**, ~0.25 ms of startup each. Worst case is
+the per-peer queue bound (256 packets ≈ 384 KB), which puts a 3.9 GB host at
+~10,000 congested peers. Memory is not binding below that.
+
+**A restart is a two-minute event (measured, then derived).** One handshake
+costs the same whatever the peer table holds — 79.6 ms at 1 peer, 79.9 at 100,
+80.1 at 1,000, 77.1 at 2,000 (5 samples each, both sides in one process) — so
+recovery is `N × one handshake` with no cliff. At the 18.4 handshakes/s above,
+2,000 peers re-establish in **~109 s**, and for that window the single-threaded
+loop is spending its core on handshakes rather than on traffic. Size the restart
+window from this number, not from the handshake latency.
+
+**Peers are devices, not people.** At two to four devices per person the
+2,000-peer target is roughly 500–1,000 people. Quote it as devices.
+
+**Unmeasured:** packets per second and throughput. The queue bounds are known
+(`MAX_QUEUED_PACKETS` 256, `MAX_QUEUED_BYTES` 4 MiB per peer), and per-packet
+crypto is measured (`vallum bench`: 8.3 µs seal, 5.2 µs open on the reference
+server — about 0.82 Gbps of crypto per core), but no load test has produced an
+end-to-end pps or bitrate figure. **Do not quote a throughput number until one
+exists**: the crypto figure is not one, because it excludes syscalls, the
+interface and the loop.
 
 ---
 
