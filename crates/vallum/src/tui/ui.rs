@@ -120,7 +120,33 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     };
 
     let mut lines = Vec::new();
-    let tabs: Vec<Span<'_>> = app
+    // Two control paths can serve the same interface name — an explicit
+    // --control plus the runtime dir's own socket, two configs for one name —
+    // and the poll renames every tab to what its daemon reports. Identical
+    // tabs with no way to tell them apart, so colliding names carry the
+    // directory that owns their socket (the full path when even those match).
+    let origins: Vec<String> = app
+        .interfaces
+        .iter()
+        .map(|item| {
+            item.control_path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_owned()
+        })
+        .collect();
+    let origin_unique = {
+        let mut seen = std::collections::HashSet::new();
+        origins.iter().all(|origin| seen.insert(origin))
+    };
+    let mut name_counts = std::collections::HashMap::new();
+    for item in &app.interfaces {
+        *name_counts.entry(item.name.as_str()).or_insert(0usize) += 1;
+    }
+    let disambiguated = name_counts.values().any(|count| *count > 1);
+    let tabs: Vec<Vec<Span<'_>>> = app
         .interfaces
         .iter()
         .enumerate()
@@ -130,10 +156,23 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             } else {
                 t.subtext()
             };
-            Span::styled(
+            let mut spans = vec![Span::styled(
                 format!(" [{}/{}] {} ", index + 1, app.interfaces.len(), item.name),
                 style,
-            )
+            )];
+            if name_counts
+                .get(item.name.as_str())
+                .is_some_and(|count| *count > 1)
+            {
+                let origin = origins.get(index).cloned().unwrap_or_default();
+                let origin = if origin_unique && !origin.is_empty() {
+                    origin
+                } else {
+                    item.control_path.display().to_string()
+                };
+                spans.push(Span::styled(format!("· {origin} "), t.muted()));
+            }
+            spans
         })
         .collect();
 
@@ -151,7 +190,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     });
 
     let mut first_row = vec![status_badge, Span::raw(" ")];
-    first_row.extend(tabs);
+    for tab in tabs {
+        first_row.extend(tab);
+    }
     if let Some(egress) = egress {
         first_row.push(egress);
         first_row.push(Span::raw(" "));
@@ -170,8 +211,13 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         }
         first_row.push(Span::raw(" "));
     }
-    first_row.push(Span::raw(" "));
-    first_row.push(Span::styled("[Space: toggle]", t.muted()));
+    // The toggle hint also lives in the footer; when tabs carry origins the
+    // row is already at its width budget, so the duplicate hint gives way
+    // instead of wrapping the header into the traffic panel.
+    if !disambiguated {
+        first_row.push(Span::raw(" "));
+        first_row.push(Span::styled("[Space: toggle]", t.muted()));
+    }
     lines.push(Line::from(first_row));
     lines.push(control_health_line(interface));
     match &interface.device {
@@ -643,9 +689,13 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .collect()
     };
     let widths = if expanded {
+        // The list owns the terminal's full width: fixed columns pin the
+        // numbers, flexible ones absorb the slack so wide screens do not end
+        // in a dead band. Minimums match the old fixed widths, so narrow
+        // terminals render exactly as before.
         let mut widths = vec![
-            Constraint::Length(20),
-            Constraint::Length(24),
+            Constraint::Min(20),
+            Constraint::Min(24),
             Constraint::Length(14),
             Constraint::Length(9),
             Constraint::Length(13),
@@ -798,13 +848,17 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
         let inner_w = area.width.saturating_sub(2);
         lines.push(t.section_rule(inner_w, "public line (y to copy)"));
-        lines.push(Line::from(Span::styled(
-            abbreviate_public_line(
-                &peer.public_line,
-                usize::from(inner_w.saturating_sub(2)).max(36),
-            ),
-            t.subtext(),
-        )));
+        let public_line = abbreviate_public_line(
+            &peer.public_line,
+            usize::from(inner_w.saturating_sub(2)).max(36),
+        );
+        // A peer with no public line still gets a row: the rule promises
+        // one, and a blank line reads as a rendering glitch.
+        lines.push(Line::from(if public_line.is_empty() {
+            Span::styled("—", t.muted())
+        } else {
+            Span::styled(public_line, t.subtext())
+        }));
     } else if !app.peer_filter.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("No peers match filter \"{}\"", app.peer_filter),
@@ -1031,23 +1085,23 @@ fn help_row(keys: &'static str, desc: &'static str) -> Line<'static> {
     ])
 }
 
-fn help_section(title: &'static str) -> Line<'static> {
-    let t = theme();
-    Line::from(Span::styled(
-        format!("── {title} "),
-        t.muted().add_modifier(Modifier::BOLD),
-    ))
+fn help_section(width: u16, title: &'static str) -> Line<'static> {
+    theme().section_rule(width, title)
 }
 
 fn draw_help(frame: &mut Frame<'_>, app: &App) {
     let t = theme();
+    let help_width = frame.area().width.saturating_sub(2);
     let text = vec![
         Line::from(vec![
             Span::styled(" ◆ VALLUM ", t.pill_accent()),
             Span::styled("  ──●──◆──●──  OPERATIONS COCKPIT REFERENCE", t.accent()),
         ]),
         Line::from(""),
-        help_section("Command Palette & Navigation (or click footer / rows)"),
+        help_section(
+            help_width,
+            "Command Palette & Navigation (or click footer / rows)",
+        ),
         help_row(
             ":",
             "command palette — every action by name, click or Enter",
@@ -1063,7 +1117,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         help_row("PgUp / PgDn", "scroll 5 peers / scroll logs & diff"),
         help_row("g / G", "jump to top / bottom (logs, diff, help)"),
         Line::from(""),
-        help_section("Peer Management & Optical Provisioning"),
+        help_section(help_width, "Peer Management & Optical Provisioning"),
         help_row("a", "add peer…"),
         help_row("v", "invite peer — one-time token + QR (no private key)…"),
         help_row("e", "edit name, endpoint, allowed IPs, keepalive, PSK…"),
@@ -1077,7 +1131,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         help_row("y", "copy peer public line (OSC 52 + wl-copy/xclip)"),
         help_row("Y", "copy peer address / endpoint (same reporting)"),
         Line::from(""),
-        help_section("Tunnel Service & Configuration"),
+        help_section(help_width, "Tunnel Service & Configuration"),
         help_row(
             "Space / s",
             "toggle tunnel up / down (or click status badge)",
@@ -1094,7 +1148,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &App) {
         help_row("? / F1", "open or close this help"),
         help_row("q / Q / Ctrl-C", "quit / close view"),
         Line::from(""),
-        help_section("Operational Semantics & Security"),
+        help_section(help_width, "Operational Semantics & Security"),
         Line::from("  CONTROL reports UAPI reachability; systemd unit state is separate."),
         Line::from("  Handshake tags: RECENT <5m, AGING <1h, OLD >1h, or NEVER."),
         Line::from("  Forms: Tab moves fields, arrows edit text, Ctrl-U clears."),
@@ -1214,13 +1268,13 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
             .scroll((scroll_y, 0))
             .block(modal_block(if app.logs_follow {
                 format!(
-                    "Logs [line {}/{}] (follow, f off, r refresh, Esc)",
+                    "LOGS [line {}/{}] (follow, f off, r refresh, Esc)",
                     scroll_y + 1,
                     app.logs.len()
                 )
             } else {
                 format!(
-                    "Logs [line {}/{}] (f follow, r refresh, Esc)",
+                    "LOGS [line {}/{}] (f follow, r refresh, Esc)",
                     scroll_y + 1,
                     app.logs.len()
                 )
@@ -1245,7 +1299,7 @@ fn draw_trial(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(lines)
             .scroll((scroll_y, 0))
             .block(modal_block(format!(
-                "Full-tunnel trial [line {}/{}] (a arm, p panic, r refresh, Esc)",
+                "FULL-TUNNEL TRIAL [line {}/{}] (a arm, p panic, r refresh, Esc)",
                 scroll_y + 1,
                 app.trial_lines.len()
             ))),
@@ -1275,7 +1329,7 @@ fn draw_health(frame: &mut Frame<'_>, app: &App) {
         Paragraph::new(lines)
             .scroll((scroll_y, 0))
             .block(modal_block(format!(
-                "Egress health [line {}/{}] (r refresh, Esc)",
+                "EGRESS HEALTH [line {}/{}] (r refresh, Esc)",
                 scroll_y + 1,
                 app.health_lines.len()
             ))),
@@ -1387,10 +1441,7 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
                 ])
             },
             Line::from(""),
-            Line::from(Span::styled(
-                "── Frame Telemetry ─────────────────────",
-                t.muted(),
-            )),
+            t.section_rule(cols[1].width, "Frame Telemetry"),
             Line::from(vec![
                 Span::styled("frame       ", t.muted()),
                 Span::styled(format!("{current_frame}/{total_frames} "), t.text_bold()),
@@ -1403,14 +1454,14 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
                 t.subtext(),
             ),
             Line::from(""),
-            Line::from(Span::styled(
+            t.section_rule(
+                cols[1].width,
                 if is_invite {
-                    "── Client Handoff ──────────────────────"
+                    "Client Handoff"
                 } else {
-                    "── Offline File Fallback ───────────────"
+                    "Offline File Fallback"
                 },
-                t.muted(),
-            )),
+            ),
             detail_kv(
                 if is_invite { "invite" } else { "saved" },
                 qr.path.clone(),
@@ -1435,10 +1486,7 @@ fn draw_qr(frame: &mut Frame<'_>, area: Rect, qr: &super::qr::QrState) {
                 ),
             ]),
             Line::from(""),
-            Line::from(Span::styled(
-                "── Controls ────────────────────────────",
-                t.muted(),
-            )),
+            t.section_rule(cols[1].width, "Controls"),
             Line::from(vec![
                 Span::styled("n / →", t.accent()),
                 Span::styled(" next frame   ", t.subtext()),
@@ -1647,7 +1695,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled("Enter", t.accent()),
                     Span::raw(" confirms  ·  "),
-                    Span::styled("Esc", t.muted().add_modifier(Modifier::BOLD)),
+                    Span::styled("Esc", t.muted()),
                     Span::raw(" cancels"),
                 ]));
             }
@@ -1679,7 +1727,7 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled("Enter", t.accent()),
                     Span::raw(" restarts service  ·  "),
-                    Span::styled("Esc", t.muted().add_modifier(Modifier::BOLD)),
+                    Span::styled("Esc", t.muted()),
                     Span::raw(" keeps file unapplied"),
                 ]));
             }

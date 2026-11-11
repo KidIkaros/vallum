@@ -1910,7 +1910,7 @@ fn trial_plan_opens_the_trial_view_with_host_status() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("Full-tunnel trial"));
+    assert!(text.contains("FULL-TUNNEL TRIAL"));
 }
 
 #[test]
@@ -2055,7 +2055,7 @@ fn health_check_opens_the_health_view_from_h_or_palette() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(text.contains("Egress health"));
+    assert!(text.contains("EGRESS HEALTH"));
 
     // The palette reaches the same action by keyword.
     let names: Vec<&str> = super::keymap::matching_commands("health")
@@ -2072,4 +2072,40 @@ fn health_check_opens_the_health_view_from_h_or_palette() {
     assert_eq!(app.view, super::app::View::Health);
     super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.view, super::app::View::Dashboard);
+}
+
+#[test]
+fn colliding_interface_names_carry_their_socket_origin() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    // An explicit --control plus the runtime dir's own socket for the same
+    // interface: the poll renames both tabs to the daemon's name, so without
+    // the origin suffix the header shows two identical tabs.
+    let first = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/tmp/a/vallum0.sock"),
+    );
+    let second = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/tmp/b/vallum0.sock"),
+    );
+    let app = App::new(vec![first, second]);
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("[1/2] vallum0"));
+    assert!(text.contains("[2/2] vallum0"));
+    assert!(text.contains("· a "));
+    assert!(text.contains("· b "));
 }
