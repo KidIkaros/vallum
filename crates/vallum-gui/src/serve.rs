@@ -266,6 +266,42 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         return Ok(());
     }
 
+    if request.path == "/api/apply/cancel" && request.method == "POST" {
+        let Some(socket) = console.known_socket() else {
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
+            return Ok(());
+        };
+        if let Err(error) = crate::write_gate(&socket) {
+            json(
+                &mut stream,
+                "403 Forbidden",
+                &serde_json::json!({ "error": error }),
+            );
+            return Ok(());
+        }
+        // The trial owns a revert timer, so killing the wait is not a
+        // cancel. This runs the documented undo (panic, split config back,
+        // unit left running) — the same end state a failed trial reaches.
+        // Refused when no trial is armed: the undo restarts a working tunnel.
+        match crate::apply_cancel(&socket) {
+            Ok(output) => json(
+                &mut stream,
+                "200 OK",
+                &serde_json::json!({ "ok": true, "output": output }),
+            ),
+            Err(error) => json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": error }),
+            ),
+        }
+        return Ok(());
+    }
+
     if request.path == "/api/service" {
         let Some(socket) = console.known_socket() else {
             json(
@@ -276,14 +312,8 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
             return Ok(());
         };
         if request.method == "POST" {
-            if let Err(error) = crate::write_gate(&socket) {
-                json(
-                    &mut stream,
-                    "403 Forbidden",
-                    &serde_json::json!({ "error": error }),
-                );
-                return Ok(());
-            }
+            // The gate lives in `service_action` itself, shared with the
+            // Tauri command — one gate for both transports.
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
             let action = body
                 .get("action")
@@ -351,24 +381,12 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
     }
 
     if let Some(name) = request.path.strip_prefix("/api/cmd/") {
-        if let Some(socket) = console.known_socket() {
-            if let Err(error) = crate::write_gate(&socket) {
-                json(
-                    &mut stream,
-                    "403 Forbidden",
-                    &serde_json::json!({ "error": error }),
-                );
-                return Ok(());
-            }
-        }
+        // The gate lives in the shared write fns (`actions::*`, `*_at`),
+        // shared with the Tauri commands — one gate for both transports.
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
         let outcome = crate::dispatch(console, name, body);
         match outcome {
-            Ok(done) => json(
-                &mut stream,
-                "200 OK",
-                &serde_json::to_value(done).unwrap_or_default(),
-            ),
+            Ok(value) => json(&mut stream, "200 OK", &value),
             Err(error) => json(
                 &mut stream,
                 "400 Bad Request",

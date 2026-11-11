@@ -29,14 +29,14 @@ export function ResultPanel({
       <p className="text-foreground/90 text-xs">{message}</p>
       {command && (
         <>
-          <pre className="border-border/70 bg-background/50 text-foreground/85 max-h-40 overflow-auto rounded-md border px-2 py-2 font-mono text-[11px] whitespace-pre-wrap break-all">
+          <pre className="border-border/70 bg-background/50 text-foreground/85 max-h-40 overflow-auto rounded-md border px-2 py-2 font-mono text-xs whitespace-pre-wrap break-all">
             {command}
           </pre>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => void copy()}>
               {copied ? "copied" : "copy command"}
             </Button>
-            <span className="text-muted-foreground text-[11px]">
+            <span className="text-muted-foreground text-xs">
               run it on the other device
             </span>
           </div>

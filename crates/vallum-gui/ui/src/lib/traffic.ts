@@ -10,6 +10,9 @@ export interface Sample {
   at: number
   rx: number
   tx: number
+  /** Daemon's cumulative established-handshake counter, when reported.
+      Optional so history persisted before markers existed still loads. */
+  established?: number
 }
 
 /** Samples retained for the sparkline. The TUI keeps 180; so do we. */
@@ -49,8 +52,8 @@ export function saveHistory(interfaceName: string, samples: Sample[]): void {
 export class TrafficHistory {
   private samples: Sample[] = []
 
-  push(rx: number, tx: number, at: number = Date.now()): void {
-    this.samples.push({ at, rx, tx })
+  push(rx: number, tx: number, at: number = Date.now(), established?: number): void {
+    this.samples.push({ at, rx, tx, established })
     if (this.samples.length > WINDOW) this.samples.shift()
   }
 

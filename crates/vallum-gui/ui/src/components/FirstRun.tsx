@@ -33,6 +33,12 @@ function stepsFor(preflight: Preflight | null): Step[] {
       done: preflight.config !== false,
     },
     {
+      title: "serve others",
+      detail: "turn this machine into a server peers join — the TUI's `1` setup, as a copyable command",
+      command: "sudo vallum setup --server",
+      done: preflight.config !== false,
+    },
+    {
       title: "start the tunnel",
       detail: "systemd owns it; the console's START does the same thing",
       command: "sudo systemctl start vallum@vallum0",
@@ -74,15 +80,15 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
               }`}
             >
               <span
-                className={`mt-0.5 text-[11px] ${step.done ? "text-live" : step === next ? "text-signal" : "text-muted-foreground"}`}
+                className={`mt-0.5 text-xs ${step.done ? "text-live" : step === next ? "text-signal" : "text-muted-foreground"}`}
               >
                 {step.done ? "done" : `${index + 1}`}
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-foreground/90 text-xs">{step.title}</p>
-                <p className="text-muted-foreground text-[11px]">{step.detail}</p>
+                <p className="text-muted-foreground text-xs">{step.detail}</p>
                 <div className="mt-1 flex items-center gap-2">
-                  <code className="text-foreground/80 truncate font-mono text-[11px]">
+                  <code className="text-foreground/80 truncate font-mono text-xs">
                     {step.command}
                   </code>
                   <CopyButton value={step.command} label="copy" />
@@ -92,14 +98,14 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
           ))}
         </ul>
 
-        <p className="text-muted-foreground mt-3 text-[11px]">
+        <p className="text-muted-foreground mt-3 text-xs">
           A full tunnel is opt-in and reversible: <code>scripts/trial.sh --dry-run</code>{" "}
           shows what it would change, and <code>vallum-panic</code> undoes it.
         </p>
       </Panel>
 
       <Panel title="WHAT THIS HOST HAS">
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] sm:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
           {[
             ["vallum binary", facts?.vallum],
             ["vallum-quick", facts?.quick],
@@ -116,12 +122,12 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
             </div>
           ))}
         </dl>
-        <p className="text-muted-foreground mt-2 text-[11px]">
+        <p className="text-muted-foreground mt-2 text-xs">
           socket directory {facts?.runtime_dir ?? "—"} · mode{" "}
           {facts?.runtime_mode ?? "—"} · {facts?.sockets ?? 0} socket(s)
         </p>
         {facts && facts.runtime_mode !== "absent" && !["0770", "0775", "0777"].includes(facts.runtime_mode) && (
-          <p className="text-stale mt-1 text-[11px]">
+          <p className="text-stale mt-1 text-xs">
             the socket directory is {facts.runtime_mode}: a daemon that drops privileges
             cannot publish its socket there. <code>scripts/install.sh</code> sets 0770
             with the right group.

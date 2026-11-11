@@ -318,6 +318,7 @@ fn launch_over(
                 fwmark: resolved.fwmark,
                 socket: Arc::clone(&shared),
                 suite: Arc::new(suite()),
+                clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
                 stats: Arc::new(vallum::run::SharedStats::default()),
             },
         });

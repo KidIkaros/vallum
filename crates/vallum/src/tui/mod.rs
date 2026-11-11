@@ -6,6 +6,7 @@ pub mod actions;
 pub mod app;
 pub mod bundle;
 pub mod client;
+pub mod health;
 pub mod input;
 pub mod keymap;
 pub mod qr;

@@ -18,8 +18,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The daemon crate is the only implementation of the control protocol in this
 # workspace: the console links it rather than re-parsing `get=1` itself. The
-# `tui` feature is off, so ratatui and crossterm are not in a GUI build.
-vallum = { path = "../vallum", default-features = false }
+# `tui` feature is off, so ratatui and crossterm are not in a GUI build; `qr`
+# is on so the export dialog animates the same `VALLUM1` frames as the TUI.
+vallum = { path = "../vallum", default-features = false, features = ["qr"] }
 # Socket discovery reads the same runtime directory the daemon and TUI use.
 vallum-config = { path = "../vallum-config" }
 tauri = { version = "2", features = [] }

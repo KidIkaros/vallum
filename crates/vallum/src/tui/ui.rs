@@ -17,6 +17,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
         View::Help => draw_help(frame, app),
         View::Logs => draw_logs(frame, app),
+        View::Trial => draw_trial(frame, app),
+        View::Health => draw_health(frame, app),
         View::Diff => draw_diff(frame, app),
         View::Dashboard => draw_dashboard(frame, app),
     }
@@ -1223,6 +1225,60 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
                     app.logs.len()
                 )
             })),
+        frame.area(),
+    );
+}
+
+fn draw_trial(frame: &mut Frame<'_>, app: &App) {
+    let lines: Vec<Line<'_>> = if app.trial_lines.is_empty() {
+        vec![Line::from("No trial plan loaded.")]
+    } else {
+        app.trial_lines
+            .iter()
+            .map(|line| Line::from(line.as_str()))
+            .collect()
+    };
+    let visible = usize::from(frame.area().height.saturating_sub(2));
+    let scroll_y =
+        (app.trial_scroll as u16).min(app.trial_lines.len().saturating_sub(visible) as u16);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll_y, 0))
+            .block(modal_block(format!(
+                "Full-tunnel trial [line {}/{}] (a arm, p panic, r refresh, Esc)",
+                scroll_y + 1,
+                app.trial_lines.len()
+            ))),
+        frame.area(),
+    );
+}
+
+fn draw_health(frame: &mut Frame<'_>, app: &App) {
+    let tone = match app.health_tone {
+        super::health::Level::Ok => theme().ok_bold(),
+        super::health::Level::Warn => theme().warn_bold(),
+        super::health::Level::Fail => theme().danger_bold(),
+    };
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let mut body = app.health_lines.iter();
+    if let Some(first) = body.next() {
+        lines.push(Line::from(Span::styled(first.as_str(), tone)));
+    }
+    lines.extend(body.map(|line| Line::from(line.as_str())));
+    if lines.is_empty() {
+        lines.push(Line::from("No health reading yet."));
+    }
+    let visible = usize::from(frame.area().height.saturating_sub(2));
+    let scroll_y =
+        (app.health_scroll as u16).min(app.health_lines.len().saturating_sub(visible) as u16);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll_y, 0))
+            .block(modal_block(format!(
+                "Egress health [line {}/{}] (r refresh, Esc)",
+                scroll_y + 1,
+                app.health_lines.len()
+            ))),
         frame.area(),
     );
 }

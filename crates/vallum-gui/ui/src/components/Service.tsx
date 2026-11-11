@@ -91,19 +91,21 @@ export function ServiceStrip({
         </span>
       </span>
       <Button
+        id="service-start-btn"
         size="sm"
         variant="outline"
-        className="h-7 px-2.5 text-[11px]"
+        className="h-7 px-2.5 text-xs"
         disabled={pending !== null || active === "active" || noUnit}
-        title={noUnit ? "no systemd unit owns this interface — start it yourself" : undefined}
+        title={noUnit ? "no systemd unit owns this interface — start it yourself" : "start the tunnel service"}
         onClick={() => void act("start")}
       >
         {pending === "start" ? "…" : "Start"}
       </Button>
       <Button
+        id="service-stop-btn"
         size="sm"
         variant="outline"
-        className={`h-7 px-2.5 text-[11px] ${confirmStop ? "border-fault/60 text-fault" : ""}`}
+        className={`h-7 px-2.5 text-xs ${confirmStop ? "border-fault/60 text-fault" : ""}`}
         disabled={pending !== null || active !== "active" || noUnit}
         title={
           noUnit
@@ -158,7 +160,7 @@ export function StoppedCard({
         <Button size="sm" disabled={pending !== null} onClick={() => void act("start")}>
           {pending === "start" ? "Starting…" : "Start tunnel"}
         </Button>
-        <code className="text-muted-foreground text-[11px]">sudo systemctl start {unit}</code>
+        <code className="text-muted-foreground text-xs">sudo systemctl start {unit}</code>
       </div>
       <LogsPanel />
     </section>
@@ -190,7 +192,7 @@ export function LogsPanel() {
       className="bg-card/60 rounded-lg border border-border/70"
       onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
     >
-      <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-3 py-2 text-[11px] select-none">
+      <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-3 py-2 text-xs select-none">
         logs
         <span className="text-muted-foreground">
           {unit || "journalctl"}
@@ -198,7 +200,7 @@ export function LogsPanel() {
         <Button
           size="sm"
           variant="ghost"
-          className="ml-auto h-5 px-2 text-[11px]"
+          className="ml-auto h-5 px-2 text-xs"
           onClick={(event) => {
             event.preventDefault()
             load()
@@ -207,7 +209,7 @@ export function LogsPanel() {
           refresh
         </Button>
       </summary>
-      <pre className="text-foreground/80 max-h-64 overflow-auto border-t border-border/70 px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+      <pre className="text-foreground/80 max-h-64 overflow-auto border-t border-border/70 px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap">
         {error ? `journald: ${error}` : text || "no output"}
       </pre>
     </details>

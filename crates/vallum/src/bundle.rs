@@ -22,6 +22,71 @@ pub struct Imported {
     pub key: PathBuf,
 }
 
+/// Build a client bundle for a generated key and one server-side peer.
+///
+/// The config template lives here — not in either console — so the TUI and
+/// the GUI mint byte-identical bundles: full-tunnel (`0.0.0.0/0`, `::/0`)
+/// with the fwmark the guard requires, keepalive 25 s.
+///
+/// # Errors
+///
+/// If the endpoint is empty or unspecified, or the peer has no allowed
+/// address to use as the client address.
+pub fn build(
+    server_public_line: &str,
+    interface: &str,
+    client_address: &str,
+    key_text: &str,
+    key_name: &str,
+    endpoint: &str,
+) -> Result<Bundle, String> {
+    use std::net::SocketAddr;
+
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err("server endpoint is empty".to_owned());
+    }
+    if endpoint
+        .parse::<SocketAddr>()
+        .is_ok_and(|address| address.ip().is_unspecified())
+        || endpoint.starts_with("0.0.0.0:")
+        || endpoint.starts_with("[::]:")
+    {
+        return Err("server endpoint is unspecified; use a reachable host:port".to_owned());
+    }
+    if client_address.trim().is_empty() {
+        return Err("the peer has no allowed address to use as the client address".to_owned());
+    }
+    let name = format!("{interface}-client");
+    let config = format!(
+        "[interface]\n\
+         name = \"{name}\"\n\
+         private_key = \"{key_name}\"\n\
+         addresses = [\"{client_address}\"]\n\
+         listen = \"0.0.0.0:0\"\n\
+         fwmark = 51820\n\
+         \n\
+         [log]\n\
+         level = \"info\"\n\
+         \n\
+         [quick]\n\
+         table = \"auto\"\n\
+         \n\
+         [[peer]]\n\
+         name = \"server\"\n\
+         public_key = \"{server_public_line}\"\n\
+         endpoint = \"{endpoint}\"\n\
+         allowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n\
+         persistent_keepalive = 25\n"
+    );
+    Ok(Bundle {
+        version: 1,
+        name,
+        config,
+        key: key_text.to_owned(),
+    })
+}
+
 /// Read and validate a bundle.
 ///
 /// # Errors

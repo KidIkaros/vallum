@@ -75,15 +75,23 @@ export interface PlanData {
 }
 
 export async function getPlan(): Promise<PlanData> {
-  if (IN_TAURI) return invoke<PlanData>("plan")
+  if (IN_TAURI) return invoke<PlanData>("plan_command")
   return http<PlanData>("/api/plan")
 }
 
 export async function applyPlan(confirm: string): Promise<{ ok: boolean; output: string }> {
-  if (IN_TAURI) return invoke<{ ok: boolean; output: string }>("apply", { confirm })
+  if (IN_TAURI) return invoke<{ ok: boolean; output: string }>("apply_command", { confirm })
   return http<{ ok: boolean; output: string }>("/api/apply", {
     method: "POST",
     body: JSON.stringify({ confirm }),
+  })
+}
+
+/** Stop a running trial and converge back on the split tunnel now. */
+export async function cancelApply(): Promise<{ ok: boolean; output: string }> {
+  if (IN_TAURI) return invoke<{ ok: boolean; output: string }>("cancel_apply")
+  return http<{ ok: boolean; output: string }>("/api/apply/cancel", {
+    method: "POST",
   })
 }
 

@@ -12,10 +12,12 @@ import { panicNow, type Health } from "@/lib/bridge"
  * The one sentence this console exists to say: is traffic going through the
  * tunnel, or is it going around it? Everything else is detail.
  */
+import { verdictTone, type VerdictTone } from "@/lib/verdict"
+
 export type Egress = {
   label: string
   detail: string
-  tone: "live" | "stale" | "fault" | "muted"
+  tone: VerdictTone
 }
 
 export function egressVerdict(health: Health | null): Egress {
@@ -109,7 +111,7 @@ export function PanicButton({ compact = false }: { compact?: boolean }) {
     <Button
       size="sm"
       variant="outline"
-      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-[11px]" : ""}`}
+      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-xs" : ""}`}
       disabled={busy}
       onClick={() => void run()}
       title="Remove the egress block, withdraw the tunnel's routes and put this host back on the internet"
@@ -127,6 +129,7 @@ export function HealthPanel({ health }: { health: Health | null }) {
       </Panel>
     )
   }
+  const verdict = egressVerdict(health)
   const v4 = health.route4_via_tunnel
   const guardOn = health.guard.active === "active"
   // Verdicts compare expectation with measurement: red is reserved for
@@ -141,9 +144,15 @@ export function HealthPanel({ health }: { health: Health | null }) {
   const v6Tunnel = health.route6_via_tunnel
   return (
     <Panel title="EGRESS HEALTH">
+      {/* The state sentence, readable at a glance: the label the header
+          shouts, plus the detail it keeps in a tooltip. */}
+      <p className={`mb-2 text-sm ${verdictTone[verdict.tone]}`}>
+        <span className="font-semibold">{verdict.label}</span>
+        <span className="text-muted-foreground"> — {verdict.detail}</span>
+      </p>
       {unprotected && (
         <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
-          <span className="text-fault text-[11px]">
+          <span className="text-fault text-xs">
             the full tunnel is armed but traffic leaves via {health.route4 ?? "the physical interface"} — the tunnel is not carrying
             {health.down_since ? ` — unprotected since ${health.down_since}` : ""}
           </span>
@@ -152,7 +161,7 @@ export function HealthPanel({ health }: { health: Health | null }) {
       )}
       {health.unit_active === "active" && health.interface_present === false && (
         <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
-          <span className="text-fault text-[11px]">
+          <span className="text-fault text-xs">
             the daemon is running but its interface is gone — the dead-man has restored your internet; restart the tunnel
           </span>
           <PanicButton compact />
@@ -215,7 +224,7 @@ export function HealthPanel({ health }: { health: Health | null }) {
         </span>
       </Row>
       {health.last_death && (
-        <p className="text-muted-foreground mt-1 truncate text-[11px]" title={health.last_death}>
+        <p className="text-muted-foreground mt-1 truncate text-xs" title={health.last_death}>
           last exit: {health.last_death}
         </p>
       )}

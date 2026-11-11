@@ -90,11 +90,11 @@
     @apply bg-background text-foreground;
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    /* Three sizes on this screen: 13 body, 12 meta, 11 label. There is no 10px
-       step — uppercase mono at 10px was the most expensive text here, and the
-       `comfortable` toggle existed only to escape it. */
-    font-size: 13px;
-    line-height: 1.5;
+    /* Three sizes on this screen: 14 body, 12 meta, 12 label. 11px failed as a
+       minimum — it misses WCAG-size readability on real displays, so 12px is
+       the floor and `comfortable` raises from there. */
+    font-size: 14px;
+    line-height: 1.55;
   }
 }
 
@@ -127,7 +127,7 @@
      "daemon attached") is read, not scanned. Caps are reserved for panel
      titles and one-word states. */
   .micro {
-    @apply text-muted-foreground text-[11px];
+    @apply text-muted-foreground text-xs;
     letter-spacing: 0.01em;
   }
 }
@@ -136,14 +136,33 @@
    The compact layout is the TUI-mirroring default. `comfortable` raises
    controls and body text above minimum touch targets for anyone who finds
    the dense mode unreadable. Toggle: header, `density:`. */
+/* Minimum touch targets: every clickable or editable control is at least
+   32px tall in compact and 36px in comfortable, so pointer and touch both
+   land without precision strain. */
+@layer base {
+  button,
+  select,
+  input,
+  textarea {
+    min-height: 32px;
+  }
+  button {
+    @apply cursor-pointer;
+  }
+}
+
 .comfortable {
   font-size: 15px;
 }
 .comfortable button {
-  font-size: 12px;
-  min-height: 32px;
+  font-size: 13px;
+  min-height: 36px;
 }
-.comfortable .text-\[11px\],
+.comfortable select,
+.comfortable input,
+.comfortable textarea {
+  min-height: 36px;
+}
 .comfortable .micro {
   font-size: 13px;
 }

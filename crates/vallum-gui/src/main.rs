@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
-use actions::{Done, InviteFields, PeerFields};
+use actions::{BundleOut, Done, InviteFields, KeyOut, PeerFields, QrFrame};
 use snapshot::Snapshot;
 
 /// Where the daemon's configs live, the same default the TUI uses.
@@ -235,6 +235,9 @@ fn apply_device(
 }
 
 fn rotate_at(socket: &std::path::Path, name: &str, new_line: &str) -> Result<Done, String> {
+    // Config edits pass here from both transports; the gate lives with the
+    // write, not the route.
+    crate::hostfacts::write_gate(socket)?;
     let config = config_of(socket).ok_or_else(|| {
         format!(
             "no readable config under {CONFIG_DIR} names this socket — run the console as root to rotate the stored identity"
@@ -247,6 +250,9 @@ fn rotate_at(socket: &std::path::Path, name: &str, new_line: &str) -> Result<Don
 }
 
 fn finalize_at(socket: &std::path::Path, name: &str) -> Result<Done, String> {
+    // Config edits pass here from both transports; the gate lives with the
+    // write, not the route.
+    crate::hostfacts::write_gate(socket)?;
     let config = config_of(socket).ok_or_else(|| {
         format!(
             "no readable config under {CONFIG_DIR} names this socket — run the console as root to finalise"
@@ -256,6 +262,8 @@ fn finalize_at(socket: &std::path::Path, name: &str) -> Result<Done, String> {
 }
 
 fn invite_at(socket: &std::path::Path, fields: &InviteFields) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    crate::hostfacts::write_gate(socket)?;
     let interface = socket
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -301,11 +309,146 @@ fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result
     invite_at(&socket, &fields)
 }
 
+/// A bundle export reads the snapshot and mints randomness; nothing is
+/// written anywhere, so no gate and no privilege question — the downloaded
+/// file is the key's only copy.
+fn export_at(
+    socket: &std::path::Path,
+    fingerprint: &str,
+    endpoint: &str,
+) -> Result<BundleOut, String> {
+    actions::export_bundle(socket, fingerprint, endpoint)
+}
+
+/// A bundle import writes a config and a key. The directory defaults to the
+/// selected interface's config directory — the TUI's rule — so a client
+/// bundle lands where the daemon reads, and the error names the CLI when the
+/// console cannot write there.
+fn import_at(socket: &std::path::Path, bundle_path: &str, out_dir: &str) -> Result<Done, String> {
+    let dir = if out_dir.trim().is_empty() {
+        config_of(socket)
+            .and_then(|config| {
+                config
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| CONFIG_DIR.to_owned())
+    } else {
+        out_dir.to_owned()
+    };
+    actions::import_bundle(bundle_path, &dir)
+}
+
+#[tauri::command]
+fn export_bundle(
+    console: State<'_, Arc<Console>>,
+    fingerprint: String,
+    endpoint: String,
+) -> Result<BundleOut, String> {
+    let socket = selected(&console)?;
+    export_at(&socket, &fingerprint, &endpoint)
+}
+
+/// One animated-QR frame for text the console already holds — an exported
+/// bundle, or an invite's join command. The front-end steps the index on its
+/// own 700 ms timer, the TUI's cadence, so the backend stays stateless and
+/// both consoles scan the same frames.
+#[tauri::command]
+fn qr_frame(
+    console: State<'_, Arc<Console>>,
+    text: String,
+    index: usize,
+) -> Result<QrFrame, String> {
+    let _ = selected(&console)?;
+    actions::qr_frame(&text, index)
+}
+
+/// The config that owns the selected socket, read for the editor. Missing or
+/// unreadable is an answer, not a fallback: a blank editor that saves would
+/// clobber a config the console simply could not see.
+fn config_text_at(socket: &std::path::Path) -> Result<String, String> {
+    let config = config_of(socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to edit it"
+        )
+    })?;
+    actions::read_config(&config)
+}
+
+fn config_write_at(socket: &std::path::Path, text: &str) -> Result<Done, String> {
+    let config = config_of(socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to edit it"
+        )
+    })?;
+    actions::write_config(&config, text)
+}
+
+#[tauri::command]
+fn generate_key(console: State<'_, Arc<Console>>) -> Result<KeyOut, String> {
+    let socket = selected(&console)?;
+    actions::generate_key(&socket)
+}
+
+#[tauri::command]
+fn read_config(console: State<'_, Arc<Console>>) -> Result<String, String> {
+    let socket = selected(&console)?;
+    config_text_at(&socket)
+}
+
+#[tauri::command]
+fn write_config(console: State<'_, Arc<Console>>, text: String) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    config_write_at(&socket, &text)
+}
+
+#[tauri::command]
+fn import_bundle(
+    console: State<'_, Arc<Console>>,
+    bundle_path: String,
+    out_dir: String,
+) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    import_at(&socket, &bundle_path, &out_dir)
+}
+
 #[tauri::command]
 fn health_state(console: State<'_, Arc<Console>>) -> serde_json::Value {
     console
         .known_socket()
         .map_or(serde_json::Value::Null, |socket| health(&socket))
+}
+
+/// The service and log twins of the HTTP `/api/service` and `/api/logs`
+/// routes. The front-end already invokes these names over Tauri IPC; they
+/// were never registered, so the Tauri build failed every service and log
+/// read. Same functions, second transport — the rule the dispatch facade
+/// states, now actually kept. Reads use `known_socket` (not `selected`) so a
+/// stopped service — the case with no socket file — still reports and starts.
+#[tauri::command]
+fn service_state_command(console: State<'_, Arc<Console>>) -> serde_json::Value {
+    console
+        .known_socket()
+        .map_or(serde_json::Value::Null, |socket| service_state(&socket))
+}
+
+#[tauri::command]
+fn service_action_command(
+    console: State<'_, Arc<Console>>,
+    action: String,
+) -> Result<Done, String> {
+    let socket = console
+        .known_socket()
+        .ok_or_else(|| "no interface selected".to_owned())?;
+    service_action(&socket, &action)
+}
+
+#[tauri::command]
+fn logs_tail_command(console: State<'_, Arc<Console>>, lines: u32) -> serde_json::Value {
+    console.known_socket().map_or_else(
+        || serde_json::json!({ "error": "no interface selected" }),
+        |socket| logs_tail(&socket, lines),
+    )
 }
 
 #[tauri::command]
@@ -415,10 +558,12 @@ pub(crate) fn dispatch(
     console: &Arc<Console>,
     name: &str,
     body: serde_json::Value,
-) -> Result<Done, String> {
+) -> Result<serde_json::Value, String> {
     let socket = console
         .current_socket()
         .ok_or_else(|| "no interface selected".to_owned())?;
+    // Every arm answers JSON: `Done` for the writes, `BundleOut` for the
+    // export. The transports serialise the value untouched.
     // The Tauri commands take `fields: PeerFields` (a named argument, so the
     // IPC body is `{"fields": {...}}`); the HTTP body is the arguments object
     // itself. Unwrap once here so both transports feed the same functions.
@@ -432,6 +577,7 @@ pub(crate) fn dispatch(
             .map(str::to_owned)
             .ok_or_else(|| format!("missing `{key}`"))
     };
+    let answer = |done: Done| serde_json::to_value(done).map_err(|error| error.to_string());
     match name {
         "add_peer" => {
             let fields: PeerFields =
@@ -446,20 +592,56 @@ pub(crate) fn dispatch(
                     fields.name, fields.allowed_ips, fields.keepalive, fields.endpoint, fields.public_line.len()
                 );
             }
-            result
+            answer(result?)
         }
         "edit_peer" => {
             let fields: PeerFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
-            actions::edit(&socket, &fields)
+            answer(actions::edit(&socket, &fields)?)
         }
-        "remove_peer" => actions::remove(&socket, &text("publicLine")?),
-        "rotate_peer" => rotate_at(&socket, &text("name")?, &text("newLine")?),
-        "finalize_peer" => finalize_at(&socket, &text("name")?),
+        "remove_peer" => answer(actions::remove(&socket, &text("publicLine")?)?),
+        "rotate_peer" => answer(rotate_at(&socket, &text("name")?, &text("newLine")?)?),
+        "finalize_peer" => answer(finalize_at(&socket, &text("name")?)?),
         "invite_peer" => {
             let fields: InviteFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
-            invite_at(&socket, &fields)
+            answer(invite_at(&socket, &fields)?)
         }
-        "apply_device" => actions::apply_device(&socket, &text("listenPort")?, &text("fwmark")?),
+        "generate_key" => {
+            serde_json::to_value(actions::generate_key(&socket)?).map_err(|error| error.to_string())
+        }
+        "read_config" => {
+            serde_json::to_value(config_text_at(&socket)?).map_err(|error| error.to_string())
+        }
+        "write_config" => answer(config_write_at(&socket, &text("text")?)?),
+        "export_bundle" => serde_json::to_value(export_at(
+            &socket,
+            &text("fingerprint")?,
+            &text("endpoint")?,
+        )?)
+        .map_err(|error| error.to_string()),
+        "qr_frame" => {
+            let index = body
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "missing `index`".to_owned())?;
+            serde_json::to_value(actions::qr_frame(&text("text")?, index as usize)?)
+                .map_err(|error| error.to_string())
+        }
+        "import_bundle" => {
+            // `outDir` is optional: a missing key means "the interface's
+            // config directory", not a client error. `text` rejects absence,
+            // so the key is read directly here.
+            let out_dir = body
+                .get("outDir")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_owned();
+            answer(import_at(&socket, &text("bundlePath")?, &out_dir)?)
+        }
+        "apply_device" => answer(actions::apply_device(
+            &socket,
+            &text("listenPort")?,
+            &text("fwmark")?,
+        )?),
         other => Err(format!("unknown command `{other}`")),
     }
 }
@@ -535,6 +717,39 @@ pub(crate) fn unit_for(socket: &std::path::Path) -> String {
     format!("vallum@{interface}")
 }
 
+/// Is a full-tunnel trial actually armed?
+///
+/// `scripts/trial.sh` arms a transient `vallum-trial-<interface>.timer` before
+/// it changes anything and stands it down on success, so the timer is the
+/// signal while the deadline is pending. Once it fires, the paired `.service`
+/// is the revert actually running. Either one active is a trial in progress;
+/// neither means the revert would not be undoing anything.
+fn trial_armed(interface: &str) -> bool {
+    ["timer", "service"].iter().any(|kind| {
+        let unit = format!("vallum-trial-{interface}.{kind}");
+        trial_is_armed(&systemctl(&["is-active", &unit]).unwrap_or_default())
+    })
+}
+
+/// Whether a reported unit state means a trial is running.
+///
+/// Split out from the `systemctl` call so both answers are testable without a
+/// real timer. `activating` counts because the timer is armed before the risk
+/// is taken, not after.
+fn trial_is_armed(state: &str) -> bool {
+    matches!(state.trim(), "active" | "activating" | "reloading")
+}
+
+/// The refusal: nothing to cancel, and where the deliberate undo lives.
+fn unarmed_cancel_error(interface: &str) -> String {
+    format!(
+        "no full-tunnel trial is armed on `{interface}`, so there is nothing to cancel. \
+         The revert is not a no-op on a working tunnel — it restores the split config and \
+         restarts the unit. Run `sudo vallum-ops revert` from a terminal if that is what \
+         you want."
+    )
+}
+
 /// Arm the full-tunnel trial. The operator has seen the plan and typed the
 /// confirmation; this hands off to the root-owned dispatcher whose script
 /// owns the ordering, the revert timer and the verdict. Its output IS the
@@ -572,6 +787,81 @@ pub(crate) fn apply(confirm: &str) -> Result<String, String> {
     Err(last)
 }
 
+/// Cancel a running full-tunnel trial: the documented undo, run immediately.
+/// Panic first (guard off, routes back, DNS restored), then the split config
+/// goes back and the unit is left running — the same end state a failed trial
+/// reaches on its own, reached now instead of at the deadline.
+///
+/// Refused when no trial is armed. The revert is idempotent but not harmless:
+/// on a host that is not mid-trial it restores the split config and restarts
+/// the tunnel — a change the operator did not ask for and did not confirm.
+/// `sudo vallum-ops revert` stays the way to say that deliberately.
+pub(crate) fn apply_cancel(socket: &std::path::Path) -> Result<String, String> {
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0");
+    if !trial_armed(interface) {
+        return Err(unarmed_cancel_error(interface));
+    }
+    let mut attempts: Vec<(&str, Vec<&str>)> =
+        vec![("sudo", vec!["-n", "/usr/local/sbin/vallum-ops", "revert"])];
+    if effective_uid() != 0 {
+        attempts.push(("pkexec", vec!["/usr/local/sbin/vallum-ops", "revert"]));
+    }
+    let mut last = String::from("cannot run vallum-ops (is the ops sudoers rule installed?)");
+    for (program, args) in attempts {
+        match std::process::Command::new(program).args(&args).output() {
+            Ok(result) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                return if result.status.success() {
+                    Ok(text.trim().to_owned())
+                } else {
+                    Err(text.trim().to_owned())
+                };
+            }
+            Err(error) => last = format!("{program}: {error}"),
+        }
+    }
+    Err(last)
+}
+
+/// The trial trio over Tauri IPC. (The HTTP transport serves the same three
+/// under /api/plan, /api/apply and /api/apply/cancel.) A socket must be
+/// selected first: every mutation is gated on the console knowing what it is
+/// about, the same gate the peer actions use.
+#[tauri::command]
+fn plan_command(console: State<'_, Arc<Console>>) -> Result<serde_json::Value, String> {
+    Ok(plan(&selected(&console)?))
+}
+
+#[tauri::command]
+fn apply_command(
+    console: State<'_, Arc<Console>>,
+    confirm: String,
+) -> Result<serde_json::Value, String> {
+    let socket = selected(&console)?;
+    crate::hostfacts::write_gate(&socket)?;
+    match apply(&confirm) {
+        Ok(output) => Ok(serde_json::json!({ "ok": true, "output": output })),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+fn cancel_apply(console: State<'_, Arc<Console>>) -> Result<serde_json::Value, String> {
+    let socket = selected(&console)?;
+    crate::hostfacts::write_gate(&socket)?;
+    match apply_cancel(&socket) {
+        Ok(output) => Ok(serde_json::json!({ "ok": true, "output": output })),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn systemctl(args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("systemctl")
         .args(args)
@@ -593,6 +883,8 @@ pub(crate) fn service_state(socket: &std::path::Path) -> serde_json::Value {
 /// Start/stop/restart through polkit. `pkexec` shows the desktop's own
 /// authentication dialog; nothing here ever prompts for a password in the UI.
 pub(crate) fn service_action(socket: &std::path::Path, action: &str) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    crate::hostfacts::write_gate(socket)?;
     if !matches!(action, "start" | "stop" | "restart") {
         return Err(format!("unknown service action `{action}`"));
     }
@@ -738,7 +1030,12 @@ pub(crate) fn panic() -> Result<Done, String> {
 }
 
 #[tauri::command]
-fn panic_command() -> Result<Done, String> {
+fn panic_command(console: State<'_, Arc<Console>>) -> Result<Done, String> {
+    // The HTTP twin gates when a socket is known; same rule here, so the
+    // escape hatch answers identically on both transports.
+    if let Some(socket) = console.known_socket() {
+        crate::hostfacts::write_gate(&socket)?;
+    }
     panic()
 }
 
@@ -792,6 +1089,9 @@ fn main() {
             ui_report,
             list_interfaces,
             health_state,
+            service_state_command,
+            service_action_command,
+            logs_tail_command,
             panic_command,
             ping_peer,
             preflight_state,
@@ -803,7 +1103,16 @@ fn main() {
             apply_device,
             rotate_peer,
             finalize_peer,
-            invite_peer
+            invite_peer,
+            export_bundle,
+            qr_frame,
+            import_bundle,
+            generate_key,
+            read_config,
+            write_config,
+            plan_command,
+            apply_command,
+            cancel_apply
         ])
         .setup(move |app| {
             // One-shot startup report on stderr: which URL the webview loaded,
@@ -849,5 +1158,88 @@ fn main() {
     if let Err(error) = outcome {
         eprintln!("vallum-gui: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod transport_parity_tests {
+    use super::*;
+
+    /// The canonical write surface: every mutation the console can invoke, by
+    /// the name both transports use. `dispatch` (HTTP `/api/cmd/*`) matches on
+    /// this list; the Tauri commands in `generate_handler!` are the same names
+    /// as functions. Add a name to both places at once — the parity test
+    /// below fails the suite if the dispatch arm is missing.
+    const COMMAND_NAMES: &[&str] = &[
+        "add_peer",
+        "edit_peer",
+        "remove_peer",
+        "rotate_peer",
+        "finalize_peer",
+        "invite_peer",
+        "apply_device",
+        "export_bundle",
+        "qr_frame",
+        "import_bundle",
+        "generate_key",
+        "read_config",
+        "write_config",
+    ];
+
+    /// Every canonical command must reach a real arm on the HTTP transport.
+    /// With no socket selected each arm fails at the socket gate — only an
+    /// unregistered name fails with "unknown command". This is the half of
+    /// the dual-transport rule the suite can check; the Tauri half is the
+    /// `generate_handler!` list above, kept identical by review.
+    /// A console pointed at a (fake) socket: past the socket gate, so each
+    /// arm fails on its arguments instead — which still proves the arm ran.
+    fn console_with_socket() -> Arc<Console> {
+        let console = Arc::new(Console::new());
+        select_path(&console, "/tmp/vallum-parity-test.sock".to_owned());
+        console
+    }
+
+    /// The cancel gate: only a running or arming trial counts. A stopped,
+    /// failed or absent timer means the revert would drop a working tunnel,
+    /// so it is refused instead of running.
+    #[test]
+    fn only_an_armed_trial_may_be_cancelled() {
+        for armed in ["active", "activating", "reloading", "active\n"] {
+            assert!(trial_is_armed(armed), "{armed:?} is a trial in progress");
+        }
+        for idle in ["inactive", "failed", "unknown", "deactivating", ""] {
+            assert!(!trial_is_armed(idle), "{idle:?} is not a trial in progress");
+        }
+        // The refusal has to say both halves: nothing to cancel, and where the
+        // deliberate undo lives. Asserted on the message, not by running the
+        // cancel: a test must never touch the host's tunnel.
+        let error = unarmed_cancel_error("vallum0");
+        assert!(error.contains("nothing to cancel"), "{error}");
+        assert!(error.contains("vallum-ops revert"), "{error}");
+        assert!(error.contains("vallum0"), "{error}");
+    }
+
+    #[test]
+    fn every_command_dispatches() {
+        let console = console_with_socket();
+        for name in COMMAND_NAMES {
+            let error = dispatch(&console, name, serde_json::Value::Null)
+                .expect_err(&format!("{name} should fail on arguments, not be unknown"));
+            assert!(
+                !error.starts_with("unknown command"),
+                "{name} is registered but not dispatched"
+            );
+        }
+    }
+
+    /// The flip side: an unregistered name is still rejected, so a typo in the
+    /// front-end cannot silently match nothing on either transport.
+    #[test]
+    fn unknown_commands_stay_unknown() {
+        let console = console_with_socket();
+        let error = dispatch(&console, "reboot_everything", serde_json::Value::Null)
+            .expect_err("unknown names must fail");
+        assert!(error.starts_with("unknown command"));
     }
 }

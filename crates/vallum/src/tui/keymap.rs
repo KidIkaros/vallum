@@ -57,8 +57,11 @@ pub enum Action {
     EditConfig,
     ToggleService,
     Logs,
+    Health,
     SetupServer,
     SetupClient,
+    TrialPlan,
+    TrialRevert,
 }
 
 /// One command-palette entry: category badge, name shown, keywords searched.
@@ -142,7 +145,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         action: Action::Keygen,
         category: "PEER",
-        name: "generate key…",
+        name: "generate key",
         keywords: "keygen identity",
     },
     Command {
@@ -222,6 +225,24 @@ pub const COMMANDS: &[Command] = &[
         category: "VIEW",
         name: "view logs",
         keywords: "journal journalctl",
+    },
+    Command {
+        action: Action::Health,
+        category: "VIEW",
+        name: "egress health check",
+        keywords: "health egress route dns guard leak protected",
+    },
+    Command {
+        action: Action::TrialPlan,
+        category: "TRIAL",
+        name: "preview full-tunnel trial…",
+        keywords: "trial egress full tunnel plan route dns guard",
+    },
+    Command {
+        action: Action::TrialRevert,
+        category: "TRIAL",
+        name: "revert full-tunnel trial (panic)",
+        keywords: "trial revert panic undo split restore",
     },
     Command {
         action: Action::NextInterface,
@@ -440,6 +461,13 @@ impl KeyMap {
             ("setup_server", Action::SetupServer, &["1"]),
             ("setup_client", Action::SetupClient, &["2"]),
             ("logs", Action::Logs, &["l"]),
+            ("health", Action::Health, &["H"]),
+            // Trial arming is palette-only on purpose: there is no safe
+            // single letter left for it, and a global key that reroutes all
+            // host traffic is exactly the loaded-key class the GUI removed.
+            // The TRIAL view's own `a`/`p` keys arm and panic once open.
+            ("trial_plan", Action::TrialPlan, &[]),
+            ("trial_revert", Action::TrialRevert, &[]),
         ];
         defaults
             .iter()

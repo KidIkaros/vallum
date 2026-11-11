@@ -1885,3 +1885,191 @@ fn render_path_takes_every_colour_from_the_theme() {
         literals.join("\n")
     );
 }
+
+#[test]
+fn trial_plan_opens_the_trial_view_with_host_status() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Vec::new());
+    super::actions::trial_plan(&mut app);
+    assert_eq!(app.view, super::app::View::Trial);
+    assert!(!app.trial_lines.is_empty());
+    let joined = app.trial_lines.join("\n");
+    assert!(joined.contains("FULL-TUNNEL TRIAL"));
+    // With or without the dispatcher installed, the plan names the commands.
+    assert!(joined.contains("vallum-ops"));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw trial view");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Full-tunnel trial"));
+}
+
+#[test]
+fn trial_commands_are_palette_only_with_no_global_keys() {
+    let app = App::new(Vec::new());
+    // A global key that reroutes all host traffic is the loaded-key class the
+    // GUI removed; the TRIAL view's own `a`/`p` arm and panic once it is open.
+    assert!(app
+        .keymap
+        .keys_for(super::keymap::Action::TrialPlan)
+        .is_empty());
+    assert!(app
+        .keymap
+        .keys_for(super::keymap::Action::TrialRevert)
+        .is_empty());
+    let names: Vec<&str> = super::keymap::matching_commands("trial")
+        .iter()
+        .map(|command| command.name)
+        .collect();
+    assert!(names.contains(&"preview full-tunnel trial…"));
+    assert!(names.contains(&"revert full-tunnel trial (panic)"));
+}
+
+#[test]
+fn trial_view_arms_and_panics_from_its_own_keys() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = App::new(Vec::new());
+    super::actions::trial_plan(&mut app);
+    // `a` arms: unprivileged hands `sudo vallum-ops full-tunnel` over, root
+    // runs it and lands back on the verdict view either way.
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|toast| toast.message.contains("vallum-ops full-tunnel"))
+            || app.view == super::app::View::Trial
+    );
+    // `p` panics back to split under the same privilege rule.
+    super::actions::trial_plan(&mut app);
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+    );
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|toast| toast.message.contains("vallum-ops revert"))
+            || app.view == super::app::View::Trial
+    );
+    // Esc leaves the trial view.
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view, super::app::View::Dashboard);
+}
+
+#[test]
+fn health_verdict_matches_the_gui_sentence() {
+    use super::health::{verdict, HealthFacts, Level};
+
+    let mut facts = HealthFacts {
+        interface: "vallum0".to_owned(),
+        unit: "vallum@vallum0".to_owned(),
+        route4: Some("wlp0s20f3".to_owned()),
+        dns: vec!["127.0.0.53".to_owned()],
+        guard_active: "inactive".to_owned(),
+        quick_active: "inactive".to_owned(),
+        unit_active: "inactive".to_owned(),
+        interface_present: true,
+        ..HealthFacts::default()
+    };
+    // Split by design reads SPLIT in amber, never red.
+    let (label, _, level) = verdict(&facts);
+    assert_eq!(label, "SPLIT");
+    assert_eq!(level, Level::Warn);
+    // The same host with a full-tunnel config and no tunnel reads as a fault.
+    facts.expected_full = true;
+    let (label, detail, level) = verdict(&facts);
+    assert_eq!(label, "UNPROTECTED");
+    assert!(detail.contains("vallum@vallum0 is inactive"));
+    assert_eq!(level, Level::Fail);
+    // Unit up but no route names the missing route instead.
+    facts.unit_active = "active".to_owned();
+    let (label, detail, level) = verdict(&facts);
+    assert_eq!(label, "UNPROTECTED");
+    assert!(detail.contains("no default route through vallum0"));
+    assert_eq!(level, Level::Fail);
+    // Route via the tunnel with a real DNS upstream is protected.
+    facts.route4 = Some("vallum0".to_owned());
+    facts.dns_upstream = vec!["10.7.0.1".to_owned()];
+    let (label, _, level) = verdict(&facts);
+    assert_eq!(label, "PROTECTED");
+    assert_eq!(level, Level::Ok);
+    // The same route with only the local stub leaks DNS.
+    facts.dns_upstream.clear();
+    facts.dns = vec!["127.0.0.53".to_owned()];
+    let (label, detail, level) = verdict(&facts);
+    assert_eq!(label, "DNS LEAK");
+    assert!(detail.contains("127.0.0.53"));
+    assert_eq!(level, Level::Fail);
+    // Guard on but nothing tunnelled is unprotected, not split.
+    facts.route4 = Some("wlp0s20f3".to_owned());
+    facts.guard_active = "active".to_owned();
+    facts.expected_full = false;
+    let (label, _, level) = verdict(&facts);
+    assert_eq!(label, "UNPROTECTED");
+    assert_eq!(level, Level::Fail);
+}
+
+#[test]
+fn health_check_opens_the_health_view_from_h_or_palette() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/run/vallum/vallum0.sock"),
+    );
+    let mut app = App::new(vec![interface]);
+    // `H` opens the check from the dashboard.
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.view, super::app::View::Health);
+    // The measurement degrades to unknown rows where the tools are missing;
+    // it never fails to render.
+    assert!(!app.health_lines.is_empty());
+    assert!(app.health_lines[0].contains(" — "));
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw health view");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Egress health"));
+
+    // The palette reaches the same action by keyword.
+    let names: Vec<&str> = super::keymap::matching_commands("health")
+        .iter()
+        .map(|command| command.name)
+        .collect();
+    assert!(names.contains(&"egress health check"));
+
+    // `r` re-measures, Esc leaves.
+    super::input::handle(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+    );
+    assert_eq!(app.view, super::app::View::Health);
+    super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.view, super::app::View::Dashboard);
+}

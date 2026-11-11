@@ -26,6 +26,15 @@ export interface InviteFields {
   pinned: string
 }
 
+/** What an export answers: the bundle as JSON text plus the file name the
+ *  browser saves it under. The key is minted in memory server-side and never
+ *  written to disk — the downloaded file is its only copy. */
+export interface BundleOut {
+  filename: string
+  json: string
+  message: string
+}
+
 export const emptyPeer = (): PeerFields => ({
   public_line: "",
   name: "",
@@ -42,6 +51,41 @@ export const rotatePeer = (name: string, newLine: string) =>
   command<Done>("rotate_peer", { name, newLine })
 export const finalizePeer = (name: string) => command<Done>("finalize_peer", { name })
 export const invitePeer = (fields: InviteFields) => command<Done>("invite_peer", { fields })
+
+export const exportBundle = (fingerprint: string, endpoint: string) =>
+  command<BundleOut>("export_bundle", { fingerprint, endpoint })
+
+/** One frame of an animated QR: its position in the set, the set's integrity
+ *  prefix, and the module grid to draw — dark flags in row-major order, no
+ *  quiet zone (the canvas adds the plate). */
+export interface QrFrame {
+  index: number
+  total: number
+  hash: string
+  size: number
+  modules: number[]
+}
+
+/** A frame of the animation for text the console already holds: an exported
+ *  bundle's JSON, or an invite's join command. */
+export const qrFrame = (text: string, index: number) =>
+  command<QrFrame>("qr_frame", { text, index })
+
+export const importBundle = (bundlePath: string, outDir: string) =>
+  command<Done>("import_bundle", { bundlePath, outDir })
+
+/** A minted key: text plus the file name the browser saves it under. */
+export interface KeyOut {
+  filename: string
+  text: string
+  message: string
+}
+
+export const generateKey = () => command<KeyOut>("generate_key", {})
+
+export const readConfig = () => command<string>("read_config", {})
+
+export const writeConfig = (text: string) => command<Done>("write_config", { text })
 
 /** Change the device's listen port and firewall mark through the daemon. */
 export const applyDevice = (listenPort: string, fwmark: string) =>

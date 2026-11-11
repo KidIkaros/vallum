@@ -7,11 +7,18 @@ export function CopyButton({
   label = "copy",
   title,
   className = "",
+  id,
+  disabled = false,
 }: {
   value: string
   label?: string
   title?: string
   className?: string
+  disabled?: boolean
+  /** Fired by the palette; the button stays the one mechanism. Global
+   *  single-letter shortcuts were removed, so nothing fires this but a
+   *  click or the palette row. */
+  id?: string
 }) {
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle")
   const copy = async () => {
@@ -41,6 +48,8 @@ export function CopyButton({
   }
   return (
     <button
+      id={id}
+      disabled={disabled}
       onClick={() => void copy()}
       title={title ?? "copy to clipboard"}
       className={`micro hover:text-foreground border-border/60 hover:border-border cursor-pointer rounded border px-1.5 py-0.5 ${className}`}

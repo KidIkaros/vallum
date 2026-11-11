@@ -307,6 +307,8 @@ pub enum View {
     Help,
     Logs,
     Diff,
+    Trial,
+    Health,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,6 +863,9 @@ pub struct App {
     /// The `:` command palette, when open.
     pub palette: Option<PaletteState>,
     pub logs: Vec<String>,
+    pub trial_lines: Vec<String>,
+    pub health_lines: Vec<String>,
+    pub health_tone: super::health::Level,
     pub last_refresh: Instant,
     pub refresh_rate: u64,
     pub pending_key: Option<PathBuf>,
@@ -874,6 +879,8 @@ pub struct App {
     pub now: u64,
     pub diff: Option<DiffView>,
     pub logs_scroll: usize,
+    pub trial_scroll: usize,
+    pub health_scroll: usize,
     pub diff_scroll: usize,
     pub help_scroll: usize,
     pub peer_filter: String,
@@ -922,6 +929,9 @@ impl App {
             keymap: super::keymap::KeyMap::default(),
             palette: None,
             logs: Vec::new(),
+            trial_lines: Vec::new(),
+            health_lines: Vec::new(),
+            health_tone: super::health::Level::Warn,
             last_refresh: Instant::now() - Duration::from_secs(2),
             pending_key: None,
             qr: None,
@@ -932,6 +942,8 @@ impl App {
             now: wall_now(),
             diff: None,
             logs_scroll: 0,
+            trial_scroll: 0,
+            health_scroll: 0,
             diff_scroll: 0,
             help_scroll: 0,
             peer_filter: String::new(),

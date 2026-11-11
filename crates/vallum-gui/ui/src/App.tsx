@@ -3,22 +3,29 @@ import { ShieldOff } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import {
   AddPeerDialog,
+  ConfigDialog,
   DeviceDialog,
   EditPeerDialog,
+  ExportBundleDialog,
   FinalizeButton,
+  ImportBundleDialog,
   InviteDialog,
+  KeygenButton,
   RemoveDialog,
   RotateDialog,
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { egressVerdict, HealthPanel, type Egress } from "@/components/Health"
+import { egressVerdict, HealthPanel } from "@/components/Health"
+import { verdictTone } from "@/lib/verdict"
+import { PeerPalette } from "@/components/PeerPalette"
 import { PlanPanel } from "@/components/Plan"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
+import { TopTalkers, type PeerRate } from "@/components/TopTalkers"
 import { TrafficChart } from "@/components/TrafficChart"
-import { Panel, PanelTitle } from "@/components/ui/panel"
+import { Diamond, Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, loadHistory, rateLabel, saveHistory, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 
@@ -47,12 +54,28 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 type SortOrder = "handshake" | "name" | "epoch"
 const SORT_CYCLE: SortOrder[] = ["handshake", "name", "epoch"]
 
-/** One place maps a verdict tone to its class, like `freshnessTone` below. */
-const verdictTone: Record<Egress["tone"], string> = {
-  live: "text-live",
-  fault: "text-fault",
-  stale: "text-stale",
-  muted: "text-muted-foreground",
+// The visible peer order, in one place: the list and the j/k handler share
+// it, so the keyboard moves through exactly what the eye sees.
+function orderPeers(peers: Peer[], filter: string, sort: SortOrder): Peer[] {
+  const needle = filter.trim().toLowerCase()
+  const matching = needle
+    ? peers.filter(
+        (peer) =>
+          peer.name.toLowerCase().includes(needle) ||
+          peer.allowed_ips.some((ip) => ip.includes(needle)),
+      )
+    : peers
+  const order = [...matching]
+  if (sort === "name") order.sort((a, b) => a.name.localeCompare(b.name))
+  else if (sort === "epoch") order.sort((a, b) => b.epoch - a.epoch)
+  else order.sort((a, b) => b.last_handshake_sec - a.last_handshake_sec)
+  return order
+}
+/** Geek-free labels for the sort control: "epoch" is the daemon's key version. */
+const SORT_LABELS: Record<SortOrder, string> = {
+  handshake: "Last activity",
+  name: "Name",
+  epoch: "Key version",
 }
 
 const freshnessTone: Record<string, string> = {
@@ -125,7 +148,7 @@ function Hero({
           >
             {verdict ? verdict.label : "…"}
           </span>
-          <span className="text-muted-foreground text-[11px]">
+          <span className="text-muted-foreground text-xs">
             tunnel {up ? "up" : unreachable ? "unreachable" : data ? "idle" : "…"}
           </span>
           <span className="text-muted-foreground mt-0.5 text-xs">
@@ -147,12 +170,13 @@ function Hero({
         <div className="flex items-end gap-8">
           {(
             [
-              ["▼ rx", rx, last.rx, "signal"] as const,
-              ["▲ tx", tx, last.tx, "violet"] as const,
+              ["Download", rx, last.rx, "signal"] as const,
+              ["Upload", tx, last.tx, "violet"] as const,
             ]
           ).map(([label, rate, total, tone]) => (
             <div key={label} className="flex flex-col gap-1">
               <span className={`micro ${tone === "signal" ? "text-signal/80" : "text-violet/80"}`}>
+                <span aria-hidden>{tone === "signal" ? "▼ " : "▲ "}</span>
                 {label}
               </span>
               <span
@@ -162,7 +186,7 @@ function Hero({
               >
                 {rateLabel(rate)}
               </span>
-              <span className="text-muted-foreground text-[11px]">total {bytes(total)}</span>
+              <span className="text-muted-foreground text-xs">total {bytes(total)}</span>
             </div>
           ))}
         </div>
@@ -198,23 +222,9 @@ function PeersPanel({
   filter: string
   onFilter: (value: string) => void
   sort: SortOrder
-  onSort: () => void
+  onSort: (next: SortOrder) => void
 }) {
-  const shown = useMemo(() => {
-    const needle = filter.trim().toLowerCase()
-    const matching = needle
-      ? peers.filter(
-          (peer) =>
-            peer.name.toLowerCase().includes(needle) ||
-            peer.allowed_ips.some((ip) => ip.includes(needle)),
-        )
-      : peers
-    const order = [...matching]
-    if (sort === "name") order.sort((a, b) => a.name.localeCompare(b.name))
-    else if (sort === "epoch") order.sort((a, b) => b.epoch - a.epoch)
-    else order.sort((a, b) => b.last_handshake_sec - a.last_handshake_sec)
-    return order
-  }, [peers, filter, sort])
+  const shown = useMemo(() => orderPeers(peers, filter, sort), [peers, filter, sort])
 
   return (
     <Panel
@@ -228,26 +238,38 @@ function PeersPanel({
       }
       right={
         <span className="flex items-center gap-1.5">
-          <button
-            onClick={onSort}
-            className="micro hover:text-foreground cursor-pointer rounded px-1 py-0.5"
-            title="cycle sort: handshake → name → epoch (o)"
-          >
-            sort {sort}
-          </button>
+          <label className="micro flex items-center gap-1">
+            <span>sort</span>
+            <select
+              value={sort}
+              onChange={(event) => onSort(event.target.value as SortOrder)}
+              className="bg-background/40 border-border/70 text-foreground cursor-pointer rounded border px-1 py-0.5"
+              title="sort peers (o cycles the order)"
+              aria-label="sort peers"
+            >
+              {(Object.keys(SORT_LABELS) as SortOrder[]).map((key) => (
+                <option key={key} value={key}>
+                  {SORT_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </label>
           {actions}
         </span>
       }
       className="min-w-0"
     >
       <div className="mb-2 flex items-center gap-2">
+        <label htmlFor="peer-filter" className="micro sr-only">
+          Filter peers
+        </label>
         <input
           id="peer-filter"
           value={filter}
           onChange={(event) => onFilter(event.target.value)}
-          placeholder="Filter"
-          className="border-border/70 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal w-full rounded-md border px-2 py-1 text-[11px] focus-visible:ring-1 focus-visible:outline-none"
-          aria-label="filter peers"
+          placeholder="Filter peers by name or IP…"
+          className="border-border/70 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal w-full rounded-md border px-2 py-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+          aria-label="filter peers by name or IP"
         />
       </div>
       {peers.length === 0 ? (
@@ -268,12 +290,14 @@ function PeersPanel({
                     isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                   }`}
                 >
-                  <span className={isSelected ? "text-signal" : "text-transparent"}>)</span>
+                  <span aria-hidden className={isSelected ? "text-signal text-[8px]" : "text-transparent text-[8px]"}>
+                    ●
+                  </span>
                   <span className="min-w-0 flex-1 truncate">{peer.name}</span>
                   {peer.rotating && (
-                    <span className="text-violet text-[11px]">rotating</span>
+                    <span className="text-violet text-xs">rotating</span>
                   )}
-                  <span className={`text-[11px] uppercase ${tone}`}>
+                  <span className={`text-xs uppercase ${tone}`}>
                     {freshnessLabel[f]}
                     {peer.last_handshake_sec > 0 && (
                       <span className="text-muted-foreground"> {Math.max(0, now - peer.last_handshake_sec)}s</span>
@@ -334,9 +358,10 @@ function PeerDetail({
           </span>
         )}
         <Button
+          id="ping-peer-btn"
           size="sm"
           variant="outline"
-          className="h-7 px-2.5 text-[11px]"
+          className="h-7 px-2.5 text-xs"
           disabled={probing || peer.allowed_ips.length === 0}
           title={`ping ${peer.allowed_ips[0] ?? "the peer"}`}
           onClick={() => {
@@ -354,7 +379,9 @@ function PeerDetail({
         >
           {probing ? "…" : "ping"}
         </Button>
-        <CopyButton value={peer.public_line} label="copy line" title="copy this peer's public line" />
+        <CopyButton id="copy-line-btn" value={peer.public_line} label="copy line" title="copy this peer's public line" />
+        <CopyButton id="copy-address-btn" value={peer.allowed_ips.join(", ") || peer.endpoint} label="copy address" title="copy this peer's address (allowed IPs, else its endpoint)" disabled={peer.allowed_ips.length === 0 && peer.endpoint === ""} />
+        <ExportBundleDialog peer={peer} blocked={blocked} />
         <EditPeerDialog peer={peer} blocked={blocked} />
         <RotateDialog peer={peer} blocked={blocked} />
         {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
@@ -362,7 +389,7 @@ function PeerDetail({
         <RemoveDialog peer={peer} blocked={blocked} />
       </div>
       {probe && (
-        <p className={`text-[11px] ${probe.received ? "text-live" : "text-fault"}`}>
+        <p className={`text-xs ${probe.received ? "text-live" : "text-fault"}`}>
           {probe.error
             ? probe.error
             : `${probe.received ?? 0}/${probe.sent ?? 0} replies from ${probe.address}${
@@ -372,10 +399,10 @@ function PeerDetail({
       )}
       <Row label="fingerprint">{peer.fingerprint}</Row>
       <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
-      <Row label="allowed">{peer.allowed_ips.join(", ")}</Row>
+      <Row label="allowed IPs">{peer.allowed_ips.join(", ")}</Row>
       <Row label="keepalive">{peer.keepalive !== null ? `${peer.keepalive}s` : "—"}</Row>
       <Row label="transfer">
-        {bytes(peer.rx_bytes)} ↓ / {bytes(peer.tx_bytes)} ↑
+        {bytes(peer.rx_bytes)} received / {bytes(peer.tx_bytes)} sent
       </Row>
       <Row label="handshake">
         <span className={tone}>{freshnessLabel[f]}</span>
@@ -386,13 +413,20 @@ function PeerDetail({
             : `${Math.max(0, now - peer.last_handshake_sec)}s ago`}
         </span>
       </Row>
-      <Row label="epoch">{peer.epoch}</Row>
+      <Row label="key version">{peer.epoch}</Row>
     </Panel>
   )
 }
 
 function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
   const c = payload?.data?.counters
+  const failures =
+    (c?.datagrams_failed ?? 0) + (c?.packets_failed ?? 0) + (c?.refusals ?? 0)
+  // Healthy counters stay collapsed: the summary line keeps the totals
+  // glanceable while the per-kind breakdown waits on demand. Failures flip
+  // the key, remounting open so the problem cannot sit hidden; user toggles
+  // in between are left alone (uncontrolled details).
+  const attention = failures > 0
   const metric = (label: string, primary: string, secondary: React.ReactNode) => (
     <div className="flex flex-col">
       <span className="micro">{label}</span>
@@ -401,29 +435,40 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
     </div>
   )
   return (
-    <Panel
-      title="INTERFACE DATA"
-      right={
-        c && (
-          <span className="text-muted-foreground text-[11px]">
-            {c.datagrams_sent.toLocaleString()} out · {c.packets_delivered.toLocaleString()} in
-            {c.datagrams_failed + c.packets_failed > 0 && (
-              <span className="text-fault"> · {c.datagrams_failed + c.packets_failed} failed</span>
-            )}
-          </span>
-        )
-      }
+    <details
+      key={attention ? "attention" : "healthy"}
+      open={attention}
+      className="bg-card/60 rounded-lg border border-border/70"
     >
-      <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-3">
+      <summary className="flex cursor-pointer items-center justify-between gap-2 px-4 pt-3 pb-1 select-none">
+        <span className="flex items-center gap-1.5">
+          <Diamond />
+          <span className="text-signal text-xs font-semibold tracking-wide">
+            INTERFACE DETAILS
+          </span>
+        </span>
+        <span className="text-muted-foreground text-xs">
+          {c ? (
+            <>
+              {c.datagrams_sent.toLocaleString()} out · {c.packets_delivered.toLocaleString()} in
+              {attention && <span className="text-fault"> · {failures} failed</span>}
+            </>
+          ) : (
+            "…"
+          )}
+        </span>
+      </summary>
+      <div className="px-4 pb-3.5">
+      <div className="grid grid-cols-1 gap-x-6 gap-y-2 pt-1 sm:grid-cols-3">
         {metric(
-          "datagrams · outer",
+          "sent",
           `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
           <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
             failed {c?.datagrams_failed ?? "—"}
           </span>,
         )}
         {metric(
-          "packets · inner",
+          "received",
           `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
           <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
             failed {c?.packets_failed ?? "—"}
@@ -437,7 +482,8 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
           </span>,
         )}
       </div>
-    </Panel>
+      </div>
+    </details>
   )
 }
 
@@ -469,17 +515,47 @@ export default function App() {
   const [filter, setFilter] = useState("")
   const [sort, setSort] = useState<SortOrder>("handshake")
   const [shortcuts, setShortcuts] = useState(false)
-  const [comfortable, setComfortable] = useState(false)
+  const [palette, setPalette] = useState(false)
+  const [comfortable, setComfortable] = useState(() => {
+    try {
+      return window.localStorage.getItem("vallum.comfortable") === "1"
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("vallum.comfortable", comfortable ? "1" : "0")
+    } catch {
+      /* a disabled store is not worth failing a render over */
+    }
+  }, [comfortable])
   const [facts, setFacts] = useState<Preflight | null>(null)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
+  const [peerRates, setPeerRates] = useState<PeerRate[]>([])
+  const prevPeers = useRef(new Map<string, { rx: number; tx: number; at: number }>())
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null)
   const [lastUpdate, setLastUpdate] = useState<number | null>(null)
   const history = useRef(new TrafficHistory())
   const now = useLiveClock()
 
   useEffect(() => watchWindowState(), [])
+
+  // The palette's own chord: Cmd/Ctrl+K toggles peer search from anywhere.
+  // Single-letter shortcuts stay parked behind the typing/dialog guards in
+  // the main handler; this chord is reserved and never collides with them.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault()
+        setPalette((open) => !open)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
 
   // What is installed here, read once: it decides whether the console offers a
   // start button or an install step.
@@ -500,12 +576,15 @@ export default function App() {
       return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || element.isContentEditable
     }
     const dialogOpen = () => document.querySelector("[role=dialog]") !== null
-    const click = (id: string) =>
-      (document.getElementById(id) as HTMLButtonElement | null)?.click()
 
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
       if (event.key === "Escape") {
+        // Clearing the peer filter from inside a dialog (or while typing in
+        // any other field) destroys input the operator did not mean to lose.
+        if (dialogOpen()) return
+        const focused = event.target as HTMLElement | null
+        if (typing(event.target) && focused?.id !== "peer-filter") return
         setFilter("")
         return
       }
@@ -516,30 +595,26 @@ export default function App() {
         return
       }
       if (dialogOpen()) return
+      // Single letters never fire here. A global letter is a loaded key: it
+      // can trigger from anywhere the guard misses, and a destructive verb on
+      // one is a disaster waiting to happen. Letters live in the palette,
+      // which is modal, explicit, and closes on Esc — the only globals are
+      // punctuation and navigation, which cannot collide with typing.
       switch (event.key) {
-        case "a":
-          event.preventDefault()
-          click("add-peer-btn")
-          break
-        case "e":
-          event.preventDefault()
-          click("edit-peer-btn")
-          break
-        case "d":
-          event.preventDefault()
-          click("remove-peer-btn")
-          break
         case "/":
           event.preventDefault()
           document.getElementById("peer-filter")?.focus()
           break
+        case ":":
+          // The TUI's dispatch key: `:` opens the command palette, like the
+          // brandkit's `: commands` pill. Typing and dialogs are guarded
+          // above, so this never fires mid-typing.
+          event.preventDefault()
+          setPalette(true)
+          break
         case "Tab":
           event.preventDefault()
           switchRef.current()
-          break
-        case "o":
-          event.preventDefault()
-          setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
           break
         default:
           break
@@ -571,11 +646,28 @@ export default function App() {
     setPayload(payload)
     setLastUpdate(Date.now() / 1000)
     if (payload.data) {
+      const at = Date.now()
       const rx = payload.data.peers.reduce((sum, p) => sum + p.rx_bytes, 0)
       const tx = payload.data.peers.reduce((sum, p) => sum + p.tx_bytes, 0)
-      history.current.push(rx, tx)
+      history.current.push(rx, tx, at, payload.data.counters.established)
       setSamples([...history.current.recent()])
       if (payload.data?.interface) saveHistory(payload.data.interface, history.current.recent())
+      // Per-peer rates need two snapshots; the first visit only seeds the baseline.
+      const rates: PeerRate[] = []
+      const next = new Map<string, { rx: number; tx: number; at: number }>()
+      for (const peer of payload.data.peers) {
+        next.set(peer.fingerprint, { rx: peer.rx_bytes, tx: peer.tx_bytes, at })
+        const prev = prevPeers.current.get(peer.fingerprint)
+        if (!prev) continue
+        const dt = (at - prev.at) / 1000
+        if (dt <= 0) continue
+        const peerRx = Math.max(0, peer.rx_bytes - prev.rx) / dt
+        const peerTx = Math.max(0, peer.tx_bytes - prev.tx) / dt
+        if (peerRx > 0 || peerTx > 0) rates.push({ name: peer.name, rx: peerRx, tx: peerTx })
+      }
+      prevPeers.current = next
+      rates.sort((a, b) => b.rx + b.tx - (a.rx + a.tx))
+      setPeerRates(rates)
     }
   })
   const ingest = ingestRef.current
@@ -655,13 +747,30 @@ export default function App() {
           (interfaces.length === 1 ? (
             <span className="text-subtext text-xs">[1/1] {currentName}</span>
           ) : (
-            <button
-              onClick={switchInterface}
-              className="text-subtext hover:text-foreground focus-visible:ring-signal h-7 cursor-pointer rounded px-2 text-xs focus-visible:ring-1 focus-visible:outline-none"
-              title="switch interface (tab)"
-            >
-              [{currentIndex + 1}/{interfaces.length}] {currentName} ▾
-            </button>
+            <label className="text-subtext flex items-center gap-1 text-xs">
+              <span aria-hidden>
+                [{currentIndex + 1}/{interfaces.length}]
+              </span>
+              <select
+                value={currentName}
+                onChange={(event) => {
+                  const next = interfaces.find((entry) => entry.name === event.target.value)
+                  if (!next || next.name === currentName) return
+                  setSelectedPeer(null)
+                  setPayload(null)
+                  void selectInterface(next.path)
+                }}
+                className="bg-background/40 border-border/70 text-foreground h-7 cursor-pointer rounded border px-1"
+                title="switch interface (tab cycles)"
+                aria-label="switch interface"
+              >
+                {interfaces.map((entry) => (
+                  <option key={entry.path} value={entry.name}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
           ))}
         <span className="micro" title="the control socket answered">
           daemon{" "}
@@ -682,6 +791,7 @@ export default function App() {
             fwmark={data?.fwmark ?? null}
             blocked={blocked}
           />
+          <ConfigDialog blocked={blocked} />
           {data && (
             <>
               <span className="text-muted-foreground" title={`suite ${data.suite} · fwmark ${data.fwmark ?? 0}`}>
@@ -728,53 +838,108 @@ export default function App() {
             lastReply={lastReply}
             health={hostHealth}
           />
-          <Panel title="THROUGHPUT">
-            <TrafficChart samples={samples} />
-          </Panel>
-          <div className="flex flex-col gap-3 md:flex-row">
-            <div className="flex min-w-0 flex-1 flex-col gap-3">
-              <PeersPanel
-                peers={data?.peers ?? []}
-                now={now}
-                selected={selectedPeer}
-                onSelect={setSelectedPeer}
-                filter={filter}
-                onFilter={setFilter}
-                sort={sort}
-                onSort={() =>
-                  setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
-                }
-                actions={
-                  <span className="flex gap-1.5">
-                    <InviteDialog blocked={blocked} />
-                    <AddPeerDialog blocked={blocked} peers={data?.peers ?? []} />
-                  </span>
-                }
-              />
-              <InterfaceData payload={payload} />
-              <PlanPanel onChanged={() => setHostHealth(null)} />
-              <HealthPanel health={hostHealth} />
+          {/* Task grouping, not tabs: overview first, then zoom/filter, then
+              details on demand. Status answers "am I protected?" at a glance;
+              peers are the workbench (list + detail stay together so nothing
+              must be held in memory across the screen); system holds the rare,
+              dangerous changes. No tab hides another task's state. */}
+          <section aria-label="Status">
+            <p className="micro px-1 pt-1 pb-1">STATUS — IS TRAFFIC PROTECTED?</p>
+            <div className="flex flex-col gap-3 lg:flex-row">
+              <div className="min-w-0 flex-[3]">
+                <Panel title="THROUGHPUT">
+                  <TrafficChart samples={samples} />
+                  <TopTalkers rates={peerRates} />
+                </Panel>
+              </div>
+              <div className="min-w-0 flex-[2]">
+                <HealthPanel health={hostHealth} />
+              </div>
             </div>
-            <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
-              <PeerDetail peer={detail} now={now} blocked={blocked} />
+          </section>
+          <section aria-label="Peers">
+            <p className="micro px-1 pt-1 pb-1">PEERS — WHO CAN CONNECT</p>
+            <div className="flex flex-col gap-3 md:flex-row">
+              <div className="min-w-0 flex-1">
+                <PeersPanel
+                  peers={data?.peers ?? []}
+                  now={now}
+                  selected={selectedPeer}
+                  onSelect={setSelectedPeer}
+                  filter={filter}
+                  onFilter={setFilter}
+                  sort={sort}
+                  onSort={setSort}
+                  actions={
+                    <span className="flex gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="micro"
+                        onClick={() => setPalette(true)}
+                        title="command palette: verbs and peers in one box (: opens it, ⌘K works too)"
+                      >
+                        : commands
+                      </Button>
+                      <InviteDialog blocked={blocked} />
+                      <ImportBundleDialog blocked={blocked} />
+                      <KeygenButton blocked={blocked} />
+                      <AddPeerDialog blocked={blocked} peers={data?.peers ?? []} />
+                    </span>
+                  }
+                />
+              </div>
+              <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
+                <PeerDetail peer={detail} now={now} blocked={blocked} />
+              </div>
             </div>
-          </div>
-          <LogsPanel />
-          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[11px]">
-            <span>updated {lastReply}</span>
+          </section>
+          <section aria-label="System">
+            <p className="micro px-1 pt-1 pb-1">SYSTEM — RARELY CHANGED</p>
+            <div className="flex flex-col gap-3">
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                <InterfaceData payload={payload} />
+                <PlanPanel onChanged={() => setHostHealth(null)} />
+              </div>
+              <LogsPanel />
+            </div>
+          </section>
+          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
+            <span>{lastReply === "live" ? "snapshot live" : lastReply === "—" ? "waiting for snapshot" : `snapshot updated ${lastReply} ago`}</span>
             <span>·</span>
             <span>snapshot stream</span>
             <span>·</span>
             <button
               onClick={() => setComfortable((c) => !c)}
               className="hover:text-foreground focus-visible:ring-signal cursor-pointer rounded focus-visible:ring-1 focus-visible:outline-none"
-              title="Density: comfortable raises control and text sizes above minimum touch targets"
+              title="Text size: comfortable raises controls and text above minimum touch targets"
             >
-              density {comfortable ? "comfortable" : "compact"}
+              text size: {comfortable ? "comfortable" : "compact"}
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => setShortcuts(true)}
+              className="hover:text-foreground focus-visible:ring-signal cursor-pointer rounded focus-visible:ring-1 focus-visible:outline-none"
+              title="Keyboard shortcuts (?) — experts keep their speed without forcing novices to memorize"
+            >
+              shortcuts
             </button>
           </footer>
         </>
       )}
+
+      <PeerPalette
+        open={palette}
+        onOpenChange={setPalette}
+        peers={data?.peers ?? []}
+        now={now}
+        selected={selectedPeer}
+        selectedRotating={detail?.rotating ?? false}
+        onSelect={setSelectedPeer}
+        onCycleSort={() =>
+          setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
+        }
+      />
 
       {shortcuts && (
         <div
@@ -792,12 +957,11 @@ export default function App() {
             </p>
             <dl className="grid grid-cols-[3rem_1fr] gap-x-3 gap-y-1.5 text-xs">
               {[
-                ["a", "add peer"],
-                ["e", "edit the selected peer"],
-                ["d", "remove the selected peer"],
                 ["/", "filter peers"],
-                ["o", "cycle sort order"],
-                ["esc", "clear the filter"],
+                [":", "command palette — every action lives here"],
+                ["⌘K", "command palette (alias)"],
+                ["Tab", "next interface"],
+                ["esc", "clear the peer filter"],
                 ["?", "this list"],
               ].map(([key, meaning]) => (
                 <div key={key} className="contents">
@@ -806,8 +970,8 @@ export default function App() {
                 </div>
               ))}
             </dl>
-            <p className="text-muted-foreground mt-3 text-[11px]">
-              Shortcuts are off while a field has focus.
+            <p className="text-muted-foreground mt-3 text-xs">
+              Peer, service, and device actions live in the palette — press : and type.
             </p>
           </div>
         </div>

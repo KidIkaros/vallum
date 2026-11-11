@@ -1,4 +1,4 @@
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import type { Sample } from "@/lib/traffic"
 import { rateLabel } from "@/lib/traffic"
 
@@ -30,19 +30,47 @@ function area(values: number[], peak: number, width: number): string {
 }
 
 export function TrafficChart({ samples }: { samples: Sample[] }) {
-  const { rx, tx, peak, rxPeak, txPeak } = useMemo(() => {
+  // Hovered segment, for the crosshair readout. Null is live: the header
+  // shows the window, and touching the chart inspects one instant of it.
+  const [hover, setHover] = useState<number | null>(null)
+  const { rx, tx, peak, rxPeak, txPeak, handshakes } = useMemo(() => {
     const rxSeries = series(samples, "rx")
     const txSeries = series(samples, "tx")
     const top = Math.max(1, ...rxSeries, ...txSeries)
+    // Segments where the daemon's handshake counter advanced: the moments
+    // new sessions proved themselves. Only where both ends report a count.
+    const marks: number[] = []
+    for (let i = 1; i < samples.length; i++) {
+      const before = samples[i - 1].established
+      const after = samples[i].established
+      if (before !== undefined && after !== undefined && after > before) marks.push(i)
+    }
     return {
       rx: rxSeries,
       tx: txSeries,
       peak: top,
       rxPeak: Math.max(0, ...rxSeries),
       txPeak: Math.max(0, ...txSeries),
+      handshakes: marks,
     }
   }, [samples])
 
+  const hovered =
+    hover !== null && hover > 0 && hover <= rx.length
+      ? {
+          ago: Math.max(0, Math.round((samples.at(-1)!.at - samples[hover].at) / 1000)),
+          rx: rx[hover - 1],
+          tx: tx[hover - 1],
+        }
+      : null
+  const onMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const ratio = (event.clientX - rect.left) / rect.width
+    setHover(Math.max(0, Math.min(rx.length, Math.round(ratio * rx.length))))
+  }
+  // Delta-point i sits at i/(rx.length-1) of the width — the same mapping the
+  // area path uses — so ticks and crosshair land on the curve they annotate.
+  const xAt = (deltaIndex: number) => (deltaIndex / Math.max(1, rx.length - 1)) * W
   const seconds = samples.length > 1 ? Math.round((samples.at(-1)!.at - samples[0].at) / 1000) : 0
   // Below a few hundred bytes a second the plot is a flat line at a scale that
   // means nothing; saying "idle" is the honest reading.
@@ -52,15 +80,23 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between">
-        <span className="micro">rate · last {seconds || 0}s</span>
+        <span className="micro">
+          {hovered
+            ? `${hovered.ago}s ago · ▼ ${rateLabel(hovered.rx)} ▲ ${rateLabel(hovered.tx)}`
+            : `rate · last ${seconds || 0}s`}
+        </span>
         {!idle && (
-          <span className="text-muted-foreground text-[11px]">
+          <span className="text-muted-foreground text-xs">
             scale 0 – <span className="text-foreground/80">{rateLabel(peak)}</span>
           </span>
         )}
       </div>
-      {idle ? (
-        <p className="text-muted-foreground py-6 text-center text-[11px]">
+      {samples.length < 2 ? (
+        <p className="text-muted-foreground py-6 text-center text-xs">
+          waiting for traffic — the chart fills as snapshots arrive
+        </p>
+      ) : idle ? (
+        <p className="text-muted-foreground py-6 text-center text-xs">
           {peak < 1
             ? "idle — no traffic in this window"
             : `low traffic — peak ${rateLabel(peak)}`}
@@ -68,9 +104,11 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       ) : (
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="h-[160px] w-full"
+        className="h-[160px] w-full cursor-crosshair"
         role="img"
-        aria-label={`Receive peak ${rateLabel(rxPeak)}, transmit peak ${rateLabel(txPeak)}`}
+        aria-label={`Receive peak ${rateLabel(rxPeak)}, transmit peak ${rateLabel(txPeak)}${handshakes.length > 0 ? `, ${handshakes.length} handshake${handshakes.length === 1 ? "" : "s"} in window` : ""}`}
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
       >
         <defs>
           <linearGradient id="rx-fill" x1="0" y1="0" x2="0" y2="1">
@@ -103,15 +141,48 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
         />
         <path d={area(tx, peak, W)} fill="url(#tx-fill)" stroke="var(--color-violet)" strokeWidth="1.2" />
         <path d={area(rx, peak, W)} fill="url(#rx-fill)" stroke="var(--color-signal)" strokeWidth="1.2" />
+        {/* Handshake ticks: short green marks at the top, one per segment
+            where the daemon proved a new session. */}
+        {handshakes.map((index) => {
+          const x = xAt(index - 1)
+          return (
+            <line
+              key={index}
+              x1={x}
+              y1={peakY}
+              x2={x}
+              y2={peakY + 7}
+              stroke="var(--color-live)"
+              strokeWidth="1.5"
+            />
+          )
+        })}
+        {/* Crosshair: the inspected instant, drawn so it can be measured. */}
+        {hovered !== null && hover !== null && hover > 0 && (
+          <line
+            x1={xAt(hover - 1)}
+            y1={PAD.top}
+            x2={xAt(hover - 1)}
+            y2={H - PAD.bottom}
+            stroke="var(--color-foreground)"
+            strokeWidth="1"
+            strokeOpacity="0.4"
+          />
+        )}
       </svg>
       )}
       {!idle && (
-        <div className="text-muted-foreground flex justify-between text-[11px]">
+        <div className="text-muted-foreground flex justify-between text-xs">
           <span>
-            <span className="text-signal">▼ rx</span> peak {rateLabel(rxPeak)}
+            <span className="text-signal">▼ download</span> peak {rateLabel(rxPeak)}
           </span>
+          {handshakes.length > 0 && (
+            <span>
+              <span className="text-live">│</span> {handshakes.length} handshake{handshakes.length === 1 ? "" : "s"}
+            </span>
+          )}
           <span>
-            <span className="text-violet">▲ tx</span> peak {rateLabel(txPeak)}
+            <span className="text-violet">▲ upload</span> peak {rateLabel(txPeak)}
           </span>
         </div>
       )}

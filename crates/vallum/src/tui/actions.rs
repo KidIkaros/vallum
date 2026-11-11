@@ -1238,6 +1238,107 @@ pub fn load_logs(app: &mut App) {
     }
 }
 
+/// The full-tunnel trial preview. Read-only: `vallum-ops status` needs no
+/// privilege, so the plan renders for every operator. Arming stays behind the
+/// privilege rule in `run_ops` below.
+pub fn trial_plan(app: &mut App) {
+    let mut lines = vec![
+        "FULL-TUNNEL TRIAL — route all host traffic through the tunnel.".to_owned(),
+        String::new(),
+        "What arming does: default route via the tunnel, DNS via the tunnel,".to_owned(),
+        "egress guard on, and a dead-man revert timer. The dispatcher's verdict".to_owned(),
+        "prints verbatim after `full-tunnel` runs. `p` panics back to split.".to_owned(),
+        String::new(),
+        "--- host now (`vallum-ops status`) ---".to_owned(),
+    ];
+    match Command::new("vallum-ops").arg("status").output() {
+        Ok(output) if output.status.success() => lines.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned),
+        ),
+        Ok(output) => lines.push(format!(
+            "status unavailable: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(_) => {
+            lines.push("vallum-ops not found — arm with: sudo vallum-ops full-tunnel".to_owned())
+        }
+    }
+    app.trial_lines = lines;
+    app.trial_scroll = 0;
+    app.view = View::Trial;
+}
+
+/// Run a privileged ops subcommand, or hand its command over. The TUI never
+/// raises a privilege prompt mid-dashboard: the same rule `restart_service`
+/// follows — root runs, everyone else gets the exact command to run.
+fn run_ops(app: &mut App, subcommand: &str) {
+    if !nix::unistd::geteuid().is_root() {
+        app.notify(format!("sudo vallum-ops {subcommand}"));
+        return;
+    }
+    match Command::new("vallum-ops").arg(subcommand).output() {
+        Ok(output) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            app.trial_lines = text.lines().map(str::to_owned).collect();
+            app.trial_scroll = 0;
+            app.view = View::Trial;
+            app.notify(if output.status.success() {
+                format!("vallum-ops {subcommand}: ok")
+            } else {
+                format!("vallum-ops {subcommand}: failed")
+            });
+        }
+        Err(error) => app.notify(format!("cannot run vallum-ops: {error}")),
+    }
+}
+
+/// Arm the full-tunnel trial from the plan view.
+pub fn trial_arm(app: &mut App) {
+    run_ops(app, "full-tunnel");
+}
+
+/// Panic: the documented undo, run immediately. Converges on split tunnel
+/// even when no trial is active — the same end state a failed trial reaches
+/// on its own, reached now instead of at the deadline.
+pub fn trial_revert(app: &mut App) {
+    run_ops(app, "revert");
+}
+
+/// Egress health, measured from the host. Read-only, so it renders for every
+/// operator with no privilege question — the GUI's EGRESS HEALTH rows.
+pub fn health_check(app: &mut App) {
+    let Some(interface) = app.current() else {
+        app.notify("no interface to check");
+        return;
+    };
+    let stem = interface
+        .config_path
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(interface.name.as_str());
+    let name = if interface.name.is_empty() {
+        stem.to_owned()
+    } else {
+        interface.name.clone()
+    };
+    let expected_full = app
+        .current_device()
+        .is_some_and(|device| device.egress == "full");
+    let facts = super::health::measure(&name, &format!("vallum@{stem}"), expected_full);
+    let (_, _, tone) = super::health::verdict(&facts);
+    app.health_tone = tone;
+    app.health_lines = super::health::lines(&facts);
+    app.health_scroll = 0;
+    app.view = View::Health;
+}
+
 fn apply(app: &App, set: &Set) -> Result<(), String> {
     let interface = app.current().ok_or("no interface")?;
     let body = uapi::render_set(set);

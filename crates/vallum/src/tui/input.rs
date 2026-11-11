@@ -44,12 +44,16 @@ pub fn handle_mouse_at(app: &mut App, mouse: MouseEvent, (width, height): (u16, 
     match mouse.kind {
         MouseEventKind::ScrollDown => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_add(3),
+            View::Trial => app.trial_scroll = app.trial_scroll.saturating_add(3),
+            View::Health => app.health_scroll = app.health_scroll.saturating_add(3),
             View::Diff => app.diff_scroll = app.diff_scroll.saturating_add(3),
             View::Help => app.help_scroll = app.help_scroll.saturating_add(3),
             View::Dashboard => app.next_peer(),
         },
         MouseEventKind::ScrollUp => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_sub(3),
+            View::Trial => app.trial_scroll = app.trial_scroll.saturating_sub(3),
+            View::Health => app.health_scroll = app.health_scroll.saturating_sub(3),
             View::Diff => app.diff_scroll = app.diff_scroll.saturating_sub(3),
             View::Help => app.help_scroll = app.help_scroll.saturating_add(0).saturating_sub(3),
             View::Dashboard => app.previous_peer(),
@@ -419,6 +423,68 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             }
             return;
         }
+        View::Trial => {
+            // Modal context, fixed keys by design (see keymap docs): `a` arms
+            // and `p` panics only while the plan is open — nothing global.
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.view = View::Dashboard;
+                    app.trial_scroll = 0;
+                }
+                KeyCode::Char('r') => actions::trial_plan(app),
+                KeyCode::Char('a') => actions::trial_arm(app),
+                KeyCode::Char('p') => actions::trial_revert(app),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.trial_scroll = app.trial_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.trial_scroll = app.trial_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    app.trial_scroll = app.trial_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    app.trial_scroll = app.trial_scroll.saturating_sub(10);
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    app.trial_scroll = 0;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    app.trial_scroll = app.trial_lines.len().saturating_sub(10);
+                }
+                _ => {}
+            }
+            return;
+        }
+        View::Health => {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.view = View::Dashboard;
+                    app.health_scroll = 0;
+                }
+                KeyCode::Char('r') | KeyCode::Char('H') => actions::health_check(app),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.health_scroll = app.health_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.health_scroll = app.health_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    app.health_scroll = app.health_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    app.health_scroll = app.health_scroll.saturating_sub(10);
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    app.health_scroll = 0;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    app.health_scroll = app.health_lines.len().saturating_sub(10);
+                }
+                _ => {}
+            }
+            return;
+        }
         View::Diff => {
             match key.code {
                 KeyCode::Enter => actions::apply_config(app),
@@ -592,6 +658,9 @@ fn dispatch(app: &mut App, action: Action) {
         Action::YankAddress => actions::yank_peer_address(app),
         Action::SaveRuntime => actions::save_runtime_config(app),
         Action::Logs => actions::load_logs(app),
+        Action::Health => actions::health_check(app),
+        Action::TrialPlan => actions::trial_plan(app),
+        Action::TrialRevert => actions::trial_revert(app),
     }
 }
 

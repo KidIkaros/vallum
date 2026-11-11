@@ -32,6 +32,7 @@ use vallum::form;
 use vallum::keys;
 use vallum::uapi::{self, Peer, Set};
 
+use crate::hostfacts::write_gate;
 use crate::snapshot;
 
 /// The fields of the invite form, as typed.
@@ -82,6 +83,8 @@ impl Done {
 ///
 /// A form error naming the field, a suite mismatch, or the daemon's refusal.
 pub fn add(path: &Path, fields: &PeerFields) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    write_gate(path)?;
     let device = snapshot::fetch(path)?;
     let peer = build(fields, device.suite_id(), false)?;
     submit(
@@ -100,6 +103,8 @@ pub fn add(path: &Path, fields: &PeerFields) -> Result<Done, String> {
 ///
 /// As [`add`], plus the daemon's `ENOENT` when the peer has gone.
 pub fn edit(path: &Path, fields: &PeerFields) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    write_gate(path)?;
     let device = snapshot::fetch(path)?;
     let peer = build(fields, device.suite_id(), true)?;
     submit(
@@ -122,6 +127,8 @@ pub fn edit(path: &Path, fields: &PeerFields) -> Result<Done, String> {
 ///
 /// If the public line cannot be decoded or the daemon refuses.
 pub fn remove(path: &Path, public_line: &str) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    write_gate(path)?;
     let (_, identity) = keys::decode_public(public_line).map_err(|error| error.to_string())?;
     let peer = Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
@@ -147,6 +154,8 @@ pub fn remove(path: &Path, public_line: &str) -> Result<Done, String> {
 ///
 /// A parse error or the daemon's refusal.
 pub fn apply_device(path: &Path, listen_port: &str, fwmark: &str) -> Result<Done, String> {
+    // Both transports pass here; the gate lives with the write, not the route.
+    write_gate(path)?;
     let listen_port = match listen_port.trim() {
         "" => None,
         text => Some(
@@ -417,8 +426,274 @@ fn privileged(config: &Path, verb: &str, error: impl std::fmt::Display) -> Strin
     )
 }
 
+/// What an export answers: the bundle as JSON text plus the file name the
+/// front-end saves it under. The key is minted in memory and never written to
+/// disk — the downloaded bundle file is its only copy, and the dialog says so.
+#[derive(Debug, serde::Serialize)]
+pub struct BundleOut {
+    pub filename: String,
+    pub json: String,
+    pub message: String,
+}
+
+/// A minted key: text plus a suggested file name. In-memory only — the TUI
+/// writes its key next to the config directory, the GUI hands the text to the
+/// browser as a download. Same `new_secret` both sides, so the files match.
+#[derive(Debug, serde::Serialize)]
+pub struct KeyOut {
+    pub filename: String,
+    pub text: String,
+    pub message: String,
+}
+
+/// Mint a fresh identity in the device's suite. Read-only against the daemon
+/// plus local randomness: no write gate, no privilege question.
+///
+/// # Errors
+///
+/// If the daemon cannot be read for its suite.
+pub fn generate_key(path: &Path) -> Result<KeyOut, String> {
+    let snap = snapshot::fetch(path)?;
+    let secret = vallum::keys::new_secret(snap.suite_id(), false, vallum::entropy::seed());
+    Ok(KeyOut {
+        filename: format!("{}-client.key", snap.interface),
+        text: vallum::keys::render_secret(&secret),
+        message: format!(
+            "fresh {} key minted — it exists only in this download until it is added to a peer",
+            snap.suite
+        ),
+    })
+}
+
+/// Read the on-disk config behind a socket for the editor. Reading another
+/// user's file fails honestly; the dialog then says so instead of showing a
+/// blank form that would clobber on save.
+///
+/// # Errors
+///
+/// No readable config names this socket, or it cannot be read.
+pub fn read_config(config: &Path) -> Result<String, String> {
+    std::fs::read_to_string(config).map_err(|error| format!("read {}: {error}", config.display()))
+}
+
+/// Write edited config text back, validated before it lands. The current file
+/// is backed up first; text that does not parse restores the backup instead
+/// of stranding the daemon on an invalid config — the one deliberate
+/// difference from the TUI's `$EDITOR` flow, where the editor is still open
+/// to fix the mistake and the backup path is reported.
+///
+/// # Errors
+///
+/// Unparseable text (backup restored), or an unwritable file with the
+/// command that finishes the same edit as root.
+pub fn write_config(config: &Path, text: &str) -> Result<Done, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let backup = config.with_extension(format!("toml.bak.{stamp}"));
+    std::fs::copy(config, &backup).map_err(|error| privileged(config, "edit", error))?;
+    std::fs::write(config, text).map_err(|error| privileged(config, "edit", error))?;
+    if let Err(error) = vallum_config::Config::load(config) {
+        let _ = std::fs::copy(&backup, config);
+        return Err(format!(
+            "not saved: the edited config does not parse ({error}); previous file restored"
+        ));
+    }
+    Ok(Done::message(format!(
+        "config saved; backup {}",
+        backup.display()
+    )))
+}
+
+/// Mint a client bundle for the peer with this fingerprint: its allowed
+/// address becomes the client's address, the server's public line becomes the
+/// client's `server` peer, and a fresh key is minted in memory.
+///
+/// Read-only against the daemon plus local randomness: no write gate, no
+/// privilege question. The endpoint is the address the client dials, so a
+/// bundle that says `<server>` is refused the way a ticket is.
+///
+/// # Errors
+///
+/// No such peer, no allowed address on it, or a bad endpoint.
+pub fn export_bundle(path: &Path, fingerprint: &str, endpoint: &str) -> Result<BundleOut, String> {
+    let snap = snapshot::fetch(path)?;
+    let peer = snap
+        .peers
+        .iter()
+        .find(|peer| peer.fingerprint == fingerprint)
+        .ok_or_else(|| {
+            "select a peer first — the export carries that peer's allowed address".to_owned()
+        })?;
+    let address = peer.allowed_ips.first().ok_or_else(|| {
+        format!(
+            "`{}` has no allowed address to use as the client address",
+            peer.name
+        )
+    })?;
+    let secret = vallum::keys::new_secret(snap.suite_id(), false, vallum::entropy::seed());
+    let key_name = format!("{}-client.key", snap.interface);
+    let bundle = vallum::bundle::build(
+        &snap.public_line,
+        &snap.interface,
+        address,
+        &vallum::keys::render_secret(&secret),
+        &key_name,
+        endpoint,
+    )?;
+    let json = serde_json::to_string_pretty(&bundle).map_err(|error| error.to_string())?;
+    Ok(BundleOut {
+        filename: format!("{}.vallum-bundle", bundle.name),
+        json,
+        message: format!(
+            "bundle minted for `{}` — the key exists only in this file; whoever holds it joins as this peer",
+            peer.name
+        ),
+    })
+}
+
+/// One frame of an animated QR: its position in the set, the set's integrity
+/// prefix, and the module grid the front-end draws — dark flags in row-major
+/// order, no quiet zone (the canvas adds the plate, the way the TUI's
+/// two-module plate does). The text is whatever the caller already has: an
+/// exported bundle's JSON, or an invite's `vallum join` command. This never
+/// mints, so the code carries exactly what the other view showed.
+#[derive(Debug, serde::Serialize)]
+pub struct QrFrame {
+    pub index: usize,
+    pub total: usize,
+    pub hash: String,
+    pub size: u32,
+    pub modules: Vec<u8>,
+}
+
+/// Render frame `index` of the `VALLUM1` animation for `text`.
+/// Read-only against the daemon plus the encoder: no gate, no privilege
+/// question — but a bundle frame carries the private key and an invite frame
+/// carries the one-time token, so the dialog clears it on close and never
+/// logs it.
+///
+/// # Errors
+///
+/// Text that will not fit the bounded frame set, or an index past the last
+/// frame.
+pub fn qr_frame(text: &str, index: usize) -> Result<QrFrame, String> {
+    let frames = vallum::qr_frames::encode(text)?;
+    let total = frames.frames.len();
+    let frame = frames.frames.get(index).ok_or_else(|| {
+        format!("frame {index} is past the last of {total} — restart the animation")
+    })?;
+    let grid = vallum::qr_frames::grid(frame)?;
+    Ok(QrFrame {
+        index,
+        total,
+        hash: frames.hash,
+        size: grid.size,
+        modules: grid.modules,
+    })
+}
+
+/// Import a `.vallum-bundle` file into a directory.
+///
+/// The directory default is the caller's decision (the selected interface's
+/// config directory, else the daemon's). When the write fails the error names
+/// the CLI that does the same thing, the way config writes do.
+///
+/// # Errors
+///
+/// An unreadable or invalid bundle, or a directory this console cannot write.
+pub fn import_bundle(bundle_path: &str, out_dir: &str) -> Result<Done, String> {
+    let bundle =
+        vallum::bundle::read(Path::new(bundle_path.trim())).map_err(|error| error.to_string())?;
+    match vallum::bundle::import(&bundle, Path::new(out_dir), false) {
+        Ok(imported) => Ok(Done::message(format!(
+            "imported `{}`: config {} (key {})",
+            bundle.name,
+            imported.config.display(),
+            imported.key.display()
+        ))),
+        Err(error) => Err(format!(
+            "{error}\n\nThis console could not write there. Run `sudo vallum import-bundle \"{bundle_path}\"` from a terminal for the same import."
+        )),
+    }
+}
+
 fn invite_privileged(error: impl std::fmt::Display) -> String {
     format!(
         "{error}\n\nThe invite file lives in the daemon's runtime directory, which this console cannot write. Run the console as root, or run `sudo vallum peer invite --help` for the same change from a terminal."
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod config_tests {
+    use super::*;
+
+    fn config_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"vallum0.key\"\naddresses = [\"10.7.0.1/32\"]\n",
+        )
+        .expect("fixture config");
+        path
+    }
+
+    #[test]
+    fn a_valid_edit_saves_and_keeps_a_backup() {
+        let dir = std::env::temp_dir().join(format!("vallum-gui-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = config_file(&dir, "vallum0.toml");
+        let edited =
+            std::fs::read_to_string(&path).expect("fixture read") + "\n[log]\nlevel = \"debug\"\n";
+        let done = write_config(&path, &edited).expect("valid edit saves");
+        assert!(done.message.contains("backup"));
+        assert!(std::fs::read_to_string(&path)
+            .expect("read back")
+            .contains("debug"));
+        let backups = std::fs::read_dir(&dir)
+            .expect("list dir")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.contains(".bak."))
+            })
+            .count();
+        assert_eq!(backups, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_invalid_edit_restores_the_previous_file() {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-gui-config-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = config_file(&dir, "vallum0.toml");
+        let before = std::fs::read_to_string(&path).expect("fixture read");
+        let error = write_config(&path, "[interface\nthis is not toml = =").expect_err("bad edit");
+        assert!(error.contains("restored"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dialogs' animation walks the same `VALLUM1` set the TUI animates:
+    /// frame 0 is the first of the total, the grid is square, and an index
+    /// past the end is an error the dialog can show rather than a blank
+    /// canvas.
+    #[test]
+    fn the_qr_steps_through_the_frames() {
+        let json = "{\"name\":\"phone\",\"config\":\"x\"}";
+        let frame = qr_frame(json, 0).expect("frame 0 renders");
+        assert_eq!(frame.index, 0);
+        assert_eq!(frame.total, 1);
+        assert_eq!(frame.hash.len(), 16);
+        assert_eq!(frame.modules.len(), (frame.size * frame.size) as usize);
+        assert!(frame.modules.contains(&1));
+        let past = qr_frame(json, 1).expect_err("past the last frame");
+        assert!(past.contains("frame 1"), "{past}");
+    }
 }
