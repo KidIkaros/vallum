@@ -117,6 +117,11 @@ export function HealthPanel({ health }: { health: Health | null }) {
   }
   const v4 = health.route4_via_tunnel
   const guardOn = health.guard.active === "active"
+  // Verdicts compare expectation with measurement: red is reserved for
+  // "armed full tunnel and not carrying" — a split host on Wi-Fi is the
+  // configuration doing exactly what it says.
+  const armedFull = health.expected_full === true
+  const unprotected = armedFull && !health.route4_via_tunnel
   // A route outside the tunnel is only a leak if nothing drops it: with the
   // guard active, v6 packets are dropped by policy, so the route is a corpse,
   // not an exit.
@@ -124,54 +129,72 @@ export function HealthPanel({ health }: { health: Health | null }) {
   const v6Tunnel = health.route6_via_tunnel
   return (
     <Panel title="EGRESS HEALTH">
-      {!v4 && (
+      {unprotected && (
         <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
           <span className="text-fault text-[11px]">
-            {health.unit_active === "active" && health.interface_present === false
-              ? "the daemon is running but its interface is gone — the dead-man has restored your internet; restart the tunnel"
-              : health.guard.active === "active"
-                ? "the guard is blocking egress and traffic is not going through the tunnel"
-                : "traffic is leaving this host outside the tunnel"}
+            the full tunnel is armed but traffic leaves via {health.route4 ?? "the physical interface"} — the tunnel is not carrying
             {health.down_since ? ` — unprotected since ${health.down_since}` : ""}
           </span>
           <PanicButton compact />
         </div>
       )}
+      {health.unit_active === "active" && health.interface_present === false && (
+        <div className="border-fault/40 bg-fault/10 mb-2 flex items-center justify-between gap-2 rounded border px-2 py-1.5">
+          <span className="text-fault text-[11px]">
+            the daemon is running but its interface is gone — the dead-man has restored your internet; restart the tunnel
+          </span>
+          <PanicButton compact />
+        </div>
+      )}
       <Row label="default route">
-        <Verdict ok={v4}>
+        <Verdict ok={armedFull ? v4 : true}>
           {health.route4 ? `via ${health.route4}` : "no route"}
-          {v4 ? "" : " · outside the tunnel"}
+          {armedFull ? (v4 ? " · tunnel carrying" : " · not carrying") : " · split by design"}
         </Verdict>
       </Row>
       <Row label="ipv6">
-        <Verdict ok={v6Blocked || v6Tunnel}>
-          {v6Blocked
-            ? guardOn && !v6Tunnel
-              ? `blocked by the guard${health.route6 ? ` · route via ${health.route6} dropped` : ""}`
-              : "no route"
-            : v6Tunnel
-              ? `tunnelled via ${health.route6}`
-              : `leaks via ${health.route6}`}
+        <Verdict ok={armedFull ? v6Blocked || v6Tunnel : true}>
+          {!armedFull
+            ? `rides ${health.route6 ?? "physical"} · split by design`
+            : v6Blocked
+              ? guardOn && !v6Tunnel
+                ? `blocked by the guard${health.route6 ? ` · route via ${health.route6} dropped` : ""}`
+                : "no route"
+              : v6Tunnel
+                ? `tunnelled via ${health.route6}`
+                : `leaks via ${health.route6}`}
         </Verdict>
       </Row>
       <Row label="dns">
-        <Verdict ok={health.dns.length > 0 && health.dns_via_tunnel}>
+        <Verdict ok={armedFull ? health.dns.length > 0 && health.dns_via_tunnel : true}>
           {health.dns_via_tunnel && health.dns_upstream && health.dns_upstream.length > 0
             ? `${health.dns[0]} → ${health.dns_upstream.join(" · ")} (tunnel)`
             : health.dns.length > 0
               ? health.dns.join(" · ")
               : "none"}
-          {health.dns.length > 0 && !health.dns_via_tunnel ? " · outside the tunnel" : ""}
+          {armedFull && health.dns.length > 0 && !health.dns_via_tunnel
+            ? " · outside the tunnel"
+            : !armedFull && health.dns.length > 0
+              ? " · split by design"
+              : ""}
         </Verdict>
       </Row>
       <Row label="guard">
-        <Verdict ok={health.guard.active === "active"}>
-          {health.guard.active === "active" ? "blocking egress" : health.guard.active}
+        <Verdict ok={armedFull ? health.guard.active === "active" : true}>
+          {health.guard.active === "active"
+            ? "blocking egress"
+            : armedFull
+              ? "inactive — armed full tunnel with no egress block"
+              : "not needed in split mode"}
         </Verdict>
       </Row>
       <Row label="routes">
-        <Verdict ok={health.quick.active === "active"}>
-          {health.quick.active === "active" ? "applied" : health.quick.active}
+        <Verdict ok={armedFull ? health.quick.active === "active" : true}>
+          {health.quick.active === "active"
+            ? "applied"
+            : armedFull
+              ? "inactive — full tunnel without routes"
+              : "not needed in split mode"}
         </Verdict>
       </Row>
       <Row label="restarts">

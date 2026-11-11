@@ -135,8 +135,29 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         })
         .collect();
 
+    // Expected egress mode, straight from the config's own allowlist: a peer
+    // with 0.0.0.0/0 means the operator armed a full tunnel, anything else is
+    // split by design. Naming the mode keeps "outside the tunnel" from
+    // reading as failure when split is the configuration.
+    let egress = interface.device.as_ref().map(|device| {
+        let full = device
+            .peers
+            .iter()
+            .flat_map(|peer| peer.allowed_ips.iter())
+            .any(|ip| ip == "0.0.0.0/0");
+        if full {
+            Span::styled(" ◆ EGRESS FULL ", t.pill_accent())
+        } else {
+            Span::styled(" ◇ EGRESS SPLIT ", t.muted())
+        }
+    });
+
     let mut first_row = vec![status_badge, Span::raw(" ")];
     first_row.extend(tabs);
+    if let Some(egress) = egress {
+        first_row.push(egress);
+        first_row.push(Span::raw(" "));
+    }
     first_row.push(Span::raw(" "));
     first_row.push(Span::styled("[Space: toggle]", t.muted()));
     lines.push(Line::from(first_row));
