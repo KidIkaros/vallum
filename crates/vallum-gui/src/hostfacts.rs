@@ -228,7 +228,7 @@ pub(crate) fn plan_from_facts(facts: &HostFacts, already_full: bool) -> serde_js
             {"step": "arm the dead-man", "change": "checks every 10 s; a dead tunnel drops the egress block and restores DNS"},
             {"step": "trial with a 90 s deadline", "change": "guard on, routes and DNS applied, every check verified — any failure reverts and restores the split tunnel"},
         ],
-        "undo": "sudo vallum-panic; sudo cp /etc/vallum/vallum0.split.bak /etc/vallum/vallum0.toml; sudo systemctl restart vallum@vallum0",
+        "undo": "sudo vallum-ops revert",
     })
 }
 
@@ -332,7 +332,7 @@ mod plan_tests {
     fn plan_on_a_split_host_names_the_changes_and_the_undo() {
         let plan = super::plan_from_facts(&facts("wlp0s20f3", false), false);
         assert_eq!(plan["already_full"], false);
-        assert!(plan["undo"].as_str().unwrap().contains("vallum-panic"));
+        assert!(plan["undo"].as_str().unwrap().contains("vallum-ops revert"));
         assert_eq!(plan["steps"].as_array().map(Vec::len), Some(5));
     }
 

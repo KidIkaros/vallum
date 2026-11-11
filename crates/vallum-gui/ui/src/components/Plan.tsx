@@ -12,6 +12,15 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
   const [confirm, setConfirm] = useState("")
   const [output, setOutput] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // The trial runs for minutes — past the ~10 s attention limit a bare label
+  // reads as a hang. The elapsed seconds are the feedback that it is working.
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (!busy) return
+    setElapsed(0)
+    const timer = window.setInterval(() => setElapsed((s) => s + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [busy])
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
@@ -75,7 +84,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               onClick={() => void run()}
               title="Arms the trial: revert timer first, then the routes. Any failed check reverts automatically."
             >
-              {busy ? "running the trial… (~3 min)" : "apply full tunnel"}
+              {busy ? `running the trial… ${elapsed}s (usually 2–3 min)` : "apply full tunnel"}
             </Button>
           </div>
           {error && <p className="text-fault mt-2 text-[11px]">{error}</p>}
