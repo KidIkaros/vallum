@@ -28,15 +28,22 @@ enable)
     # Boot persistence: the tunnel comes up after every power-up, in the
     # config's current mode (split unless the operator applied the full tunnel).
     # The restore floor (vallum-cleanup) runs before it by unit ordering.
-    systemctl enable "vallum@$IFACE"
-    systemctl is-enabled "vallum@$IFACE"
+    # Optional second argument names another interface (a second tunnel).
+    iface=${2:-$IFACE}
+    systemctl enable "vallum@$iface"
+    systemctl is-enabled "vallum@$iface"
     ;;
 disable)
     # Nothing Vallum starts at boot. quick/guard are session units: an enabled
     # guard installs the egress block before any tunnel exists — the outage
     # class this project already paid for once.
-    systemctl disable "vallum@$IFACE" "vallum-quick@$IFACE" "vallum-guard@$IFACE" 2>/dev/null || true
-    for u in vallum@$IFACE vallum-quick@$IFACE vallum-guard@$IFACE; do
+    # Optional second argument names another interface, so a leftover unit from
+    # a test (`vallum@owtest0`, which failed at every boot) can be retired
+    # through this dispatcher rather than a shell that needs a password.
+    iface=${2:-$IFACE}
+    systemctl disable "vallum@$iface" "vallum-quick@$iface" "vallum-guard@$iface" 2>/dev/null || true
+    systemctl reset-failed "vallum@$iface" 2>/dev/null || true
+    for u in vallum@$iface vallum-quick@$iface vallum-guard@$iface; do
         if systemctl is-enabled --quiet "$u" 2>/dev/null; then
             printf '  %s: enabled\n' "$u"
         else
@@ -98,6 +105,21 @@ status)
     echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
     echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
     echo "handshake: $(/usr/bin/vallum show --control /run/vallum/$IFACE.sock 2>/dev/null | grep -m1 last_handshake_time_sec || echo none)"
+    # The build the daemon is actually running, so two hosts can be compared
+    # without trusting either one's working tree.
+    echo "build:     $(/usr/bin/vallum show --control /run/vallum/$IFACE.sock 2>/dev/null | sed -n 's/^ *vallum_build=//p' | head -1 || echo none)"
+    # Every enabled tunnel unit needs a config, or boot ends with a failed unit
+    # the operator has to interpret. A leftover test unit (vallum@owtest0) did
+    # exactly that until 2026-11-11. Enabled instances of a template are the
+    # symlinks in the wants directories — `list-unit-files` only knows the
+    # template itself. Silent when nothing is wrong.
+    for link in /etc/systemd/system/*.wants/vallum@*.service; do
+        [ -e "$link" ] || continue
+        name=${link##*/vallum@}
+        name=${name%.service}
+        [ -r "/etc/vallum/$name.toml" ] || \
+            echo "boot:      vallum@$name is enabled but /etc/vallum/$name.toml is missing"
+    done
     echo "public ip: $(curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo unknown)"
     ;;
 journal)
@@ -105,7 +127,7 @@ journal)
         --no-pager -o short-iso -n "${2:-40}"
     ;;
 *)
-    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]|enable|disable|trace|sync|self-update}" >&2
+    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]|enable [iface]|disable [iface]|trace|sync|self-update}" >&2
     exit 2
     ;;
 esac
