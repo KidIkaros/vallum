@@ -56,6 +56,37 @@ export async function selectInterface(path: string): Promise<void> {
   })
 }
 
+export interface PlanStep {
+  step: string
+  change: string
+}
+
+export interface PlanData {
+  already_full: boolean
+  interface: string
+  current: {
+    route4: string | null
+    route4_via_tunnel: boolean
+    dns_via_tunnel: boolean
+    guard: { unit: string; active: string } | string
+  }
+  steps: PlanStep[]
+  undo: string
+}
+
+export async function getPlan(): Promise<PlanData> {
+  if (IN_TAURI) return invoke<PlanData>("plan")
+  return http<PlanData>("/api/plan")
+}
+
+export async function applyPlan(confirm: string): Promise<{ ok: boolean; output: string }> {
+  if (IN_TAURI) return invoke<{ ok: boolean; output: string }>("apply", { confirm })
+  return http<{ ok: boolean; output: string }>("/api/apply", {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  })
+}
+
 export async function reportWindowState(focused: boolean, visible: boolean): Promise<void> {
   // The HTTP transport has no window; its cadence is fixed server-side.
   if (!IN_TAURI) return

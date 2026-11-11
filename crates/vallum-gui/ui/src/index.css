@@ -97,3 +97,22 @@
     letter-spacing: 0.08em;
   }
 }
+
+/* ── comfortable density ──────────────────────────────────────────────
+   The compact layout is the TUI-mirroring default. `comfortable` raises
+   controls and body text above minimum touch targets for anyone who finds
+   the dense mode unreadable. Toggle: header, `density:`. */
+.comfortable {
+  font-size: 15px;
+}
+.comfortable button {
+  font-size: 12px;
+  min-height: 32px;
+}
+.comfortable .text-\[10px\],
+.comfortable .micro {
+  font-size: 12px;
+}
+.comfortable .text-\[11px\] {
+  font-size: 13px;
+}

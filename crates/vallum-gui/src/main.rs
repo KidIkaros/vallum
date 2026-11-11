@@ -15,8 +15,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod actions;
-pub(crate) mod serve;
+pub(crate) mod hostfacts;
+mod serve;
 pub(crate) mod snapshot;
+
+// The serve transport and the Tauri commands both speak to the inner ring
+// through this facade; the ring itself lives in hostfacts.
+pub(crate) use hostfacts::{health, plan, write_gate};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -523,7 +528,40 @@ pub(crate) fn unit_for(socket: &std::path::Path) -> String {
     format!("vallum@{interface}")
 }
 
-fn systemctl(args: &[&str]) -> Option<String> {
+/// Arm the full-tunnel trial. The operator has seen the plan and typed the
+/// confirmation; this hands off to the root-owned dispatcher whose script
+/// owns the ordering, the revert timer and the verdict. Its output IS the
+/// result — returned verbatim, success or failure.
+pub(crate) fn apply(confirm: &str) -> Result<String, String> {
+    if confirm != "APPLY" {
+        return Err("type APPLY in the confirmation field to arm this change".to_owned());
+    }
+    let mut attempts: Vec<(&str, Vec<&str>)> = vec![(
+        "sudo",
+        vec!["-n", "/usr/local/sbin/vallum-ops", "full-tunnel"],
+    )];
+    if effective_uid() != 0 {
+        attempts.push(("pkexec", vec!["/usr/local/sbin/vallum-ops", "full-tunnel"]));
+    }
+    let mut last = String::from("cannot run vallum-ops (is the ops sudoers rule installed?)");
+    for (program, args) in attempts {
+        match std::process::Command::new(program).args(&args).output() {
+            Ok(result) => {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let verdict = if result.status.success() { "ok" } else { "failed" };
+                return Ok(format!("[{}]\n{}", verdict, text));
+            }
+            Err(error) => last = format!("{program}: {error}"),
+        }
+    }
+    Err(last)
+}
+
+pub(crate) fn systemctl(args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("systemctl").args(args).output().ok()?;
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -657,116 +695,6 @@ fn route_device(address: &str, v6: bool) -> Option<String> {
         .map(|dev| (*dev).to_owned())
 }
 
-fn nameservers() -> Vec<String> {
-    std::fs::read_to_string("/etc/resolv.conf")
-        .map(|text| {
-            text.lines()
-                .filter_map(|line| line.trim().strip_prefix("nameserver "))
-                .map(|server| server.trim().to_owned())
-                .filter(|server| !server.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The facts an operator needs to answer "is this actually a VPN right now?".
-/// Every one is measured from the host, not inferred from the config: a config
-/// that says `0.0.0.0/0` and a route that says `wlp0s20f3` are the difference
-/// between a product and a claim.
-pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
-    let unit = unit_for(socket);
-    let interface = socket
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0")
-        .to_owned();
-    let quick = format!("vallum-quick@{interface}");
-    let guard = format!("vallum-guard@{interface}");
-
-    let route4 = route_device("1.1.1.1", false);
-    let route6 = route_device("2001:4860:4860::8888", true);
-    let servers = nameservers();
-    let dns_dev = servers
-        .first()
-        .and_then(|server| route_device(server, server.contains(':')));
-    // The system resolver is usually systemd-resolved's stub (127.0.0.53);
-    // what decides "DNS rides the tunnel" is whether the tunnel LINK carries
-    // upstream servers — resolved forwards there. Reading only resolv.conf
-    // turns a working setup into a false FAIL.
-    let link_dns: Vec<String> = std::process::Command::new("resolvectl")
-        .args(["dns", &interface])
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|text| {
-            text.lines().next().and_then(|line| line.split_once(':')).map(|(_, tail)| tail.to_owned())
-        })
-        .map(|tail| {
-            tail.split_whitespace()
-                .filter(|token| token.parse::<std::net::IpAddr>().is_ok())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let show = std::process::Command::new("systemctl")
-        .args(["show", &unit, "-p", "NRestarts", "-p", "ExecMainStatus"])
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .unwrap_or_default();
-    let field = |name: &str| -> Option<String> {
-        show.lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
-            .map(str::to_owned)
-    };
-    let restarts: u64 = field("NRestarts").and_then(|v| v.parse().ok()).unwrap_or(0);
-
-    let last_death = std::process::Command::new("journalctl")
-        .args(["-u", &unit, "-n", "400", "--no-pager", "-o", "cat"])
-        .output()
-        .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|line| {
-                    line.contains("status=31/SYS")
-                        || line.contains("Failed with result")
-                        || line.contains("Main process exited")
-                })
-                .next_back()
-                .unwrap_or_default()
-                .trim()
-                .to_owned()
-        })
-        .unwrap_or_default();
-
-    serde_json::json!({
-        "unit": unit,
-        "interface": interface,
-        "route4": route4,
-        "route4_via_tunnel": route4.as_deref() == Some(interface.as_str()),
-        "route6": route6,
-        "route6_via_tunnel": route6.as_deref() == Some(interface.as_str()),
-        "dns": servers,
-        "dns_via_tunnel": dns_dev.as_deref() == Some(interface.as_str()) || !link_dns.is_empty(),
-        "dns_upstream": link_dns,
-        "restarts": restarts,
-        "last_death": last_death,
-        "guard": {
-            "unit": guard,
-            "active": systemctl(&["is-active", &guard]).unwrap_or_else(|| "unknown".to_owned()),
-        },
-        "quick": {
-            "unit": quick,
-            "active": systemctl(&["is-active", &quick]).unwrap_or_else(|| "unknown".to_owned()),
-        },
-    })
-}
-
-/// Put the host back on the internet. The one control that must work when
-/// everything else is broken, so it runs a root-owned script through the
-/// narrow sudoers rule rather than doing anything itself.
 pub(crate) fn panic() -> Result<Done, String> {
     // `sudo -n` when the installer's rule is present; otherwise polkit, so the
     // escape hatch works on a host where the rule is missing. The one control

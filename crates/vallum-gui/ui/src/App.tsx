@@ -14,6 +14,7 @@ import {
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
 import { EgressBadge, HealthPanel } from "@/components/Health"
+import { PlanPanel } from "@/components/Plan"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
@@ -459,6 +460,7 @@ export default function App() {
   const [filter, setFilter] = useState("")
   const [sort, setSort] = useState<SortOrder>("handshake")
   const [shortcuts, setShortcuts] = useState(false)
+  const [comfortable, setComfortable] = useState(false)
   const [facts, setFacts] = useState<Preflight | null>(null)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
@@ -635,7 +637,7 @@ export default function App() {
   const lastReply = replyAge === null ? "—" : replyAge < 1 ? "live" : `${replyAge}s`
 
   return (
-    <div className="mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4">
+    <div className={`mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4 ${comfortable ? "comfortable" : ""}`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
         <PanelTitle>
           <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
@@ -652,6 +654,13 @@ export default function App() {
               [{currentIndex + 1}/{interfaces.length}] {currentName} ▾
             </button>
           ))}
+        <button
+          onClick={() => setComfortable((c) => !c)}
+          className="text-subtext hover:text-foreground focus-visible:ring-signal cursor-pointer rounded px-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+          title="Control density: the comfortable setting raises control and text sizes above minimum touch targets"
+        >
+          density: {comfortable ? "comfortable" : "compact"}
+        </button>
         <span className="micro" title="the control socket answered">
           daemon{" "}
           <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
@@ -741,6 +750,7 @@ export default function App() {
                 }
               />
               <InterfaceData payload={payload} />
+              <PlanPanel onChanged={() => setHostHealth(null)} />
               <HealthPanel health={hostHealth} />
             </div>
             <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
