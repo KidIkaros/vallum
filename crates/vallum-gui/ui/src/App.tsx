@@ -98,6 +98,9 @@ function Hero({
   const rx = history.rate("rx")
   const tx = history.rate("tx")
   const last = samples.at(-1) ?? { rx: 0, tx: 0 }
+  // One derivation per render: the headline, its tone and its tooltip all read
+  // this value.
+  const verdict = health ? egressVerdict(health) : null
 
   return (
     <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-4">
@@ -109,19 +112,19 @@ function Hero({
           <span className="micro">protection</span>
           <span
             className={`text-3xl leading-none font-semibold tracking-tight ${
-              !health
+              !verdict
                 ? "text-muted-foreground"
-                : egressVerdict(health).tone === "live"
+                : verdict.tone === "live"
                   ? "text-live"
-                  : egressVerdict(health).tone === "fault"
+                  : verdict.tone === "fault"
                     ? "text-fault"
-                    : egressVerdict(health).tone === "stale"
+                    : verdict.tone === "stale"
                       ? "text-stale"
                       : "text-foreground/80"
             }`}
-            title={health ? egressVerdict(health).detail : undefined}
+            title={verdict?.detail}
           >
-            {health ? egressVerdict(health).label : "…"}
+            {verdict ? verdict.label : "…"}
           </span>
           <span className="text-muted-foreground text-[11px]">
             tunnel {up ? "up" : unreachable ? "unreachable" : data ? "idle" : "…"}

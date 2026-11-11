@@ -39,24 +39,6 @@ export function egressVerdict(health: Health | null): Egress {
   }
 }
 
-export function EgressBadge({ health }: { health: Health | null }) {
-  const verdict = egressVerdict(health)
-  const colour = {
-    live: "text-live border-live/40",
-    stale: "text-stale border-stale/40",
-    fault: "text-fault border-fault/40",
-    muted: "text-muted-foreground border-border",
-  }[verdict.tone]
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[10px] tracking-wider uppercase ${colour}`}
-      title={verdict.detail}
-    >
-      egress <span className="font-semibold">{verdict.label}</span>
-    </span>
-  )
-}
-
 function Verdict({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
   const tone = ok === null ? "text-muted-foreground" : ok ? "text-live" : "text-fault"
   // A word beside the colour: ~8% of men cannot separate red from green, and a
