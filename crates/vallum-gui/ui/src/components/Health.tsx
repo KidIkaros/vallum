@@ -36,6 +36,19 @@ export function egressVerdict(health: Health | null): Egress {
   if (guarded) {
     return { label: "UNPROTECTED", detail: "guard is on but traffic is not tunnelled", tone: "fault" }
   }
+  // A full-tunnel host that is not tunnelled is not "split by design". The
+  // daemon publishes what the config asked for (`vallum_egress`); when it asked
+  // for full and no traffic enters the tunnel, the same picture a split host
+  // shows honestly is here a fault. Without this branch a rebooted full-tunnel
+  // machine — guard and quick both disabled, no default route installed — read
+  // SPLIT in amber, which is a mode, not a warning.
+  if (health.expected_full) {
+    const why =
+      health.unit_active && health.unit_active !== "active"
+        ? `${health.unit} is ${health.unit_active}`
+        : `no default route through ${health.interface}`
+    return { label: "UNPROTECTED", detail: `full tunnel configured, ${why}`, tone: "fault" }
+  }
   return {
     label: "SPLIT",
     detail: `traffic leaves via ${health.route4 ?? "no route"} — the tunnel carries only its own subnet`,
