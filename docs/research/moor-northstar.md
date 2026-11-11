@@ -70,6 +70,46 @@ names what it protects (Vallum's current promise is "the server does not see
 your traffic's content"; multi-hop changes the promise to "no single host
 sees both ends").
 
+## Audit: what MOOR does that Vallum should take, ranked
+
+Grounded in MOOR's README, architecture and security docs (verified
+2026-11-11) and Vallum's state as built this week. Effort: S = hours,
+M = days, L = weeks.
+
+| # | MOOR mechanism | What it fixes in Vallum today | Effort |
+|---|---|---|---|
+| 1 | `mlockall(MCL_CURRENT)` + `sodium_memzero` on key buffers | Keys are in RAM and can be swapped to disk; Vallum does neither | S |
+| 2 | **Build-ID gate** — a 16-byte git hash on every descriptor; mismatched builds are rejected | Fleet parity is enforced by `vallum-ops sync` discipline only; today's drift cost hours | S/M |
+| 3 | **Fixed 514-byte cells** — every cell identical on the wire | Vallum's datagrams are variable length; sizes leak through DPI | M |
+| 4 | **Mandatory exit notice** — every exit serves an HTTP notice on :80 | Vallum's server *is* an exit for full-tunnel clients; no safe-harbour posture | S |
+| 5 | **Self-loop filter** — never route through your own address | No guard against a peer endpoint pointing at our own address (the lab-poisoning class) | S |
+| 6 | **Per-IP token buckets** on handshake/circuit admission | No rate limiting; handshake floods cost CPU on a public server | M |
+| 7 | **Transport registry** (`transport.c` + one file per transport, `--bridge-transport`) | Carrier is a hard-wired UDP socket; blocks all mimicry | M |
+| 8 | **Nether** — Minecraft 1.21.4 handshake cover traffic | UDP-only client is blockable by DPI | L |
+| 9 | **Dual-signed consensus** (Ed25519 + ML-DSA-65) as the relay-list format | The multi-host step needs a signed relay list; this is the format reference | M |
+| 10 | **Circuit model** — guard/middle/exit, per-hop keys, 10-min rotation | Single-host trust: the server sees plaintext | L |
+
+Adopt 1, 2, 4, 5 now (hours each, no protocol change). 3 and 6 are the next
+security pass. 7–10 are the north-star roadmap already recorded above.
+
+### What MOOR does that Vallum should NOT take
+
+- **The 55k-line Tor-compatible core** — a different product; we borrow
+  designs.
+- **DA consensus protocol, PIR, Conflux, WTF-PAD machines, enclaves** —
+  complexity that pays only for an anonymity network with many independent
+  operators; triggers are recorded in the table below.
+- **Argon2id relay PoW, scanner honeypot** — need a public relay set first.
+- **The control port** — Vallum's uapi + console already cover it.
+
+### MOOR's own weak spots (so the north star is not treated as perfect)
+
+No third-party audit; C memory safety; two DAs in the default network (a
+compromised majority can forge consensus); no in-circuit rekey; global
+passive adversaries are explicitly not defeated; its own test suite was not
+runnable at the last consult. The transfer list above takes the *designs that
+survived* those caveats.
+
 ## Deliberately NOT adopted (with the trigger that would change it)
 
 | MOOR capability | Why not now | Trigger |
