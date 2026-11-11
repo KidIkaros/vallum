@@ -43,3 +43,29 @@ product path must be:
   without a human in the loop.
 - Production hardening is a listed install.sh requirement, not an idea.
   Before any ship: audit that no root path dereferences a user-writable file.
+
+---
+
+## Amendment (2026-11-11): the dev dispatcher is a privilege boundary
+
+The red team (security-redteam.md M4) found the obvious consequence of this ADR
+in its dev form: `self-update` — and `sync`, which copies binaries — install from
+`$REPO`, defaulting to `/home/ikaaros/Coding/Gold/vallum`. Anything running as
+that user gets root at the next `vallum-ops self-update`, so the NOPASSWD rule
+for the dispatcher is effectively full root for the checkout's owner.
+
+That is acceptable on the single-operator development host it was written for,
+and it is **not** acceptable on any host with another user account. The fix is
+the production path this ADR already designs: artifacts owned by root, installed
+from a root-owned location, with the checkout unable to influence what runs.
+Until that exists, the rule is:
+
+- **A host that runs `vallum-ops` must not have a second user account** unless
+  the dispatcher was installed from a root-owned path.
+- A checkout is a build input, not an install source, once the host has users.
+
+Named trigger for building the pinned path: the first deployment that is not
+this laptop. It is not a task to do before the alpha on a machine the operator
+owns alone; it is the first thing to do before the alpha reaches anyone else's
+machine.
+

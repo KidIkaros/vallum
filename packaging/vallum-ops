@@ -57,9 +57,19 @@ trace)
     pid=$(systemctl show -p MainPID --value "vallum@$IFACE")
     [ -n "$pid" ] && [ "$pid" != "0" ] || { echo "daemon not running" >&2; exit 1; }
     echo "tracing openat on pid $pid for 60 s under load..."
+    # A fixed path in /tmp is a root-owned file an unprivileged user can
+    # pre-create as a symlink on a host where it does not exist yet, and
+    # `strace -o` truncates whatever it points at (security-redteam.md M5).
+    # /run/vallum is root-owned 0770, and mktemp makes the name unpredictable.
+    trace_dir=/run/vallum
+    [ -d "$trace_dir" ] || trace_dir=/root
+    log=$(mktemp "$trace_dir/vallum-openat.XXXXXXXX") || {
+        echo "cannot create a trace log in $trace_dir" >&2
+        exit 1
+    }
     # strace's own stderr goes into the log: a silent tracer that attaches to
     # nothing is worse than no tracer.
-    timeout 60 strace -f -p "$pid" -e trace=openat -o /tmp/vallum-openat.log 2>>/tmp/vallum-openat.log &
+    timeout 60 strace -f -p "$pid" -e trace=openat -o "$log" 2>>"$log" &
     tracer=$!
     sleep 2
     # Load: the profile that historically triggered it — bulk transfer through
@@ -72,12 +82,12 @@ trace)
         buffy@10.7.0.1 'dd if=/dev/zero bs=1M count=150 2>/dev/null' 2>/dev/null | wc -c)
     echo "load: $load bytes through the tunnel"
     wait "$tracer" 2>/dev/null
-    total=$(grep -c 'openat(' /tmp/vallum-openat.log 2>/dev/null || echo 0)
-    failed=$(grep -cE 'openat\(.*= -1 ' /tmp/vallum-openat.log 2>/dev/null || echo 0)
+    total=$(grep -c 'openat(' "$log" 2>/dev/null || echo 0)
+    failed=$(grep -cE 'openat\(.*= -1 ' "$log" 2>/dev/null || echo 0)
     echo "openat calls: $total, failed: $failed"
     echo "--- the calls:"
-    grep 'openat(' /tmp/vallum-openat.log 2>/dev/null | sed 's/^/  /' | head -20
-    echo "--- full log: /tmp/vallum-openat.log"
+    grep 'openat(' "$log" 2>/dev/null | sed 's/^/  /' | head -20
+    echo "--- full log: $log"
     ;;
 sync)
     # Deployment automation: make the host match the build under test, then
