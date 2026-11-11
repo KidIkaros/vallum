@@ -27,6 +27,19 @@ export function egressVerdict(health: Health | null): Egress {
   // corpse, not an exit. (The panel rows were fixed for this; the verdict
   // was not — the full-tunnel trial exposed it.)
   const v6Leaks = health.route6 !== null && !health.route6_via_tunnel && !guarded
+  // DNS is the leak a routed default hides: with 0.0.0.0/0 through the tunnel
+  // and the resolver still pointing at the local stub, every hostname is looked
+  // up outside it while the hero says PROTECTED. Only a fault when the config
+  // asked for a full tunnel — a split host resolving locally is the design.
+  const dnsLeaks =
+    health.expected_full && health.dns.length > 0 && !health.dns_via_tunnel
+  if (tunnelled && dnsLeaks) {
+    return {
+      label: "DNS LEAK",
+      detail: `lookups leave via ${health.dns.join(", ")} instead of the tunnel`,
+      tone: "fault",
+    }
+  }
   if (tunnelled && !v6Leaks) {
     return { label: "PROTECTED", detail: `default route via ${health.route4}`, tone: "live" }
   }
