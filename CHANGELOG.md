@@ -2,6 +2,84 @@
 
 ## Unreleased
 
+- **The console's composition root stops implementing its own use cases.**
+  `main.rs` held the Tauri commands *and* the bodies they call. `preflight()` and
+  `ping()` are host facts, so they moved to `hostfacts.rs` beside `measure`,
+  `health`, `plan` and `write_gate`; the commands stay thin in the composition
+  root, and both transports (webview and `--serve`) still call one
+  implementation. Seven stock shadcn components nothing imported (`badge`,
+  `card`, `select`, `separator`, `switch`, `table`, `tooltip`) are deleted —
+  including two that the design pass had polished before anyone checked whether
+  they had a consumer. The hero's verdict colour became a map instead of a
+  four-level nested ternary, and `TrafficBars` went with its last consumer.
+
+- **The console and the TUI stop looking generated and start looking designed.**
+  Nine passes across both surfaces, with the product's own direction kept (a
+  terminal cockpit, not a SaaS dashboard): no emoji, no gradients, no glows were
+  ever there, so what changed is craft and hierarchy.
+  - **Type.** The 10px step is gone: 13 body, 12 meta, 11 label, on both
+    surfaces. `.micro` is sentence case — caps are reserved for panel titles and
+    one-word states — because a label that reads as a sentence ("default route",
+    "daemon attached") is read, not scanned. `comfortable` survives for anyone
+    who needs it, but it is no longer a header control covering for a bad
+    default; it moved to the footer.
+  - **Hierarchy.** Traffic was drawn three times (two 40-bar sparklines in the
+    hero plus the THROUGHPUT chart). It is drawn once, in the chart, which now
+    carries the height the sparklines were stealing; the hero keeps the numbers.
+    `TrafficBars` is deleted.
+  - **TUI: one brand mark.** `◆ Vallum ❯` prefixed four panels — four headers of
+    equal weight, and the width the peer table needed. The brand appears once,
+    on TUNNEL CONTROL; the rest are plain section titles.
+  - **TUI: columns that say something.** `epoch` and `psk` rendered `0` and `—`
+    on every row in the ordinary case; they now appear only when some peer
+    actually has one. The traffic line's `Σ … pk …` became `… total`, and the
+    shared scale ceiling moved into the panel title, where it is one fact
+    instead of two per-series numbers.
+  - **Stock components tuned to the vocabulary.** Cards 8px radius with no
+    shadow on a dark surface, `transition-all` → `transition-colors`, dialogs
+    keep the soft shadow (they float), disabled controls at 60% instead of 50%
+    so the word is still legible, scrollbars on the ramp instead of the browser
+    default, copy affordances with a hairline so they read as controls.
+  - **Contrast, measured, and it failed.** `--muted-foreground` (`#6e7681`) is
+    the label colour on every row: 4.12:1 on the page, 3.77:1 on a card, 3.19:1
+    on a raised row — under WCAG AA on all three, and it was carrying the labels
+    the type pass had just made smaller-but-sentence-case. It is `#8b949e` now
+    (6.15 / 5.62 / 4.77) and `--subtext` moved up to `#9aa4b0` so the two roles
+    stay distinct. Opacity variants survive only where they are decoration
+    (a chevron, a placeholder); the two that carried real text are solid again.
+  - **Copy.** `filter by name or address   ( / )` → `Filter`; `START`/`STOP`/
+    `INTERFACE` → `Start`/`Stop`/`Interface`; the plan panel lost its doubled
+    diamond and gained the space its `undo it all:` line was missing.
+  - The GUI's brand line wrote `Vallum )` — a literal paren where the TUI writes
+    `❯`. It is the chevron now, which is the product's own signature.
+
+- **The gate is green again on a host that runs Vallum.** `scripts/verify.sh` is
+  the gate of record, and on a machine with a live daemon it failed before any
+  test: `cargo fmt --check` reported 37 diffs (four files, formatting only) and
+  `clippy -D warnings` fired seven lints in `vallum-gui` under clippy 1.97 —
+  a dead duplicate of `hostfacts::route_device`, a `filter(..).next_back()`, a
+  `map(..).flatten()`, a `Cow::to_owned`, an `and_then(|x| Some(y))`, an
+  `unwrap()` in a test, and an **unused `group` binding in `preflight()`**.
+  That last one was the real bug: the runtime directory's gid was measured and
+  thrown away, so the one fact that explains "cannot tell whether it is in use:
+  Permission denied" — a dir whose group is not the drop user's group — was the
+  one fact preflight never reported. It is now `runtime_group` in
+  `/api/preflight`. All ten steps pass (`fmt`, `clippy --all-features`,
+  workspace tests, lean daemon, shell syntax, zstd guard, `cargo deny`,
+  standalone clone build, TUI snapshot, release-signature round trip).
+
+- **A scratch server no longer dials the machine's live daemon.**
+  `crates/vallum/tests/provisioning.rs` ran `server init` with no `--control`,
+  which writes the machine-wide `/run/vallum/<name>.sock`. On a host that runs
+  Vallum, `peer add`/`peer invite` therefore talked to the *deployed* daemon:
+  three provisioning tests failed with "the request was malformed, or two peers
+  claim the same prefix" — the live client daemon refusing a server request —
+  and on a server host the same request would have mutated the production
+  config. The scratch config now names its own socket, so `peer add` reports
+  `applied no — no control socket at …` and the twelve tests pass on a
+  deployed machine. No product code changed: `--control` already did the right
+  thing; the test was the thing that assumed a global path.
+
 - **The syscall filter enforces by default.** ADR-0028's plan was two stages:
   derive the list from a trace, ship it in `log` mode, empty the log over a real
   exercise, and only then let the kernel kill. All four are done — the last on
