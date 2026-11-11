@@ -254,6 +254,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
                     fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),
                     suite,
+                    clock: Arc::clone(&clock) as Arc<dyn TimeSource>,
                     stats: Arc::new(run::SharedStats::default()),
                 },
             }),

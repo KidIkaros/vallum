@@ -1,5 +1,5 @@
 [Unit]
-Description=Scrape Vallum metrics into node_exporter's textfile directory
+Description=Scrape Vallum metrics for a node_exporter textfile collector or any scraper
 Documentation=man:vallum(8)
 
 [Service]
@@ -7,7 +7,16 @@ Type=oneshot
 # One instance per tunnel is supported: drop a snippet in
 # vallum-metrics.service.d/ named for the config, or run a second copy of this
 # unit under a different name. The default covers the usual /etc/vallum/vallum0.toml.
-ExecStart=/usr/bin/vallum metrics --config /etc/vallum/vallum0.toml --output /var/lib/node_exporter/textfile_collector/vallum.prom
+#
+# The output is Vallum's own runtime directory, not node_exporter's: that one
+# exists only where node_exporter is installed, which is why this timer sat
+# disabled and nothing was collected anywhere. Point a collector at this file
+# (node_exporter: --collector.textfile.directory=/run/vallum) or read it
+# directly; either way the numbers exist on every host that runs a tunnel.
+ExecStart=/usr/bin/vallum metrics --config /etc/vallum/vallum0.toml --output /run/vallum/metrics.prom
+# Skip cleanly before the daemon has made its runtime directory, instead of
+# failing every 15 seconds into a journal nobody reads.
+ExecCondition=/usr/bin/test -d /run/vallum
 # A failed scrape still writes `vallum_up 0`, which is the signal the alert
 # rules look for; exiting nonzero marks the unit failed so `systemctl status`
 # shows the scrape broke.
@@ -28,6 +37,6 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# The textfile directory and the control socket are the only things this unit
-# can legitimately write or read.
-ReadWritePaths=/var/lib/node_exporter/textfile_collector
+# The runtime directory (write) and the control socket (read) are the only two
+# things this unit can legitimately touch.
+ReadWritePaths=/run/vallum

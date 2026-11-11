@@ -77,6 +77,14 @@ pub struct ControlContext {
     pub socket: Arc<crate::net::SharedSocket>,
     /// The suite, for a runtime identity change.
     pub suite: Arc<dyn CryptoSuite>,
+    /// The daemon's clock.
+    ///
+    /// Carried here so the snapshot can turn a peer's last-activity stamp into
+    /// an age. The stamps are on this process's monotonic origin, which no other
+    /// process shares, so the subtraction has to happen here — and it must use a
+    /// clock that keeps ticking even if the data plane stops, which is exactly
+    /// the case the age exists to report.
+    pub clock: Arc<dyn crate::clock::TimeSource>,
     /// Live loop counters; `run` publishes here once per iteration.
     pub stats: Arc<crate::run::SharedStats>,
 }
@@ -288,7 +296,7 @@ pub(crate) fn serve(
                                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                             ) =>
                         {
-                            break
+                            break;
                         }
                         Err(_) => break,
                     }
@@ -399,6 +407,8 @@ pub fn handle(device: &mut Device, context: &mut ControlContext, request: Reques
 
 fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
     let mut peers = Vec::new();
+    // Read once so every peer in one answer is aged against the same instant.
+    let now_ms = context.clock.monotonic_ms();
     for (id, config) in device.peers() {
         let (tx_bytes, rx_bytes, last_handshake) = match device.stats(id) {
             Some(stats) => (stats.tx_bytes, stats.rx_bytes, stats.last_handshake),
@@ -422,6 +432,14 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             rx_bytes,
             window_sent: device.stats(id).map_or(0, |stats| stats.window_sent),
             window_received: device.stats(id).map_or(0, |stats| stats.window_received),
+            last_received_age_ms: device
+                .stats(id)
+                .and_then(|stats| stats.last_received_ms)
+                .map(|stamp| now_ms.saturating_sub(stamp)),
+            last_sent_age_ms: device
+                .stats(id)
+                .and_then(|stats| stats.last_sent_ms)
+                .map(|stamp| now_ms.saturating_sub(stamp)),
             dropped_no_session: device.stats(id).map_or(0, |stats| stats.dropped_no_session),
             dropped_replay: device.stats(id).map_or(0, |stats| stats.dropped_replay),
             dropped_allowed_ips: device
@@ -652,6 +670,7 @@ mod tests {
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
+            clock: Arc::new(crate::clock::SystemClock::new()),
             stats: Arc::new(crate::run::SharedStats::default()),
         }
     }

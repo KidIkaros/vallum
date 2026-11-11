@@ -295,6 +295,11 @@ pub struct PeerStats {
     pub window_sent: u64,
     /// Datagrams received and opened in the most recent delivery window.
     pub window_received: u64,
+    /// When a datagram from this peer last opened, on the device's monotonic
+    /// clock (milliseconds). `None` means nothing has ever arrived.
+    pub last_received_ms: Option<u64>,
+    /// When a datagram was last sent to this peer, same clock.
+    pub last_sent_ms: Option<u64>,
     /// Datagrams dropped because this peer had no live session.
     pub dropped_no_session: u64,
     /// Datagrams that failed to open: replay window, or authentication.
@@ -756,6 +761,8 @@ impl Device {
                 rx_bytes: peer.rx_bytes,
                 window_sent: peer.window.settled().0,
                 window_received: peer.window.settled().1,
+                last_received_ms: peer.last_received_ms,
+                last_sent_ms: peer.last_sent_ms,
                 dropped_no_session: peer.dropped_no_session,
                 dropped_replay: peer.dropped_replay,
                 dropped_allowed_ips: peer.dropped_allowed_ips,

@@ -113,6 +113,13 @@ pub mod field {
     pub const WINDOW_SENT: &str = "vallum_window_sent";
     /// Peer fields.
     pub const WINDOW_RECEIVED: &str = "vallum_window_received";
+    /// When a datagram last arrived from this peer, on the host's monotonic
+    /// clock, in milliseconds. Absent means nothing has ever arrived — which is
+    /// a different fact from "it arrived a long time ago", and the one that
+    /// distinguishes a peer that never answered from a path that died.
+    pub const LAST_RECEIVED_MS: &str = "vallum_last_received_ms";
+    /// When a datagram was last sent to this peer, same clock.
+    pub const LAST_SENT_MS: &str = "vallum_last_sent_ms";
     /// Peer drop reasons, counted separately because they have different causes
     /// and an aggregate reads as a diagnosis when it is not one.
     pub const DROPPED_NO_SESSION: &str = "vallum_dropped_no_session";
@@ -475,6 +482,12 @@ pub struct PeerState {
     pub window_sent: u64,
     /// Datagrams received and opened in the most recent delivery window.
     pub window_received: u64,
+    /// Milliseconds since a datagram from this peer last opened; `None` when
+    /// nothing has ever arrived. Aged by the daemon, because the stamps live on
+    /// its monotonic origin and no other process shares it.
+    pub last_received_age_ms: Option<u64>,
+    /// Milliseconds since a datagram was last sent to this peer.
+    pub last_sent_age_ms: Option<u64>,
     /// Datagrams dropped because this peer had no live session.
     pub dropped_no_session: u64,
     /// Datagrams that failed to open.
@@ -638,6 +651,16 @@ pub fn render_get(state: &DeviceState) -> String {
             field::WINDOW_RECEIVED,
             peer.window_received
         ));
+        // Ages, not stamps: a human reading `vallum show` wants "how long", and
+        // the daemon already did the subtraction against a clock that keeps
+        // ticking even when the data plane has stopped. Absent means "never",
+        // which is a different fact from "a long time ago".
+        if let Some(age) = peer.last_received_age_ms {
+            out.push_str(&format!("{}={age}\n", field::LAST_RECEIVED_MS));
+        }
+        if let Some(age) = peer.last_sent_age_ms {
+            out.push_str(&format!("{}={age}\n", field::LAST_SENT_MS));
+        }
         // Split drop reasons: "accepted nothing" is a symptom, not a cause.
         out.push_str(&format!(
             "{}={}\n",
@@ -1100,6 +1123,8 @@ mod tests {
                     rx_bytes,
                     window_sent,
                     window_received,
+                    last_received_age_ms: None,
+                    last_sent_age_ms: None,
                     dropped_no_session,
                     dropped_replay,
                     dropped_allowed_ips,
@@ -1357,6 +1382,8 @@ mod tests {
                 rx_bytes: 20,
                 window_sent: 40,
                 window_received: 30,
+                last_received_age_ms: Some(1_500),
+                last_sent_age_ms: Some(250),
                 dropped_no_session: 1,
                 dropped_replay: 2,
                 dropped_allowed_ips: 3,
@@ -1380,6 +1407,10 @@ mod tests {
         assert!(text.contains("vallum_can_set_listen_port=false"));
         assert!(text.contains("endpoint=203.0.113.9:51820"));
         assert!(text.contains("allowed_ip=10.7.0.2/32"));
+        // How long since anything moved, in milliseconds. A stalled tunnel is
+        // diagnosed by this growing while handshake age stays flat.
+        assert!(text.contains("vallum_last_received_ms=1500"));
+        assert!(text.contains("vallum_last_sent_ms=250"));
         assert!(text.ends_with("errno=0\n"));
     }
 
@@ -1417,6 +1448,8 @@ mod tests {
                 rx_bytes: 0,
                 window_sent: 0,
                 window_received: 0,
+                last_received_age_ms: None,
+                last_sent_age_ms: None,
                 dropped_no_session: 0,
                 dropped_replay: 0,
                 dropped_allowed_ips: 0,

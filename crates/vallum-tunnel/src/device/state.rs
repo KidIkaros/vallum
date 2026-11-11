@@ -151,6 +151,18 @@ pub(super) struct Peer {
     pub(super) rx_bytes: u64,
     /// Datagram accounting for the current delivery window.
     pub(super) window: DeliveryWindow,
+    /// When a datagram from this peer last opened, on the device's monotonic
+    /// clock. `None` until the first one.
+    ///
+    /// Every other liveness signal here is a proxy — key age, handshake age,
+    /// keepalive cadence, the delivery ratio of the last window. This is the
+    /// one that answers "how long since anything actually arrived", which is
+    /// the question a stalled tunnel asks and none of the proxies can answer:
+    /// a ratio of 1 over an empty window reads healthy, and a handshake age
+    /// only grows once rekeying has already stopped.
+    pub(super) last_received_ms: Option<u64>,
+    /// When a datagram was last sent to this peer, same clock.
+    pub(super) last_sent_ms: Option<u64>,
     /// When the last handshake completed, for `show`.
     pub(super) last_handshake: Option<Tai64n>,
     /// A runtime `remove` marks the peer dead rather than shifting the table,
@@ -287,6 +299,8 @@ impl Peer {
             tx_bytes: 0,
             rx_bytes: 0,
             window: DeliveryWindow::default(),
+            last_received_ms: None,
+            last_sent_ms: None,
             last_handshake: None,
             removed: false,
         }

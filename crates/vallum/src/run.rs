@@ -284,6 +284,23 @@ pub(crate) enum Input {
 ///
 /// # Errors
 ///
+/// Is this peer sending into a path that has stopped answering?
+///
+/// One-way silence, not "the peer is offline": a peer that is simply quiet
+/// sends nothing, so `sent_age_ms` grows with `received_age_ms` and this stays
+/// false. The failure this names is the one where the kernel keeps accepting
+/// datagrams (so `datagrams_failed` stays 0) and nothing comes back.
+fn path_stalled(received_age_ms: u64, sent_age_ms: u64, keepalive_ms: u64) -> bool {
+    // Two keepalives, so one lost datagram is not a stall; a minute when the
+    // peer has no persistent keepalive to calibrate against.
+    let limit_ms = if keepalive_ms > 0 {
+        keepalive_ms.saturating_mul(2)
+    } else {
+        60_000
+    };
+    received_age_ms > limit_ms && sent_age_ms < 120_000
+}
+
 /// If a reader thread cannot be spawned. A socket or interface that fails while
 /// running is logged and counted, not fatal: a tunnel does not exit because one
 /// datagram did not go.
@@ -509,6 +526,12 @@ pub fn run(
     let mut send_failed: HashSet<SocketAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
+    // Peers currently in one-way silence, so the warning is a transition and
+    // not a line per loop iteration. The failure it names is the one every
+    // other signal here misses: sends keep succeeding (the kernel accepts them,
+    // so `datagrams_failed` stays 0), nothing comes back, and the daemon looks
+    // perfectly healthy from the inside.
+    let mut silent: HashSet<usize> = HashSet::new();
     let mut last_control_check = Instant::now();
 
     loop {
@@ -635,6 +658,43 @@ pub fn run(
             Some(event) => device.handle(reading, event, rng),
             None => device.poll(reading, rng),
         };
+
+        // One-way silence, said once per transition. A path that dies under a
+        // live socket is invisible to every counter in the snapshot: the sends
+        // succeed, so nothing fails, and the peer goes quiet without ever
+        // saying so. This is the line the field journal was missing.
+        for (id, config) in device.peers() {
+            let Some(stats) = device.stats(id) else {
+                continue;
+            };
+            let keepalive_ms = config.persistent_keepalive().map_or(0, |interval| {
+                u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
+            });
+            let now = clock.monotonic_ms();
+            let stalled = match (stats.last_received_ms, stats.last_sent_ms) {
+                (Some(received), Some(sent)) => path_stalled(
+                    now.saturating_sub(received),
+                    now.saturating_sub(sent),
+                    keepalive_ms,
+                ),
+                _ => false,
+            };
+            let index = id.index();
+            if stalled {
+                if silent.insert(index) {
+                    log_warn!(
+                        log,
+                        "peer `{}`: still sending but nothing has arrived for {}s — the path \
+                         is one-way. Check the route and source address toward it; the tunnel \
+                         itself is up",
+                        config.name(),
+                        now.saturating_sub(stats.last_received_ms.unwrap_or(now)) / 1_000,
+                    );
+                }
+            } else {
+                silent.remove(&index);
+            }
+        }
 
         // Collect the datagrams one event produced, so a burst (a handshake's
         // fragments, or several peers' packets) is one `sendmmsg`.
@@ -854,29 +914,31 @@ fn spawn_udp_reader(
     let mut buf = vec![0u8; UDP_BUFFER];
     thread::Builder::new()
         .name("vallum-udp".to_owned())
-        .spawn(move || loop {
-            let (generation, current) = socket.current();
-            match current.recv_from(&mut buf) {
-                Ok((n, source)) => {
-                    queued.fetch_add(1, Ordering::Relaxed);
-                    if tx.send(Input::Datagram(source, buf[..n].to_vec())).is_err() {
+        .spawn(move || {
+            loop {
+                let (generation, current) = socket.current();
+                match current.recv_from(&mut buf) {
+                    Ok((n, source)) => {
+                        queued.fetch_add(1, Ordering::Relaxed);
+                        if tx.send(Input::Datagram(source, buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::TimedOut =>
+                    {
+                        // A rebind wakes the reader here; an unchanged socket is
+                        // simply idle.
+                        if socket.generation() != generation {
+                            continue;
+                        }
+                    }
+                    Err(error) => {
+                        log_debug!(log, "socket read stopped: {error}");
                         break;
                     }
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock
-                        || error.kind() == io::ErrorKind::TimedOut =>
-                {
-                    // A rebind wakes the reader here; an unchanged socket is
-                    // simply idle.
-                    if socket.generation() != generation {
-                        continue;
-                    }
-                }
-                Err(error) => {
-                    log_debug!(log, "socket read stopped: {error}");
-                    break;
                 }
             }
         })
@@ -886,7 +948,7 @@ fn spawn_udp_reader(
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY, UDP_BUFFER};
+    use super::{path_stalled, DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY, UDP_BUFFER};
 
     #[test]
     fn the_read_buffer_is_one_byte_past_the_message_cap() {
@@ -904,5 +966,24 @@ mod tests {
         // first signal of a flood becomes a blocked producer instead of a
         // cookie.
         const { assert!(QUEUE_CAPACITY >= DEFAULT_UNDER_LOAD_DEPTH * 4) };
+    }
+
+    #[test]
+    fn a_stall_is_sending_into_silence_not_merely_being_quiet() {
+        // Both directions silent: an idle tunnel. Nothing is being sent, so
+        // nothing can be lost — this must not warn, or every quiet night pages.
+        assert!(!path_stalled(300_000, 300_000, 25_000));
+        // Sending every keepalive and hearing nothing for two of them: the
+        // failure that cost a field outage 71 minutes of unexplained silence.
+        assert!(path_stalled(300_000, 5_000, 25_000));
+        // Healthy.
+        assert!(!path_stalled(5_000, 5_000, 25_000));
+        // Exactly at the threshold is not yet a stall: two keepalives of
+        // silence is the boundary, and a strict comparison keeps one lost
+        // datagram from being reported as a dead path.
+        assert!(!path_stalled(50_000, 5_000, 25_000));
+        // No persistent keepalive to calibrate against: fall back to a minute.
+        assert!(path_stalled(90_000, 5_000, 0));
+        assert!(!path_stalled(30_000, 5_000, 0));
     }
 }

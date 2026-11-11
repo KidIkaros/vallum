@@ -381,6 +381,21 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
         ),
         ("peer_epoch", "gauge", "The peer's current key epoch."),
         (
+            "peer_last_received_age_seconds",
+            "gauge",
+            "Seconds since a datagram from the peer last arrived, or -1 if never. The one signal that separates a path that died from a peer that is simply quiet: it grows while handshake age and delivery ratio both still read healthy.",
+        ),
+        (
+            "peer_last_sent_age_seconds",
+            "gauge",
+            "Seconds since a datagram was last sent to the peer, or -1 if never.",
+        ),
+        (
+            "peer_path_stalled",
+            "gauge",
+            "1 when datagrams are being sent but nothing has come back for longer than twice the keepalive, 0 otherwise. One-way silence is the failure no other metric here names.",
+        ),
+        (
             "peer_handshaked",
             "gauge",
             "1 if the peer has completed a handshake, 0 otherwise.",
@@ -442,6 +457,31 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
                         now.saturating_sub(last).to_string()
                     }
                 }
+                "peer_last_received_age_seconds" => {
+                    peer_age_seconds(response, index, uapi::field::LAST_RECEIVED_MS)
+                }
+                "peer_last_sent_age_seconds" => {
+                    peer_age_seconds(response, index, uapi::field::LAST_SENT_MS)
+                }
+                "peer_path_stalled" => {
+                    // Sending, but nothing has come back. The threshold is two
+                    // keepalives so a single lost datagram is not a stall, and
+                    // a recent send is required so an idle tunnel is not either.
+                    let received = peer_age_ms(response, index, uapi::field::LAST_RECEIVED_MS);
+                    let sent = peer_age_ms(response, index, uapi::field::LAST_SENT_MS);
+                    let keepalive =
+                        number(response, index, uapi::field::PERSISTENT_KEEPALIVE_INTERVAL);
+                    let limit_ms = if keepalive > 0 {
+                        keepalive * 2 * 1_000
+                    } else {
+                        60_000
+                    };
+                    let stalled = matches!(
+                        (received, sent),
+                        (Some(received), Some(sent)) if received > limit_ms && sent < 120_000
+                    );
+                    u64::from(stalled).to_string()
+                }
                 "peer_epoch" => number(response, index, uapi::field::VALLUM_EPOCH).to_string(),
                 _ => u64::from(number(response, index, uapi::field::LAST_HANDSHAKE_TIME_SEC) > 0)
                     .to_string(),
@@ -450,6 +490,21 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
         }
     }
     out
+}
+
+/// A peer's last-activity age in milliseconds, or `None` if the daemon did not
+/// report one (the event never happened).
+fn peer_age_ms(response: &Response, index: usize, field: &str) -> Option<u64> {
+    response
+        .peer_field(index, field)
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+/// The same age in whole seconds, `-1` when absent so a graph shows "never"
+/// rather than a zero that looks like "just now".
+fn peer_age_seconds(response: &Response, index: usize, field: &str) -> String {
+    peer_age_ms(response, index, field)
+        .map_or_else(|| "-1".to_owned(), |ms| (ms / 1_000).to_string())
 }
 
 fn number(response: &Response, index: usize, field: &str) -> u64 {

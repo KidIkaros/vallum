@@ -74,6 +74,7 @@ impl Device {
             .rx_bytes
             .saturating_add(bytes.len() as u64);
         self.peers[index].window.received = self.peers[index].window.received.saturating_add(1);
+        self.peers[index].last_received_ms = Some(clock.monotonic_ms);
         self.peers[index].timers.on_received(clock.monotonic_ms);
 
         if plaintext.is_empty() {
@@ -355,6 +356,7 @@ impl Device {
 
         self.peers[index].sent += 1;
         self.peers[index].window.sent = self.peers[index].window.sent.saturating_add(1);
+        self.peers[index].last_sent_ms = Some(clock.monotonic_ms);
         self.peers[index].tx_bytes = self.peers[index]
             .tx_bytes
             .saturating_add(packet.len() as u64);

@@ -49,6 +49,15 @@ enum Status {
 }
 
 impl Status {
+    /// Ordering for "which peer's verdict is the report's verdict": the worst
+    /// one wins, because one dead path is not offset by a live one.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Pass => 0,
+            Self::Warn => 1,
+            Self::Fail => 2,
+        }
+    }
     fn as_str(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
@@ -141,6 +150,10 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
                     &path,
                     config.as_ref().map(|resolved| resolved.carrier),
                 ));
+                // Handshake age says the keys were agreed; this says data is
+                // still moving. The two come apart in the one failure that
+                // matters — a path that dies while the daemon keeps dialling.
+                checks.push(check_path_liveness(&path));
             }
             Err(error) => {
                 let is_offline = match &error {
@@ -226,6 +239,7 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
     }
 
     checks.push(check_clock());
+    checks.push(check_metrics());
 
     for tool in ["ip", "systemctl", "journalctl", "resolvconf", "nft"] {
         let found = which(tool);
@@ -457,6 +471,72 @@ fn check_control(path: &Path) -> Result<String, Error> {
 /// a unit that could not exec, a config root could not read, and a default
 /// route into a dead interface. `doctor` checked the parts and passed all three
 /// times. This check is about the whole.
+/// Is anything actually arriving from each peer?
+///
+/// The handshake check answers "did we agree on keys"; this answers "is data
+/// still moving". They come apart in exactly one failure — a path that dies
+/// while the daemon keeps dialling — and every other check in this report
+/// passes through it, because a dead path looks like a quiet one from every
+/// angle except this: datagrams going out, nothing coming back.
+fn check_path_liveness(path: &Path) -> Check {
+    let reply = match control::request(path, "get=1\n") {
+        Ok(reply) => reply,
+        Err(error) => return Check::new("path", Status::Warn, error.to_string()),
+    };
+    let response = uapi::parse_response(&reply);
+    if response.peers.is_empty() {
+        return Check::new("path", Status::Warn, "no peers configured");
+    }
+    let mut verdict: Option<Check> = None;
+    for peer in &response.peers {
+        let field = |key: &str| {
+            peer.iter()
+                .find(|(name, _)| name == key)
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+        };
+        let name = peer
+            .iter()
+            .find(|(key, _)| key == uapi::field::VALLUM_NAME)
+            .map_or("unnamed", |(_, value)| value.as_str());
+        let received = field(uapi::field::LAST_RECEIVED_MS);
+        let sent = field(uapi::field::LAST_SENT_MS);
+        let keepalive = field(uapi::field::PERSISTENT_KEEPALIVE_INTERVAL).unwrap_or(0);
+        let limit_ms = if keepalive > 0 {
+            keepalive * 2 * 1_000
+        } else {
+            60_000
+        };
+        let (status, detail) = match (received, sent) {
+            (Some(received), Some(sent)) if received > limit_ms && sent < 120_000 => (
+                Status::Fail,
+                format!(
+                    "peer `{name}`: sending, but nothing has arrived for {}s (last send {}s ago) \
+                     — the path is dead, not the peer",
+                    received / 1_000,
+                    sent / 1_000
+                ),
+            ),
+            (None, Some(_)) => (
+                Status::Warn,
+                format!("peer `{name}`: datagrams sent, nothing has ever arrived"),
+            ),
+            (Some(received), _) => (
+                Status::Pass,
+                format!("peer `{name}`: last heard {}s ago", received / 1_000),
+            ),
+            (None, None) => (Status::Warn, format!("peer `{name}`: no traffic yet")),
+        };
+        // The worst peer is the answer: one dead peer is not offset by a live one.
+        if verdict
+            .as_ref()
+            .is_none_or(|worst| status.rank() > worst.status.rank())
+        {
+            verdict = Some(Check::new("path", status, detail));
+        }
+    }
+    verdict.unwrap_or_else(|| Check::new("path", Status::Warn, "no peers configured"))
+}
+
 fn check_tunnel(path: &Path, carrier: Option<vallum_config::Carrier>) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,
@@ -809,6 +889,40 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
 /// Replay-window timestamps and identity validity windows are wall-clock
 /// checks, so a host drifting minutes or hours peers and re-keys badly. Warn,
 /// never fail: an offline lab without NTP still tunnels correctly today.
+/// Is the scrape that feeds every dashboard still happening?
+///
+/// A metrics pipeline fails silently by nature: the graphs keep showing the last
+/// value they had. This check answers the question the graph cannot — when was
+/// the file last written.
+fn check_metrics() -> Check {
+    let path = Path::new("/run/vallum/metrics.prom");
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Check::new(
+            "metrics",
+            Status::Warn,
+            "no scrape file at /run/vallum/metrics.prom — `vallum-ops sync` enables \
+             vallum-metrics.timer",
+        );
+    };
+    let age = meta
+        .modified()
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if age <= 60 {
+        Check::new("metrics", Status::Pass, format!("scraped {age}s ago"))
+    } else {
+        Check::new(
+            "metrics",
+            Status::Warn,
+            format!(
+                "last scrape {age}s ago — is vallum-metrics.timer running? \
+                 `systemctl status vallum-metrics.timer`"
+            ),
+        )
+    }
+}
+
 fn check_clock() -> Check {
     let synced = std::process::Command::new("timedatectl")
         .args(["show", "-p", "NTPSynchronized", "--value"])

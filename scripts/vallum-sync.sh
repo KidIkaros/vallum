@@ -25,7 +25,7 @@ done
 
 for u in vallum@.service vallum-quick@.service vallum-guard@.service \
     vallum-deadman@.service vallum-deadman@.timer vallum-cleanup.service \
-    vallum-netlink-watch.service; do
+    vallum-netlink-watch.service vallum-metrics.service vallum-metrics.timer; do
     if ! cmp -s "$REPO/packaging/$u" "/etc/systemd/system/$u"; then
         echo "sync: unit $u is stale — updating"
         install -m 644 "$REPO/packaging/$u" "/etc/systemd/system/$u"
@@ -70,6 +70,12 @@ systemctl enable vallum-cleanup >/dev/null 2>&1 && echo "sync: vallum-cleanup en
 # The link-event recorder is read-only and harmless: start it here because the
 # operator's sudoers rule does not cover it.
 systemctl enable --now vallum-netlink-watch >/dev/null 2>&1 && echo "sync: link-event recorder running"
+# Metrics: a scrape every 15 s into /run/vallum/metrics.prom. Enabled here
+# because a monitoring unit nobody turns on is a design document, and the last
+# three outages were diagnosed from numbers that existed but were never written
+# down. The unit is inert until the runtime directory exists, so enabling it
+# before the daemon has ever run is safe.
+systemctl enable --now vallum-metrics.timer >/dev/null 2>&1 && echo "sync: metrics timer running"
 
 echo "sync complete ($([ "$CHANGES" = 1 ] && echo 'changes applied' || echo 'host already current'))"
 systemctl is-enabled vallum-cleanup 2>/dev/null | sed 's/^/  cleanup unit: /'
