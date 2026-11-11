@@ -36,10 +36,17 @@ fn run(command: &mut Command) -> (bool, String, String) {
 
 fn init(dir: &Path) -> PathBuf {
     let config = dir.join("vallum0.toml");
+    // A scratch server must not inherit the machine-wide socket path: on a host
+    // that runs Vallum, `peer add` would then dial the *live* daemon (and fail
+    // with "the request was malformed" — or, on a server host, mutate it).
+    let control = dir.join("run").join("vallum0.sock");
+    std::fs::create_dir_all(control.parent().unwrap()).unwrap();
     let (ok, stdout, stderr) = run(bin()
         .args(["server", "init", "--config"])
         .arg(&config)
-        .args(["--endpoint", "203.0.113.5", "--no-host", "--no-service"]));
+        .args(["--endpoint", "203.0.113.5", "--no-host", "--no-service"])
+        .arg("--control")
+        .arg(&control));
     assert!(ok, "server init failed\nstdout: {stdout}\nstderr: {stderr}");
     config
 }
