@@ -578,7 +578,24 @@ pub fn run(
     };
 
     spawn_tun_reader(&tx, Arc::clone(&queued), parts.reader, parts.mtu, &log)?;
-    spawn_udp_reader(&tx, Arc::clone(&queued), Arc::clone(&socket), &log)?;
+    // The reader owns the allowance now: refusing before the buffer is
+    // allocated and before the channel hop is where the cost is (ADR-0032).
+    // It needs two things the loop owns — the clock, and the set of endpoints
+    // that belong to configured peers, which it may only trust as a snapshot.
+    let reader_clock: Arc<dyn TimeSource> = Arc::clone(&clock) as Arc<dyn TimeSource>;
+    let peer_endpoints: Arc<std::sync::Mutex<HashSet<SocketAddr>>> =
+        Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let rate_limited: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+
+    spawn_udp_reader(
+        &tx,
+        Arc::clone(&queued),
+        Arc::clone(&socket),
+        &log,
+        Arc::clone(&peer_endpoints),
+        Arc::clone(&rate_limited),
+        Arc::clone(&reader_clock),
+    )?;
     drop(tx);
 
     log_info!(log, "tunnel up on interface `{}`", parts.name);
@@ -616,9 +633,7 @@ pub fn run(
     // so `datagrams_failed` stays 0), nothing comes back, and the daemon looks
     // perfectly healthy from the inside.
     let mut silent: HashSet<usize> = HashSet::new();
-    // Admission for strangers, before any parsing (ADR-0030).
-    let mut admission = Admission::new();
-    let mut rate_limited: u64 = 0;
+
     let mut last_control_check = Instant::now();
 
     loop {
@@ -665,7 +680,7 @@ pub fn run(
                 // the request handler takes its snapshot.
                 stats.reassembled = segments.reassembled();
                 stats.fragments_dropped = segments.dropped();
-                stats.fragments_rate_limited = rate_limited;
+                stats.fragments_rate_limited = rate_limited.load(Ordering::Relaxed);
                 stats.dropped_malformed = device.dropped_malformed();
                 stats.dropped_unknown_index = device.dropped_unknown_index();
                 shared_stats.publish(&stats);
@@ -726,26 +741,31 @@ pub fn run(
             }
             Ok(Input::Datagram(source, bytes)) => {
                 queued.fetch_sub(1, Ordering::Relaxed);
-                // A configured peer's traffic is exempt: its fragments are the
-                // tunnel's own, and a bucket a peer trips is worse than none.
-                // Everything else gets an allowance before it is parsed, because
-                // a replayed fragment costs this loop 26 µs and its sender
-                // nothing (ADR-0030).
-                if !device.owns_endpoint(source)
-                    && !admission.allow(source.ip(), clock.monotonic_ms())
-                {
-                    rate_limited = rate_limited.saturating_add(1);
-                    None
-                } else {
-                    // A fragment is held here; only a whole message is an event.
-                    // The loop still ticks, which is what expires a half-assembled
-                    // message that never finished.
-                    segments
-                        .inbound(clock.monotonic_ms(), source, bytes)
-                        .map(|bytes| Event::Datagram { source, bytes })
-                }
+                // Strangers were already refused in the reader (ADR-0032), so
+                // anything arriving here has been allowed once.
+                //
+                // A fragment is held here; only a whole message is an event.
+                // The loop still ticks, which is what expires a half-assembled
+                // message that never finished.
+                segments
+                    .inbound(clock.monotonic_ms(), source, bytes)
+                    .map(|bytes| Event::Datagram { source, bytes })
             }
-            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Timeout) => {
+                // Idle tick: refresh the reader's exemption set. Doing it here
+                // and not per packet keeps the cost off the data path, at the
+                // price of a peer that has just roamed being bucketed for up to
+                // one tick (ADR-0032).
+                if let Ok(mut set) = peer_endpoints.lock() {
+                    set.clear();
+                    for (id, _) in device.peers() {
+                        if let Some(endpoint) = device.endpoint(id) {
+                            set.insert(endpoint);
+                        }
+                    }
+                }
+                None
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         };
 
@@ -909,7 +929,7 @@ pub fn run(
     }
     stats.reassembled = segments.reassembled();
     stats.fragments_dropped = segments.dropped();
-    stats.fragments_rate_limited = rate_limited;
+    stats.fragments_rate_limited = rate_limited.load(Ordering::Relaxed);
     stats.dropped_malformed = device.dropped_malformed();
     stats.dropped_unknown_index = device.dropped_unknown_index();
 
@@ -1009,6 +1029,9 @@ fn spawn_udp_reader(
     queued: Arc<AtomicUsize>,
     socket: Arc<SharedSocket>,
     log: &Logger,
+    peer_endpoints: Arc<std::sync::Mutex<HashSet<SocketAddr>>>,
+    rate_limited: Arc<AtomicU64>,
+    clock: Arc<dyn TimeSource>,
 ) -> Result<(), Error> {
     let tx = tx.clone();
     let log = *log;
@@ -1016,10 +1039,29 @@ fn spawn_udp_reader(
     thread::Builder::new()
         .name("vallum-udp".to_owned())
         .spawn(move || {
+            let mut admission = Admission::new();
             loop {
                 let (generation, current) = socket.current();
                 match current.recv_from(&mut buf) {
                     Ok((n, source)) => {
+                        // A configured peer's traffic is exempt — its fragments
+                        // are the tunnel's own, and a bucket a peer trips is
+                        // worse than none. The set is a snapshot the loop
+                        // refreshes on its tick, so a peer that has just roamed
+                        // may be bucketed for up to one tick. Everything else
+                        // gets an allowance here, before the allocation and the
+                        // channel hop, because that path is what a replayed
+                        // fragment actually costs (ADR-0032).
+                        let known = peer_endpoints
+                            .lock()
+                            .map(|set| set.contains(&source))
+                            .unwrap_or(true);
+                        if !known
+                            && !admission.allow(source.ip(), clock.monotonic_ms())
+                        {
+                            rate_limited.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
                         queued.fetch_add(1, Ordering::Relaxed);
                         if tx.send(Input::Datagram(source, buf[..n].to_vec())).is_err() {
                             break;
