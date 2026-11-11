@@ -329,6 +329,17 @@ instead — the transport's cost is evidence, and evidence that can disappear wh
 the suite stays green is not. It takes about 75 seconds where it runs, most of it
 the 40 ms and 2 % path.
 
+A host too loaded to read a clean path at full speed re-sends data the far end
+already had: the receive window closes while its reader is off the CPU, and the
+kernel re-sends inside the window it had already advertised. That row is reported
+in a line of its own — how many segments went twice, and how many of them the far
+end saw as duplicate — rather than failing the run, because the kernel's own
+sockets are what re-send there and no assertion can attribute that to the carrier.
+What the run still fails on is the other direction: above a percent of the stream,
+every re-send has to be duplicate data with nothing dropped by the qdisc, so a
+clean row that repaired a gap no counter explains — or one whose traffic the qdisc
+dropped — is still an error, and the numbers on it are somebody else's.
+
 The tables are also what the gate runner keeps: `VALLUM_LOSSY_TABLE` names a file
 the test writes them to, and `ci.yml` appends it to the run's step summary. A green
 check then carries the numbers the run measured — a change in the transport's cost
