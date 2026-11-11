@@ -30,3 +30,5 @@
 | [0026](0026-censorship-resistance.md) | Censorship resistance is a separate surface from traffic shaping | proposed | 2026-11-06 |
 | [0027](0027-mesh-topology-and-control-plane.md) | Mesh topology as an external agent — vallum-core stays a tunnel | proposed | 2026-11-07 |
 | [0028](0028-seccomp-filter.md) | A seccomp filter, derived from the daemon's own syscall surface | accepted (log mode) | 2026-11-08 |
+| [0029](0029-ops-trust-model.md) | Ops trust model — dev dispatcher vs production pinning | accepted for development | 2026-11-10 |
+| [0030](0030-fragment-admission-control.md) | Admission control on the fragment path, before reassembly | proposed | 2026-11-11 |
