@@ -89,8 +89,15 @@ M = days, L = weeks.
 | 9 | **Dual-signed consensus** (Ed25519 + ML-DSA-65) as the relay-list format | The multi-host step needs a signed relay list; this is the format reference | M |
 | 10 | **Circuit model** — guard/middle/exit, per-hop keys, 10-min rotation | Single-host trust: the server sees plaintext | L |
 
-Adopt 1, 2, 4, 5 now (hours each, no protocol change). 3 and 6 are the next
-security pass. 7–10 are the north-star roadmap already recorded above.
+**1, 2, 4, 5 adopted (2026-11-11, `656f713`).** Verified live: VmLck 9688 kB
+(mlock works only with the unit's `LimitMEMLOCK=infinity` — systemd's default
+silently defeats it), `vallum_build` in the snapshot, the exit notice answering
+on the VPS's :80, the self-loop refusal in the daemon's startup path.
+Follow-up named: the build id names the *commit*, not the working tree, and the
+cross-host comparison needs a build field in the invite ticket.
+
+3 (fixed-size cells) and 6 (rate limiting) are the next security pass. 7–10 are
+the north-star roadmap already recorded above.
 
 ### What MOOR does that Vallum should NOT take
 
