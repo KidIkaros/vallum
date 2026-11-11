@@ -83,7 +83,7 @@ export function PanicButton({ compact = false }: { compact?: boolean }) {
     <Button
       size="sm"
       variant="outline"
-      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-[10px]" : ""}`}
+      className={`border-fault/60 text-fault hover:bg-fault/10 ${compact ? "h-6 px-2 text-[11px]" : ""}`}
       disabled={busy}
       onClick={() => void run()}
       title="Remove the egress block, withdraw the tunnel's routes and put this host back on the internet"
@@ -189,7 +189,7 @@ export function HealthPanel({ health }: { health: Health | null }) {
         </span>
       </Row>
       {health.last_death && (
-        <p className="text-muted-foreground mt-1 truncate text-[10px]" title={health.last_death}>
+        <p className="text-muted-foreground mt-1 truncate text-[11px]" title={health.last_death}>
           last exit: {health.last_death}
         </p>
       )}

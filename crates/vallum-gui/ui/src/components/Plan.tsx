@@ -52,7 +52,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
   if (!plan) return null
 
   return (
-    <Panel title="◆ FULL TUNNEL — PLAN BEFORE APPLY">
+    <Panel title="FULL TUNNEL — PLAN BEFORE APPLY">
       {plan.already_full ? (
         <p className="text-muted-foreground py-2 text-xs">
           the selected interface is already full-tunnel — nothing to apply
@@ -67,15 +67,15 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               </li>
             ))}
           </ul>
-          <p className="text-muted-foreground mb-2 text-[10px] leading-snug">
-            undo it all:{render_undo(plan.undo)}
+          <p className="text-muted-foreground mb-2 text-[11px] leading-snug">
+            undo it all: {render_undo(plan.undo)}
           </p>
           <div className="flex items-center gap-2">
             <input
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="type APPLY to arm"
-              className="border-border bg-canvas h-7 w-40 rounded border px-2 font-mono text-[11px] placeholder:text-muted-foreground/60"
+              className="border-border/70 bg-background/40 focus-visible:ring-signal h-7 w-40 rounded border px-2 font-mono text-[11px] placeholder:text-muted-foreground/70 focus-visible:ring-1 focus-visible:outline-none"
               spellCheck={false}
             />
             <Button
@@ -89,7 +89,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
           </div>
           {error && <p className="text-fault mt-2 text-[11px]">{error}</p>}
           {output && (
-            <pre className="border-border bg-canvas text-muted-foreground mt-2 max-h-48 overflow-auto rounded border p-2 font-mono text-[10px] leading-snug whitespace-pre-wrap">
+            <pre className="border-border bg-canvas text-muted-foreground mt-2 max-h-48 overflow-auto rounded border p-2 font-mono text-[11px] leading-snug whitespace-pre-wrap">
               {output}
             </pre>
           )}

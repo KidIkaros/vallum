@@ -74,13 +74,13 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
               }`}
             >
               <span
-                className={`mt-0.5 text-[10px] ${step.done ? "text-live" : step === next ? "text-signal" : "text-muted-foreground"}`}
+                className={`mt-0.5 text-[11px] ${step.done ? "text-live" : step === next ? "text-signal" : "text-muted-foreground"}`}
               >
                 {step.done ? "done" : `${index + 1}`}
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-foreground/90 text-xs">{step.title}</p>
-                <p className="text-muted-foreground text-[10px]">{step.detail}</p>
+                <p className="text-muted-foreground text-[11px]">{step.detail}</p>
                 <div className="mt-1 flex items-center gap-2">
                   <code className="text-foreground/80 truncate font-mono text-[11px]">
                     {step.command}
@@ -92,7 +92,7 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
           ))}
         </ul>
 
-        <p className="text-muted-foreground mt-3 text-[10px]">
+        <p className="text-muted-foreground mt-3 text-[11px]">
           A full tunnel is opt-in and reversible: <code>scripts/trial.sh --dry-run</code>{" "}
           shows what it would change, and <code>vallum-panic</code> undoes it.
         </p>
@@ -116,12 +116,12 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
             </div>
           ))}
         </dl>
-        <p className="text-muted-foreground mt-2 text-[10px]">
+        <p className="text-muted-foreground mt-2 text-[11px]">
           socket directory {facts?.runtime_dir ?? "—"} · mode{" "}
           {facts?.runtime_mode ?? "—"} · {facts?.sockets ?? 0} socket(s)
         </p>
         {facts && facts.runtime_mode !== "absent" && !["0770", "0775", "0777"].includes(facts.runtime_mode) && (
-          <p className="text-stale mt-1 text-[10px]">
+          <p className="text-stale mt-1 text-[11px]">
             the socket directory is {facts.runtime_mode}: a daemon that drops privileges
             cannot publish its socket there. <code>scripts/install.sh</code> sets 0770
             with the right group.

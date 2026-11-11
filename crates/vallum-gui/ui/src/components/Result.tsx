@@ -36,7 +36,7 @@ export function ResultPanel({
             <Button size="sm" variant="outline" onClick={() => void copy()}>
               {copied ? "copied" : "copy command"}
             </Button>
-            <span className="text-muted-foreground text-[10px]">
+            <span className="text-muted-foreground text-[11px]">
               run it on the other device
             </span>
           </div>

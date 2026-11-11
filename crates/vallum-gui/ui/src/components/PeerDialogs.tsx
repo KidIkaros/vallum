@@ -65,9 +65,9 @@ function Field({
       {/* The complaint replaces the hint: two lines of small text under one
           field is noise, and the complaint is the one that matters now. */}
       {error ? (
-        <span className="text-fault text-[10px]">{error}</span>
+        <span className="text-fault text-[11px]">{error}</span>
       ) : (
-        hint && <span className="text-muted-foreground text-[10px]">{hint}</span>
+        hint && <span className="text-muted-foreground text-[11px]">{hint}</span>
       )}
     </div>
   )
@@ -207,7 +207,7 @@ function PeerForm({
       </Field>
       <DialogFooter className="mt-2 items-center gap-3">
         {!ready && (
-          <span className="text-muted-foreground mr-auto text-[10px]">
+          <span className="text-muted-foreground mr-auto text-[11px]">
             {blocking[0][1]}
           </span>
         )}

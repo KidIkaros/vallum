@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ShieldOff } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
-import { TrafficBars } from "@/components/TrafficBars"
 import {
   AddPeerDialog,
   DeviceDialog,
@@ -13,7 +12,7 @@ import {
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { egressVerdict, HealthPanel } from "@/components/Health"
+import { egressVerdict, HealthPanel, type Egress } from "@/components/Health"
 import { PlanPanel } from "@/components/Plan"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun } from "@/components/FirstRun"
@@ -47,6 +46,14 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 type SortOrder = "handshake" | "name" | "epoch"
 const SORT_CYCLE: SortOrder[] = ["handshake", "name", "epoch"]
+
+/** One place maps a verdict tone to its class, like `freshnessTone` below. */
+const verdictTone: Record<Egress["tone"], string> = {
+  live: "text-live",
+  fault: "text-fault",
+  stale: "text-stale",
+  muted: "text-muted-foreground",
+}
 
 const freshnessTone: Record<string, string> = {
   never: "text-muted-foreground",
@@ -109,18 +116,10 @@ function Hero({
           {/* One glance must answer "am I protected?" — so the headline IS the
               derived verdict, not a mechanism word the user has to combine
               with a second badge. Usability spec: <=2 s, no scrolling. */}
-          <span className="micro">protection</span>
+          <PanelTitle>PROTECTION</PanelTitle>
           <span
             className={`text-3xl leading-none font-semibold tracking-tight ${
-              !verdict
-                ? "text-muted-foreground"
-                : verdict.tone === "live"
-                  ? "text-live"
-                  : verdict.tone === "fault"
-                    ? "text-fault"
-                    : verdict.tone === "stale"
-                      ? "text-stale"
-                      : "text-foreground/80"
+              verdictTone[verdict?.tone ?? "muted"]
             }`}
             title={verdict?.detail}
           >
@@ -163,8 +162,7 @@ function Hero({
               >
                 {rateLabel(rate)}
               </span>
-              <span className="text-muted-foreground text-[10px]">Σ {bytes(total)}</span>
-              <TrafficBars samples={samples} kind={tone === "signal" ? "rx" : "tx"} color={tone} bars={40} height={20} />
+              <span className="text-muted-foreground text-[11px]">total {bytes(total)}</span>
             </div>
           ))}
         </div>
@@ -232,7 +230,7 @@ function PeersPanel({
         <span className="flex items-center gap-1.5">
           <button
             onClick={onSort}
-            className="micro hover:text-foreground cursor-pointer rounded px-1 py-0.5 uppercase"
+            className="micro hover:text-foreground cursor-pointer rounded px-1 py-0.5"
             title="cycle sort: handshake → name → epoch (o)"
           >
             sort {sort}
@@ -247,7 +245,7 @@ function PeersPanel({
           id="peer-filter"
           value={filter}
           onChange={(event) => onFilter(event.target.value)}
-          placeholder="filter by name or address   ( / )"
+          placeholder="Filter"
           className="border-border/70 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal w-full rounded-md border px-2 py-1 text-[11px] focus-visible:ring-1 focus-visible:outline-none"
           aria-label="filter peers"
         />
@@ -273,9 +271,9 @@ function PeersPanel({
                   <span className={isSelected ? "text-signal" : "text-transparent"}>)</span>
                   <span className="min-w-0 flex-1 truncate">{peer.name}</span>
                   {peer.rotating && (
-                    <span className="text-violet text-[10px] uppercase">rotating</span>
+                    <span className="text-violet text-[11px]">rotating</span>
                   )}
-                  <span className={`text-[10px] uppercase ${tone}`}>
+                  <span className={`text-[11px] uppercase ${tone}`}>
                     {freshnessLabel[f]}
                     {peer.last_handshake_sec > 0 && (
                       <span className="text-muted-foreground"> {Math.max(0, now - peer.last_handshake_sec)}s</span>
@@ -320,7 +318,7 @@ function PeerDetail({
           <span
             aria-hidden
             className={`inline-block size-1.5 rounded-full ${
-              f === "recent" ? "animate-pulse bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
+              f === "recent" ? "bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
             }`}
           />
           <span className="text-foreground/90">peer · {peer.name}</span>
@@ -338,7 +336,7 @@ function PeerDetail({
         <Button
           size="sm"
           variant="outline"
-          className="h-6 px-2 text-[10px] uppercase"
+          className="h-7 px-2.5 text-[11px]"
           disabled={probing || peer.allowed_ips.length === 0}
           title={`ping ${peer.allowed_ips[0] ?? "the peer"}`}
           onClick={() => {
@@ -407,7 +405,7 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
       title="INTERFACE DATA"
       right={
         c && (
-          <span className="text-muted-foreground text-[10px]">
+          <span className="text-muted-foreground text-[11px]">
             {c.datagrams_sent.toLocaleString()} out · {c.packets_delivered.toLocaleString()} in
             {c.datagrams_failed + c.packets_failed > 0 && (
               <span className="text-fault"> · {c.datagrams_failed + c.packets_failed} failed</span>
@@ -651,7 +649,7 @@ export default function App() {
     <div className={`mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4 ${comfortable ? "comfortable" : ""}`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
         <PanelTitle>
-          <span className="text-foreground">Vallum ) </span>TUNNEL CONTROL
+          <span className="text-foreground">Vallum ❯ </span>TUNNEL CONTROL
         </PanelTitle>
         {interfaces.length > 0 &&
           (interfaces.length === 1 ? (
@@ -665,13 +663,6 @@ export default function App() {
               [{currentIndex + 1}/{interfaces.length}] {currentName} ▾
             </button>
           ))}
-        <button
-          onClick={() => setComfortable((c) => !c)}
-          className="text-subtext hover:text-foreground focus-visible:ring-signal h-7 cursor-pointer rounded px-2 text-xs focus-visible:ring-1 focus-visible:outline-none"
-          title="Control density: the comfortable setting raises control and text sizes above minimum touch targets"
-        >
-          density: {comfortable ? "comfortable" : "compact"}
-        </button>
         <span className="micro" title="the control socket answered">
           daemon{" "}
           <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
@@ -698,7 +689,7 @@ export default function App() {
                 <span className="text-foreground/80">
                   {data.listen_port !== null ? `:${data.listen_port}` : "—"}
                 </span>
-                <span className="text-muted-foreground/70"> · {data.suite}</span>
+                <span className="text-muted-foreground"> · {data.suite}</span>
               </span>
               <span className="text-muted-foreground">
                 id <span className="text-foreground/80">{data.fingerprint.slice(0, 16)}</span>
@@ -769,10 +760,18 @@ export default function App() {
             </div>
           </div>
           <LogsPanel />
-          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[10px]">
+          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-[11px]">
             <span>updated {lastReply}</span>
             <span>·</span>
             <span>snapshot stream</span>
+            <span>·</span>
+            <button
+              onClick={() => setComfortable((c) => !c)}
+              className="hover:text-foreground focus-visible:ring-signal cursor-pointer rounded focus-visible:ring-1 focus-visible:outline-none"
+              title="Density: comfortable raises control and text sizes above minimum touch targets"
+            >
+              density {comfortable ? "comfortable" : "compact"}
+            </button>
           </footer>
         </>
       )}
@@ -807,7 +806,7 @@ export default function App() {
                 </div>
               ))}
             </dl>
-            <p className="text-muted-foreground mt-3 text-[10px]">
+            <p className="text-muted-foreground mt-3 text-[11px]">
               Shortcuts are off while a field has focus.
             </p>
           </div>

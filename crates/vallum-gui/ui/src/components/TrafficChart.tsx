@@ -54,7 +54,7 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       <div className="flex items-baseline justify-between">
         <span className="micro">rate · last {seconds || 0}s</span>
         {!idle && (
-          <span className="text-muted-foreground text-[10px]">
+          <span className="text-muted-foreground text-[11px]">
             scale 0 – <span className="text-foreground/80">{rateLabel(peak)}</span>
           </span>
         )}
@@ -68,7 +68,7 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       ) : (
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="h-[120px] w-full"
+        className="h-[160px] w-full"
         role="img"
         aria-label={`Receive peak ${rateLabel(rxPeak)}, transmit peak ${rateLabel(txPeak)}`}
       >
@@ -106,7 +106,7 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       </svg>
       )}
       {!idle && (
-        <div className="text-muted-foreground flex justify-between text-[10px]">
+        <div className="text-muted-foreground flex justify-between text-[11px]">
           <span>
             <span className="text-signal">▼ rx</span> peak {rateLabel(rxPeak)}
           </span>

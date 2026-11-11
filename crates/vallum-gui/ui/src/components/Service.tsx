@@ -98,7 +98,7 @@ export function ServiceStrip({
         title={noUnit ? "no systemd unit owns this interface — start it yourself" : undefined}
         onClick={() => void act("start")}
       >
-        {pending === "start" ? "…" : "START"}
+        {pending === "start" ? "…" : "Start"}
       </Button>
       <Button
         size="sm"
@@ -121,7 +121,7 @@ export function ServiceStrip({
           void act("stop")
         }}
       >
-        {pending === "stop" ? "…" : confirmStop ? "CONFIRM STOP" : "STOP"}
+        {pending === "stop" ? "…" : confirmStop ? "Confirm stop" : "Stop"}
       </Button>
     </span>
   )
@@ -156,7 +156,7 @@ export function StoppedCard({
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={pending !== null} onClick={() => void act("start")}>
-          {pending === "start" ? "starting…" : "START TUNNEL"}
+          {pending === "start" ? "Starting…" : "Start tunnel"}
         </Button>
         <code className="text-muted-foreground text-[11px]">sudo systemctl start {unit}</code>
       </div>
@@ -190,15 +190,15 @@ export function LogsPanel() {
       className="bg-card/60 rounded-lg border border-border/70"
       onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
     >
-      <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-3 py-2 text-[10px] tracking-wider uppercase select-none">
+      <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-3 py-2 text-[11px] select-none">
         logs
-        <span className="text-muted-foreground/70 normal-case tracking-normal">
+        <span className="text-muted-foreground">
           {unit || "journalctl"}
         </span>
         <Button
           size="sm"
           variant="ghost"
-          className="ml-auto h-5 px-2 text-[10px]"
+          className="ml-auto h-5 px-2 text-[11px]"
           onClick={(event) => {
             event.preventDefault()
             load()

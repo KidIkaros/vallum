@@ -156,7 +156,11 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     }
     // The guard only matters for a full tunnel: on split it is not needed, so
     // its state is not shown (a pill for a component nobody needs is noise).
-    if interface.device.as_ref().is_some_and(|d| d.egress == "full") {
+    if interface
+        .device
+        .as_ref()
+        .is_some_and(|d| d.egress == "full")
+    {
         match interface.guard_state {
             Some(ServiceState::Active) => first_row.push(Span::styled(" ◆ GUARD ON ", t.pill_ok())),
             Some(_) => first_row.push(Span::styled(" ◇ GUARD OFF ", t.pill_warn())),
@@ -219,18 +223,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     );
 
     if let Some(t_area) = traffic_area {
-        let block = brand_block("TRAFFIC");
-        let inner = block.inner(t_area);
-        frame.render_widget(block, t_area);
-
-        let rows = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
+        // The scale ceiling goes in the title: RX and TX share one scale, so a
+        // per-series "peak" printed beside each line was two numbers for one
+        // fact, and it overflowed the 32-column panel.
         let (total_rx, total_tx) = interface.device.as_ref().map_or((0u64, 0u64), |dev| {
             (
                 dev.peers.iter().map(|p| p.rx_bytes).sum(),
@@ -242,16 +237,25 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         // Shared scale ceiling across RX & TX with a 1 KB/s floor so sub-1KB/s
         // keepalive noise never renders as full-height bars (Tufte Lie Factor = 1).
         let scale_max = rx_peak.max(tx_peak).max(1024);
+        let block = section_block(format!("TRAFFIC · scale {}", bytes(scale_max)));
+        let inner = block.inner(t_area);
+        frame.render_widget(block, t_area);
+
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
         let baseline = "▁".repeat(inner.width as usize);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("▼ RX ", t.accent()),
                 Span::styled(format!("{:<9}", rate_label(interface.rx_rate)), t.text()),
-                Span::styled(
-                    format!("Σ {} pk {}", bytes(total_rx), bytes(rx_peak)),
-                    t.muted(),
-                ),
+                Span::styled(format!("{} total", bytes(total_rx)), t.muted()),
             ])),
             rows[0],
         );
@@ -273,10 +277,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
             Paragraph::new(Line::from(vec![
                 Span::styled("▲ TX ", t.tx_signal()),
                 Span::styled(format!("{:<9}", rate_label(interface.tx_rate)), t.text()),
-                Span::styled(
-                    format!("Σ {} pk {}", bytes(total_tx), bytes(tx_peak)),
-                    t.muted(),
-                ),
+                Span::styled(format!("{} total", bytes(total_tx)), t.muted()),
             ])),
             rows[2],
         );
@@ -320,6 +321,19 @@ fn brand_block(title: impl Into<String>) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(t.muted())
         .title(brand_title(title))
+}
+
+/// A section header without the brand mark. The brand belongs once per screen,
+/// on the panel that carries the product's own name; repeating "◆ Vallum ❯" on
+/// every box made four headers of equal weight and spent the width the peer
+/// table needed.
+fn section_block(title: impl Into<String>) -> Block<'static> {
+    let t = theme();
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(t.muted())
+        .title(Line::from(Span::styled(title.into(), t.subtext())))
 }
 
 fn modal_block(title: impl Into<String>) -> Block<'static> {
@@ -493,7 +507,7 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .current()
             .and_then(|interface| interface.error.as_deref())
             .unwrap_or("No device data. Press r to retry.");
-        frame.render_widget(Paragraph::new(message).block(brand_block("PEERS")), area);
+        frame.render_widget(Paragraph::new(message).block(section_block("PEERS")), area);
         return;
     };
 
@@ -531,7 +545,7 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
         };
         frame.render_widget(
             Paragraph::new(empty_text)
-                .block(brand_block(title))
+                .block(section_block(title))
                 .wrap(Wrap { trim: true }),
             area,
         );
@@ -543,31 +557,39 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let filtered_count = filtered.len();
 
     let expanded = area.width >= 101;
+    // A column that reads "—" or "0" on every row is a demand the operator
+    // cannot use: show epoch and psk only when some peer actually has one.
+    let show_epoch = device.peers.iter().any(|peer| peer.epoch != 0);
+    let show_psk = device.peers.iter().any(|peer| peer.preshared_key);
+    let mut header_cells = vec!["name", "endpoint", "allowed", "handshake", "rx/tx"];
+    if show_epoch {
+        header_cells.push("epoch");
+    }
+    if show_psk {
+        header_cells.push("psk");
+    }
     let header = if expanded {
-        Row::new(vec![
-            "name",
-            "endpoint",
-            "allowed",
-            "handshake",
-            "rx/tx",
-            "epoch",
-            "psk",
-        ])
+        Row::new(header_cells)
     } else {
         Row::new(vec!["peer", "endpoint", "handshake", "rx / tx"])
     }
     .style(t.accent());
     let rows: Vec<Row> = if filtered_count == 0 {
         if expanded {
-            vec![Row::new(vec![
+            let mut cells = vec![
                 Cell::from("no match").style(t.warn()),
                 Cell::from(format!("filter: \"{}\"", app.peer_filter)).style(t.muted()),
                 Cell::from(""),
                 Cell::from(""),
                 Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-            ])]
+            ];
+            if show_epoch {
+                cells.push(Cell::from(""));
+            }
+            if show_psk {
+                cells.push(Cell::from(""));
+            }
+            vec![Row::new(cells)]
         } else {
             vec![Row::new(vec![
                 Cell::from("no match").style(t.warn()),
@@ -593,15 +615,20 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 let handshake = Cell::from(hs_label)
                     .style(freshness_style(t, freshness).add_modifier(Modifier::BOLD));
                 if expanded {
-                    Row::new(vec![
+                    let mut cells = vec![
                         Cell::from(peer.name.clone()),
                         Cell::from(peer.endpoint.clone()),
                         Cell::from(peer.allowed_ips.join(",")),
                         handshake,
                         Cell::from(format!("{}/{}", bytes(peer.rx_bytes), bytes(peer.tx_bytes))),
-                        Cell::from(peer.epoch.to_string()),
-                        Cell::from(if peer.preshared_key { "yes" } else { "—" }),
-                    ])
+                    ];
+                    if show_epoch {
+                        cells.push(Cell::from(peer.epoch.to_string()));
+                    }
+                    if show_psk {
+                        cells.push(Cell::from(if peer.preshared_key { "yes" } else { "—" }));
+                    }
+                    Row::new(cells)
                 } else {
                     Row::new(vec![
                         Cell::from(peer.name.clone()),
@@ -614,15 +641,20 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .collect()
     };
     let widths = if expanded {
-        vec![
+        let mut widths = vec![
             Constraint::Length(20),
             Constraint::Length(24),
             Constraint::Length(14),
             Constraint::Length(9),
             Constraint::Length(13),
-            Constraint::Length(6),
-            Constraint::Length(4),
-        ]
+        ];
+        if show_epoch {
+            widths.push(Constraint::Length(6));
+        }
+        if show_psk {
+            widths.push(Constraint::Length(4));
+        }
+        widths
     } else {
         vec![
             Constraint::Length(20),
@@ -653,7 +685,7 @@ fn draw_peers(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let table = Table::new(rows, widths)
         .header(header)
-        .block(brand_block(table_title))
+        .block(section_block(table_title))
         .row_highlight_style(theme().row_selected())
         .highlight_symbol("❯ ");
     let selected = if filtered_count > 0 {
@@ -833,7 +865,7 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(brand_block("PEER DETAILS"))
+            .block(section_block("PEER DETAILS"))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -885,7 +917,7 @@ fn draw_compact_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(brand_block("PEER DETAILS"))
+            .block(section_block("PEER DETAILS"))
             .wrap(Wrap { trim: true }),
         area,
     );

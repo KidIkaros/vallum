@@ -10,7 +10,9 @@
    the console is a dark surface; there is no light theme. */
 
 :root {
-  --radius: 0.25rem;
+  /* Controls 4-6, rows/inputs 6, cards 8, dialogs 12. Nested: inner = outer
+     minus the padding between them, never below 4. */
+  --radius: 0.375rem;
   /* The console's typography is the TUI's: JetBrains Mono everywhere,
      tabular numerals, zero jitter (brandkit §06). */
   --font-mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, "SF Mono",
@@ -26,7 +28,10 @@
   --secondary: #182a3a;
   --secondary-foreground: #c9d1d9;
   --muted: #182a3a;
-  --muted-foreground: #6e7681;
+  /* WCAG AA, measured: #6e7681 was 4.12:1 on the page, 3.77:1 on a card and
+     3.19:1 on a raised row — under 4.5 for every label on the screen. #8b949e
+     is 6.15 / 5.62 / 4.77, so the label role passes on the worst surface. */
+  --muted-foreground: #8b949e;
   --accent: #182a3a;
   --accent-foreground: #c9d1d9;
   --destructive: #e4573d;
@@ -40,7 +45,7 @@
   --stale: #d29922;
   --fault: #e4573d;
   --violet: #bc8cff;
-  --subtext: #8b949e;
+  --subtext: #9aa4b0;
 }
 
 @theme inline {
@@ -85,16 +90,45 @@
     @apply bg-background text-foreground;
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+    /* Three sizes on this screen: 13 body, 12 meta, 11 label. There is no 10px
+       step — uppercase mono at 10px was the most expensive text here, and the
+       `comfortable` toggle existed only to escape it. */
     font-size: 13px;
-    line-height: 1.45;
+    line-height: 1.5;
+  }
+}
+
+/* A browser default scrollbar on a dark surface reads as an unfinished app.
+   Thin, on the ramp, no arrow buttons. */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 16%, transparent);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--foreground) 26%, transparent);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
 @layer utilities {
-  /* The TUI's micro-labels: uppercase, letter-spaced, muted. */
+  /* Field labels. Sentence case, not caps: a terminal writes its section
+     headers in caps, but a label that reads as a sentence ("default route",
+     "daemon attached") is read, not scanned. Caps are reserved for panel
+     titles and one-word states. */
   .micro {
-    @apply text-muted-foreground text-[10px] uppercase;
-    letter-spacing: 0.08em;
+    @apply text-muted-foreground text-[11px];
+    letter-spacing: 0.01em;
   }
 }
 
@@ -109,10 +143,10 @@
   font-size: 12px;
   min-height: 32px;
 }
-.comfortable .text-\[10px\],
+.comfortable .text-\[11px\],
 .comfortable .micro {
-  font-size: 12px;
-}
-.comfortable .text-\[11px\] {
   font-size: 13px;
+}
+.comfortable .text-xs {
+  font-size: 14px;
 }
