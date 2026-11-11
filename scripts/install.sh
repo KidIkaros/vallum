@@ -395,6 +395,25 @@ install_docs() {
             run install -D -m 0755 "$SOURCE_DIR/$tool" "/usr/local/sbin/$tool"
         fi
     done
+    # The console's privileged path and the full-tunnel deploy scripts ship
+    # with the product: without them the plan-before-apply panel is a button
+    # that prints a sudo error (see the premortem, 2026-11-11).
+    run install -d -m 0755 /usr/local/lib/vallum
+    for lib in trial.sh go-full-tunnel.sh; do
+        if [ -f "scripts/$lib" ]; then
+            run install -m 0755 "scripts/$lib" "/usr/local/lib/vallum/$lib"
+        fi
+    done
+    if [ -f "packaging/vallum-ops" ]; then
+        run install -m 0755 "packaging/vallum-ops" "/usr/local/sbin/vallum-ops"
+    fi
+    if [ -f "packaging/vallum-ops-sudoers" ]; then
+        ops_user=${SUDO_USER:-$(id -un 2>/dev/null || echo root)}
+        run mkdir -p /etc/sudoers.d
+        run sh -c "sed 's/@USER@/$ops_user/' packaging/vallum-ops-sudoers > /etc/sudoers.d/vallum-ops"
+        run chmod 440 /etc/sudoers.d/vallum-ops
+        run visudo -cf /etc/sudoers.d/vallum-ops || { run rm -f /etc/sudoers.d/vallum-ops; echo "sudoers validation failed — ops rule not installed" >&2; }
+    fi
     for unit in vallum-deadman@.service vallum-deadman@.timer; do
         if [ -f "packaging/$unit" ]; then
             run install -D -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"

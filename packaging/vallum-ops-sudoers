@@ -1,0 +1,4 @@
+# vallum-ops: the console's privileged path. Grants the root-owned dispatcher
+# only — never a wildcard. Install with the operator's username substituted
+# and validate with visudo -cf before activating.
+@USER@ ALL=(root) NOPASSWD: /usr/local/sbin/vallum-ops

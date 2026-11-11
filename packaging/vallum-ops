@@ -12,15 +12,17 @@
 #   vallum-ops journal [N]   # last N lines from the vallum units' journals
 set -uo pipefail
 
-SRC=/home/ikaaros/.hermes/cache/scratch/vallum-real
-REPO=/home/ikaaros/Coding/Gold/vallum
+# LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
+# machine (self-update) and is meaningless elsewhere.
+LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
+REPO=${VALLUM_REPO:-/home/ikaaros/Coding/Gold/vallum}
 CONF=/etc/vallum/vallum0.toml
 IFACE=vallum0
 UNIT=vallum@$IFACE
 
 case "${1:-}" in
 full-tunnel)
-    exec bash "$SRC/go-full-tunnel.sh"
+    exec bash "$LIB/go-full-tunnel.sh"
     ;;
 sync)
     # Deployment automation: make the host match the build under test, then
@@ -34,7 +36,7 @@ self-update)
     ;;
 revert)
     /usr/local/sbin/vallum-panic
-    install -m 600 -o root -g root "$SRC/vallum0-split.toml" "$CONF"
+    install -m 600 -o root -g root /etc/vallum/vallum0.split.bak "$CONF"
     systemctl reset-failed "$UNIT" 2>/dev/null || true
     systemctl restart "$UNIT"
     sleep 3

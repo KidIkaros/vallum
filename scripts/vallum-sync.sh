@@ -32,6 +32,15 @@ for u in vallum@.service vallum-quick@.service vallum-guard@.service \
     fi
 done
 
+install -d -m 755 /usr/local/lib/vallum
+for lib in trial.sh go-full-tunnel.sh; do
+    if ! cmp -s "$REPO/scripts/$lib" "/usr/local/lib/vallum/$lib"; then
+        echo "sync: deploy script $lib is stale — updating"
+        install -m 755 "$REPO/scripts/$lib" "/usr/local/lib/vallum/$lib"
+        CHANGES=1
+    fi
+done
+
 for tool in vallum-panic vallum-guard-deadman vallum-cleanup; do
     if ! cmp -s "$REPO/packaging/$tool" "/usr/local/sbin/$tool"; then
         echo "sync: tool $tool is stale — updating"
