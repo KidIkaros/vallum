@@ -52,7 +52,7 @@ into `/etc/systemd/system`, and the man pages and completion into `/usr/share`.
 ```sh
 sudo vallum server init \
     --endpoint vpn.example.com \
-    --address 10.7.0.1/24 \
+    --address 10.7.0.1/20 \
     --listen 0.0.0.0:51820
 ```
 
@@ -95,7 +95,7 @@ ready: server `vallum0`
    key       /etc/vallum/server.key (new)
    listen    0.0.0.0:51820
    endpoint  vpn.example.com:51820
-   address   10.7.0.1/24
+   address   10.7.0.1/20
    firewall  ufw
    service   installed and started
 

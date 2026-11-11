@@ -33,7 +33,7 @@ said in the README, because a customer discovering it during rollout is a
 support incident.
 
 **The first ceiling is not on that table: it is the address plan (measured).**
-`vallum server init` wrote `10.7.0.1/24`, and `vallum peer add` allocates each
+Until this release `vallum server init` wrote `10.7.0.1/24`, and `vallum peer add` allocates each
 device's inner address from that prefix. Enrolling peers one at a time into a
 running daemon succeeds **253 times** and then stops with "the tunnel has no free
 address left", having handed out 10.7.0.2 through 10.7.0.254. A default install
@@ -132,7 +132,7 @@ notes until the build moves to an older base.
 |---|---|
 | Crypto | tri-hybrid X25519 + sntrup761 + ML-KEM-768, handshake fragmentation managed |
 | Crypto dependency | `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`); classical X25519 mitigates single-point PQ failure |
-| Addressing | dual-stack by default — `10.7.0.1/24` and `fd00:7::1/64`; a peer gets one address per family |
+| Addressing | dual-stack by default — `10.7.0.1/20` (4,094 peer addresses) and `fd00:7::1/64`; a peer gets one address per family |
 | Independent audit | **None.** Stated plainly in the README |
 | Fail-closed | **Implemented** — `vallum-guard@` blocks egress outside the tunnel, endpoint excepted (ADR-0018) |
 | Privilege | control socket `0600 root`; daemon drops to the configured user where possible |

@@ -418,6 +418,16 @@ pub fn server(args: &ServerArgs) -> Result<(), Error> {
     }
 }
 
+/// The inner address plan a server gets unless it is told otherwise.
+///
+/// A `/24` holds 253 peer addresses, eight times below the 2,000-peer target in
+/// `docs/requirements.md` — a gap that stayed invisible until someone enrolled
+/// their 254th device and read "the tunnel has no free address left". The
+/// address plan is the first capacity ceiling, so the default clears the target
+/// with room: `/20` is 4,094 devices. The IPv6 prefix is a unique-local /64 and
+/// is not a constraint.
+pub const DEFAULT_ADDRESSES: [&str; 2] = ["10.7.0.1/20", "fd00:7::1/64"];
+
 pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
     let root = nix::unistd::geteuid().is_root();
     let needs_service = !args.no_service && Path::new("/run/systemd/system").exists();
@@ -458,7 +468,7 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
         // `::/0` sends v6 around the tunnel instead of through it — which is
         // how the IPv6 leak happened. A unique-local v6 prefix is routed, not
         // NATed: the server already forwards, and no translation is involved.
-        vec!["10.7.0.1/24".to_owned(), "fd00:7::1/64".to_owned()]
+        DEFAULT_ADDRESSES.iter().map(ToString::to_string).collect()
     } else {
         args.addresses.clone()
     };
@@ -1015,6 +1025,29 @@ mod tests {
         assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
         assert!(listen_port("0.0.0.0").is_err());
         assert!(listen_port("0.0.0.0:99999").is_err());
+    }
+
+    #[test]
+    fn the_default_address_plan_clears_the_peer_target() {
+        // docs/requirements.md promises 2,000 peers. A /24 holds 253 and nothing
+        // failed until a real enrolment reached 254, because the allocator only
+        // complains when it runs dry. Keep the default above the claim so the
+        // two cannot drift apart again without a test saying so.
+        let v4 = DEFAULT_ADDRESSES
+            .iter()
+            .find(|address| !address.contains(':'))
+            .expect("a v4 default");
+        let prefix: u32 = v4
+            .rsplit('/')
+            .next()
+            .expect("a prefix")
+            .parse()
+            .expect("a number");
+        let hosts = 2u64.pow(32 - prefix) - 2;
+        assert!(
+            hosts >= 2_000,
+            "the default {v4} holds {hosts} peers, below the stated 2,000 target"
+        );
     }
 
     #[test]

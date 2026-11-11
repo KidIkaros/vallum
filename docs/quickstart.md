@@ -91,7 +91,7 @@ firewall and NAT rules, and installs the unit. It asks before changing the host;
 ```sh
 sudo vallum setup --server \
     --endpoint vpn.example.com \
-    --address 10.7.0.1/24 \
+    --address 10.7.0.1/20 \
     --listen 0.0.0.0:51820
 ```
 

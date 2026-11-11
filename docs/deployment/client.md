@@ -78,7 +78,7 @@ should carry:
 name = "server"
 public_key = "vallum1:0003:…"
 endpoint = "203.0.113.5:51820"
-allowed_ips = ["10.7.0.0/24", "192.168.50.0/24"]
+allowed_ips = ["10.7.0.0/20", "192.168.50.0/24"]
 persistent_keepalive = 25
 ```
 

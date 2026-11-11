@@ -24,7 +24,7 @@ and a repair.
   "config": "/etc/vallum/vallum0.toml",
   "key": "/etc/vallum/server.key",
   "interface": "vallum0",
-  "addresses": ["10.7.0.1/24"],
+  "addresses": ["10.7.0.1/20"],
   "listen": "0.0.0.0:51820",
   "endpoint": "203.0.113.5:51820",
   "public_key": "vallum1:0003:…:-",

@@ -69,7 +69,7 @@ sudo systemctl enable --now vallum@vallum0 vallum-guard@vallum0
 ```
 
 `server init` provisions both address families by default:
-`10.7.0.1/24` and `fd00:7::1/64`.
+`10.7.0.1/20` and `fd00:7::1/64`.
 
 **Platform floor: glibc 2.39** — Ubuntu 24.04 or newer. Not Debian 12, not
 Ubuntu 22.04. This is a `cargo-deb` artifact of the build host, not a choice.
