@@ -206,6 +206,9 @@ pub struct Interface {
     pub device: Option<DeviceView>,
     pub error: Option<String>,
     pub service_state: Option<ServiceState>,
+    /// The egress guard's unit state — only meaningful when full tunnel is
+    /// armed; None until the first check.
+    pub guard_state: Option<ServiceState>,
     prev_tx: u64,
     prev_rx: u64,
     prev_at: Instant,
@@ -227,6 +230,7 @@ impl Interface {
             device: None,
             error: None,
             service_state: None,
+            guard_state: None,
             prev_tx: 0,
             prev_rx: 0,
             prev_at: Instant::now(),
@@ -286,6 +290,10 @@ impl Interface {
     pub fn set_service_state(&mut self, state: Option<ServiceState>) {
         self.service_state = state;
         self.last_service_check = Some(Instant::now());
+    }
+
+    pub fn set_guard_state(&mut self, state: Option<ServiceState>) {
+        self.guard_state = state;
     }
 
     pub fn invalidate_service_state(&mut self) {

@@ -986,9 +986,16 @@ mod tests {
 
         let reply = request(&path, "stop=1\n").expect("a stop is answered");
         assert!(reply.contains("errno=0"), "got {reply:?}");
+        // The ack is written before the trigger by design, so the trigger may
+        // land a moment later; asserting instantly raced the control thread
+        // and failed under parallel test load.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !tunnel.is_triggered() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
             tunnel.is_triggered(),
-            "the stop was acknowledged but not acted on"
+            "the stop was acknowledged but not acted on within 2 s"
         );
 
         // The control thread stops with the tunnel, so this returns.

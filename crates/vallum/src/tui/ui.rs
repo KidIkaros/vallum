@@ -161,6 +161,16 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
         first_row.push(egress);
         first_row.push(Span::raw(" "));
     }
+    // The guard only matters for a full tunnel: on split it is not needed, so
+    // its state is not shown (a pill for a component nobody needs is noise).
+    if interface.device.as_ref().is_some_and(|d| d.egress == "full") {
+        match interface.guard_state {
+            Some(ServiceState::Active) => first_row.push(Span::styled(" ◆ GUARD ON ", t.pill_ok())),
+            Some(_) => first_row.push(Span::styled(" ◇ GUARD OFF ", t.pill_warn())),
+            None => {}
+        }
+        first_row.push(Span::raw(" "));
+    }
     first_row.push(Span::raw(" "));
     first_row.push(Span::styled("[Space: toggle]", t.muted()));
     lines.push(Line::from(first_row));
