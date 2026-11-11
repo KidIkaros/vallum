@@ -32,12 +32,12 @@ export function Panel({
   className?: string
 }) {
   return (
-    <section className={`bg-card/60 rounded-lg border border-border/70 ${className}`}>
-      <div className="flex items-center justify-between px-4 pt-3 pb-1">
+    <section className={`surface rounded-lg ${className}`}>
+      <div className="flex items-center justify-between px-4 pt-3 pb-1.5">
         <PanelTitle>{title}</PanelTitle>
         {right}
       </div>
-      <div className="px-4 pb-3.5">{children}</div>
+      <div className="px-4 pb-3">{children}</div>
     </section>
   )
 }

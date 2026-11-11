@@ -90,6 +90,10 @@
     @apply bg-background text-foreground;
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
+    /* Crisper glyphs on macOS; a no-op elsewhere. Monospace at 14px is where
+       the difference is most visible. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     /* Three sizes on this screen: 14 body, 12 meta, 12 label. 11px failed as a
        minimum — it misses WCAG-size readability on real displays, so 12px is
        the floor and `comfortable` raises from there. */
@@ -121,6 +125,23 @@
   }
 }
 
+@layer base {
+  /* Prose wraps by hand: `balance` on a heading so it does not leave one word
+     alone on a line, `pretty` on body copy so the last line is not a widow.
+     Values and labels are short and unaffected. */
+  h1,
+  h2,
+  h3,
+  p {
+    text-wrap: pretty;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+}
+
 @layer utilities {
   /* Field labels. Sentence case, not caps: a terminal writes its section
      headers in caps, but a label that reads as a sentence ("default route",
@@ -129,6 +150,51 @@
   .micro {
     @apply text-muted-foreground text-xs;
     letter-spacing: 0.01em;
+  }
+
+  /* Depth without a drawn frame: a hairline of light on the top edge and two
+     soft shadows underneath, so a surface sits on the canvas instead of being
+     outlined on it. Values stay low — this is a terminal, not a card game —
+     and the border moves from a hard line to a tinted edge. */
+  .surface {
+    background-color: color-mix(in oklab, var(--card) 72%, transparent);
+    border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, #ffffff 4%, transparent),
+      0 1px 1px rgb(0 0 0 / 0.25),
+      0 10px 24px -18px rgb(0 0 0 / 0.8);
+  }
+
+  /* The one surface that is a focal point rather than a container: the hero
+     and anything modal. A vertical tint plus a deeper shadow lifts it off the
+     page, which is what tells the eye "start here". */
+  .surface-raised {
+    background-color: var(--card);
+    background-image: linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--card) 100%, transparent),
+      color-mix(in oklab, var(--card) 70%, var(--background))
+    );
+    border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, #ffffff 6%, transparent),
+      0 1px 2px rgb(0 0 0 / 0.3),
+      0 18px 40px -28px rgb(0 0 0 / 0.9);
+  }
+}
+
+/* Anyone who asks the system for less motion gets less motion: transitions
+   and keyframes collapse to a no-op. The animated QR is deliberately exempt —
+   it is not decoration, it is the only way that code can be scanned, and it
+   is driven by a timer rather than CSS. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

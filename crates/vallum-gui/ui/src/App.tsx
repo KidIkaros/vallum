@@ -133,7 +133,7 @@ function Hero({
   const verdict = health ? egressVerdict(health) : null
 
   return (
-    <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-4">
+    <section className="surface-raised rounded-lg px-5 py-4">
       <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
         <div className="flex flex-col gap-1">
           {/* One glance must answer "am I protected?" — so the headline IS the
@@ -268,12 +268,15 @@ function PeersPanel({
           value={filter}
           onChange={(event) => onFilter(event.target.value)}
           placeholder="Filter peers by name or IP…"
-          className="border-border/70 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal w-full rounded-md border px-2 py-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+          className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal/60 w-full rounded-md border px-2 py-1 text-xs focus-visible:ring-2 focus-visible:outline-none"
           aria-label="filter peers by name or IP"
         />
       </div>
       {peers.length === 0 ? (
-        <p className="text-muted-foreground py-3 text-xs">no peers configured</p>
+        <p className="text-muted-foreground py-3 text-xs">
+          no peers yet — <span className="text-foreground/80">+ add peer</span> above mints the
+          first one, or <span className="text-foreground/80">invite</span> hands a ticket to a device.
+        </p>
       ) : shown.length === 0 ? (
         <p className="text-muted-foreground py-3 text-xs">nothing matches “{filter}”</p>
       ) : (
@@ -286,7 +289,7 @@ function PeersPanel({
                 <button
                   onClick={() => onSelect(peer.fingerprint)}
                   aria-pressed={isSelected}
-                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-colors focus-visible:ring-1 focus-visible:ring-signal focus-visible:outline-none ${
+                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-[background-color,color] duration-150 focus-visible:ring-2 focus-visible:ring-signal/60 focus-visible:outline-none ${
                     isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                   }`}
                 >
@@ -330,7 +333,11 @@ function PeerDetail({
   if (!peer) {
     return (
       <Panel title="PEER DETAIL">
-        <p className="text-muted-foreground py-3 text-xs">select a peer</p>
+        <p className="text-muted-foreground py-3 text-xs">
+          select a peer — <span className="text-foreground/80">j</span>/
+          <span className="text-foreground/80">k</span> steps through the list, or{" "}
+          <span className="text-foreground/80">:</span> runs any command by name.
+        </p>
       </Panel>
     )
   }
@@ -438,7 +445,7 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
     <details
       key={attention ? "attention" : "healthy"}
       open={attention}
-      className="bg-card/60 rounded-lg border border-border/70"
+      className="surface rounded-lg"
     >
       <summary className="flex cursor-pointer items-center justify-between gap-2 px-4 pt-3 pb-1 select-none">
         <span className="flex items-center gap-1.5">
@@ -489,7 +496,7 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
 
 function NoBridge() {
   return (
-    <section className="bg-card/60 rounded-lg border border-border/70">
+    <section className="surface rounded-lg">
       <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
         <ShieldOff className="text-muted-foreground size-8" aria-hidden />
         <div>
@@ -911,7 +918,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setComfortable((c) => !c)}
-              className="hover:text-foreground focus-visible:ring-signal cursor-pointer rounded focus-visible:ring-1 focus-visible:outline-none"
+              className="hover:text-foreground focus-visible:ring-signal/60 cursor-pointer rounded focus-visible:ring-2 focus-visible:outline-none"
               title="Text size: comfortable raises controls and text above minimum touch targets"
             >
               text size: {comfortable ? "comfortable" : "compact"}
@@ -919,7 +926,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setShortcuts(true)}
-              className="hover:text-foreground focus-visible:ring-signal cursor-pointer rounded focus-visible:ring-1 focus-visible:outline-none"
+              className="hover:text-foreground focus-visible:ring-signal/60 cursor-pointer rounded focus-visible:ring-2 focus-visible:outline-none"
               title="Keyboard shortcuts (?) — experts keep their speed without forcing novices to memorize"
             >
               shortcuts
@@ -947,11 +954,10 @@ export default function App() {
           aria-label="keyboard shortcuts"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
           onClick={() => setShortcuts(false)}
-        >
-          <div
-            className="bg-card border-border w-full max-w-sm rounded-lg border p-5"
-            onClick={(event) => event.stopPropagation()}
-          >
+        >            <div
+              className="surface-raised w-full max-w-sm rounded-xl p-5"
+              onClick={(event) => event.stopPropagation()}
+            >
             <p className="text-signal mb-3 text-xs font-semibold tracking-wide uppercase">
               keyboard
             </p>

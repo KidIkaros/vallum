@@ -138,7 +138,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
   // panel's worth of attention on saying so.
   if (plan.already_full) {
     return (
-      <details className="bg-card/60 rounded-lg border border-border/70">
+      <details className="surface rounded-lg">
         <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-4 py-2.5 text-xs select-none">
           <span className="text-signal text-xs font-semibold tracking-wide">FULL TUNNEL</span>
           <span>already applied — nothing to do</span>
@@ -167,7 +167,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="type APPLY to arm"
               disabled={busy}
-              className="border-border/70 bg-background/40 focus-visible:ring-signal h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70 focus-visible:ring-1 focus-visible:outline-none"
+              className="border-border/60 bg-background/40 focus-visible:ring-signal/60 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:outline-none"
               spellCheck={false}
             />
             <Button

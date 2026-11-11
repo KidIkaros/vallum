@@ -141,7 +141,7 @@ export function StoppedCard({
   const unit = service?.unit ?? "vallum@vallum0"
   const failed = service?.active === "failed"
   return (
-    <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-6">
+    <section className="surface rounded-lg px-5 py-6">
       <div className="flex flex-col gap-1">
         <span className="micro">tunnel</span>
         <span
@@ -189,7 +189,7 @@ export function LogsPanel() {
 
   return (
     <details
-      className="bg-card/60 rounded-lg border border-border/70"
+      className="surface rounded-lg"
       onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
     >
       <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-3 py-2 text-xs select-none">
