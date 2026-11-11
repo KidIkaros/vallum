@@ -142,6 +142,17 @@
   }
 }
 
+/* One focus indicator for the whole console. Buttons, inputs, selects,
+   summaries and peer rows all draw the same 2px signal outline on keyboard
+   focus, so no component needs its own ring classes — and `:focus-visible`
+   keeps it off mouse clicks, where an outline would be noise. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--signal) 60%, transparent);
+    outline-offset: 2px;
+  }
+}
+
 @layer utilities {
   /* Field labels. Sentence case, not caps: a terminal writes its section
      headers in caps, but a label that reads as a sentence ("default route",

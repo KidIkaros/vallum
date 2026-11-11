@@ -167,7 +167,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="type APPLY to arm"
               disabled={busy}
-              className="border-border/60 bg-background/40 focus-visible:ring-signal/60 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70 focus-visible:ring-2 focus-visible:outline-none"
+              className="border-border/60 bg-background/40 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70"
               spellCheck={false}
             />
             <Button

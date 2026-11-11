@@ -267,8 +267,7 @@ function PeersPanel({
           id="peer-filter"
           value={filter}
           onChange={(event) => onFilter(event.target.value)}
-          placeholder="Filter peers by name or IP…"
-          className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 focus-visible:ring-signal/60 w-full rounded-md border px-2 py-1 text-xs focus-visible:ring-2 focus-visible:outline-none"
+          placeholder="Filter peers by name or IP…"            className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 w-full rounded-md border px-2 py-1 text-xs"
           aria-label="filter peers by name or IP"
         />
       </div>
@@ -289,7 +288,7 @@ function PeersPanel({
                 <button
                   onClick={() => onSelect(peer.fingerprint)}
                   aria-pressed={isSelected}
-                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-[background-color,color] duration-150 focus-visible:ring-2 focus-visible:ring-signal/60 focus-visible:outline-none ${
+                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-[background-color,color] duration-150 ${
                     isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
                   }`}
                 >
@@ -918,7 +917,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setComfortable((c) => !c)}
-              className="hover:text-foreground focus-visible:ring-signal/60 cursor-pointer rounded focus-visible:ring-2 focus-visible:outline-none"
+              className="hover:text-foreground cursor-pointer rounded"
               title="Text size: comfortable raises controls and text above minimum touch targets"
             >
               text size: {comfortable ? "comfortable" : "compact"}
@@ -926,7 +925,7 @@ export default function App() {
             <span>·</span>
             <button
               onClick={() => setShortcuts(true)}
-              className="hover:text-foreground focus-visible:ring-signal/60 cursor-pointer rounded focus-visible:ring-2 focus-visible:outline-none"
+              className="hover:text-foreground cursor-pointer rounded"
               title="Keyboard shortcuts (?) — experts keep their speed without forcing novices to memorize"
             >
               shortcuts
@@ -982,7 +981,10 @@ export default function App() {
           </div>
         </div>
       )}
-      <Toaster position="bottom-right" />
+      {/* The console is unconditionally dark (see index.css) and mounts no
+          ThemeProvider, so sonner's `system` default would follow the OS and
+          paint light toasts on a dark cockpit. Pin dark. */}
+      <Toaster position="bottom-right" theme="dark" />
     </div>
   )
 }
