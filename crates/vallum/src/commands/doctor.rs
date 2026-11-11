@@ -154,6 +154,7 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
                 // still moving. The two come apart in the one failure that
                 // matters — a path that dies while the daemon keeps dialling.
                 checks.push(check_path_liveness(&path));
+                checks.push(check_handshake_drops(&path));
             }
             Err(error) => {
                 let is_offline = match &error {
@@ -478,6 +479,64 @@ fn check_control(path: &Path) -> Result<String, Error> {
 /// while the daemon keeps dialling — and every other check in this report
 /// passes through it, because a dead path looks like a quiet one from every
 /// angle except this: datagrams going out, nothing coming back.
+/// Did this responder refuse initiations, and why?
+///
+/// Every refusal on the handshake path is silent on the wire, deliberately: an
+/// unauthenticated datagram gets no oracle. That is correct and it is also why a
+/// server that receives an initiation and ignores it looks exactly like one that
+/// never received it. This is the only place the reason reaches a human.
+fn check_handshake_drops(path: &Path) -> Check {
+    let reply = match control::request(path, "get=1\n") {
+        Ok(reply) => reply,
+        Err(error) => return Check::new("handshakes", Status::Warn, error.to_string()),
+    };
+    let response = uapi::parse_response(&reply);
+    let count = |field: &str| {
+        response
+            .field(field)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let mut reasons = Vec::new();
+    for (field, why) in [
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,
+            "failed admission (the peer's copy of this server's public key is wrong, or something is spoofing)",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE,
+            "did not decapsulate (wrong suite, or corrupt)",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER,
+            "named a peer this server does not have (a stale client config)",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT,
+            "came from another peer's pinned endpoint",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_STALE,
+            "carried a timestamp that was not newer than the last accepted one \
+             (the peer's clock stepped back, or it is replaying)",
+        ),
+    ] {
+        let value = count(field);
+        if value > 0 {
+            reasons.push(format!("{value} {why}"));
+        }
+    }
+    if reasons.is_empty() {
+        Check::new("handshakes", Status::Pass, "no initiation refused")
+    } else {
+        Check::new(
+            "handshakes",
+            Status::Warn,
+            format!("refused: {}", reasons.join("; ")),
+        )
+    }
+}
+
 fn check_path_liveness(path: &Path) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,

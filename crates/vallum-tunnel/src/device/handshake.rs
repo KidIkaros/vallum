@@ -55,7 +55,10 @@ impl Device {
             Some(&self.cookie_secret),
         ) {
             Ok(admission) => admission,
-            Err(_) => return,
+            Err(_) => {
+                self.handshake_drops.no_mac = self.handshake_drops.no_mac.saturating_add(1);
+                return;
+            }
         };
         match admission {
             Admission::Accept => {}
@@ -65,14 +68,20 @@ impl Device {
             }
             // No `mac1`, a wrong `mac1`, or a wrong `mac2`: drop in silence. The
             // responder has not been told anything it should believe yet.
-            Admission::NoMac1 | Admission::BadMac1 | Admission::BadMac2 => return,
+            Admission::NoMac1 | Admission::BadMac1 | Admission::BadMac2 => {
+                self.handshake_drops.no_mac = self.handshake_drops.no_mac.saturating_add(1);
+                return;
+            }
         }
 
         // (2) Decapsulate op A and read the confidential, unauthenticated hint.
         let Ok(info) = responder_identify(&*suite, &self.identity, bytes) else {
+            self.handshake_drops.unidentifiable =
+                self.handshake_drops.unidentifiable.saturating_add(1);
             return;
         };
         let Some((index, which)) = self.peer_with_hint(info.peer_hint()) else {
+            self.handshake_drops.unknown_peer = self.handshake_drops.unknown_peer.saturating_add(1);
             return;
         };
         if let Some(reason) = self.validity_refusal(index, which, clock.wall.unix_seconds()) {
@@ -88,6 +97,8 @@ impl Device {
         //     or a spoof aimed at the wrong peer. Either way, refuse.
         if let Some(owner) = self.peer_owning_endpoint(source) {
             if owner != PeerId::from_index(index) {
+                self.handshake_drops.endpoint_conflict =
+                    self.handshake_drops.endpoint_conflict.saturating_add(1);
                 return;
             }
         }
@@ -97,6 +108,7 @@ impl Device {
         //     then reject the peer's own, genuine retransmission.
         let stamp = Tai64n::from_bytes(*info.timestamp());
         if self.peers[index].timestamp_guard.check(stamp).is_err() {
+            self.handshake_drops.stale = self.handshake_drops.stale.saturating_add(1);
             return;
         }
 

@@ -482,6 +482,96 @@ fn two_hosts() -> Net {
 // ── the gate ─────────────────────────────────────────────────────────
 
 #[test]
+fn a_client_that_restarts_re_establishes() {
+    // The field failure of 2026-11-11: the client daemon restarted, kept sending
+    // initiations every five seconds, and the server answered none of them for
+    // twenty-one minutes. Both ends reported clean counters. This models the
+    // client half — same key, same config, no state — and asserts the session
+    // comes back.
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    net.settle();
+    assert!(net.hosts[0].established_once(), "the first session never came up");
+
+    // Ten seconds pass while the process restarts, as they would in the field:
+    // the client's wall clock has moved on, so its first initiation is newer
+    // than anything this responder has seen from it.
+    net.advance(10_000);
+
+    // Replace the client with a fresh device built from the same seed: the
+    // process restarted, nothing else changed.
+    let replacement = two_hosts().hosts.into_iter().next().expect("a host");
+    net.hosts[0] = Host::new(replacement.device, endpoint(A_EP), 0xAAAA);
+
+    net.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    net.settle();
+    assert!(
+        net.hosts[0].established_once(),
+        "a restarted client never re-established"
+    );
+}
+
+#[test]
+fn a_restart_with_a_clock_that_did_not_move_is_refused_and_counted() {
+    // The other half of the restart story. If the fresh client's first
+    // initiation is not newer than the last one this responder accepted — a
+    // clock that stepped back, or did not move at all — the timestamp guard
+    // refuses it. That refusal is silent on the wire by design, so the counter
+    // is the only thing standing between the operator and twenty minutes of
+    // unexplained silence.
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"before"));
+    net.settle();
+
+    let replacement = two_hosts().hosts.into_iter().next().expect("a host");
+    net.hosts[0] = Host::new(replacement.device, endpoint(A_EP), 0xAAAA);
+
+    let before = net.hosts[1].device.handshake_drops();
+    net.outbound(0, ipv4(A_IP, B_IP, b"after"));
+    net.pump(6);
+    let after = net.hosts[1].device.handshake_drops();
+
+    assert!(after.stale > before.stale, "a stale initiation must be counted");
+    assert!(
+        !net.hosts[0].established_once(),
+        "and it must not establish on a timestamp the guard refused"
+    );
+}
+
+#[test]
+fn a_refused_initiation_leaves_a_counter_behind() {
+    // Every refusal on this path is silent on the wire, by design: an
+    // unauthenticated datagram gets no oracle. That is correct, and it is also
+    // why a server that receives an initiation and ignores it looked identical
+    // to one that never received it (2026-11-11, both ends reporting clean).
+    // The counters are the only account of a refusal, so pin that they move.
+    let mut net = two_hosts();
+    net.outbound(0, ipv4(A_IP, B_IP, b"ping"));
+    net.pump(1);
+
+    let mut init = net.hosts[0]
+        .sent
+        .last()
+        .cloned()
+        .expect("an initiation was produced");
+    // The last byte is mac2: flipping it fails admission without touching any
+    // field the responder parses.
+    let last = init.len() - 1;
+    init[last] ^= 0xFF;
+
+    let before = net.hosts[1].device.handshake_drops();
+    net.hosts[1].inbox.push_back((endpoint(A_EP), init));
+    net.pump(1);
+    let after = net.hosts[1].device.handshake_drops();
+
+    assert_eq!(
+        after.no_mac,
+        before.no_mac + 1,
+        "a bad mac2 must be counted, not just dropped"
+    );
+}
+
+#[test]
 fn two_hosts_establish_and_carry_traffic_both_ways() {
     let mut net = two_hosts();
 

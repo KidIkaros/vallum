@@ -159,6 +159,23 @@ pub mod field {
     pub const VALLUM_DROPPED_MALFORMED: &str = "vallum_dropped_malformed";
     /// Datagrams dropped because the sender index matched no peer session.
     pub const VALLUM_DROPPED_UNKNOWN_INDEX: &str = "vallum_dropped_unknown_index";
+    /// Initiations the responder dropped, by reason. Silent on the wire by
+    /// design — an unauthenticated datagram gets no oracle — so these counters
+    /// are the only account of a refusal. A server that receives an initiation
+    /// and ignores it is otherwise indistinguishable from one that never
+    /// received it.
+    pub const VALLUM_HANDSHAKE_DROPPED_NO_MAC: &str = "vallum_handshake_dropped_no_mac";
+    /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
+    pub const VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE: &str =
+        "vallum_handshake_dropped_unidentifiable";
+    /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
+    pub const VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER: &str =
+        "vallum_handshake_dropped_unknown_peer";
+    /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
+    pub const VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT: &str =
+        "vallum_handshake_dropped_endpoint_conflict";
+    /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
+    pub const VALLUM_HANDSHAKE_DROPPED_STALE: &str = "vallum_handshake_dropped_stale";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
     /// Request markers and flags.
@@ -439,6 +456,16 @@ pub struct DeviceState {
     pub capabilities: Capabilities,
     /// Live loop counters.
     pub stats: crate::run::LoopStats,
+    /// Initiations dropped before a peer could be named, by reason.
+    pub handshake_dropped_no_mac: u64,
+    /// See [`Self::handshake_dropped_no_mac`].
+    pub handshake_dropped_unidentifiable: u64,
+    /// See [`Self::handshake_dropped_no_mac`].
+    pub handshake_dropped_unknown_peer: u64,
+    /// See [`Self::handshake_dropped_no_mac`].
+    pub handshake_dropped_endpoint_conflict: u64,
+    /// See [`Self::handshake_dropped_no_mac`].
+    pub handshake_dropped_stale: u64,
     /// The peers, in configuration order.
     pub peers: Vec<PeerState>,
 }
@@ -600,6 +627,26 @@ pub fn render_get(state: &DeviceState) -> String {
         (
             field::VALLUM_DROPPED_UNKNOWN_INDEX,
             stats.dropped_unknown_index,
+        ),
+        (
+            field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,
+            state.handshake_dropped_no_mac,
+        ),
+        (
+            field::VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE,
+            state.handshake_dropped_unidentifiable,
+        ),
+        (
+            field::VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER,
+            state.handshake_dropped_unknown_peer,
+        ),
+        (
+            field::VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT,
+            state.handshake_dropped_endpoint_conflict,
+        ),
+        (
+            field::VALLUM_HANDSHAKE_DROPPED_STALE,
+            state.handshake_dropped_stale,
         ),
     ] {
         out.push_str(&format!("{key}={value}\n"));
@@ -1182,6 +1229,11 @@ mod tests {
                     offload: false,
                     batching: false,
                     stats: crate::run::LoopStats::default(),
+                    handshake_dropped_no_mac: 0,
+                    handshake_dropped_unidentifiable: 0,
+                    handshake_dropped_unknown_peer: 0,
+                    handshake_dropped_endpoint_conflict: 0,
+                    handshake_dropped_stale: 0,
                     capabilities: Capabilities {
                         set_private_key,
                         set_listen_port,
@@ -1365,6 +1417,11 @@ mod tests {
             offload: false,
             batching: false,
             stats: crate::run::LoopStats::default(),
+            handshake_dropped_no_mac: 0,
+            handshake_dropped_unidentifiable: 0,
+            handshake_dropped_unknown_peer: 0,
+            handshake_dropped_endpoint_conflict: 0,
+            handshake_dropped_stale: 0,
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,
@@ -1431,6 +1488,11 @@ mod tests {
             offload: false,
             batching: false,
             stats: crate::run::LoopStats::default(),
+            handshake_dropped_no_mac: 0,
+            handshake_dropped_unidentifiable: 0,
+            handshake_dropped_unknown_peer: 0,
+            handshake_dropped_endpoint_conflict: 0,
+            handshake_dropped_stale: 0,
             capabilities: Capabilities {
                 set_private_key: true,
                 set_listen_port: false,

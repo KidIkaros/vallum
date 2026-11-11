@@ -323,6 +323,28 @@ pub const DELIVERY_WINDOW_MS: u64 = 60_000;
 // ── the device ───────────────────────────────────────────────────────
 
 /// A peer table and the handshake driver over it.
+/// Handshake initiations the responder dropped, by reason.
+///
+/// Every one of these is silent on the wire, deliberately: an unauthenticated
+/// datagram gets no oracle. That makes this struct the only place the reason can
+/// survive. Without it a server that receives an initiation and ignores it is
+/// indistinguishable from one that never received it — which is precisely the
+/// state both ends were left in on 2026-11-11, with every counter clean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandshakeDrops {
+    /// No mac1, a wrong mac1, or a wrong mac2: the admission gate refused it
+    /// before any KEM work.
+    pub no_mac: u64,
+    /// The initiation did not decapsulate — not for this identity, or corrupt.
+    pub unidentifiable: u64,
+    /// The peer hint inside it matched no configured peer.
+    pub unknown_peer: u64,
+    /// The source address is another peer's pinned endpoint.
+    pub endpoint_conflict: u64,
+    /// The timestamp was not newer than the last one accepted from this peer.
+    pub stale: u64,
+}
+
 pub struct Device {
     suite: Arc<dyn CryptoSuite>,
     identity: StaticIdentity,
@@ -346,6 +368,8 @@ pub struct Device {
     /// half of ADR-0019's reinit budget (the per-peer half is
     /// [`Peer::last_reinit_ms`]).
     last_reinit_global_ms: Option<u64>,
+    /// Initiations dropped before a peer could be named, and for which peer.
+    handshake_drops: HandshakeDrops,
 }
 
 impl core::fmt::Debug for Device {
@@ -398,6 +422,7 @@ impl Device {
             dropped_malformed: 0,
             dropped_unknown_index: 0,
             last_reinit_global_ms: None,
+            handshake_drops: HandshakeDrops::default(),
             now_ms,
         };
         for config in configs {
@@ -820,6 +845,15 @@ impl Device {
     #[must_use]
     pub fn dropped_unknown_index(&self) -> u64 {
         self.dropped_unknown_index
+    }
+
+    /// Initiations this responder dropped, by reason.
+    ///
+    /// The reasons are silent on the wire, so this is the only way an operator
+    /// can tell "the peer never reached us" from "we refused it".
+    #[must_use]
+    pub fn handshake_drops(&self) -> HandshakeDrops {
+        self.handshake_drops
     }
 
     /// React to one event and run the timer pass.

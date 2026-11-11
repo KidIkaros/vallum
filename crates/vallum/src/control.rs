@@ -475,6 +475,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             epoch: device.epoch(id).unwrap_or(0),
         });
     }
+    let handshake_drops = device.handshake_drops();
     uapi::DeviceState {
         interface: context.interface.clone(),
         private_key: context.private_key.clone(),
@@ -498,6 +499,11 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             set_fwmark: true,
         },
         stats: context.stats.snapshot(),
+        handshake_dropped_no_mac: handshake_drops.no_mac,
+        handshake_dropped_unidentifiable: handshake_drops.unidentifiable,
+        handshake_dropped_unknown_peer: handshake_drops.unknown_peer,
+        handshake_dropped_endpoint_conflict: handshake_drops.endpoint_conflict,
+        handshake_dropped_stale: handshake_drops.stale,
         peers,
     }
 }

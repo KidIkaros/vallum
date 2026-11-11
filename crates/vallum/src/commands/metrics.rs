@@ -298,6 +298,31 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             "loop_dropped_unknown_index_total",
             "Datagrams dropped because the sender index matched no peer session.",
         ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,
+            "handshake_dropped_no_mac_total",
+            "Initiations refused at the admission gate: no mac1, a wrong mac1, or a wrong mac2.",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE,
+            "handshake_dropped_unidentifiable_total",
+            "Initiations that did not decapsulate for this identity.",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER,
+            "handshake_dropped_unknown_peer_total",
+            "Initiations whose peer hint matched no configured peer.",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT,
+            "handshake_dropped_endpoint_conflict_total",
+            "Initiations whose source belongs to another peer's pinned endpoint.",
+        ),
+        (
+            uapi::field::VALLUM_HANDSHAKE_DROPPED_STALE,
+            "handshake_dropped_stale_total",
+            "Initiations whose timestamp was not newer than the last one accepted.",
+        ),
     ] {
         let Some(value) = response.field(field) else {
             continue;
