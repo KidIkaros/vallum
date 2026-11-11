@@ -205,6 +205,14 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
             checks.push(check_forwarding(resolved));
             checks.push(check_firewall(resolved.listen.port(), resolved.carrier));
         }
+        // Enrolment listens on its own port, opened by a different code path
+        // than the tunnel's. A config edited by hand leaves the rule where it
+        // was, which is how the production server ended up answering nobody with
+        // the config saying it was on (security-redteam.md H2). The running unit
+        // is the honest signal: the port is in use exactly when it is active.
+        if resolved.listen.port() != 0 {
+            checks.push(check_enroll_firewall(resolved));
+        }
         let rotating: Vec<&str> = resolved
             .peers
             .iter()
@@ -746,6 +754,48 @@ fn check_forwarding(resolved: &crate::config::Resolved) -> Check {
 ///
 /// The protocol is the configured carrier's, because a rule that opens UDP
 /// 51820 does nothing for a tunnel that speaks TCP on it.
+/// Is the enrolment port reachable, now that enrolment is on?
+///
+/// `server enroll --enable` opens this port and `--disable` closes it. Nothing
+/// keeps the rule in step with a config that was edited by hand, so a server can
+/// advertise an invite flow that dials into silence — the invite is minted, the
+/// client sends its hello, and no firewall anywhere allows the answer out.
+fn check_enroll_firewall(resolved: &crate::config::Resolved) -> Check {
+    let interface = resolved.interface_name.as_deref().unwrap_or("vallum0");
+    let unit = format!("vallum-enroll@{interface}");
+    let active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", &unit])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !active {
+        return Check::new("enroll", Status::Pass, format!("{unit} is not running"));
+    }
+    let port = resolved.listen.port().saturating_add(1);
+    let state = crate::hostnet::inspect();
+    match state.firewall {
+        crate::hostnet::Firewall::Ufw => {
+            if ufw_allows(port, "udp") {
+                Check::new("enroll", Status::Pass, format!("ufw allows udp {port}"))
+            } else {
+                Check::new(
+                    "enroll",
+                    Status::Warn,
+                    format!(
+                        "enrolment is on but ufw does not allow udp {port}: invites will \
+                         dial into silence. `vallum server enroll --enable` opens it, or \
+                         `ufw allow {port}/udp`"
+                    ),
+                )
+            }
+        }
+        _ => Check::new(
+            "enroll",
+            Status::Warn,
+            format!("enrolment is on; confirm UDP {port} is reachable from outside"),
+        ),
+    }
+}
+
 fn check_firewall(port: u16, carrier: vallum_config::Carrier) -> Check {
     let proto = carrier.protocol();
     let state = crate::hostnet::inspect();

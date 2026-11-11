@@ -701,7 +701,12 @@ fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
         .unwrap_or_else(|| vallum_config::socket_path(name));
     say!();
     say!("proving the tunnel…");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    // Longer than the 25 s keepalive: nothing else makes a fresh client dial.
+    // It has no route to the server's tunnel address yet (its own address is a
+    // /32), so a ping cannot be the trigger, and a 15 s window ended before the
+    // first keepalive ever fired — a working enrolment reported "no handshake"
+    // (2026-11-11, found by enrolling from a clean container).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
     let mut handshaked = false;
     while std::time::Instant::now() < deadline {
         if let Ok(response) = crate::control::request(&socket, "get=1\n") {
@@ -713,9 +718,10 @@ fn prove_tunnel(name: &str, config: &Path, server_address: Option<&str>) {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
     if !handshaked {
-        say!("   fail  no handshake within 15s");
+        say!("   fail  no handshake within 35s");
         say!("         likely causes, in order:");
         say!("           · UDP 51820 is filtered on the server (firewall, provider)");
+        say!("           · the server's daemon has not applied this peer yet");
         say!("           · the endpoint in this config is not reachable from here");
         say!("           · the server's daemon is not running");
         say!(

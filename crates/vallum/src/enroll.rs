@@ -891,6 +891,22 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             json: true,
         }) {
             Ok(report) => {
+                // The device is about to receive a config and try to connect. If
+                // the peer was written but not applied to the running daemon, that
+                // config cannot work until someone reloads — and the device has no
+                // way to know. Say it here, where an operator will see it, because
+                // the alternative is a join that fails with "no handshake" and no
+                // cause (2026-11-11: two devices enrolled, neither could connect).
+                if !report.applied {
+                    eprintln!(
+                        "vallum: enrolled `{}` in {} but could NOT apply it to the running \
+                         daemon — this device cannot connect until the daemon reloads the \
+                         config (`vallum syncconf {}`)",
+                        invite.name,
+                        report.config,
+                        report.config
+                    );
+                }
                 let Ok(json) = serde_json::to_string(&report) else {
                     continue;
                 };

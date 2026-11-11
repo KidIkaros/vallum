@@ -665,6 +665,17 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
         }
     };
 
+    // `add` reports its own apply, but its outcome is not carried back here and
+    // a config handed to a device that was never applied is a join that fails
+    // with "no handshake" and no cause. Apply again, explicitly, and let a
+    // failure fail the enrolment: `syncconf` of an already-applied config is a
+    // no-op, so the cost of the second call is a socket round trip.
+    let apply = if args.no_apply {
+        ApplyOutcome::Skipped
+    } else {
+        syncconf_running(&args.config)?
+    };
+
     let (endpoint, source) = bundle_endpoint(None, &server, &args.config)?;
     let config_text = client_config(
         &args.name,
@@ -679,6 +690,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     let _ = source;
     Ok(Enrolled {
         name: args.name.clone(),
+        applied: apply.applied(),
         address: addresses.first().cloned().unwrap_or_default(),
         endpoint,
         server_address: file
@@ -1679,6 +1691,13 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
 #[derive(Debug, Serialize)]
 pub(crate) struct Enrolled {
     pub(crate) name: String,
+    /// Whether the peer reached the running daemon.
+    ///
+    /// The responder answers with a config either way, so this is the only
+    /// signal that the device will actually be able to connect. It was missing
+    /// until 2026-11-11, when two devices enrolled, got configs, and could not
+    /// handshake because nothing had applied them.
+    pub(crate) applied: bool,
     pub(crate) address: String,
     pub(crate) endpoint: String,
     /// The server's own tunnel address, so the client can prove the tunnel by
