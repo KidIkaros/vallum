@@ -659,7 +659,7 @@ export default function App() {
           ) : (
             <button
               onClick={switchInterface}
-              className="text-subtext hover:text-foreground focus-visible:ring-signal cursor-pointer rounded px-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+              className="text-subtext hover:text-foreground focus-visible:ring-signal h-7 cursor-pointer rounded px-2 text-xs focus-visible:ring-1 focus-visible:outline-none"
               title="switch interface (tab)"
             >
               [{currentIndex + 1}/{interfaces.length}] {currentName} ▾
@@ -667,7 +667,7 @@ export default function App() {
           ))}
         <button
           onClick={() => setComfortable((c) => !c)}
-          className="text-subtext hover:text-foreground focus-visible:ring-signal cursor-pointer rounded px-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+          className="text-subtext hover:text-foreground focus-visible:ring-signal h-7 cursor-pointer rounded px-2 text-xs focus-visible:ring-1 focus-visible:outline-none"
           title="Control density: the comfortable setting raises control and text sizes above minimum touch targets"
         >
           density: {comfortable ? "comfortable" : "compact"}

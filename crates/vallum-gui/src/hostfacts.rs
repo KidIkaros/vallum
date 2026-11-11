@@ -65,16 +65,9 @@ impl HostFacts {
 
 /// Read the host: routes, resolvers, unit state, the last death.
 pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
-    // The daemon decides the expected mode (vallum_egress); the peer scan is
-    // only a fallback for a daemon that predates the field.
+    // The daemon decides the expected mode (vallum_egress) — one source.
     let expected_full = crate::snapshot::fetch(socket)
-        .map(|snap| {
-            snap.expected_egress == "full"
-                || snap
-                    .peers
-                    .iter()
-                    .any(|peer| peer.allowed_ips.iter().any(|ip| ip == "0.0.0.0/0"))
-        })
+        .map(|snap| snap.expected_egress == "full")
         .unwrap_or(false);
     let unit = crate::unit_for(socket);
     let interface = socket
@@ -203,13 +196,7 @@ pub(crate) fn health(socket: &std::path::Path) -> serde_json::Value {
 pub(crate) fn plan(socket: &std::path::Path) -> serde_json::Value {
     let facts = measure(socket);
     let already_full = match crate::snapshot::fetch(socket) {
-        Ok(snap) => {
-            snap.expected_egress == "full"
-                || snap
-                    .peers
-                    .iter()
-                    .any(|peer| peer.allowed_ips.iter().any(|ip| ip == "0.0.0.0/0"))
-        }
+        Ok(snap) => snap.expected_egress == "full",
         Err(_) => false,
     };
     plan_from_facts(&facts, already_full)

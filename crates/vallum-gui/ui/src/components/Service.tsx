@@ -93,7 +93,7 @@ export function ServiceStrip({
       <Button
         size="sm"
         variant="outline"
-        className="h-6 px-2 text-[10px]"
+        className="h-7 px-2.5 text-[11px]"
         disabled={pending !== null || active === "active" || noUnit}
         title={noUnit ? "no systemd unit owns this interface — start it yourself" : undefined}
         onClick={() => void act("start")}
@@ -103,7 +103,7 @@ export function ServiceStrip({
       <Button
         size="sm"
         variant="outline"
-        className={`h-6 px-2 text-[10px] ${confirmStop ? "border-fault/60 text-fault" : ""}`}
+        className={`h-7 px-2.5 text-[11px] ${confirmStop ? "border-fault/60 text-fault" : ""}`}
         disabled={pending !== null || active !== "active" || noUnit}
         title={
           noUnit
