@@ -13,7 +13,7 @@ import {
 } from "@/components/PeerDialogs"
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { EgressBadge, HealthPanel } from "@/components/Health"
+import { egressVerdict, HealthPanel } from "@/components/Health"
 import { PlanPanel } from "@/components/Plan"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun } from "@/components/FirstRun"
@@ -103,21 +103,29 @@ function Hero({
     <section className="bg-card/60 rounded-lg border border-border/70 px-5 py-4">
       <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
         <div className="flex flex-col gap-1">
-          <span className="micro">tunnel</span>
+          {/* One glance must answer "am I protected?" — so the headline IS the
+              derived verdict, not a mechanism word the user has to combine
+              with a second badge. Usability spec: <=2 s, no scrolling. */}
+          <span className="micro">protection</span>
           <span
             className={`text-3xl leading-none font-semibold tracking-tight ${
-              up ? "text-live" : unreachable ? "text-fault" : "text-foreground/80"
+              !health
+                ? "text-muted-foreground"
+                : egressVerdict(health).tone === "live"
+                  ? "text-live"
+                  : egressVerdict(health).tone === "fault"
+                    ? "text-fault"
+                    : egressVerdict(health).tone === "stale"
+                      ? "text-stale"
+                      : "text-foreground/80"
             }`}
+            title={health ? egressVerdict(health).detail : undefined}
           >
-            {up ? "UP" : unreachable ? "FAULT" : data ? "IDLE" : "…"}
+            {health ? egressVerdict(health).label : "…"}
           </span>
-          <EgressBadge health={health} />
-          {health && !health.route4_via_tunnel && (
-            <span className="text-stale text-[11px]">
-              traffic leaves via {health.route4 ?? "no route"} — the tunnel carries only
-              its own subnet
-            </span>
-          )}
+          <span className="text-muted-foreground text-[11px]">
+            tunnel {up ? "up" : unreachable ? "unreachable" : data ? "idle" : "…"}
+          </span>
           <span className="text-muted-foreground mt-0.5 text-xs">
             {data ? (
               <>
