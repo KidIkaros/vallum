@@ -55,6 +55,10 @@ pub mod field {
     pub const PUBLIC_KEY: &str = "public_key";
     /// Device fields.
     pub const VALLUM_INTERFACE: &str = "vallum_interface";
+    /// What the peer allowlists ask for: `full` when any peer routes
+    /// 0.0.0.0/0 (or ::/0) through the tunnel, `split` otherwise. The one
+    /// place this decision is made; every surface reads it.
+    pub const VALLUM_EGRESS: &str = "vallum_egress";
     /// Device and peer.
     pub const VALLUM_PUBLIC_LINE: &str = "vallum_public_line";
     /// Device and peer.
@@ -529,6 +533,16 @@ pub fn render_get(state: &DeviceState) -> String {
     if let Some(control) = &state.control {
         out.push_str(&format!("{}={control}\n", field::VALLUM_CONTROL));
     }
+    let egress = if state.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|ip| matches!(ip.to_string().as_str(), "0.0.0.0/0" | "::/0"))
+    }) {
+        "full"
+    } else {
+        "split"
+    };
+    out.push_str(&format!("{}={egress}\n", field::VALLUM_EGRESS));
     out.push_str(&format!("{}={}\n", field::VALLUM_OFFLOAD, state.offload));
     out.push_str(&format!("{}={}\n", field::VALLUM_BATCHING, state.batching));
     for address in &state.addresses {

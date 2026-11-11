@@ -140,11 +140,14 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     // split by design. Naming the mode keeps "outside the tunnel" from
     // reading as failure when split is the configuration.
     let egress = interface.device.as_ref().map(|device| {
-        let full = device
-            .peers
-            .iter()
-            .flat_map(|peer| peer.allowed_ips.iter())
-            .any(|ip| ip == "0.0.0.0/0");
+        // The daemon's field is authoritative; the peer scan only covers a
+        // daemon that predates it.
+        let full = device.egress == "full"
+            || device
+                .peers
+                .iter()
+                .flat_map(|peer| peer.allowed_ips.iter())
+                .any(|ip| ip == "0.0.0.0/0");
         if full {
             Span::styled(" ◆ EGRESS FULL ", t.pill_accent())
         } else {

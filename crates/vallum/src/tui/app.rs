@@ -45,6 +45,8 @@ pub struct DeviceView {
     pub addresses: Vec<String>,
     pub offload: bool,
     pub batching: bool,
+    /// `full` / `split`, decided by the daemon's allowlists.
+    pub egress: String,
     pub peers: Vec<PeerView>,
 }
 
@@ -153,6 +155,7 @@ impl DeviceView {
             fingerprint: get(field::VALLUM_FINGERPRINT),
             public_line: get(field::VALLUM_PUBLIC_LINE),
             addresses,
+            egress: get(field::VALLUM_EGRESS),
             offload: flag(field::VALLUM_OFFLOAD),
             batching: flag(field::VALLUM_BATCHING),
             peers,

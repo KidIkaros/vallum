@@ -27,6 +27,9 @@ pub struct Snapshot {
     pub offload: bool,
     pub batching: bool,
     pub counters: Counters,
+    /// `full` when the daemon's peer allowlists route everything through the
+    /// tunnel; the daemon decides, this just carries it.
+    pub expected_egress: String,
     pub peers: Vec<Peer>,
 }
 
@@ -108,6 +111,10 @@ impl Snapshot {
                 .to_owned(),
             offload: device(field::VALLUM_OFFLOAD) == Some("1"),
             batching: device(field::VALLUM_BATCHING) == Some("1"),
+            expected_egress: device(field::VALLUM_EGRESS)
+                .map(str::to_owned)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "split".to_owned()),
             counters: Counters {
                 datagrams_sent: number(&response.device, field::VALLUM_DATAGRAMS_SENT),
                 datagrams_failed: number(&response.device, field::VALLUM_DATAGRAMS_FAILED),
