@@ -89,7 +89,12 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
 }
 
 fn json(stream: &mut TcpStream, status: &str, value: &serde_json::Value) {
-    respond(stream, status, "application/json", value.to_string().as_bytes());
+    respond(
+        stream,
+        status,
+        "application/json",
+        value.to_string().as_bytes(),
+    );
 }
 
 fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::io::Result<()> {
@@ -123,7 +128,10 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
                     data: None,
                 },
             };
-            let frame = format!("data: {}\n\n", serde_json::to_string(&payload).unwrap_or_default());
+            let frame = format!(
+                "data: {}\n\n",
+                serde_json::to_string(&payload).unwrap_or_default()
+            );
             if stream.write_all(frame.as_bytes()).is_err() {
                 return Ok(());
             }
@@ -134,40 +142,71 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
     if request.path == "/api/panic" && request.method == "POST" {
         if let Some(socket) = console.known_socket() {
             if let Err(error) = crate::write_gate(&socket) {
-                json(&mut stream, "403 Forbidden", &serde_json::json!({ "error": error }));
+                json(
+                    &mut stream,
+                    "403 Forbidden",
+                    &serde_json::json!({ "error": error }),
+                );
                 return Ok(());
             }
         }
         match crate::panic() {
-            Ok(done) => json(&mut stream, "200 OK", &serde_json::to_value(done).unwrap_or_default()),
-            Err(error) => json(&mut stream, "500 Internal Server Error", &serde_json::json!({ "error": error })),
+            Ok(done) => json(
+                &mut stream,
+                "200 OK",
+                &serde_json::to_value(done).unwrap_or_default(),
+            ),
+            Err(error) => json(
+                &mut stream,
+                "500 Internal Server Error",
+                &serde_json::json!({ "error": error }),
+            ),
         }
         return Ok(());
     }
 
     if request.path == "/api/preflight" {
-        json(&mut stream, "200 OK", &crate::preflight());
+        json(&mut stream, "200 OK", &crate::hostfacts::preflight());
         return Ok(());
     }
 
     if request.path == "/api/ping" && request.method == "POST" {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
-        let address = body.get("address").and_then(|v| v.as_str()).unwrap_or_default();
+        let address = body
+            .get("address")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if address.is_empty() {
-            json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": "missing `address`" }));
+            json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": "missing `address`" }),
+            );
             return Ok(());
         }
-        json(&mut stream, "200 OK", &crate::ping(&socket, address, 3));
+        json(
+            &mut stream,
+            "200 OK",
+            &crate::hostfacts::ping(&socket, address, 3),
+        );
         return Ok(());
     }
 
     if request.path == "/api/health" {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         json(&mut stream, "200 OK", &crate::health(&socket));
@@ -176,7 +215,11 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
 
     if request.path == "/api/plan" {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         json(&mut stream, "200 OK", &crate::plan(&socket));
@@ -185,40 +228,78 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
 
     if request.path == "/api/apply" && request.method == "POST" {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         if let Err(error) = crate::write_gate(&socket) {
-            json(&mut stream, "403 Forbidden", &serde_json::json!({ "error": error }));
+            json(
+                &mut stream,
+                "403 Forbidden",
+                &serde_json::json!({ "error": error }),
+            );
             return Ok(());
         }
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
-        let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or_default();
+        let confirm = body
+            .get("confirm")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         // Long-running by design: the trial restarts the daemon, waits for the
         // handshake, arms the 90 s deadline and verifies. The request holds
         // until the verdict exists.
         match crate::apply(confirm) {
-            Ok(output) => json(&mut stream, "200 OK", &serde_json::json!({ "ok": true, "output": output })),
-            Err(error) => json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": error })),
+            Ok(output) => json(
+                &mut stream,
+                "200 OK",
+                &serde_json::json!({ "ok": true, "output": output }),
+            ),
+            Err(error) => json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": error }),
+            ),
         }
         return Ok(());
     }
 
     if request.path == "/api/service" {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         if request.method == "POST" {
             if let Err(error) = crate::write_gate(&socket) {
-                json(&mut stream, "403 Forbidden", &serde_json::json!({ "error": error }));
+                json(
+                    &mut stream,
+                    "403 Forbidden",
+                    &serde_json::json!({ "error": error }),
+                );
                 return Ok(());
             }
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
-            let action = body.get("action").and_then(|v| v.as_str()).unwrap_or_default();
+            let action = body
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             match crate::service_action(&socket, action) {
-                Ok(done) => json(&mut stream, "200 OK", &serde_json::to_value(done).unwrap_or_default()),
-                Err(error) => json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": error })),
+                Ok(done) => json(
+                    &mut stream,
+                    "200 OK",
+                    &serde_json::to_value(done).unwrap_or_default(),
+                ),
+                Err(error) => json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({ "error": error }),
+                ),
             }
         } else {
             json(&mut stream, "200 OK", &crate::service_state(&socket));
@@ -228,7 +309,11 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
 
     if request.path.starts_with("/api/logs") {
         let Some(socket) = console.known_socket() else {
-            json(&mut stream, "409 Conflict", &serde_json::json!({ "error": "no interface selected" }));
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
             return Ok(());
         };
         let lines = request
@@ -256,7 +341,11 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
             crate::select_path(console, path.to_owned());
             json(&mut stream, "200 OK", &serde_json::json!({ "ok": true }));
         } else {
-            json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": "path" }));
+            json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": "path" }),
+            );
         }
         return Ok(());
     }
@@ -264,22 +353,38 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
     if let Some(name) = request.path.strip_prefix("/api/cmd/") {
         if let Some(socket) = console.known_socket() {
             if let Err(error) = crate::write_gate(&socket) {
-                json(&mut stream, "403 Forbidden", &serde_json::json!({ "error": error }));
+                json(
+                    &mut stream,
+                    "403 Forbidden",
+                    &serde_json::json!({ "error": error }),
+                );
                 return Ok(());
             }
         }
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
         let outcome = crate::dispatch(console, name, body);
         match outcome {
-            Ok(done) => json(&mut stream, "200 OK", &serde_json::to_value(done).unwrap_or_default()),
-            Err(error) => json(&mut stream, "400 Bad Request", &serde_json::json!({ "error": error })),
+            Ok(done) => json(
+                &mut stream,
+                "200 OK",
+                &serde_json::to_value(done).unwrap_or_default(),
+            ),
+            Err(error) => json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": error }),
+            ),
         }
         return Ok(());
     }
 
     // Static files from the UI directory; `/` is index.html.
     let relative = request.path.split('?').next().unwrap_or("/");
-    let relative = if relative == "/" { "/index.html" } else { relative };
+    let relative = if relative == "/" {
+        "/index.html"
+    } else {
+        relative
+    };
     if relative.contains("..") {
         respond(&mut stream, "400 Bad Request", "text/plain", b"bad path");
         return Ok(());

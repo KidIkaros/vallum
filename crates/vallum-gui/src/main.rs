@@ -203,8 +203,11 @@ fn config_of(socket: &std::path::Path) -> Option<PathBuf> {
     // The installed layout keeps configs in /etc/vallum. A lab or a hand-run
     // daemon keeps its config beside the socket it publishes, and the console
     // should find that too rather than reporting "no config" at the operator.
-    actions::config_for(socket, std::path::Path::new(CONFIG_DIR))
-        .or_else(|| socket.parent().and_then(|dir| actions::config_for(socket, dir)))
+    actions::config_for(socket, std::path::Path::new(CONFIG_DIR)).or_else(|| {
+        socket
+            .parent()
+            .and_then(|dir| actions::config_for(socket, dir))
+    })
 }
 
 #[tauri::command]
@@ -298,7 +301,6 @@ fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result
     invite_at(&socket, &fields)
 }
 
-
 #[tauri::command]
 fn health_state(console: State<'_, Arc<Console>>) -> serde_json::Value {
     console
@@ -345,7 +347,11 @@ fn poll_loop(app: tauri::AppHandle, console: Arc<Console>) {
                 inner.immediate = false;
                 inner.socket.clone()
             } else {
-                let interval = if inner.focused && inner.visible { FOCUSED } else { UNFOCUSED };
+                let interval = if inner.focused && inner.visible {
+                    FOCUSED
+                } else {
+                    UNFOCUSED
+                };
                 let generation = inner.generation;
                 let deadline = Instant::now() + interval;
                 let mut current = inner;
@@ -428,7 +434,8 @@ pub(crate) fn dispatch(
     };
     match name {
         "add_peer" => {
-            let fields: PeerFields = serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
+            let fields: PeerFields =
+                serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
             let result = actions::add(&socket, &fields);
             if let Err(error) = &result {
                 // A rejected write is the one case where the exact request
@@ -552,7 +559,11 @@ pub(crate) fn apply(confirm: &str) -> Result<String, String> {
                     String::from_utf8_lossy(&result.stdout),
                     String::from_utf8_lossy(&result.stderr)
                 );
-                let verdict = if result.status.success() { "ok" } else { "failed" };
+                let verdict = if result.status.success() {
+                    "ok"
+                } else {
+                    "failed"
+                };
                 return Ok(format!("[{}]\n{}", verdict, text));
             }
             Err(error) => last = format!("{program}: {error}"),
@@ -562,7 +573,10 @@ pub(crate) fn apply(confirm: &str) -> Result<String, String> {
 }
 
 pub(crate) fn systemctl(args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("systemctl").args(args).output().ok()?;
+    let output = std::process::Command::new("systemctl")
+        .args(args)
+        .output()
+        .ok()?;
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
@@ -578,10 +592,7 @@ pub(crate) fn service_state(socket: &std::path::Path) -> serde_json::Value {
 
 /// Start/stop/restart through polkit. `pkexec` shows the desktop's own
 /// authentication dialog; nothing here ever prompts for a password in the UI.
-pub(crate) fn service_action(
-    socket: &std::path::Path,
-    action: &str,
-) -> Result<Done, String> {
+pub(crate) fn service_action(socket: &std::path::Path, action: &str) -> Result<Done, String> {
     if !matches!(action, "start" | "stop" | "restart") {
         return Err(format!("unknown service action `{action}`"));
     }
@@ -606,7 +617,9 @@ pub(crate) fn service_action(
         } else {
             &["sudo", "-n", "systemctl", "reset-failed", unit.as_str()]
         };
-        let _ = std::process::Command::new(reset[0]).args(&reset[1..]).output();
+        let _ = std::process::Command::new(reset[0])
+            .args(&reset[1..])
+            .output();
     }
 
     let mut last_error = String::from("no way to run systemctl");
@@ -615,7 +628,10 @@ pub(crate) fn service_action(
             Ok(output) if output.status.success() => {
                 // Report the state that actually resulted, not the intent.
                 let state = service_state(socket);
-                let active = state.get("active").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let active = state
+                    .get("active")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 return Ok(Done {
                     message: format!("{unit}: {active}"),
                     command: None,
@@ -675,31 +691,12 @@ fn effective_uid() -> u32 {
     65534
 }
 
-/// Which interface would carry traffic to `address`? `None` when the kernel
-/// has no route at all — which, for v6 behind the guard, is the good answer.
-fn route_device(address: &str, v6: bool) -> Option<String> {
-    let mut command = std::process::Command::new("ip");
-    if v6 {
-        command.arg("-6");
-    }
-    let output = command.args(["route", "get", address]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = text.split_whitespace().collect();
-    fields
-        .iter()
-        .position(|field| *field == "dev")
-        .and_then(|at| fields.get(at + 1))
-        .map(|dev| (*dev).to_owned())
-}
-
 pub(crate) fn panic() -> Result<Done, String> {
     // `sudo -n` when the installer's rule is present; otherwise polkit, so the
     // escape hatch works on a host where the rule is missing. The one control
     // that matters must not depend on a config file being right.
-    let mut attempts: Vec<(&str, Vec<&str>)> = vec![("sudo", vec!["-n", "/usr/local/sbin/vallum-panic"])];
+    let mut attempts: Vec<(&str, Vec<&str>)> =
+        vec![("sudo", vec!["-n", "/usr/local/sbin/vallum-panic"])];
     if effective_uid() != 0 {
         attempts.push(("pkexec", vec!["/usr/local/sbin/vallum-panic"]));
     }
@@ -727,7 +724,12 @@ pub(crate) fn panic() -> Result<Done, String> {
     );
     if output.status.success() {
         Ok(Done {
-            message: text.trim().lines().last().unwrap_or("internet restored").to_owned(),
+            message: text
+                .trim()
+                .lines()
+                .last()
+                .unwrap_or("internet restored")
+                .to_owned(),
             command: None,
         })
     } else {
@@ -742,116 +744,17 @@ fn panic_command() -> Result<Done, String> {
 
 /// Probe a peer over the interface that carries it.
 ///
-/// Bound to the interface on purpose: the host's routing table may prefer a
-/// different tunnel (or the physical link), and a probe that answers from
-/// somewhere else is worse than no probe.
-pub(crate) fn ping(
-    socket: &std::path::Path,
-    address: &str,
-    count: u32,
-) -> serde_json::Value {
-    let interface = socket
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0")
-        .to_owned();
-    let output = std::process::Command::new("ping")
-        .args([
-            "-I",
-            &interface,
-            "-c",
-            &count.to_string(),
-            "-W",
-            "2",
-            address,
-        ])
-        .output();
-    let Ok(output) = output else {
-        return serde_json::json!({ "address": address, "error": "cannot run ping" });
-    };
-    let text = String::from_utf8_lossy(&output.stdout).to_owned();
-    let received = text
-        .lines()
-        .find(|line| line.contains("packets transmitted"))
-        .and_then(|line| line.split_whitespace().nth(3))
-        .and_then(|value| value.parse::<u32>().ok());
-    let rtt = text
-        .lines()
-        .find(|line| line.starts_with("rtt") || line.starts_with("round-trip"))
-        .and_then(|line| line.split('=').nth(1))
-        .map(|value| value.trim().split('/').nth(1).map(str::to_owned))
-        .flatten();
-    serde_json::json!({
-        "address": address,
-        "interface": interface,
-        "sent": count,
-        "received": received,
-        "avg_ms": rtt,
-        "output": text.trim(),
-    })
-}
-
 #[tauri::command]
 fn preflight_state() -> serde_json::Value {
-    preflight()
+    hostfacts::preflight()
 }
 
 #[tauri::command]
 fn ping_peer(console: State<'_, Arc<Console>>, address: String) -> serde_json::Value {
     console.known_socket().map_or_else(
         || serde_json::json!({ "error": "no interface selected" }),
-        |socket| ping(&socket, &address, 3),
+        |socket| hostfacts::ping(&socket, &address, 3),
     )
-}
-
-/// What is on this host, before any daemon exists to ask. Every field is a fact
-/// read from disk or systemd — a first-run screen that guesses is worse than one
-/// that says nothing.
-pub(crate) fn preflight() -> serde_json::Value {
-    let exists = |path: &str| std::path::Path::new(path).exists();
-    // A file the console cannot read is not the same as a file that is absent;
-    // saying "no config" when it is merely root-owned sends the operator to
-    // reinstall something they already have.
-    let present = |path: &str| -> Option<bool> {
-        match std::fs::metadata(path) {
-            Ok(_) => Some(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
-            Err(_) => None,
-        }
-    };
-    let unit_installed = std::process::Command::new("systemctl")
-        .args(["list-unit-files", "vallum@.service", "--no-legend"])
-        .output()
-        .ok()
-        .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
-        .unwrap_or(false);
-    let runtime = vallum_config::runtime_dir();
-    let (mode, group) = std::fs::metadata(runtime)
-        .ok()
-        .and_then(|meta| {
-            use std::os::unix::fs::MetadataExt;
-            Some((format!("{:04o}", meta.mode() & 0o7777), meta.gid()))
-        })
-        .unwrap_or_else(|| ("absent".to_owned(), 0));
-    let sockets = std::fs::read_dir(runtime)
-        .map(|read| {
-            read.flatten()
-                .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("sock"))
-                .count()
-        })
-        .unwrap_or(0);
-
-    serde_json::json!({
-        "vallum": exists("/usr/bin/vallum"),
-        "quick": exists("/usr/bin/vallum-quick"),
-        "panic": exists("/usr/local/sbin/vallum-panic"),
-        "deadman": exists("/usr/local/sbin/vallum-guard-deadman"),
-        "unit": unit_installed,
-        "config": present("/etc/vallum/vallum0.toml"),
-        "runtime_dir": runtime.display().to_string(),
-        "runtime_mode": mode,
-        "sockets": sockets,
-    })
 }
 
 fn main() {

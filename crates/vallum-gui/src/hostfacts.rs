@@ -52,14 +52,15 @@ impl HostFacts {
     /// upstream servers — resolved forwards there. Reading only resolv.conf
     /// turns a working setup into a false FAIL.
     pub fn dns_via_tunnel(&self) -> bool {
-        !self.dns.is_empty()
-            && (!self.dns_upstream.is_empty() || self.route_via(self.dns.first()))
+        !self.dns.is_empty() && (!self.dns_upstream.is_empty() || self.route_via(self.dns.first()))
     }
 
     fn route_via(&self, server: Option<&String>) -> bool {
         match server {
-            Some(server) => route_device(server, server.contains(':')).as_deref()
-                == Some(self.interface.as_str()),
+            Some(server) => {
+                route_device(server, server.contains(':')).as_deref()
+                    == Some(self.interface.as_str())
+            }
             None => false,
         }
     }
@@ -111,12 +112,11 @@ pub(crate) fn measure(socket: &std::path::Path) -> HostFacts {
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .filter(|line| {
+                .rfind(|line| {
                     line.contains("status=31/SYS")
                         || line.contains("Failed with result")
                         || line.contains("Main process exited")
                 })
-                .next_back()
                 .unwrap_or_default()
                 .trim()
                 .to_owned()
@@ -241,10 +241,105 @@ pub(crate) fn plan_from_facts(facts: &HostFacts, already_full: bool) -> serde_js
 /// the runtime directory is not world-writable. A wider socket mode exposes
 /// `--dump` (the private key) to every local user, so writes fail loudly
 /// rather than succeed silently in a broken deployment.
+/// What is on this host, before any daemon exists to ask. Every field is a fact
+/// read from disk or systemd — a first-run screen that guesses is worse than one
+/// that says nothing.
+pub(crate) fn preflight() -> serde_json::Value {
+    let exists = |path: &str| std::path::Path::new(path).exists();
+    // A file the console cannot read is not the same as a file that is absent;
+    // saying "no config" when it is merely root-owned sends the operator to
+    // reinstall something they already have.
+    let present = |path: &str| -> Option<bool> {
+        match std::fs::metadata(path) {
+            Ok(_) => Some(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+            Err(_) => None,
+        }
+    };
+    let unit_installed = std::process::Command::new("systemctl")
+        .args(["list-unit-files", "vallum@.service", "--no-legend"])
+        .output()
+        .ok()
+        .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+        .unwrap_or(false);
+    let runtime = vallum_config::runtime_dir();
+    let (mode, group) = std::fs::metadata(runtime)
+        .ok()
+        .map(|meta| {
+            use std::os::unix::fs::MetadataExt;
+            (format!("{:04o}", meta.mode() & 0o7777), meta.gid())
+        })
+        .unwrap_or_else(|| ("absent".to_owned(), 0));
+    let sockets = std::fs::read_dir(runtime)
+        .map(|read| {
+            read.flatten()
+                .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("sock"))
+                .count()
+        })
+        .unwrap_or(0);
+
+    serde_json::json!({
+        "vallum": exists("/usr/bin/vallum"),
+        "quick": exists("/usr/bin/vallum-quick"),
+        "panic": exists("/usr/local/sbin/vallum-panic"),
+        "deadman": exists("/usr/local/sbin/vallum-guard-deadman"),
+        "unit": unit_installed,
+        "config": present("/etc/vallum/vallum0.toml"),
+        "runtime_dir": runtime.display().to_string(),
+        "runtime_mode": mode,
+        "runtime_group": group,
+        "sockets": sockets,
+    })
+}
+
+/// Bound to the interface on purpose: the host's routing table may prefer a
+/// different tunnel (or the physical link), and a probe that answers from
+/// somewhere else is worse than no probe.
+pub(crate) fn ping(socket: &std::path::Path, address: &str, count: u32) -> serde_json::Value {
+    let interface = socket
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("vallum0")
+        .to_owned();
+    let output = std::process::Command::new("ping")
+        .args([
+            "-I",
+            &interface,
+            "-c",
+            &count.to_string(),
+            "-W",
+            "2",
+            address,
+        ])
+        .output();
+    let Ok(output) = output else {
+        return serde_json::json!({ "address": address, "error": "cannot run ping" });
+    };
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let received = text
+        .lines()
+        .find(|line| line.contains("packets transmitted"))
+        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|value| value.parse::<u32>().ok());
+    let rtt = text
+        .lines()
+        .find(|line| line.starts_with("rtt") || line.starts_with("round-trip"))
+        .and_then(|line| line.split('=').nth(1))
+        .and_then(|value| value.trim().split('/').nth(1).map(str::to_owned));
+    serde_json::json!({
+        "address": address,
+        "interface": interface,
+        "sent": count,
+        "received": received,
+        "avg_ms": rtt,
+        "output": text.trim(),
+    })
+}
+
 pub(crate) fn write_gate(socket: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(socket)
-        .map_err(|error| format!("control socket unreadable: {error}"))?;
+    let meta =
+        std::fs::metadata(socket).map_err(|error| format!("control socket unreadable: {error}"))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o600 {
         return Err(format!(
@@ -320,7 +415,11 @@ mod plan_tests {
             route4: Some(route4.to_owned()),
             route6: Some("wlp0s20f3".to_owned()),
             dns: vec!["127.0.0.53".to_owned()],
-            dns_upstream: if via_tunnel { vec!["1.1.1.1".to_owned()] } else { vec![] },
+            dns_upstream: if via_tunnel {
+                vec!["1.1.1.1".to_owned()]
+            } else {
+                vec![]
+            },
             restarts: 0,
             last_death: String::new(),
             guard_active: "inactive".to_owned(),
@@ -337,7 +436,9 @@ mod plan_tests {
     fn plan_on_a_split_host_names_the_changes_and_the_undo() {
         let plan = super::plan_from_facts(&facts("wlp0s20f3", false), false);
         assert_eq!(plan["already_full"], false);
-        assert!(plan["undo"].as_str().unwrap().contains("vallum-ops revert"));
+        assert!(plan["undo"]
+            .as_str()
+            .is_some_and(|undo| undo.contains("vallum-ops revert")));
         assert_eq!(plan["steps"].as_array().map(Vec::len), Some(5));
     }
 
