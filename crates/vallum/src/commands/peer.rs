@@ -308,6 +308,9 @@ struct Server {
     /// `interface.public_endpoint`: the address `server init` remembered, which
     /// client bundles should dial before falling back to source-route detection.
     public_endpoint: Option<String>,
+    /// The interface's own networks, so a client's address can carry the tunnel
+    /// prefix instead of a /32 that leaves the server off-link.
+    networks: Vec<String>,
 }
 
 /// `vallum peer`.
@@ -680,6 +683,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     let config_text = client_config(
         &args.name,
         &addresses,
+        &server.networks,
         &server.public_line,
         &endpoint,
         &[],
@@ -1138,6 +1142,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         let config_text = client_config(
             &args.name,
             &address_list,
+            &server.networks,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1173,6 +1178,7 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         let text = client_config(
             &args.name,
             &address_list,
+            &server.networks,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1332,6 +1338,7 @@ fn rotate(args: &RotateArgs) -> Result<(), Error> {
         let config_text = client_config(
             &args.name,
             &addresses,
+            &server.networks,
             &server.public_line,
             &endpoint,
             &args.dns,
@@ -1807,9 +1814,17 @@ fn load_server(config_path: &Path) -> Result<Server, Error> {
         ),
         None => None,
     };
+    // Both spellings: `server init` writes the singular `address`, and a
+    // dual-stack tunnel may use the plural. Reading only one of them left this
+    // empty on the production server, so the widening silently did nothing.
+    let mut networks = config.interface.addresses.clone();
+    if let Some(single) = &config.interface.address {
+        networks.push(single.clone());
+    }
     Ok(Server {
         suite,
         suite_id: file.suite,
+        networks,
         public_line,
         issuer,
         public_endpoint: config.interface.public_endpoint.clone(),
@@ -1992,9 +2007,35 @@ fn client_interface_name(peer: &str) -> (String, bool) {
     (name, shortened)
 }
 
+/// Give a peer's address the tunnel's prefix.
+///
+/// A `/32` puts exactly one address on-link — the peer's own — so the server's
+/// tunnel address needs a route that does not exist until `vallum-quick`
+/// attaches. That made the join proof's ping fail on a fresh enrolment and
+/// leaves a split-tunnel client unable to reach the server at all (2026-11-11).
+/// The peer keeps its `/32` in the *server's* config, where it is cryptokey
+/// routing and must stay narrow; only the client's own interface address widens.
+fn widen_to_tunnel(addresses: &[String], networks: &[String]) -> Vec<String> {
+    addresses
+        .iter()
+        .map(|address| {
+            let v6 = address.contains(':');
+            let Some(network) = networks.iter().find(|network| network.contains(':') == v6) else {
+                return address.clone();
+            };
+            let Some(bits) = network.rsplit('/').next() else {
+                return address.clone();
+            };
+            let host = address.split('/').next().unwrap_or(address);
+            format!("{host}/{bits}")
+        })
+        .collect()
+}
+
 fn client_config(
     name: &str,
     addresses: &[String],
+    networks: &[String],
     server_line: &str,
     endpoint: &str,
     dns: &[String],
@@ -2020,7 +2061,8 @@ fn client_config(
     // Every address the peer was given, so a dual-stack tunnel puts both on the
     // interface. With only the v4 address the client has no v6 source, and a
     // `::/0` claim then routes v6 around the tunnel instead of through it.
-    let quoted = addresses
+    let widened = widen_to_tunnel(addresses, networks);
+    let quoted = widened
         .iter()
         .map(|address| format!("\"{address}\""))
         .collect::<Vec<_>>()
@@ -2167,6 +2209,7 @@ mod tests {
         let text = client_config(
             "laptop",
             &["fd00:8::2/128".to_owned()],
+            &["fd00:8::1/64".to_owned()],
             "vallum1:0003:aa:-",
             "vpn.example.com:51820",
             &[],
@@ -2181,10 +2224,35 @@ mod tests {
     }
 
     #[test]
+    fn the_client_address_carries_the_tunnel_prefix() {
+        // A /32 puts only the client itself on-link, so the server's tunnel
+        // address needs a route that does not exist until `vallum-quick`
+        // attaches. The client's own address must carry the tunnel's prefix —
+        // while the peer entry in the server's config stays a /32, where it is
+        // cryptokey routing.
+        let text = client_config(
+            "laptop",
+            &["10.7.0.6/32".to_owned()],
+            &["10.7.0.1/20".to_owned()],
+            "vallum1:0003:aa:-",
+            "vpn.example.com:51820",
+            &[],
+            None,
+            None,
+        );
+        assert!(
+            text.contains("addresses = [\"10.7.0.6/20\"]"),
+            "the client address must carry the tunnel prefix, got: {text}"
+        );
+        assert!(text.contains("allowed_ips = [\"0.0.0.0/0\"]"));
+    }
+
+    #[test]
     fn the_client_config_names_the_server_and_routes_everything() {
         let text = client_config(
             "laptop",
             &["10.7.0.3/32".to_owned()],
+            &["10.7.0.1/20".to_owned()],
             "vallum1:0003:aa:-",
             "vpn.example.com:51820",
             &["1.1.1.1".to_owned()],
