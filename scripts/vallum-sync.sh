@@ -53,7 +53,7 @@ done
 # ships with the installer, so every dated backup is a leftover.
 bak_left=$(ls /etc/systemd/system/vallum-*.bak.* 2>/dev/null | wc -l)
 if [ "$bak_left" -gt 0 ]; then
-    rm -f /etc/systemd/system/vallum-*.bak.*
+    rm -f /etc/systemd/system/vallum-*.bak.* /etc/systemd/system/vallum-*.bak
     echo "sync: removed $bak_left dated unit backups"
 fi
 
