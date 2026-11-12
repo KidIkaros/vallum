@@ -160,6 +160,12 @@ fn every_template_is_a_command_the_binary_accepts() {
             }
         }
         assert_eq!(argv.first().map(String::as_str), Some("vallum"), "{name}");
+        // `tui` only exists with the feature, and this suite also runs as
+        // `--no-default-features` for the lean daemon — where the manual's TUI
+        // templates are not commands that binary accepts (CI, 2026-11-12).
+        if !cfg!(feature = "tui") && argv.get(1).map(String::as_str) == Some("tui") {
+            continue;
+        }
         // `--help` on the deepest subcommand validates the flags without acting
         // on anything, which is the only safe way to ask a root verb.
         let mut probe = vec![argv[0].clone()];
