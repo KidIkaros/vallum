@@ -121,6 +121,21 @@ peer "server"  10.7.0.1/32  endpoint 203.0.113.5:51820  handshake 12s  rx 1.2K t
 
 If the handshake stays at `never`, see [troubleshooting.md](troubleshooting.md).
 
+### What the doctor returns
+
+`doctor` exits **0 when the client is protected** and **1 when it is not**. The
+two cases that used to be warnings, and are now failures:
+
+- **the daemon is not running** — nothing is moving this client's traffic into
+  a tunnel, so every byte goes out in the clear;
+- **the client is dialling and has never been answered** — the tunnel has never
+  come up.
+
+Both say `NOT protected` in the report. With `--probe-path`, a server that
+answers on the wire but refuses the handshake is named as a *refusal* rather
+than left for you to guess at: that is usually a client key the server no
+longer has, and the fix is to re-enrol, not to chase a firewall.
+
 ## Full tunnel vs split tunnel
 
 The server writes `allowed_ips = ["0.0.0.0/0", "::/0"]`, which routes everything

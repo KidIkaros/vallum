@@ -208,6 +208,7 @@ notes until the build moves to an older base.
 | DNS | **Does not leak** — UDP and TCP port 53 egress is dropped outside the tunnel by the killswitch filter before any allow rule; `attach` and `up` fail closed when a resolver cannot be installed; the server pushes a resolver into the tunnel with `--dns`. See the boundary below. |
 | Privilege | control socket `0600 root`; daemon drops to the configured user where possible |
 | Secret storage | keys `0600`; invites `0600` in tmpfs with a 15-minute TTL |
+| Verdict | **`vallum doctor` fails when the client is not protected.** A client whose daemon is not running, or that is dialling and has never been answered, exits non-zero and says `NOT protected` — it does not exit 0 over a client sending every byte in the clear. A *server* whose peers are merely offline does not fail: that is ordinary, and failing it would train people to ignore the line. Pinned by `crates/vallum/tests/exit_codes.rs`. |
 
 ### What the DNS guarantee is, and is not
 
