@@ -153,7 +153,7 @@ export function HealthPanel({ health, stale }: { health: Health | null; stale?: 
     <Panel title="EGRESS HEALTH">
       {/* The state sentence, readable at a glance: the label the header
           shouts, plus the detail it keeps in a tooltip. */}
-      <p className={`mb-2 text-sm ${verdictTone[verdict.tone]}`}>
+      <p key={verdict.label} className={`animate-in fade-in mb-2 text-sm duration-300 ${verdictTone[verdict.tone]}`}>
         <span className="font-semibold">{verdict.label}</span>
         <span className="text-muted-foreground"> — {verdict.detail}</span>
       </p>

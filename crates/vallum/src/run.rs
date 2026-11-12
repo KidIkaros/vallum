@@ -460,6 +460,8 @@ mod outbound_source_tests {
 struct Admission {
     current: HashMap<std::net::IpAddr, Bucket>,
     previous: HashMap<std::net::IpAddr, Bucket>,
+    burst: f64,
+    rate: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -474,24 +476,45 @@ const ADMISSION_BURST: f64 = 64.0;
 const ADMISSION_PER_SECOND: f64 = 50.0;
 /// Distinct sources tracked per generation.
 const ADMISSION_SOURCES: usize = 4096;
+/// A configured peer's allowance. Not unlimited: the exemption is keyed on the
+/// peer's `SocketAddr`, and on a client that address is the server's public
+/// host:port from its own config — an off-path attacker who spoofs it would
+/// otherwise skip admission entirely (review, 2026-11-11). A peer's rekey herd
+/// is ~20-64 fragments per handshake at a few handshakes per second, so this is
+/// two orders of magnitude of headroom that still bounds a spoofer.
+/// Sized so the tunnel is never the thing being limited: 20,000 datagrams/s is
+/// ~280 Mbit/s at a 1400-byte MTU, and the bucket is per source address, so on a
+/// server each client has its own. A spoofer of one peer endpoint is bounded to
+/// 20,000 pps instead of unbounded — a bound, not a solution; doing admission
+/// after the first authenticated packet is the real answer and needs its own ADR.
+const PEER_BURST: f64 = 4_096.0;
+const PEER_PER_SECOND: f64 = 20_000.0;
 
 impl Admission {
     fn new() -> Self {
+        Self::with(ADMISSION_BURST, ADMISSION_PER_SECOND)
+    }
+
+    /// A bucket with its own size, for a class of source that is not a
+    /// stranger but must still be bounded.
+    fn with(burst: f64, rate: f64) -> Self {
         Self {
             current: HashMap::new(),
             previous: HashMap::new(),
+            burst,
+            rate,
         }
     }
 
     /// Whether a datagram from `source` may be parsed now.
     fn allow(&mut self, source: std::net::IpAddr, now_ms: u64) -> bool {
         if let Some(bucket) = self.current.get_mut(&source) {
-            return bucket.take(now_ms);
+            return bucket.take(now_ms, self.burst, self.rate);
         }
         // Seen in the previous generation: keep its allowance rather than
         // granting a fresh burst on every sweep.
         if let Some(bucket) = self.previous.get_mut(&source) {
-            let allowed = bucket.take(now_ms);
+            let allowed = bucket.take(now_ms, self.burst, self.rate);
             self.current.insert(source, *bucket);
             return allowed;
         }
@@ -499,19 +522,19 @@ impl Admission {
             self.previous = std::mem::take(&mut self.current);
         }
         let mut bucket = Bucket {
-            tokens: ADMISSION_BURST,
+            tokens: self.burst,
             last_ms: now_ms,
         };
-        let allowed = bucket.take(now_ms);
+        let allowed = bucket.take(now_ms, self.burst, self.rate);
         self.current.insert(source, bucket);
         allowed
     }
 }
 
 impl Bucket {
-    fn take(&mut self, now_ms: u64) -> bool {
+    fn take(&mut self, now_ms: u64, burst: f64, rate: f64) -> bool {
         let elapsed = now_ms.saturating_sub(self.last_ms) as f64;
-        self.tokens = (self.tokens + elapsed * ADMISSION_PER_SECOND / 1000.0).min(ADMISSION_BURST);
+        self.tokens = (self.tokens + elapsed * rate / 1000.0).min(burst);
         self.last_ms = now_ms;
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
@@ -1052,6 +1075,7 @@ fn spawn_udp_reader(
         .name("vallum-udp".to_owned())
         .spawn(move || {
             let mut admission = Admission::new();
+            let mut peer_admission = Admission::with(PEER_BURST, PEER_PER_SECOND);
             loop {
                 let (generation, current) = socket.current();
                 match current.recv_from(&mut buf) {
@@ -1070,7 +1094,17 @@ fn spawn_udp_reader(
                             // Fail closed: a poisoned lock must not turn the
                             // bucket off for the life of the process.
                             .unwrap_or(false);
-                        if !known && !admission.allow(source.ip(), clock.monotonic_ms()) {
+                        // A configured peer gets a large but finite allowance
+                        // rather than a free pass: the exemption is keyed on a
+                        // `SocketAddr` that is public config on a client, so an
+                        // off-path attacker could otherwise skip admission
+                        // entirely (review, 2026-11-11).
+                        let bucket = if known {
+                            &mut peer_admission
+                        } else {
+                            &mut admission
+                        };
+                        if !bucket.allow(source.ip(), clock.monotonic_ms()) {
                             rate_limited.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }

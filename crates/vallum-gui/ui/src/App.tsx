@@ -160,21 +160,37 @@ function Hero({
   // this value.
   const verdict = health ? egressVerdict(health) : null
   const tone = silent ? "text-fault" : verdictTone[verdict?.tone ?? "muted"]
+  // The one thing allowed to move forever: a live tunnel breathes. The dot
+  // only renders while the daemon is answering with peers up, so a retained
+  // snapshot never pulses in the live colour — and the reduced-motion guard
+  // in index.css stills it for anyone who asks for less motion.
+  const heartbeat = up && live && !silent
 
   return (
-    <section className="surface-raised rounded-lg px-5 py-4">
+    <section className="surface-raised animate-in fade-in slide-in-from-bottom-2 rounded-lg px-5 py-4 duration-500">
       <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
         <div className="flex flex-col gap-1">
           {/* One glance must answer "am I protected?" — so the headline IS the
               derived verdict, not a mechanism word the user has to combine
               with a second badge. Usability spec: <=2 s, no scrolling. */}
           <PanelTitle>PROTECTION</PanelTitle>
-          <span
-            className={`text-3xl leading-none font-semibold tracking-tight ${tone}`}
-            title={silent ? `nothing answers ${socket || "the control socket"}` : verdict?.detail}
-          >
-            {silent ? "NO DAEMON" : verdict ? verdict.label : "…"}
-          </span>
+          <div className="flex items-center gap-3">
+            {heartbeat && (
+              <span className="relative flex size-2.5 shrink-0" aria-hidden="true">
+                <span className="bg-live absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" />
+                <span className="bg-live relative inline-flex size-2.5 rounded-full" />
+              </span>
+            )}
+            {/* Keyed on the label, not the facts: a changed verdict replays
+                the fade, while second-by-second refreshes stay still. */}
+            <span
+              key={silent ? "silent" : (verdict?.label ?? "…")}
+              className={`animate-in fade-in text-3xl leading-none font-semibold tracking-tight duration-300 ${tone}`}
+              title={silent ? `nothing answers ${socket || "the control socket"}` : verdict?.detail}
+            >
+              {silent ? "NO DAEMON" : verdict ? verdict.label : "…"}
+            </span>
+          </div>
           <span className="text-muted-foreground text-xs">
             {silent ? "the control socket has nothing behind it" : `tunnel ${up ? "up" : data ? "idle" : "…"}`}
           </span>
@@ -1011,7 +1027,7 @@ export default function App() {
               peers are the workbench (list + detail stay together so nothing
               must be held in memory across the screen); system holds the rare,
               dangerous changes. No tab hides another task's state. */}
-          <section aria-label="Status">
+          <section aria-label="Status" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
             <p className="micro px-1 pt-1 pb-1">STATUS — IS TRAFFIC PROTECTED?</p>
             <div className="flex flex-col gap-3 lg:flex-row">
               <div className="min-w-0 flex-[3]">
@@ -1025,7 +1041,7 @@ export default function App() {
               </div>
             </div>
           </section>
-          <section aria-label="Peers">
+          <section aria-label="Peers" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
             <p className="micro px-1 pt-1 pb-1">PEERS — WHO CAN CONNECT</p>
             <div className="flex flex-col gap-3 md:flex-row">
               <div className="min-w-0 flex-1">
@@ -1064,7 +1080,7 @@ export default function App() {
               </div>
             </div>
           </section>
-          <section aria-label="System">
+          <section aria-label="System" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
             <p className="micro px-1 pt-1 pb-1">SYSTEM — RARELY CHANGED</p>
             <div className="flex flex-col gap-3">
               <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">

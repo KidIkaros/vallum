@@ -13,12 +13,40 @@
 set -uo pipefail
 
 # LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
-# machine (self-update) and is meaningless elsewhere.
+# machine (self-update) and is meaningless elsewhere. There is deliberately no
+# baked-in default: a path compiled into a root-installed dispatcher is wrong on
+# every host but the one it was built on, and it was a password-less root
+# escalation for whoever owned that checkout (review, 2026-11-11).
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
-REPO=${VALLUM_REPO:-/home/ikaaros/Coding/Gold/vallum}
+REPO=${VALLUM_REPO:-}
 CONF=/etc/vallum/vallum0.toml
 IFACE=vallum0
 UNIT=vallum@$IFACE
+
+# A verb that installs from a working tree must not exec code from a directory
+# its owner can rewrite: under a NOPASSWD sudoers rule that is password-less
+# root for that user (ADR-0029). Root-owned sources pass; a single-user dev host
+# opts in explicitly with a marker only root can create.
+require_trusted_source() {
+    if [ -z "$REPO" ]; then
+        echo "vallum-ops: VALLUM_REPO is not set — this verb needs a source tree." >&2
+        echo "  Install with scripts/install.sh as root, or set VALLUM_REPO." >&2
+        exit 1
+    fi
+    if [ -e /etc/vallum/allow-untrusted-source ]; then
+        echo "vallum-ops: WARNING: /etc/vallum/allow-untrusted-source is present;" >&2
+        echo "  installing from $REPO without checking who owns it." >&2
+        return 0
+    fi
+    owner=$(stat -c %u "$REPO" 2>/dev/null || echo 1)
+    if [ "$owner" != 0 ]; then
+        echo "vallum-ops: refusing to install from $REPO: it is owned by uid $owner, not root." >&2
+        echo "  Anyone who can write that tree gets root here. Install with scripts/install.sh" >&2
+        echo "  as root, or, on a single-user development host only, create" >&2
+        echo "  /etc/vallum/allow-untrusted-source (root-owned) to accept the risk." >&2
+        exit 1
+    fi
+}
 
 case "${1:-}" in
 full-tunnel)
@@ -72,14 +100,17 @@ trace)
     timeout 60 strace -f -p "$pid" -e trace=openat -o "$log" 2>>"$log" &
     tracer=$!
     sleep 2
-    # Load: the profile that historically triggered it — bulk transfer through
-    # the tunnel plus the console's polling (already running).
-    # The dispatcher runs as root: root has no ssh config, so the key and port
-    # are explicit here. The transfer must be real — an idle-daemon trace
-    # answers nothing.
-    load=$(timeout 50 ssh -p 2222 -i /home/ikaaros/.ssh/id_ed25519_basanite_vps \
-        -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-        buffy@10.7.0.1 'dd if=/dev/zero bs=1M count=150 2>/dev/null' 2>/dev/null | wc -c)
+    # Load: whatever `/etc/vallum/trace-load` names, run as an argv — never a
+    # shell string, and never a host, key or port baked into this file. A
+    # dispatcher that hardcoded one operator's ssh destination was wrong on
+    # every other host and told a reader where that operator's key lives.
+    if [ -x /etc/vallum/trace-load ]; then
+        load=$(timeout 50 /etc/vallum/trace-load 2>/dev/null | wc -c)
+    else
+        load=0
+        echo "load: none — put a root-owned script at /etc/vallum/trace-load to" >&2
+        echo "  push traffic through the tunnel while the trace runs" >&2
+    fi
     echo "load: $load bytes through the tunnel"
     wait "$tracer" 2>/dev/null
     total=$(grep -c 'openat(' "$log" 2>/dev/null || echo 0)
@@ -92,9 +123,11 @@ trace)
 sync)
     # Deployment automation: make the host match the build under test, then
     # stop. Never runs the cleanup itself — the floor fires at boot only.
+    require_trusted_source
     exec bash "$REPO/scripts/vallum-sync.sh"
     ;;
 self-update)
+    require_trusted_source
     install -m 755 "$REPO/packaging/vallum-ops" /usr/local/sbin/vallum-ops
     echo "dispatcher updated"
     exit 0
