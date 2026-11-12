@@ -34,3 +34,4 @@
 | [0030](0030-fragment-admission-control.md) | Admission control on the fragment path, before reassembly | proposed | 2026-11-11 |
 | [0031](0031-stale-timestamp-scope.md) | A stale initiation is refused only while a session exists | accepted | 2026-11-11 |
 | [0032](0032-reader-thread-admission.md) | The admission allowance belongs in the socket reader | accepted | 2026-11-11 |
+| [0033](0033-bundle-policy-report.md) | An imported bundle states its policy, and a weak one is refused | proposed | 2026-11-11 |
