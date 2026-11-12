@@ -24,7 +24,13 @@ LimitMEMLOCK=infinity
 
 Type=notify
 ExecStart=/usr/bin/vallum run --config /etc/vallum/%i.toml
-Restart=on-failure
+# `always`, not `on-failure`: a clean exit is exactly what `vallum stop` does,
+# and anything running as the daemon's user can issue it. Under on-failure that
+# stopped the tunnel permanently — the weaker event with the worse outcome — while
+# a crash came back by itself (security-redteam-round2.md R2-1). A deliberate stop
+# is `systemctl stop`, or `vallum-ops disable`. The burst limit still bounds a
+# crash loop.
+Restart=always
 RestartSec=2s
 WatchdogSec=30s
 

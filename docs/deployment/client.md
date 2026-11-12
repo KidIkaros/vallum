@@ -186,3 +186,12 @@ sudo rm -f /etc/vallum/laptop.toml /etc/vallum/laptop.key
 On the server, `vallum peer remove laptop` stops routing the address to this
 device. The client's key files are left in place on the server by design — delete
 them by hand if the device is gone for good.
+
+## File ownership rule
+
+Every file the daemon reads must be **owned by the user it runs as** — normally
+root for the config and key. The unit's capability bounding set has no
+`CAP_DAC_OVERRIDE`, so root is only root for files it owns: a config copied in as
+another user fails with `Permission denied` even though the operator can read it
+in a shell. `install.sh` sets this up; anything hand-placed should be
+`chown root:root` and `chmod 600`.

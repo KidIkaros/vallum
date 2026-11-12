@@ -281,3 +281,12 @@ sudo vallum uninstall --purge     # including /etc/vallum — keys are gone for 
 `install.sh --uninstall` runs the same command. `apt remove vallum` /
 `rpm -e vallum` stop the units first (maintainer scripts); `apt purge` also
 clears `/etc/vallum`.
+
+## File ownership rule
+
+Every file the daemon reads must be **owned by the user it runs as** — normally
+root for the config and key. The unit's capability bounding set has no
+`CAP_DAC_OVERRIDE`, so root is only root for files it owns: a config copied in as
+another user fails with `Permission denied` even though the operator can read it
+in a shell. `install.sh` sets this up; anything hand-placed should be
+`chown root:root` and `chmod 600`.
