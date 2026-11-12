@@ -4,6 +4,18 @@ The question: is this product alpha-ready end to end? The answer is only worth
 as much as the gates behind it, so this file is the gate list and the evidence,
 not a narrative.
 
+**What "alpha" means here, in the operator's words (2026-11-12):** reproducibility
+matters more than working on the operator's own devices. The VPS exists to
+validate that Vallum works; the next phase serves the VPN to many devices like a
+service, free, so that strangers' usage continues the validation. So the bar is
+not "it works for me" — it is **"a machine that is not mine can install it, join
+it, and be served, repeatedly and without me in the loop."**
+
+That reorders the gates and adds one: install reproducibility and multi-device
+service become the centre, and the security work (admission, bundle policy, hook
+refusal) is re-read as the boundary a free service needs rather than hardening
+for one operator's sake.
+
 The contract comes from the `vallum-operations` skill, which names the gates and
 the traps. It is deliberately not a new flow: every gate below already existed.
 
@@ -30,9 +42,16 @@ VPS — is the right long-term answer and needs a human (a `/wizard` job: card,
 DNS, provisioning), so it is recorded as the standing improvement rather than
 done under time pressure.
 
-## Gate 2 — Fresh-machine install acceptance
+## Gate 2 — Fresh-machine install acceptance (the reproducibility gate)
 
-**Status: not run.**
+**Status: running** — `~/.hermes/cache/scratch/gate2-install-acceptance.sh`.
+
+The claim under test: a clean systemd container with its own network namespace
+installs from the shipped media, gets a ticket minted on the production server,
+joins, and carries traffic — with no dependence on the operator's home directory,
+shell, or any file that happens to exist on their machine. The script asserts
+that last part explicitly: after installing, it greps the installed tree for
+`/home/ikaaros` and fails if anything survives.
 
 A systemd container with its own network namespace, `install.sh --local
 --install-only`, a join ticket minted on the server and transferred base64, then
@@ -55,6 +74,21 @@ failure runs the panic path, never a `set -e` exit.
 
 This is the gate that separates "the tunnel works" from "production", because
 its failure mode is a host with no internet.
+
+## Gate 5 — Many devices, as a service
+
+**Status: not run.** The gap between "a client" and "a service".
+
+- Enrol N devices (10 is enough to catch the arithmetic) and confirm each gets
+  its own address, its own peer entry, and its own handshake.
+- The server must be able to answer "who is on, and is each one carrying?"
+  per device — that is what `vallum show` per peer plus the metrics gauges
+  exist for; nobody has read them with ten peers present.
+- Minting an invite is a root command on the server today. For a free service
+  that is the front door, and it needs a rate limit and an audit trail before
+  strangers use it, not after.
+- Capacity arithmetic already measured (2,000 peers, 8.9 KB/peer, ~109 s to
+  re-establish a full herd) becomes the operating envelope rather than a claim.
 
 ## Gate 4 — CI
 
