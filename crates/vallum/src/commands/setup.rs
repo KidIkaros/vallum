@@ -619,14 +619,12 @@ fn resolve_client_files(path: &Path) -> Result<ClientFiles, Error> {
     // The server's public line, from the peer stanza. Taken from the text
     // rather than re-encoded from the parsed key, because the line is what the
     // operator reads off the server and compares.
-    let server_public_line = text
-        .split_once("[[peer]]")
-        .and_then(|(_, peers)| {
-            peers.lines().find_map(|line| {
-                let rest = line.trim().strip_prefix("public_key = \"")?;
-                rest.split('"').next().map(str::to_owned)
-            })
-        });
+    let server_public_line = text.split_once("[[peer]]").and_then(|(_, peers)| {
+        peers.lines().find_map(|line| {
+            let rest = line.trim().strip_prefix("public_key = \"")?;
+            rest.split('"').next().map(str::to_owned)
+        })
+    });
 
     Ok(ClientFiles {
         name,
@@ -1399,7 +1397,11 @@ mod tests {
         // A config with no peer stanza has nothing to check, and says so
         // rather than inventing an anchor.
         let bare = dir.join("bare.toml");
-        std::fs::write(&bare, "[interface]\nname = \"bare\"\nprivate_key = \"bare.key\"\n").unwrap();
+        std::fs::write(
+            &bare,
+            "[interface]\nname = \"bare\"\nprivate_key = \"bare.key\"\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("bare.key"), "key").unwrap();
         let files = resolve_client_files(&bare).expect("the config and its key are there");
         assert_eq!(files.server_public_line, None);
@@ -1432,7 +1434,10 @@ mod tests {
 
         // A config with no server line has nothing to check against.
         let error = check_server_fingerprint(&right, None).expect_err("nothing to check");
-        assert!(error.to_string().contains("no server public line"), "{error}");
+        assert!(
+            error.to_string().contains("no server public line"),
+            "{error}"
+        );
     }
 
     /// Three causes, three different remedies. The old message called all of
