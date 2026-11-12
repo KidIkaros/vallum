@@ -68,6 +68,38 @@ Vallum ships **three** enrolment paths, and only one of them is WireGuard's:
    where the recent hardening matters (a bundle may carry `[quick]` hooks, which
    `sh -c` as root — refused by default; see ADR-0033).
 
+## What the two paths cannot both carry
+
+The file path and the token path do **not** produce identical client configs,
+and the reason is structural rather than accidental:
+
+| | file path (`peer add`) | token path (`peer invite` → `join`) |
+|---|---|---|
+| the operator's `--dns` list | carried into the client config | **not carried** |
+| a preshared key (`--psk`) | generated per add and carried | **not carried** |
+| `--shaping` | carried | **not carried** (the responder's `EnrollArgs` has no shaping field) |
+
+The reason is that the token path runs when the **operator is not there**: the
+responder creates the peer record from the invite alone
+(`crates/vallum/src/enroll.rs:879-892`), and an invite carries a name, a
+public line and a token — not a DNS list, a PSK or a shaping preset. The file
+path runs in front of the operator, who can ask for all three
+(`crates/vallum/src/commands/peer.rs:1082-1106`).
+
+So the file path is the primary one for a reason beyond convenience: it is the
+only path that can express a peer's full configuration.
+
+**This is recorded rather than fixed here.** The right fix is for the invite to
+carry the same per-peer options the file path takes — the operator is present
+when the invite is minted, so the options exist at that moment and only need
+transporting. That is a change to the invite's wire format, and it belongs in
+its own change with its own tests, not as an aside to a documentation fix.
+
+Until then: **a device enrolled by ticket gets a working tunnel with no
+client-side DNS list, no PSK and no shaping preset.** Set them on the device
+afterwards, or enrol over SSH (`setup --remote`), which runs `peer enroll` on
+the server with the operator's arguments.
+
 ## What the comparison changed
 
 **The responder is no longer enabled at boot.** Every peer already in the

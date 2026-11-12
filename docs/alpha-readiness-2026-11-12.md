@@ -287,3 +287,45 @@ condition is now counted as it is evaluated. What the count still cannot do is
 notice a check that was *neutralised* rather than removed — a sabotage that
 prints its "ok" line still counts. It measures what ran, not what was proved.
 
+## Open findings the premortem did not close
+
+These are recorded because they are real and not yet fixed. Nothing here is a
+release blocker by itself; each is a place where the product is less than the
+documentation implies.
+
+1. **The token path cannot carry a peer's DNS, PSK or shaping.** The responder
+   creates the peer record from the invite alone, and an invite carries none of
+   those. The file path can, because the operator is present. The fix is to
+   carry the operator's options in the invite; the analysis is in
+   `docs/wireguard-comparison.md`.
+
+2. **The ticket's host:port is derived three ways** — `[enroll].port`, else the
+   *endpoint* port + 1 (`crates/vallum/src/commands/peer.rs:788`), else the
+   *listen* port + 1 (`crates/vallum/src/enroll.rs:764`), and the TUI's
+   `join_target` uses the listen port (`crates/vallum/src/enroll.rs:620`). On a
+   server whose `public_endpoint` port differs from its `listen` port, a ticket
+   minted by `peer invite` points at a port where nothing is listening, and the
+   join times out with a generic message.
+
+3. **The seccomp check's oracle is the artefact it checks.**
+   `scripts/seccomp-trace.sh` reads the allowed list back out of the binary
+   under test and diffs the trace against it — and both the filter and the
+   check read the same list from `crates/vallum/src/sandbox.rs`. A syscall
+   missing from the source is missing from both sides of the comparison, so the
+   defect is invisible by construction. The check needs an independently
+   written expectation.
+
+4. **The release gate's two-host evidence is a bare hash in a home directory**
+   (`~/.local/state/vallum/remote-verified`), with no host, no timestamp and no
+   proof that two hosts ran. The two-host property is asserted in the script's
+   own closing message and not encoded in the artefact the gate reads. The
+   `--skip-remote "reason"` bypass also contradicts the script's header, which
+   says a tree that never crossed two hosts is "a refusal, not a warning".
+
+5. **A verdict file can be written by hand.** `scripts/verdict.sh` is a writer;
+   a JSON file with the current commit and `"status": "passed"` satisfies
+   `release.sh` exactly as a real run would. There is no signature, no producer
+   identity, and no hash of the gate script that produced it. The verdicts are
+   gitignored, so they are local evidence — and local evidence that anyone can
+   forge is evidence of nothing.
+
