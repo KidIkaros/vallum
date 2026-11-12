@@ -97,6 +97,7 @@ check lean cargo test -p vallum --no-default-features || true
 
 step "Package manifest parity (install.sh == deb == rpm)"
 check parity bash scripts/check-package-manifest.sh || true
+check "the SDK is pinned once" bash scripts/check-sdk-pin.sh || true
 
 step "Headless TUI snapshot"
 check tui bash -c 'cargo build -q -p vallum && ./target/debug/vallum tui --snapshot --ansi >/dev/null' || true

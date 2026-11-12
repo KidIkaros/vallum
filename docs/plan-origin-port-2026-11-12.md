@@ -1,6 +1,6 @@
 # Plan: what origin-tools can and cannot give Vallum
 
-**Date:** 2026-11-12 · **Status:** scouting complete, premortem in flight · **Author:** Claude
+**Date:** 2026-11-12 · **Status:** premortem done, one defect fixed, one gate added · **Author:** Claude
 
 ## The premise, stated and checked
 
@@ -110,6 +110,35 @@ Now `vallum setup --client-config <file> --expect-server <fingerprint>`
 refuses a config naming a different server, **before anything is written**,
 with the decision in a pure function (`check_server_fingerprint`) and its own
 tests.
+
+## Revised plan
+
+What the premortem changed, in the order it is worth doing:
+
+1. **Do not port anything for the enrolment.** ADR-0015 already refused the
+   premise — a static leg would require provisioning the very thing enrolment
+   exists to provision — and the file path's real gap is trust establishment,
+   not transport. That gap is now partly closed: `setup --client-config
+   <file> --expect-server <fingerprint>` refuses a config naming another
+   server, before anything is written.
+2. **Keep the SDK at the git tag, always — and enforce it.** cargo-deny cannot
+   express "deny a duplicate of this one crate" (its `multiple-versions` is
+   global, and the workspace legitimately carries duplicates), so the guard is a
+   lockfile check instead: `scripts/check-sdk-pin.sh` asserts the lockfile
+   names `origin-crypto-sdk` **once** and from the pinned git source. It runs
+   in the supply-chain CI job and in `scripts/ci-local.sh`, and its failure
+   prints both copies — because "the pinning policy" is not the same thing as
+   the pinning policy being enforced.
+3. **If STUN is ever wanted, it cannot use a third-party default.** It would
+   disclose the client's public address to Google on every connect, and
+   Vallum's own fail-closed guard would drop the packet anyway
+   (`crates/vallum/src/policy.rs:240`). A self-hosted STUN server, or the
+   peer-exchange design in `docs/research/pi-hole-in-vallum.md`.
+4. **Write the porting discipline down before any port** — carry the tests
+   with the code, no second protocol, nothing behind the adapter but
+   `vallum-crypto-sdk`, no dependency skew, and **the gate is the
+   deliverable**: a port that no gate in Vallum can observe is a port that is
+   not finished.
 
 ## Decision
 

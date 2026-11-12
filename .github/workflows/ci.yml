@@ -374,3 +374,11 @@ jobs:
       - name: deny.toml (licenses, sources, bans, advisories)
         working-directory: vallum
         run: cargo deny check
+      - name: the SDK is pinned once (one SDK in the binary)
+        working-directory: vallum
+        # `cargo deny` can only WARN about multiple versions, because the
+        # workspace legitimately carries duplicates. The SDK is the one
+        # dependency where a second copy would matter: the registry carries
+        # only 0.7.2, the adapter cannot compile against it, and two copies
+        # would mean two SDKs in one binary.
+        run: bash scripts/check-sdk-pin.sh
