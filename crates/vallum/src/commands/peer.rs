@@ -853,11 +853,12 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
             .status()
             .is_ok_and(|status| status.success());
         if !active {
+            // Started, not enabled: an invite must be answerable, but that is
+            // not a reason to leave a second port listening at every boot.
             let _ = std::process::Command::new("systemctl")
                 .args([
                     "--no-ask-password",
-                    "enable",
-                    "--now",
+                    "start",
                     &format!("vallum-enroll@{interface}"),
                 ])
                 .status();
@@ -873,6 +874,18 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     say!("   on the client:");
     say!("      sudo vallum join {ticket}");
     say!();
+    if root && systemd {
+        say!();
+        say!("   when the device has joined, close the second port again:");
+        say!(
+            "      sudo systemctl stop vallum-enroll@{}",
+            interface
+        );
+        say!(
+            "      sudo ufw delete allow {}/udp",
+            port
+        );
+    }
     say!(
         "   the token lives in {} (0600) and is never logged;",
         path.display()
@@ -893,7 +906,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 args.config.display()
             );
             say!(
-                "   `sudo systemctl enable --now vallum-enroll@{}`.",
+                "   `sudo systemctl start vallum-enroll@{}`.",
                 interface
             );
         }

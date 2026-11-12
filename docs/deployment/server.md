@@ -294,7 +294,10 @@ in a shell. `install.sh` sets this up; anything hand-placed should be
 ## Enrolment: open the second port only while you are enrolling
 
 The enrolment responder listens on `listen + 1` (51821) and is **not enabled at
-boot**. Every peer you already have lives in the server's config and needs only
+boot** — and that is now the code's behaviour, not just a convention:
+`vallum peer invite` *starts* the responder for the enrolment but never
+*enables* it, and prints the teardown commands below where it mints the
+invite. Every peer you already have lives in the server's config and needs only
 51820, so the second port is only needed during the seconds a new device joins.
 Keeping it open to the world between enrolments is a standing surface with no
 reason to be open (ADR-0034).

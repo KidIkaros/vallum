@@ -135,13 +135,37 @@ definition of how a peer joins.
 2. **`vallum peer add --client-config-out` as the advertised way to get a client
    config.** *Effectively done* — `setup --remote` performs the same exchange
    with the copy automated.
-3. **The responder stops standing open.** *Done* — it is no longer enabled at
-   boot on the server, and `docs/deployment/server.md` gives the procedure that
-   opens 51821 and starts the responder only for the seconds an enrolment takes.
+3. **The responder stops standing open.** *Done, and enforced in code* — it
+   was first done by hand on one host, and the premortem's investigators then
+   found that the code undid it:
+
+   - `crates/vallum/src/commands/peer.rs:838` — `peer invite` on a root+systemd
+     host called `server::enroll(enable: true)`, which writes
+     `enroll.enabled = true` into the config, installs the unit and opens the
+     port. The first invite after the demotion re-armed everything.
+   - `crates/vallum/src/commands/server.rs:952` — the `enroll.enabled` branch
+     ran `systemctl enable` on the responder, so the flag did double duty:
+     "the responder may serve" (the runtime gate at
+     `crates/vallum/src/enroll.rs:759`) and "the responder starts at boot".
+   - `crates/vallum/src/commands/peer.rs:855` — the already-enabled path ran
+     `systemctl enable --now`, re-arming it a second way.
+
+   The three now **start** the responder and never **enable** it, and `peer
+   invite` prints the teardown (`systemctl stop`, `ufw delete allow`) where the
+   invite is minted. `docs/deployment/server.md` gives the same procedure.
 4. **`vallum join` keeps working and says which path it used.** *Not done.*
 5. **Only then consider removing the responder.** *Not done, deliberately* — a
    device that cannot reach the server over SSH has no other way in.
 6. **New, from the comparison**: the SSH variant (`setup --remote`) is the
-   documented primary path but is **not** covered by any gate. `accept-pair.sh`
-   proves the manual file path; the SSH variant needs a reachable server and a
-   login, and deserves its own.
+   documented primary path. *Corrected on review*: this ADR first said it had
+   no gate. It does — `scripts/verify-remote.sh` enrols one client **per
+   transport** (bundle at `:552`, `setup --remote` at `:563`, `peer invite` +
+   `setup --join` at `:571`) and proves each carries traffic. What is missing is
+   the opposite: `accept-pair.sh` proves the manual file path on any machine,
+   while the SSH path can only be proven against a real server over SSH.
+7. **New, from the premortem (2026-11-12)**: the two-host gate could report
+   PASS with the production host's NAT table destroyed. `restore_nat` had no
+   else branch, the cleanup ran with `set +e`, the trap's status did not
+   replace the script's exit status, and the "this commit passed" stamp was
+   written *before* the cleanup ran. A failed restore is now loud, fails the
+   run, and revokes the stamp. See `scripts/verify-remote.sh`.

@@ -526,14 +526,10 @@ fn peer_differs(peer: &vallum_tunnel::PeerConfig, current: &[(String, String)]) 
         .iter()
         .map(|p| p.to_string())
         .collect();
-    if current_ips.len() != desired_ips.len()
+    current_ips.len() != desired_ips.len()
         || !desired_ips
             .iter()
             .all(|ip| current_ips.contains(&ip.as_str()))
-    {
-        return true;
-    }
-    false
 }
 
 /// The outcome of applying configuration differences to the daemon.

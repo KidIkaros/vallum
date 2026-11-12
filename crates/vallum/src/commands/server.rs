@@ -954,9 +954,12 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
             .map(|config| config.enroll.enabled)
             .unwrap_or(false);
     if enroll_enabled {
+        // The responder is started, not armed. `[enroll] enabled = true` says
+        // "the responder may serve" - it does not say "the responder should be
+        // listening to the world on every boot". ADR-0034: the enrolment port
+        // is opened for the enrolment, not for the lifetime of the server.
         let unit = format!("vallum-enroll@{instance}");
-        systemctl(&["enable", &unit])?;
-        systemctl(&["restart", &unit])?;
+        systemctl(&["start", &unit])?;
     }
     Ok("installed and started".to_owned())
 }

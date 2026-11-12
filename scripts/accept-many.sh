@@ -168,8 +168,9 @@ echo
 # The PASS line used to claim the peers were "tracked separately" while the
 # exit condition only counted pings. The count is now compared, and a mismatch
 # fails the run (premortem, 2026-11-12).
-ASSERTIONS=$((ASSERTIONS + 2))
-if [ "$ok" = "$COUNT" ] && [ "$PEERS_ADDED" = "$COUNT" ]; then
+ASSERTIONS=$((ASSERTIONS + 1)); [ "$ok" = "$COUNT" ] && carry_ok=1
+ASSERTIONS=$((ASSERTIONS + 1)); [ "$PEERS_ADDED" = "$COUNT" ] && tracked_ok=1
+if [ "${carry_ok:-}" = 1 ] && [ "${tracked_ok:-}" = 1 ]; then
     echo "== PASS — $ok/$COUNT clients joined and carried, and the server tracks $PEERS_ADDED of them"
 else
     [ "$ok" != "$COUNT" ] && echo "== FAIL — $ok/$COUNT carried; failed:$failed"

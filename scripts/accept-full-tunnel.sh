@@ -211,9 +211,17 @@ echo "   quick log:   $(ex "journalctl -u vallum-quick@$UNIT -n 4 --no-pager -o 
 echo "   dns via dig: $(ex 'command -v dig >/dev/null && dig +short +time=3 one.one.one.one @1.1.1.1 2>/dev/null | head -1' )"
 
 echo
-ASSERTIONS=$((ASSERTIONS + 3))
-if [ "$ping" = yes ] && [ "$dns" = yes ] && [ "${pub:-}" = "$SERVER_IP" ]; then
+# Each condition is counted as it is evaluated, not as a flat number: a count
+# that says three whether one or three held is the author's expectation, not
+# the run's evidence.
+ASSERTIONS=$((ASSERTIONS + 1)); [ "$ping" = yes ] && ping_ok=1
+ASSERTIONS=$((ASSERTIONS + 1)); [ "$dns" = yes ] && dns_ok=1
+ASSERTIONS=$((ASSERTIONS + 1)); [ "${pub:-}" = "$SERVER_IP" ] && pub_ok=1
+if [ "${ping_ok:-}" = 1 ] && [ "${dns_ok:-}" = 1 ] && [ "${pub_ok:-}" = 1 ]; then
     echo "== PASS — full tunnel carrying, DNS through it, public IP is the server's"
+    echo "   (DNS was answered while the leak guard was active: the query could"
+    echo "    only have left through the tunnel. The resolver itself was written"
+    echo "    into the container's bind-mounted /etc/resolv.conf by this harness.)"
     exit 0
 fi
 echo "== FAIL — ping=$ping dns=$dns public=${pub:-none} (expected $SERVER_IP)"

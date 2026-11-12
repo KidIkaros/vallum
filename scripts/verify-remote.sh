@@ -136,6 +136,7 @@ TARGET=""
 
 say(){ printf '── %s\n' "$*"; }
 ok(){ printf '   ok    %s\n' "$*"; }
+fail(){ printf '   FAIL  %s\n' "$*"; }
 bad(){ printf '   FAIL  %s\n' "$*"; exit 1; }
 note(){ printf '   note  %s\n' "$*"; }
 
@@ -210,10 +211,30 @@ FORWARD_WAS=""
 SERVER_UNIT=""
 SERVER_PATTERN=""
 
+NAT_RESTORE_FAILED=0
 restore_nat() {
     [ -s "$NAT_SAVE" ] || return 0
-    rsh "sudo nft -f -" <"$NAT_SAVE" >/dev/null 2>&1 && \
+    if rsh "sudo nft -f -" <"$NAT_SAVE" >/dev/null 2>&1; then
         ok "the host's own \`inet vallum\` NAT table was restored"
+        return 0
+    fi
+    # A silent failure here was the worst of it: the run still reported PASS
+    # and still stamped the commit as verified, with the host's NAT gone.
+    fail "the host's \`inet vallum\` NAT table could NOT be restored from $NAT_SAVE"
+    fail "   the host's tunnel egress is broken until that table is put back:"
+    fail "   sudo nft -f $NAT_SAVE"
+    NAT_RESTORE_FAILED=1
+    return 1
+}
+
+# Where the 'this commit passed the two-host gate' stamp lives.
+verified_stamp() {
+    if [ -n "$SUDO_USER" ]; then
+        printf '%s/vallum/remote-verified' \
+            "$(sudo -u "$SUDO_USER" sh -c 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}"')"
+    else
+        printf '%s/vallum/remote-verified' "${XDG_STATE_HOME:-$HOME/.local/state}"
+    fi
 }
 
 cleanup() {
@@ -256,6 +277,13 @@ cleanup() {
     # did — put the table back and then deleted it again, so the fix was a no-op
     # that read like a fix (found by the premortem, 2026-11-12).
     restore_nat
+    if [ "$NAT_RESTORE_FAILED" = 1 ]; then
+        # The stamp says this commit passed the gate. If the host was left
+        # broken, that stamp is a lie - revoke it and fail the run.
+        rm -f "$(verified_stamp)" 2>/dev/null
+        fail "the commit was NOT recorded as verified: the host was left unrestored"
+        exit 1
+    fi
     ok "both ends restored"
 }
 kept() {
@@ -1504,14 +1532,10 @@ fi
 
 # The stamp scripts/release.sh requires. It lives outside the repository and
 # names the commit it proved, so an old pass cannot vouch for a new tree.
-if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-    OWNER_STATE=$(sudo -u "$SUDO_USER" sh -c 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}"')
-else
-    OWNER_STATE="${XDG_STATE_HOME:-$HOME/.local/state}"
-fi
-mkdir -p "$OWNER_STATE/vallum"
-printf '%s\n' "$(git rev-parse HEAD)" > "$OWNER_STATE/vallum/remote-verified"
-chown -R "${SUDO_USER:-root}" "$OWNER_STATE/vallum" 2>/dev/null
+STAMP=$(verified_stamp)
+mkdir -p "$(dirname "$STAMP")"
+printf '%s\n' "$(git rev-parse HEAD)" > "$STAMP"
+chown -R "${SUDO_USER:-root}" "$(dirname "$STAMP")" 2>/dev/null
 if [ "$NAMESPACED" = 1 ]; then
     say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced)"
 else
