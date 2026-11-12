@@ -290,3 +290,43 @@ root for the config and key. The unit's capability bounding set has no
 another user fails with `Permission denied` even though the operator can read it
 in a shell. `install.sh` sets this up; anything hand-placed should be
 `chown root:root` and `chmod 600`.
+
+## Enrolment: open the second port only while you are enrolling
+
+The enrolment responder listens on `listen + 1` (51821) and is **not enabled at
+boot**. Every peer you already have lives in the server's config and needs only
+51820, so the second port is only needed during the seconds a new device joins.
+Keeping it open to the world between enrolments is a standing surface with no
+reason to be open (ADR-0034).
+
+To enrol a device:
+
+```bash
+# on the server
+sudo -S -p '' ufw allow 51821/udp
+sudo -S -p '' systemctl start vallum-enroll@vallum0
+# ... the device joins: vallum join <ticket>
+# and afterwards:
+sudo -S -p '' systemctl stop vallum-enroll@vallum0
+sudo -S -p '' ufw delete allow 51821/udp
+```
+
+`sudo ufw status numbered` should show **no** rule for 51821 between enrolments.
+If it does, the responder is still running or the rule was left behind — both are
+worth checking, because a listener on 51821 is a second service to harden.
+
+The alternative, and the primary path as of ADR-0034, needs no second port at
+all: the device generates its keypair, sends its **public line** to the server
+operator however you already talk, and the server records it and generates the
+client's config:
+
+```bash
+# on the server
+sudo vallum peer add phone --config /etc/vallum/vallum0.toml \
+    --public-key-file phone.pub --client-config-out phone.toml
+```
+
+`phone.toml` is the whole client configuration — the same three values
+WireGuard's `[Peer]` stanza carries — and the device's private key never leaves
+the device.
+
