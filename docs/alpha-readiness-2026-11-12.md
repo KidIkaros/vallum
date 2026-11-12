@@ -220,3 +220,70 @@ an experiment. Every gate above runs locally with the workflow's own commands.
 Either the product is alpha-ready with four green gates and a recorded commit, or
 it is not, with the failing gate named. Nothing above is a judgement about the
 code's quality — that was `docs/review-2026-11-11.md`, on a different axis.
+
+## Later the same day: the evidence itself was audited
+
+A premortem was run against the alpha as it stood, and five read-only
+investigators were sent after the parts the gates were supposed to cover. Three
+came back with defects in the *verification*, not the product. They are recorded
+here because they are the state of the record, not because they are tidy.
+
+### The two-host gate could report PASS with the production host broken
+
+`scripts/verify-remote.sh` saved the host's `inet vallum` NAT table and
+restored it in the cleanup. Three things were wrong with that, and they
+compounded:
+
+1. `restore_nat` had no `else` branch — a failed restore printed nothing.
+2. The cleanup runs with `set +e`, and the trap's status does not replace the
+   script's exit status, so the run reported **PASS**.
+3. The "this commit passed the two-host gate" stamp was written in the main
+   body, **before** the cleanup ran — so a run that left the host's NAT table
+   deleted still recorded the commit as verified.
+
+A failed restore is now loud (it prints the remedy and the exact `nft`
+command), fails the run, and revokes the stamp.
+`scripts/selftest-restore-fail.sh` is the proof: a good restore keeps the
+stamp, a failed one exits 1 and revokes it.
+
+### `vallum peer invite` undid the responder's demotion
+
+The demotion of the enrolment responder had been done *by hand on one host* —
+and the code restored it on the first invite:
+
+- `peer.rs:838` called `server::enroll(enable: true)`, which wrote
+  `enroll.enabled = true` into the config, installed the unit and opened the
+  port;
+- `peer.rs:855` ran `systemctl enable --now`;
+- `server.rs:952` enabled the unit whenever the config flag was true — so the
+  flag did double duty: "the responder may serve" (the runtime gate at
+  `enroll.rs:759`) and "the responder starts at boot".
+
+All three now **start** the responder and never **enable** it, and `peer
+invite` prints the teardown where it mints the invite. ADR-0034's decision is
+now the code's behaviour rather than a convention on one host.
+
+### The local rehearsal was not the CI gate
+
+`scripts/ci-local.sh` claimed to run the gates CI runs. It ran the same
+*commands* on a different *compiler*: CI's `stable` was cargo 1.100.0, the
+laptop's was 1.97.1, and the lints born in between (a cargo manifest lint and
+`clippy::needless_bool`) failed CI while the rehearsal was green.
+
+The toolchain is now pinned in `rust-toolchain.toml` (1.100.0), CI uses the
+pinned version rather than a moving `stable`, and `ci-local.sh` **refuses to
+rehearse** on any other toolchain, naming the install command.
+
+### The verdicts count what ran
+
+`scripts/verdict.sh` writes a record per gate — gate, status, commit,
+assertion count, target, timestamp — so a verdict from an older tree is
+visible ("stale accept-pair ran on 77a0a1d, not this commit") instead of
+silently standing in for the current one. A failing gate records too.
+
+The assertion counts were at first hand-written: `accept-full-tunnel.sh`
+counted a flat `+3` whether one or three of its conditions held. Each
+condition is now counted as it is evaluated. What the count still cannot do is
+notice a check that was *neutralised* rather than removed — a sabotage that
+prints its "ok" line still counts. It measures what ran, not what was proved.
+
