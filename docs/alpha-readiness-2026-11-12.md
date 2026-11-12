@@ -81,15 +81,55 @@ port 51820, which can only fail and looks exactly like a dead tunnel.
 
 ## Gate 3 — Full tunnel, guard and dead-man
 
-**Status: not run.**
+**Status: PASS** — `scripts/accept-full-tunnel.sh`, inside a container with its
+own network namespace, so the default route that moves and the nftables block
+that lands belong to the container and never to the host.
 
-The part that can take the internet away: `fwmark` mandatory for `0.0.0.0/0`,
-prove the tunnel carries *before* routing into it, arm the dead-man before the
-guard, and verify with the public-IP equality check plus a `curl -6` probe. Any
-failure runs the panic path, never a `set -e` exit.
+```
+route: 1.1.1.1 dev vallum-full01 table 51820 src 10.7.0.3
+ping 1.1.1.1: yes
+resolve example.com: yes
+public IP: 203.0.113.10   (server is 203.0.113.10)
+IPv6 egress: blocked
+vallum@full01 / vallum-guard@full01 / vallum-quick@full01 — all active
+dead-man timer: active, armed before the guard
+```
 
-This is the gate that separates "the tunnel works" from "production", because
-its failure mode is a host with no internet.
+The public-IP equality is the assertion that matters: it catches a split route, an
+IPv6 escape and a DNS leak in one measurement, and it can only hold if the whole
+path is right.
+
+### Four failures on the way, none of them in the routing or tunnel code
+
+1. **`no config at /etc/vallum/vallum-full01.toml`** — the unit instance is the
+   config stem (`full01`), the kernel interface is `vallum-full01` because a join
+   prefixes `vallum-`. The harness conflated them and asked systemd for an
+   instance with no config.
+2. **The server had no masquerade table.** `hostnet.rs` plans it and `server init`
+   installs it; this deployment had none, so forwarded packets left with a
+   private source and no reply could return.
+3. **`verify-remote.sh` deleted that table.** The release gate runs
+   `nft delete table inet vallum` on cleanup — on a live host that is the
+   masquerade rule every full-tunnel client depends on, and a `/etc/vallum`
+   tarball cannot restore nftables state. Fixed: the script now saves the table
+   before the clean path and restores it on exit.
+4. **The server refused to forward.** `Default: deny (routed)`, an empty
+   `ufw-user-forward` chain, and no `-i vallum0 -j ACCEPT` rules — so packets
+   arrived from the tunnel and went no further, while `ip_forward` read `1` and
+   every sysctl-based check would have called it healthy.
+
+### The finding worth acting on
+
+**"Forwarding enabled" and "forwarding works" are different questions, and the
+product only asks the first.** A server can be running, handshaking, carrying
+ICMP, and silently dropping every TCP and UDP flow from its clients, with
+`doctor` green. The check that would catch it is a forwarded-packet probe, not a
+sysctl read.
+
+Also resolved here rather than assumed: the traffic demonstrably crosses the
+tunnel (the server's per-peer `rx_bytes` moved 710 → 3456 during the probes), so
+the guard is not leaking. That was worth proving — a guard that passes traffic is
+worse than a DNS failure, and the counters are what told the two apart.
 
 ## Gate 5 — The harness at scale
 
