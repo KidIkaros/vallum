@@ -183,7 +183,7 @@ function Hero({
             {data ? (
               <>
                 {data.interface} · {data.addresses.join(" · ")} ·{" "}
-                {handshake ? `established ${Math.max(0, now - handshake)}s ago` : "no session yet"}
+                {handshake ? `last handshake ${Math.max(0, now - handshake)}s ago` : "no session yet"}
               </>
             ) : seen ? (
               "no snapshot since the disconnect"
