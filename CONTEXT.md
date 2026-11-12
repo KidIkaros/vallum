@@ -27,6 +27,35 @@ can be swapped underneath the whole protocol. The check is structural and
 re-runnable in one glance at the manifests (e.g. `cargo -Z features` analysis
 or the package-principles pass); no audit doc owns it.
 
+## The console's reader
+
+`vallum-gui` is read by three readers at once, and its defaults are set for all
+three rather than for the middle one. Decided 2026-11-11, in an interview; the
+consequence is a rule, not a preference.
+
+| Reader | What they need on the first screen | Where it lives |
+|---|---|---|
+| The **operator** already running a tunnel | exact state in exact terms — `SPLIT`, `PSK`, fingerprint, epoch | the panels as they stand; the `:` palette for every verb |
+| The **newcomer** who just installed | the next single step, in plain words, with a command to copy | `FirstRun`, the hero's sentence, the failure cards |
+| An **agent** reading the page (or its text) | stable ids, `aria-label`s, copyable commands, and no state that exists only as colour or only in a `title=` | `id=` on every action, the copy buttons, the failure cards' raw error lines |
+
+**The rule: plain words on the surface, exact terms one level down.** A panel's
+headline reads without the glossary; its row labels, tooltips and the palette keep
+the daemon's own vocabulary. Where both cannot be true, the surface wins and the
+term moves into this file.
+
+Two calls that followed, and their status:
+
+* The hero's word for a split host stays **SPLIT** — a mode name, amber, with the
+  sentence beneath it carrying the meaning ("traffic leaves via … — the tunnel
+  carries only its own subnet"). **Provisional**: the interview did not settle
+  the word, and the sentence is what a newcomer reads, so renaming it changes
+  little; revisit if a first-run test says otherwise.
+* The interface counters are **datagrams sent** and **packets delivered**, the
+  words `docs/proof/transport.md` already uses of the wire. The collapsed summary
+  may shorten to `N datagrams out · M packets in`; it may not introduce a third
+  noun.
+
 ## Glossary
 
 | Term | The one thing it means | Owner |
@@ -48,6 +77,9 @@ or the package-principles pass); no audit doc owns it.
 | **Carrying / degraded** | A tunnel *carries* when the delivery ratio is ≥ 0.1 over a window with ≥ 100 datagrams sent. **Under 100 sent is neither carried nor degraded** — the sample is too small (an idle peer reports ratio 1.0). Degraded = ratio < 0.1 over a ≥ 100-datagram window *while handshakes stay fresh*. **Stale** is the idle-host case: the daemon answers but the oldest handshake is past `REJECT_AFTER_TIME`, so the session is dead and no delivery sample exists to say so. Status verbiage (`up`/`degraded`/`stale`/`blocked`/`leaking`) is defined there | `docs/requirements.md`, Delivery & Carrying |
 | **Rotation window** | The overlap where a rotated row answers both keys until `peer finalize` | **ADR-0014**, **ADR-0021** |
 | **Route plan / the record** | `RoutePlan`: the exact `ip` invocations an attach performs, recorded to `/var/lib/vallum/<iface>.quick` and *reversed verbatim* at teardown — not re-derived from the (possibly edited) config. Two words from its seam: `render`/`parse` round-trip must hold; `reversed` is one-way (a `replace` re-reverses as `add`) | `vallum-quick/routes.rs` |
+| **Datagram** | The unit the carrier sends: one sealed packet in one UDP datagram. The canonical **outbound** noun — never "packet" | `vallum-tunnel` carriers, `docs/proof/transport.md` |
+| **Packet** | The unit the tunnel reads from, and delivers to, the TUN interface. The canonical **inbound** noun. "Received" is reserved for socket-level kernel counters (`RcvbufErrors`), never for deliveries | `vallum-tunnel::device`, `docs/proof/transport.md` |
+| **Control socket** | The daemon's unix socket that the console and the TUI read. **Silent** = it answered nothing; **retained** = the last snapshot that did answer, still on screen and marked as such; **unmanaged** = a daemon answers with no systemd unit behind it. Not "offline" — that is a network word | `crates/vallum-gui`, `crates/vallum/src/tui` |
 | **Privilege boundary** | The config file is a privilege boundary *because of hooks*: a hook string runs as root. Only hook execution escalates — routes and DNS from a user's own config are not a boundary. Hook-bearing configs must be root-owned, 0600 | `vallum-quick/hooks.rs` |
 
 ## Conventions worth not re-deriving

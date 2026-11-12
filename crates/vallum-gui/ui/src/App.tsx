@@ -543,9 +543,12 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
           </span>
         </span>
         <span className="text-muted-foreground text-xs">
+          {/* The counters' canonical nouns (CONTEXT.md): datagrams go out, packets
+              come in, and the summary is allowed to shorten them only that far. */}
           {c ? (
             <>
-              {c.datagrams_sent.toLocaleString()} out · {c.packets_delivered.toLocaleString()} in
+              {c.datagrams_sent.toLocaleString()} datagrams out ·{" "}
+              {c.packets_delivered.toLocaleString()} packets in
               {attention && <span className="text-fault"> · {failures} failed</span>}
             </>
           ) : (
@@ -556,14 +559,14 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
       <div className="px-4 pb-3.5">
       <div className="grid grid-cols-1 gap-x-6 gap-y-2 pt-1 sm:grid-cols-3">
         {metric(
-          "sent",
+          "datagrams out",
           `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
           <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
             failed {c?.datagrams_failed ?? "—"}
           </span>,
         )}
         {metric(
-          "received",
+          "packets in",
           `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
           <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
             failed {c?.packets_failed ?? "—"}
