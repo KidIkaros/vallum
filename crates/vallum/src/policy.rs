@@ -154,7 +154,7 @@ fn endpoints(config: &Config) -> Result<Vec<(IpAddr, u16)>, Error> {
                 return Err(Error::Usage(format!(
                     "the endpoint `{endpoint}` does not resolve ({source}); a guard with no \
                      permitted destination would block the handshake it exists to protect"
-                )))
+                )));
             }
         }
     }
@@ -290,6 +290,32 @@ pub enum GuardState {
     Absent,
     /// Could not determine — not root, or `nft` is missing.
     Unknown,
+}
+
+impl GuardState {
+    /// The word `vallum policy --json` reports for this state.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// What this state means for egress, in one word.
+    ///
+    /// [`GuardState::Unknown`] is deliberately not [`GuardState::Absent`]: an
+    /// unprivileged reader who cannot see the table must not be told their
+    /// traffic is unrestricted.
+    #[must_use]
+    pub fn egress(self) -> &'static str {
+        match self {
+            Self::Installed => "blocked",
+            Self::Absent => "unrestricted",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Read the guard's state from the host.
@@ -484,6 +510,17 @@ allowed_ips = ["10.7.0.1/32"]
         assert!(
             dns_drop < lan_allow,
             "port 53 drop must precede LAN allow rules to prevent DNS leaking to local routers"
+        );
+    }
+
+    #[test]
+    fn every_guard_state_has_its_own_word_for_egress() {
+        assert_eq!(GuardState::Installed.egress(), "blocked");
+        assert_eq!(GuardState::Absent.egress(), "unrestricted");
+        assert_eq!(
+            GuardState::Unknown.egress(),
+            "unknown",
+            "not being able to look is not the same as nothing being there"
         );
     }
 
