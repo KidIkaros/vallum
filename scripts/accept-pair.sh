@@ -54,13 +54,21 @@ if [ "$BACKEND" = namespaces ]; then
     export QUICK="$PWD/target/release/vallum-quick"
     NS_OUT=$(bash scripts/e2e-netns.sh "$PWD/target/release/vallum" 2>&1)
     NS_RC=$?
+    NS_ASSERT=$(printf '%s\n' "$NS_OUT" | grep -c '^   ok')
     if [ "$NS_RC" -ne 0 ]; then
-        NS_OUT=$(sudo -n -E bash scripts/e2e-netns.sh "$PWD/target/release/vallum" 2>&1)
+        NS_OUT2=$(sudo -n -E bash scripts/e2e-netns.sh "$PWD/target/release/vallum" 2>&1)
         NS_RC=$?
+        NS_ASSERT2=$(printf '%s\n' "$NS_OUT2" | grep -c '^   ok')
+        # keep whichever attempt got further: a failed escalation must not
+        # erase the checks the first attempt did make
+        if [ "$NS_ASSERT2" -gt "$NS_ASSERT" ]; then
+            NS_ASSERT=$NS_ASSERT2
+            NS_OUT=$NS_OUT2
+        fi
     fi
     printf '%s\n' "$NS_OUT"
     # the delegated gate's own checks are the assertions it made
-    ASSERTIONS=$(printf '%s\n' "$NS_OUT" | grep -c '^   ok')
+    ASSERTIONS=$NS_ASSERT
     if [ "$NS_RC" -eq 0 ]; then
         echo "== PASS - a server and a client, in namespaces, handshook and carried"
         exit 0
