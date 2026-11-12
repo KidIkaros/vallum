@@ -898,6 +898,12 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                 // the alternative is a join that fails with "no handshake" and no
                 // cause (2026-11-11: two devices enrolled, neither could connect).
                 if !report.applied {
+                    // Loud, but still sent: `applied: false` does not say WHY.
+                    // It is false both when the daemon refused the peer and when
+                    // there was no daemon to ask (a standalone responder, or
+                    // --no-apply), and refusing the send would break the second
+                    // case. The fix is for the report to carry `apply_attempted`
+                    // so this can refuse only a real failure (review, 2026-11-11).
                     eprintln!(
                         "vallum: enrolled `{}` in {} but could NOT apply it to the running \
                          daemon — this device cannot connect until the daemon reloads the \

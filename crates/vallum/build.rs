@@ -31,12 +31,26 @@ fn main() {
         git(&["rev-parse", "--absolute-git-dir"]).unwrap_or_else(|| "../../.git".to_owned());
 
     let mut watched = vec![format!("{git_dir}/HEAD")];
+    // The ref and packed-refs live in the COMMON dir. In a linked worktree
+    // `--absolute-git-dir` points at `.git/worktrees/<name>`, which has neither,
+    // so watching it there froze the stamp again — the exact failure this file
+    // exists to fix. HEAD stays worktree-private; the ref does not.
+    let common_dir = git(&["rev-parse", "--git-common-dir"])
+        .map(|dir| {
+            let path = Path::new(&dir);
+            if path.is_absolute() {
+                dir
+            } else {
+                format!("{git_dir}/{dir}")
+            }
+        })
+        .unwrap_or_else(|| git_dir.clone());
     // On a branch the ref file is what a commit writes; a detached HEAD keeps
     // its hash in HEAD itself, which is already watched.
     if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
-        watched.push(format!("{git_dir}/{reference}"));
+        watched.push(format!("{common_dir}/{reference}"));
     }
-    watched.push(format!("{git_dir}/packed-refs"));
+    watched.push(format!("{common_dir}/packed-refs"));
 
     // Only watch paths that exist: cargo treats a missing watched path as
     // always-changed, which would re-run this script on every build.

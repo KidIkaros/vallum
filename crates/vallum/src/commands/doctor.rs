@@ -768,9 +768,19 @@ fn check_enroll_firewall(resolved: &crate::config::Resolved) -> Check {
         .status()
         .is_ok_and(|status| status.success());
     if !active {
-        return Check::new("enroll", Status::Pass, format!("{unit} is not running"));
+        // A config that asks for the responder and has no unit running is the
+        // failure this check exists for; reporting PASS was the bug.
+        return if resolved.enroll_enabled {
+            Check::new(
+                "enroll",
+                Status::Fail,
+                format!("[enroll] enabled but {unit} is not running — no device can enrol"),
+            )
+        } else {
+            Check::new("enroll", Status::Pass, format!("{unit} is not running"))
+        };
     }
-    let port = resolved.listen.port().saturating_add(1);
+    let port = resolved.enroll_port;
     let state = crate::hostnet::inspect();
     match state.firewall {
         crate::hostnet::Firewall::Ufw => {

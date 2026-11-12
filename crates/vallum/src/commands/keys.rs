@@ -5,12 +5,12 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use vallum_crypto_sdk::SdkSuite;
 
-use crate::Error;
 use crate::entropy;
 use crate::keys;
+use crate::Error;
 
 #[derive(Debug, Args)]
 pub struct KeygenArgs {

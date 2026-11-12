@@ -78,6 +78,11 @@ pub struct Resolved {
     pub mtu: u16,
     /// The address to bind, for the configured carrier.
     pub listen: SocketAddr,
+    /// The port `enroll-serve` actually binds: `[enroll] port` when set,
+    /// otherwise `listen + 1`. `doctor` must not guess it.
+    pub enroll_port: u16,
+    /// Whether `[enroll] enabled` asks for the responder at all.
+    pub enroll_enabled: bool,
     /// The transport: UDP, or the TCP fallback.
     pub carrier: Carrier,
     /// The control socket, if configured.
@@ -702,6 +707,11 @@ impl ResolveConfig for Config {
             addresses,
             mtu,
             listen,
+            enroll_port: self
+                .enroll
+                .port
+                .unwrap_or_else(|| listen.port().saturating_add(1)),
+            enroll_enabled: self.enroll.enabled,
             carrier,
             control,
             fwmark: self.interface.fwmark.unwrap_or(0),
@@ -932,6 +942,8 @@ mod tests {
             addresses: Vec::new(),
             mtu: 1420,
             listen: "0.0.0.0:51820".parse().expect("addr"),
+            enroll_port: 51821,
+            enroll_enabled: false,
             carrier: Carrier::Udp,
             control: None,
             fwmark: 0,

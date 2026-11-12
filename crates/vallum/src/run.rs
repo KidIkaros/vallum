@@ -55,6 +55,10 @@ use crate::{log_debug, log_info, log_warn};
 /// How often the loop wakes with nothing to do.
 pub const DEFAULT_TICK_MS: u64 = 100;
 
+/// How often the reader's peer-exemption set is rebuilt. A deadline rather than
+/// an idle tick, because under load there is no idle tick.
+const ENDPOINT_REFRESH_MS: u64 = 100;
+
 /// Queued events past which the device is told it is under load.
 pub const DEFAULT_UNDER_LOAD_DEPTH: usize = 64;
 
@@ -305,7 +309,9 @@ fn path_stalled(received_age_ms: u64, sent_age_ms: u64, keepalive_ms: u64) -> bo
     } else {
         60_000
     };
-    received_age_ms > limit_ms && sent_age_ms < 120_000
+    // Both ages against the same limit: a peer with a 300 s keepalive is legal,
+    // and a hardcoded 120 s made the stall undetectable for it (review).
+    received_age_ms > limit_ms && sent_age_ms <= limit_ms
 }
 
 /// If a reader thread cannot be spawned. A socket or interface that fails while
@@ -624,6 +630,7 @@ pub fn run(
     // sets above: a send that fails is the difference between "the path is gone"
     // and "the peer is silent", and UDP reports neither — the kernel says only
     // that the write failed, and at debug level nobody sees it.
+    let mut next_endpoint_refresh: u64 = 0;
     let mut send_failed: HashSet<SocketAddr> = HashSet::new();
     // Destinations whose path MTU has already been read from the routing table.
     let mut probed: HashSet<SocketAddr> = HashSet::new();
@@ -669,6 +676,25 @@ pub fn run(
                                 path.display()
                             );
                         }
+                    }
+                }
+            }
+        }
+
+        // Refresh the reader's exemption set on a deadline, not on idleness.
+        // Refreshing in the timeout arm looked cheap and was wrong: under load
+        // the queue is never empty, so the arm never fires, the set stays empty,
+        // and every configured peer is bucketed — the throttle then removes the
+        // idleness that would have lifted it (review, 2026-11-11). One u64
+        // compare per iteration; the rebuild itself runs at most every 100 ms.
+        let now_ms = clock.monotonic_ms();
+        if now_ms >= next_endpoint_refresh {
+            next_endpoint_refresh = now_ms.saturating_add(ENDPOINT_REFRESH_MS);
+            if let Ok(mut set) = peer_endpoints.lock() {
+                set.clear();
+                for (id, _) in device.peers() {
+                    if let Some(endpoint) = device.endpoint(id) {
+                        set.insert(endpoint);
                     }
                 }
             }
@@ -751,21 +777,7 @@ pub fn run(
                     .inbound(clock.monotonic_ms(), source, bytes)
                     .map(|bytes| Event::Datagram { source, bytes })
             }
-            Err(RecvTimeoutError::Timeout) => {
-                // Idle tick: refresh the reader's exemption set. Doing it here
-                // and not per packet keeps the cost off the data path, at the
-                // price of a peer that has just roamed being bucketed for up to
-                // one tick (ADR-0032).
-                if let Ok(mut set) = peer_endpoints.lock() {
-                    set.clear();
-                    for (id, _) in device.peers() {
-                        if let Some(endpoint) = device.endpoint(id) {
-                            set.insert(endpoint);
-                        }
-                    }
-                }
-                None
-            }
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
         };
 
@@ -1055,7 +1067,9 @@ fn spawn_udp_reader(
                         let known = peer_endpoints
                             .lock()
                             .map(|set| set.contains(&source))
-                            .unwrap_or(true);
+                            // Fail closed: a poisoned lock must not turn the
+                            // bucket off for the life of the process.
+                            .unwrap_or(false);
                         if !known && !admission.allow(source.ip(), clock.monotonic_ms()) {
                             rate_limited.fetch_add(1, Ordering::Relaxed);
                             continue;
