@@ -551,8 +551,6 @@ struct ClientFiles {
     text: String,
     /// Where the private key is.
     key: PathBuf,
-    /// The server's endpoint, for the handover message.
-    endpoint: String,
 }
 
 /// Check a client config and its key without touching anything.
@@ -593,19 +591,7 @@ fn resolve_client_files(path: &Path) -> Result<ClientFiles, Error> {
         )));
     }
 
-    let endpoint = config
-        .peers
-        .first()
-        .and_then(|peer| peer.endpoint.as_ref())
-        .cloned()
-        .unwrap_or_else(|| "?".to_owned());
-
-    Ok(ClientFiles {
-        name,
-        text,
-        key,
-        endpoint,
-    })
+    Ok(ClientFiles { name, text, key })
 }
 
 /// Enrol this machine from a client config the server wrote.
@@ -1293,62 +1279,62 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-/// Three causes, three different remedies. The old message called all of
-/// them "the server refused the enrolment".
-#[test]
-fn the_ssh_failure_names_the_cause_that_actually_applies() {
-    let sudo = ssh_failure(
-        Some(1),
-        "sudo: a terminal is required to read the password",
-        "vpn.example.com",
-        "laptop",
-    );
-    assert!(sudo.contains("sudo wants a password"), "{sudo}");
-
-    let missing = ssh_failure(
-        Some(127),
-        "sudo: vallum: command not found",
-        "vpn.example.com",
-        "laptop",
-    );
-    assert!(
-        missing.contains("no `vallum` on that user's PATH"),
-        "{missing}"
-    );
-
-    let transport = ssh_failure(
-        Some(255),
-        "Host key verification failed.",
-        "vpn.example.com",
-        "laptop",
-    );
-    assert!(
-        transport.contains("ssh connection itself failed"),
-        "{transport}"
-    );
-
-    for message in [sudo, missing, transport] {
-        assert!(
-            message.contains("vpn.example.com") || message.contains("laptop"),
-            "every message names something to act on: {message}"
-        );
-    }
-}
-
-/// The guidance is one text, and it leads with the file path.
-#[test]
-fn the_guidance_leads_with_the_file_path() {
-    let text = guidance_text();
-    let file = text
-        .find("--client-config")
-        .expect("the file path is named");
-    let ssh = text.find("--remote").expect("ssh is named");
-    let token = text.find("vallum1-join").expect("the token is named");
-    assert!(file < ssh && ssh < token, "the order is the order: {text}");
-}
-
 mod tests {
     use super::*;
+
+    /// Three causes, three different remedies. The old message called all of
+    /// them "the server refused the enrolment".
+    #[test]
+    fn the_ssh_failure_names_the_cause_that_actually_applies() {
+        let sudo = ssh_failure(
+            Some(1),
+            "sudo: a terminal is required to read the password",
+            "vpn.example.com",
+            "laptop",
+        );
+        assert!(sudo.contains("sudo wants a password"), "{sudo}");
+
+        let missing = ssh_failure(
+            Some(127),
+            "sudo: vallum: command not found",
+            "vpn.example.com",
+            "laptop",
+        );
+        assert!(
+            missing.contains("no `vallum` on that user's PATH"),
+            "{missing}"
+        );
+
+        let transport = ssh_failure(
+            Some(255),
+            "Host key verification failed.",
+            "vpn.example.com",
+            "laptop",
+        );
+        assert!(
+            transport.contains("ssh connection itself failed"),
+            "{transport}"
+        );
+
+        for message in [sudo, missing, transport] {
+            assert!(
+                message.contains("vpn.example.com") || message.contains("laptop"),
+                "every message names something to act on: {message}"
+            );
+        }
+    }
+
+    /// The guidance is one text, and it leads with the file path.
+    #[test]
+    fn the_guidance_leads_with_the_file_path() {
+        let text = guidance_text();
+        let file = text
+            .find("--client-config")
+            .expect("the file path is named");
+        let ssh = text.find("--remote").expect("ssh is named");
+        let token = text.find("vallum1-join").expect("the token is named");
+        assert!(file < ssh && ssh < token, "the order is the order: {text}");
+    }
 
     #[test]
     fn the_port_comes_from_the_listen_address() {

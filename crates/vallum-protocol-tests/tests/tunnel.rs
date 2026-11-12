@@ -491,7 +491,10 @@ fn a_client_that_restarts_re_establishes() {
     let mut net = two_hosts();
     net.outbound(0, ipv4(A_IP, B_IP, b"before"));
     net.settle();
-    assert!(net.hosts[0].established_once(), "the first session never came up");
+    assert!(
+        net.hosts[0].established_once(),
+        "the first session never came up"
+    );
 
     // Ten seconds pass while the process restarts, as they would in the field:
     // the client's wall clock has moved on, so its first initiation is newer
@@ -555,7 +558,10 @@ fn a_restart_with_a_clock_that_did_not_move_is_refused_and_counted() {
     net.pump(6);
     let after = net.hosts[1].device.handshake_drops();
 
-    assert!(after.stale > before.stale, "a stale initiation must be counted");
+    assert!(
+        after.stale > before.stale,
+        "a stale initiation must be counted"
+    );
     assert!(
         !net.hosts[0].established_once(),
         "and it must not establish on a timestamp the guard refused"
@@ -1783,9 +1789,12 @@ fn a_peer_that_gave_up_recovers_when_the_path_comes_back() {
     net.settle();
     assert!(net.hosts[1].established_once());
 
-    // Black-hole the path for 220 s. A's rekey starts at 120 s, fails, and gives
-    // up at 210 s; both keys expire at 180 s. Nothing is delivered throughout.
-    for _ in 0..220 {
+    // Black-hole the path for 240 s. A's rekey starts between 120 s and 140 s
+    // (the trigger carries a bounded spread, ADR-0036), fails, and gives up
+    // between 210 s and 230 s; both keys expire at 180 s. Nothing is delivered
+    // throughout. The blackhole must outlast the WORST case, or this test
+    // would pass only when the draw is small.
+    for _ in 0..240 {
         net.advance(1_000);
         net.pump(1);
         for host in &mut net.hosts {
@@ -1887,9 +1896,10 @@ fn a_server_that_restarts_and_loses_its_session_still_carries_traffic() {
     link.hosts[1].established.clear();
     link.hosts[1].delivered.clear();
 
-    // The client rekeys on its own 120 s timer. Both ends must end up with a
-    // session, and traffic must flow.
-    link.advance(130_000);
+    // The client rekeys on its own timer, which now fires between 120 s and
+    // 140 s (the trigger carries a bounded spread, ADR-0036). Advance past the
+    // worst case, or this test would pass only when the draw is small.
+    link.advance(150_000);
     link.pump(8);
 
     let epoch_a = link.hosts[0].device.epoch(link.hosts[0].peer_id());

@@ -276,13 +276,13 @@ pub fn import_with_policy(
     // Every other path generates the key on the device, so the safe
     // alternative always exists - and a key that travelled in a file is a
     // custody fact the operator chose without being told.
-    if !allow_shipped_key {
-        if findings
+    if !allow_shipped_key
+        && findings
             .iter()
             .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle))
-        {
-            return Err(
-                "refusing this bundle: it carries this client's PRIVATE KEY.\n\
+    {
+        return Err(
+            "refusing this bundle: it carries this client's PRIVATE KEY.\n\
                  The key was generated on the server and travelled in this file, so \
                  anyone holding the file holds the key.\n\
                  \n\
@@ -295,9 +295,8 @@ pub fn import_with_policy(
                  --client-config-out <name>.toml\n\
                  \n\
                  Pass --allow-shipped-key if you understand and accept this."
-                    .to_owned(),
-            );
-        }
+                .to_owned(),
+        );
     }
     if strict && !findings.is_empty() {
         return Err(format!(
@@ -371,62 +370,62 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(test)]
-/// The one fact about a bundle that matters most: whether it carries the
-/// client's private key. The report only ever looked at the config.
-#[test]
-fn a_bundle_that_carries_the_key_is_reported_and_refused() {
-    let bundle = Bundle {
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// The one fact about a bundle that matters most: whether it carries the
+    /// client's private key. The report only ever looked at the config.
+    #[test]
+    fn a_bundle_that_carries_the_key_is_reported_and_refused() {
+        let bundle = Bundle {
             version: 1,
             name: "laptop".to_owned(),
             config: "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\naddresses = [\"10.7.0.4/20\"]\n"
                 .to_owned(),
             key: "-----BEGIN KEY-----".to_owned(),
         };
-    let findings = inspect_policy(&bundle).expect("the bundle parses");
-    assert!(
-        findings
-            .iter()
-            .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
-        "the custody fact must be in the report: {findings:?}"
-    );
+        let findings = inspect_policy(&bundle).expect("the bundle parses");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
+            "the custody fact must be in the report: {findings:?}"
+        );
 
-    let dir =
-        std::env::temp_dir().join(format!("vallum-bundle-{}-{}", std::process::id(), line!()));
-    let refused = import_with_policy(&bundle, &dir, false, false, false, false)
-        .expect_err("a shipped key is refused by default");
-    assert!(
-        refused.contains("PRIVATE KEY"),
-        "the refusal must name the fact: {refused}"
-    );
-    assert!(
-        refused.contains("vallum keygen"),
-        "the refusal must offer the safe path: {refused}"
-    );
-}
+        let dir =
+            std::env::temp_dir().join(format!("vallum-bundle-{}-{}", std::process::id(), line!()));
+        let refused = import_with_policy(&bundle, &dir, false, false, false, false)
+            .expect_err("a shipped key is refused by default");
+        assert!(
+            refused.contains("PRIVATE KEY"),
+            "the refusal must name the fact: {refused}"
+        );
+        assert!(
+            refused.contains("vallum keygen"),
+            "the refusal must offer the safe path: {refused}"
+        );
+    }
 
-/// A bundle with no key in it is fine: the report sees nothing wrong.
-#[test]
-fn a_bundle_without_a_key_has_no_custody_finding() {
-    let bundle = Bundle {
+    /// A bundle with no key in it is fine: the report sees nothing wrong.
+    #[test]
+    fn a_bundle_without_a_key_has_no_custody_finding() {
+        let bundle = Bundle {
             version: 1,
             name: "laptop".to_owned(),
             config: "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\naddresses = [\"10.7.0.4/20\"]\n"
                 .to_owned(),
             key: String::new(),
         };
-    let findings = inspect_policy(&bundle).expect("the bundle parses");
-    assert!(
-        !findings
-            .iter()
-            .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
-        "no key, no finding: {findings:?}"
-    );
-}
-
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
+        let findings = inspect_policy(&bundle).expect("the bundle parses");
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
+            "no key, no finding: {findings:?}"
+        );
+    }
     use std::os::unix::fs::PermissionsExt;
 
     fn bundle(name: &str) -> Bundle {

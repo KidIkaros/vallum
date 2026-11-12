@@ -96,6 +96,27 @@ terms.
   key — a small but real reduction in the secrecy of key rotation.
 - **Rejected:** the device already owns randomness for exactly this purpose.
 
+## What the spread cost the protocol tests
+
+The trigger moved, so two protocol tests that advanced the clock to the *old*
+trigger time now depend on the draw:
+
+- `a_server_that_restarts_and_loses_its_session_still_carries_traffic` advanced
+  130 s — exactly the old trigger. It now advances 150 s, past the worst case.
+- `a_peer_that_gave_up_recovers_when_the_path_comes_back` black-holed the path
+  for 220 s, which covered a give-up at 210 s but not one at 230 s. It now
+  black-holes for 240 s.
+
+Both now assert the **contract** — the rekey fires in 120..140 s — rather than
+the behaviour of one particular draw. A test that passes only when the
+randomness is small is a test that will fail on someone else's machine, and
+these two did exactly that on the CI runner.
+
+This is also why the spread is drawn from the device's `Randomness` rather than
+from the session's material: a deterministic source would make the trigger
+predictable to anyone who knows the peer, which is a small but real reduction in
+the secrecy of key rotation.
+
 ## Consequences
 
 - A fleet's rekeys spread over 20 s instead of landing on one instant. The

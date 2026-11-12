@@ -123,11 +123,11 @@ impl Verdict {
 
     /// Whether the tunnel is doing its job.
     ///
-    /// `Up` is a working tunnel; `Starting` is one that has not handshook yet
-    /// - a daemon that is still coming up, not a broken one. Everything else
-    /// is a tunnel that is not carrying: the peer is not answering
-    /// (`Degraded`), the session is dead (`Stale`), the daemon is gone
-    /// (`Blocked`, `Down`), or the guard cannot be determined (`Unknown`).
+    /// `Up` is a working tunnel. `Starting` is one that has not handshook yet:
+    /// a daemon that is still coming up, not a broken one. Everything else is a
+    /// tunnel that is not carrying — the peer is not answering (`Degraded`),
+    /// the session is dead (`Stale`), the daemon is gone (`Blocked` or
+    /// `Down`), or the guard cannot be determined (`Unknown`).
     ///
     /// A gate that only fails on `Leaking` says "fine" while the tunnel is
     /// dead, which is the opposite of what a user asking "am I protected?"
@@ -360,34 +360,34 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-/// Two contracts, two names. The leak contract is narrow on purpose, and
-/// the tests that say so are older than this one.
-#[test]
-fn the_leak_contract_is_only_leaking() {
-    assert!(Verdict::Leaking.is_failure());
-    assert!(!Verdict::Blocked.is_failure());
-    assert!(!Verdict::Stale.is_failure());
-    assert!(!Verdict::Down.is_failure());
-    assert!(!Verdict::Unknown.is_failure());
-    assert!(!Verdict::Degraded.is_failure());
-}
-
-/// The gate contract: a tunnel that is not carrying is not working, even
-/// when nothing is leaking.
-#[test]
-fn a_tunnel_that_is_not_carrying_is_not_working() {
-    assert!(Verdict::Up.is_working());
-    assert!(Verdict::Starting.is_working());
-    assert!(!Verdict::Stale.is_working());
-    assert!(!Verdict::Degraded.is_working());
-    assert!(!Verdict::Blocked.is_working());
-    assert!(!Verdict::Down.is_working());
-    assert!(!Verdict::Unknown.is_working());
-    assert!(!Verdict::Leaking.is_working());
-}
-
 mod tests {
     use super::*;
+
+    /// Two contracts, two names. The leak contract is narrow on purpose, and
+    /// the tests that say so are older than this one.
+    #[test]
+    fn the_leak_contract_is_only_leaking() {
+        assert!(Verdict::Leaking.is_failure());
+        assert!(!Verdict::Blocked.is_failure());
+        assert!(!Verdict::Stale.is_failure());
+        assert!(!Verdict::Down.is_failure());
+        assert!(!Verdict::Unknown.is_failure());
+        assert!(!Verdict::Degraded.is_failure());
+    }
+
+    /// The gate contract: a tunnel that is not carrying is not working, even
+    /// when nothing is leaking.
+    #[test]
+    fn a_tunnel_that_is_not_carrying_is_not_working() {
+        assert!(Verdict::Up.is_working());
+        assert!(Verdict::Starting.is_working());
+        assert!(!Verdict::Stale.is_working());
+        assert!(!Verdict::Degraded.is_working());
+        assert!(!Verdict::Blocked.is_working());
+        assert!(!Verdict::Down.is_working());
+        assert!(!Verdict::Unknown.is_working());
+        assert!(!Verdict::Leaking.is_working());
+    }
 
     /// The clock every age rule is judged against: the fixture stamps below
     /// are a little earlier, so a reply is fresh unless a test moves it.
