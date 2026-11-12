@@ -91,22 +91,39 @@ failure runs the panic path, never a `set -e` exit.
 This is the gate that separates "the tunnel works" from "production", because
 its failure mode is a host with no internet.
 
-## Gate 5 — The harness at scale (a protocol claim, not a service one)
+## Gate 5 — The harness at scale
 
-**Status: not run.** The gap between "a client" and "a protocol that carries a
-crowd" — the claim `requirements.md` already makes and nobody has demonstrated
-end to end.
+**Status: PASS** — `scripts/accept-many.sh 10`, ten containers with their own
+network namespaces, each with its own key, its own allocated address and a real
+`vallum join` against the production server.
 
-- Enrol N devices (10 is enough to catch the arithmetic) and confirm each gets
-  its own address, its own peer entry, and its own handshake.
-- The server must be able to answer "who is on, and is each one carrying?"
-  per device — `vallum show` per peer plus the metrics gauges exist for exactly
-  this; nobody has read them with ten peers present.
-- The measured ceilings (2,000 peers, 8.9 KB/peer, ~109 s to re-establish a
-  full herd, 18.4 handshakes/s) become a demonstrated envelope rather than a
-  quoted number.
-- **Not** in scope, because this is not a service: invite rate limiting, an
-  enrolment audit trail, or anything that defends a public front door.
+```
+many01 addr=10.7.0.6/24   unit=active ping=yes      many06 addr=10.7.0.5/24  …
+many02 addr=10.7.0.13/24  unit=active ping=yes      many07 addr=10.7.0.9/24  …
+many03 addr=10.7.0.10/24  unit=active ping=yes      many08 addr=10.7.0.12/24 …
+many04 addr=10.7.0.4/24   unit=active ping=yes      many09 addr=10.7.0.11/24 …
+many05 addr=10.7.0.3/24   unit=active ping=yes      many10 addr=10.7.0.7/24  …
+distinct addresses: 10 of 10
+peers the daemon reports: 12   (10 new + the 2 pre-existing config peers)
+```
+
+Nothing here is mocked except the hardware: ten distinct source IPs, ten real
+keys, ten real enrolments through the allocator, and ten live sessions.
+
+**A criterion worth keeping.** The first run declared PASS on `ping` alone, and
+one client showed `ping=yes` beside `unit=inactive` and `addr=?` — three facts
+that cannot all hold. It did not reproduce under a stricter rule that requires
+the unit active, an address allocated *and* the ping to succeed, and the earlier
+containers were already destroyed, so which measurement lied is not knowable.
+What is knowable: an acceptance criterion that reads one signal can pass a
+contradiction, and the second run is the one to trust.
+
+**What this gate does not prove**, and must not be read as proving: bandwidth at
+scale, or handshake timing under a full rekey herd. The memory sample (128 kB
+over 10 peers = 12.8 kB/peer) is dominated by page granularity against a 5 MB
+baseline; the 8.9 kB/peer claim in `requirements.md` was measured at 0/1000/2000
+peers and this sample can neither confirm nor refute it. The capacity harness in
+`references/capacity.md` is the instrument for both.
 
 ## Gate 4 — CI
 
