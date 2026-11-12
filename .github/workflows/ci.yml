@@ -103,6 +103,22 @@ jobs:
               libayatana-appindicator3-dev patchelf
           fi
 
+      - name: Node (the console's frontend is a build artifact)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Console frontend
+        working-directory: vallum/crates/vallum-gui/ui
+        # `tauri::generate_context!()` embeds `ui/dist` at compile time and
+        # panics when it is absent — and `dist/` is gitignored, because it is a
+        # build artifact. Without this step the whole workspace fails to compile
+        # in CI, which is what the first run of this workflow found on
+        # 2026-11-12: not a lint failure, a missing frontend.
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
       - name: Format (scoped to the Vallum crates)
         working-directory: vallum
         # Never `--all`: the SDK is an external dependency and is not ours to format.
