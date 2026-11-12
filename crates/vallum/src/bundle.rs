@@ -159,9 +159,8 @@ impl PolicyFinding {
 /// systemd unit already drops privileges.
 pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
     let mut findings = Vec::new();
-    match config.interface.seccomp {
-        Some(vallum_config::Seccomp::Log) => findings.push(PolicyFinding::SeccompLogOnly),
-        _ => {}
+    if let Some(vallum_config::Seccomp::Log) = config.interface.seccomp {
+        findings.push(PolicyFinding::SeccompLogOnly);
     }
     if let Some(control) = &config.interface.control {
         if let Some(parent) = control.parent() {
@@ -175,7 +174,8 @@ pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
             }
         }
     }
-    let hooks = config.quick.pre_up.len() + config.quick.post_up.len() + config.quick.post_down.len();
+    let hooks =
+        config.quick.pre_up.len() + config.quick.post_up.len() + config.quick.post_down.len();
     if hooks > 0 {
         findings.push(PolicyFinding::HooksFromBundle { count: hooks });
     }

@@ -600,10 +600,11 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        let config: Self = toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let config: Self =
+            toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
+                path: path.to_path_buf(),
+                source,
+            })?;
         config.validate(path)?;
         Ok(config)
     }

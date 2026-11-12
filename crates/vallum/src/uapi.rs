@@ -172,8 +172,7 @@ pub mod field {
     pub const VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE: &str =
         "vallum_handshake_dropped_unidentifiable";
     /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
-    pub const VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER: &str =
-        "vallum_handshake_dropped_unknown_peer";
+    pub const VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER: &str = "vallum_handshake_dropped_unknown_peer";
     /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
     pub const VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT: &str =
         "vallum_handshake_dropped_endpoint_conflict";

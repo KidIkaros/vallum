@@ -2032,6 +2032,10 @@ fn widen_to_tunnel(addresses: &[String], networks: &[String]) -> Vec<String> {
         .collect()
 }
 
+// Eight distinct inputs, each used exactly where its name says. Grouping them
+// into a struct would rename arguments at six call sites without shortening the
+// list, and this is a pure string builder — there is no state to encapsulate.
+#[allow(clippy::too_many_arguments)]
 fn client_config(
     name: &str,
     addresses: &[String],

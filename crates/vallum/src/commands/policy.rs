@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use vallum_config::Config;
 
 use crate::error::Error;

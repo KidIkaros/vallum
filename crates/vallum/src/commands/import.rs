@@ -73,7 +73,7 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
         args.strict,
         args.allow_hooks,
     )
-        .map_err(Error::Usage)?;
+    .map_err(Error::Usage)?;
 
     say!("config {}", imported.config.display());
     say!("key    {}", imported.key.display());

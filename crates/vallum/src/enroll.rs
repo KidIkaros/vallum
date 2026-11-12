@@ -902,9 +902,7 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                         "vallum: enrolled `{}` in {} but could NOT apply it to the running \
                          daemon — this device cannot connect until the daemon reloads the \
                          config (`vallum syncconf {}`)",
-                        invite.name,
-                        report.config,
-                        report.config
+                        invite.name, report.config, report.config
                     );
                 }
                 let Ok(json) = serde_json::to_string(&report) else {

@@ -1056,9 +1056,7 @@ fn spawn_udp_reader(
                             .lock()
                             .map(|set| set.contains(&source))
                             .unwrap_or(true);
-                        if !known
-                            && !admission.allow(source.ip(), clock.monotonic_ms())
-                        {
+                        if !known && !admission.allow(source.ip(), clock.monotonic_ms()) {
                             rate_limited.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
@@ -1116,7 +1114,7 @@ mod tests {
         // Sized so one full initiation (~20 fragments) and a peer's first
         // contact fit; past that a stranger is refused until it refills.
         let mut admission = super::Admission::new();
-        let source = "198.51.100.7".parse().expect("an address");
+        let source = std::net::IpAddr::from([198, 51, 100, 7]);
         let allowed = (0..64).filter(|_| admission.allow(source, 1_000)).count();
         assert_eq!(allowed, 64, "the burst must be granted in full");
         assert!(
@@ -1132,8 +1130,8 @@ mod tests {
     #[test]
     fn the_admission_bucket_is_per_source() {
         let mut admission = super::Admission::new();
-        let attacker = "198.51.100.7".parse().expect("an address");
-        let peer = "203.0.113.9".parse().expect("an address");
+        let attacker = std::net::IpAddr::from([198, 51, 100, 7]);
+        let peer = std::net::IpAddr::from([203, 0, 113, 9]);
         for _ in 0..64 {
             admission.allow(attacker, 1_000);
         }
