@@ -65,6 +65,16 @@ name = "epoch_open"
 path = "fuzz_targets/epoch_open.rs"
 test = false
 doc = false
+
+# The reassembler: the one place an unauthenticated peer reaches the daemon's
+# memory management. Two fragments whose claimed totals disagreed made the
+# copy index past the end of the entry's buffer, and there is no catch_unwind
+# on the daemon's loop thread.
+[[bin]]
+name = "segment_reassembly"
+path = "fuzz_targets/segment_reassembly.rs"
+test = false
+doc = false
 bench = false
 
 [[bin]]

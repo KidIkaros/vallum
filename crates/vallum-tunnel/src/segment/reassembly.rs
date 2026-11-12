@@ -248,11 +248,28 @@ impl Segments {
             None => self.open(source, head.message_id, usize::from(head.total), now_ms),
         };
 
-        // `parse` has already checked that this fragment fits inside the message
-        // it claims to be part of, so no copy can run past the end.
+        // The entry was sized by the FIRST fragment of this message. A later
+        // fragment that claims a different total is not a fragment of that
+        // message: a message's size is fixed when it is sent, so a fragment
+        // claiming a different one is forged or malformed.
+        //
+        // Copying it anyway indexes past the end of the entry's buffer. The
+        // check `parse` does bounds a fragment by the total IT claims, while
+        // the entry is sized by the total the first fragment claimed - and
+        // those are different numbers. The result is a panic on a path an
+        // unauthenticated peer can reach with two datagrams, and a panic on
+        // the loop thread takes the daemon with it.
         let offset = usize::from(head.offset);
+        let end = offset + data.len();
+        {
+            let entry = &self.table[slot];
+            if entry.total != usize::from(head.total) || end > entry.data.len() {
+                self.dropped += 1;
+                return None;
+            }
+        }
         let entry = &mut self.table[slot];
-        entry.data[offset..offset + data.len()].copy_from_slice(data);
+        entry.data[offset..end].copy_from_slice(data);
         entry.received += entry.cover(offset, data.len());
         entry.updated_ms = now_ms;
 
@@ -389,6 +406,56 @@ mod tests {
 
     fn v6_dest() -> SocketAddr {
         "[2001:db8::9]:51820".parse().expect("a v6 endpoint")
+    }
+
+    /// The panic this closes, as a test.
+    ///
+    /// Two datagrams from an unauthenticated peer: the first opens a
+    /// reassembly sized by the total IT claims, the second claims a bigger
+    /// total and an offset past the first one's end. The copy was bounded by
+    /// the fragment's own claim while the buffer was sized by the first
+    /// fragment's, so it indexed past the end — a panic on the loop thread,
+    /// which takes the daemon with it.
+    #[test]
+    fn a_fragment_claiming_a_different_total_is_refused_not_copied() {
+        let mut segments = Segments::new();
+        let source = addr(51820);
+
+        // The first fragment opens the entry with a total of 2.
+        assert!(segments
+            .inbound(1_000, source, fragment(1, 0, 2, &[0xAA]))
+            .is_none());
+        // The second claims 16384 and an offset of 100: past the end of a
+        // two-byte entry.
+        assert!(segments
+            .inbound(1_001, source, fragment(1, 100, 16_384, &[0xBB; 10]))
+            .is_none());
+
+        // And the table is still usable: a well-formed message completes.
+        let parts = split(7, &message(400));
+        let mut last = None;
+        for (index, part) in parts.iter().enumerate() {
+            last = segments.inbound(2_000 + index as u64, addr(51821), part.clone());
+        }
+        assert_eq!(
+            last,
+            Some(message(400)),
+            "a legal fragmented message still completes"
+        );
+    }
+
+    /// The same shape, from the other direction: the entry is opened by a
+    /// large fragment and a later one claims a SMALLER total.
+    #[test]
+    fn a_fragment_claiming_a_smaller_total_is_refused_too() {
+        let mut segments = Segments::new();
+        let source = addr(51820);
+        assert!(segments
+            .inbound(1_000, source, fragment(2, 0, 16_384, &[0xAA]))
+            .is_none());
+        assert!(segments
+            .inbound(1_001, source, fragment(2, 0, 4, &[0xBB]))
+            .is_none());
     }
 
     #[test]
