@@ -113,6 +113,30 @@ fn every_placeholder_is_a_required_input() {
 }
 
 #[test]
+fn every_input_reaches_the_command() {
+    // The mirror image of the test above: an input the template never
+    // substitutes is decoration. `vallum_status` declared `json` while its
+    // command already passed `--json` itself, so an agent could set it to false
+    // and still get JSON back.
+    let manual = manual();
+    let mut problems = Vec::new();
+    for tool in tools(&manual) {
+        let name = tool["name"].as_str().unwrap_or("?");
+        let used = placeholders(template(tool));
+        if let Some(properties) = tool["inputs"]["properties"].as_object() {
+            for property in properties.keys() {
+                if !used.iter().any(|placeholder| placeholder == property) {
+                    problems.push(format!(
+                        "{name}: `{property}` is an input that no placeholder reads, so its value is discarded"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
 fn every_template_is_a_command_the_binary_accepts() {
     let manual = manual();
     let mut problems = Vec::new();

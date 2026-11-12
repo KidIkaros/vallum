@@ -44,6 +44,13 @@ The agent reader's real surface is not the page: it is
 verb the console can do and the manual cannot is a gap, and one with a test —
 `crates/vallum/tests/utcp_manual.rs` — behind it.
 
+That reader cannot read a sentence and act on it. Every verb an agent is handed
+has to answer in a shape it can branch on, which is why `vallum policy` grew
+`--json` (`egress: blocked | unrestricted | unknown`, and `fix` when a guard is
+wanted but missing) and why `vallum_status` already had it. A tool description
+that names a field the command does not emit is the same defect as a page that
+names a state the host does not have.
+
 **The rule: plain words on the surface, exact terms one level down.** A panel's
 headline reads without the glossary; its row labels, tooltips and the palette keep
 the daemon's own vocabulary. Where both cannot be true, the surface wins and the

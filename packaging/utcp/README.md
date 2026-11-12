@@ -8,7 +8,7 @@ AI agents fail when trying to run interactive terminal applications like `vallum
 
 UTCP provides a standardized, zero-overhead bridge:
 - **No wrapper proxy daemon**: The agent calls `vallum` CLI directly.
-- **Deterministic JSON**: Operates over `--json` and structured subcommands (`doctor`, `show`, `keygen`, `syncconf`, `bench`).
+- **Deterministic JSON**: `--json` wherever the verb offers it — `doctor`, `show`, `status`, `policy`, and the `peer` family — and Prometheus text from `metrics`.
 - **Headless visual verification**: Exposes `vallum_tui_snapshot` (`vallum tui --snapshot`) so agents can inspect the dashboard layout without hanging or requiring a TTY.
 
 ## Available Tools
@@ -25,10 +25,15 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_bench` | `vallum bench --iterations <n> --bytes <n>` | Benchmark PQ data plane seal/open latency and throughput. |
 | `vallum_syncconf` | `vallum syncconf <file>` | Apply atomic peer configuration diffs to a running tunnel. |
 | `vallum_tui_snapshot` | `vallum tui --snapshot ...` | Capture a headless ASCII render of the cockpit dashboard. |
-| `vallum_status` | `vallum status --config <file> [--json]` | Answer "in the tunnel, blocked, or leaking?" by reading the host, so it works with the daemon dead. |
-| `vallum_policy` | `vallum policy on\|off\|status --config <file>` | Install, remove, or report the fail-closed egress block. |
+| `vallum_status` | `vallum status --config <file> --json` | Answer "in the tunnel, blocked, or leaking?" by reading the host, so it works with the daemon dead. |
+| `vallum_policy` | `vallum policy on\|off\|status --config <file> --json` | Install, remove, or report the fail-closed egress block, as one object: `declared`, `policy`, `guard`, `egress`, `fix`. |
 | `vallum_metrics` | `vallum metrics --config <file>` | Prometheus metrics, including `vallum_peer_delivery_ratio`. |
 | `vallum_peer_list` | `vallum peer list --config <file>` | Peers, prefixes, endpoints and fingerprints. |
+| `vallum_peer_show` | `vallum peer show <name> --config <file>` | One peer in full — the read to do before a remove. |
+| `vallum_peer_add` | `vallum peer add <name> --config <file> --public-key <line>` | Enrol a device that generated its own key. |
+| `vallum_peer_invite` | `vallum peer invite <name> --config <file> --ttl <min>` | Mint a single-use `vallum1-join:` ticket, no SSH needed. |
+| `vallum_peer_invites` | `vallum peer invites --config <file>` | Live invites, TTL left, spent or not. Tokens are never listed. |
+| `vallum_peer_remove` | `vallum peer remove <name> --config <file>` | Remove a peer; returns the backup path, the only undo. |
 | `vallum_server_init_plan` | `vallum server init --config <file> --dry-run` | Print every host change provisioning would make. No root needed. |
 | `vallum_server_init` | `vallum server init --config <file> --json` | Provision this host as a server: keys, units, port, forwarding, masquerade. |
 | `vallum_server_teardown_plan` | `vallum server teardown --config <file> --dry-run` | Print what teardown would remove. No root needed. |
@@ -46,24 +51,33 @@ starts a root daemon and changes the host:
 | `vallum_import_bundle` | `vallum import-bundle <file> --install` | Install a client from a `.vallum-bundle`: `/etc/vallum`, key, units, started. |
 | `vallum_stop` | `vallum stop --config <file>` | Ask the daemon to stop and wait for its acknowledgement. |
 
-## Two rules the manual follows
+## Three rules the manual follows
 
-1. **Every placeholder is a required input.** A UTCP CLI template substitutes
-   its placeholders verbatim, so an optional one arrives as an empty string and
-   `--suite UTCP_ARG_suite_UTCP_END` becomes `--suite --output …`. Where the CLI
-   has a default, the manual asks for the default explicitly (`bench`,
-   `tui_snapshot`).
-2. **Anything that changes the host as root has a plan tool beside it.**
+1. **Every placeholder is a required input, and every input reaches the
+   command.** A UTCP CLI template substitutes its placeholders verbatim, so an
+   optional one arrives as an empty string and `--suite UTCP_ARG_suite_UTCP_END`
+   becomes `--suite --output …`. Where the CLI has a default, the manual asks for
+   the default explicitly (`bench`, `tui_snapshot`). The mirror image matters
+   too: an input no placeholder reads is decoration, and a caller setting it
+   learns nothing — `vallum_status` declared `json` while its command already
+   passed `--json`, and `vallum_metrics` declared `control`, `prefix` and
+   `output` that no template passed on.
+2. **Anything that starts or stops host services has a plan tool beside it.**
    `server init`, `server teardown` and `join` each ship with a `_plan` variant
    running the same command under `--dry-run`, so an agent can show its work
-   before it acts. Flags that a template cannot express — a repeated `--address`,
-   `--purge`, `--force`, `--allow-hooks` — are named in the tool description as
-   shell-only, rather than silently missing.
+   before it acts.
+3. **A verb with no dry run is paired with the read that makes it safe.**
+   `peer remove` publishes `backup` and nothing else, so `vallum_peer_show` is
+   shipped beside it and the description says to call it first. Flags that a
+   template cannot express — a repeated `--address`, `--purge`, `--force`,
+   `--allow-hooks`, `--dns`, `--bundle-out`, `--prefix`, `--output` — are named
+   in the tool description as shell-only, rather than silently missing.
 
-`crates/vallum/tests/utcp_manual.rs` holds the manual against the binary on
-three points: every tool has a call template, every placeholder is required, and
-both the subcommand and every flag in each template exist in `--help`. It runs
-in `cargo test --workspace`, which is what CI runs on every push.
+`crates/vallum/tests/utcp_manual.rs` holds the manual against the binary on four
+points: every tool has a call template, every placeholder is a required input,
+every declared input is read by a placeholder, and both the subcommand and every
+flag in each template exist in `--help`. It runs in `cargo test --workspace`,
+which is what CI runs on every push.
 
 ## Agent Usage
 
@@ -101,10 +115,54 @@ A tool that fails (missing config, no permission, `vallum_status` saying
 `LEAKING`) comes back as the command's **stderr text**, not an exception — read
 it, it is the product's own sentence about what to fix next.
 
-**Version note (checked 2026-11-11, `utcp` 1.2.0).** The package's `UtcpManual`
-model still wants `{version, tools}`, while the current specification — and this
-file — carry `utcp_version` and `manual_version`. Loading this manual as a single
-`UtcpManual` therefore fails on a current-spec file, which is why the snippet
-above validates tools individually. `$schema` was removed for the same reason it
-would be useless: the URL the specification's own manuals point at
+Python parses JSON stdout for you, so `vallum_doctor` returns a list and
+`vallum_peer_add` returns a dict. The TypeScript SDK does not: it hands back the
+raw text, quoted, and the caller parses it.
+
+### With the TypeScript SDK
+
+```sh
+npm install @utcp/sdk @utcp/cli @utcp/file
+```
+
+```typescript
+import { UtcpClient } from '@utcp/sdk';
+import { FileCallTemplateSerializer } from '@utcp/file';
+import { register } from '@utcp/cli';
+
+register();   // the `cli` call-template type
+
+const manual = new FileCallTemplateSerializer().validateDict({
+  name: 'vallum',
+  call_template_type: 'file',
+  file_path: 'packaging/utcp/vallum.utcp.json',
+  // The file transport only registers tools whose protocol it allows.
+  allowed_communication_protocols: ['cli'],
+});
+
+const client = await UtcpClient.create(process.cwd(), {
+  manual_call_templates: [manual],
+});
+const doctor = await client.callTool('vallum.vallum_doctor', {});
+```
+
+Two client-side requirements, neither of them visible in the manual: tools are
+namespaced under the template's `name` (`vallum.vallum_doctor`), and without
+`allowed_communication_protocols: ['cli']` the file transport refuses every tool
+with *"uses communication protocol 'cli' which is not in allowed protocols
+['file']"*.
+
+**Version note (checked 2026-11-11).** The two SDKs disagree about the manual's
+envelope, and this file follows the specification: `utcp_version`,
+`manual_version`, `tools` — nothing else.
+
+- `utcp` 1.2.0 (Python) still wants `{version, tools}`, so it rejects this file
+  as a whole; validate tools individually as the snippet above does.
+- `@utcp/sdk` 1.2.0 (TypeScript) accepts the versions but is **strict** about
+  extra keys — the `name` and `description` this file used to carry made it fail
+  with `unrecognized_keys` and register zero tools. That is why they are gone,
+  and why the description of each tool says what it does.
+
+`$schema` was removed for the same reason it would be useless: the URL the
+specification's own manuals point at
 (`.../utcp-specification/main/schemas/manual.schema.json`) returns 404.

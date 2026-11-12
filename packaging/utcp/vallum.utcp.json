@@ -1,8 +1,6 @@
 {
   "manual_version": "1.1.0",
   "utcp_version": "1.0.1",
-  "name": "vallum",
-  "description": "Universal Tool Calling Protocol (UTCP) manual for Vallum \u2014 hybrid post-quantum layer-3 tunnel operations, diagnostics, key management, and runtime telemetry.",
   "tools": [
     {
       "name": "vallum_doctor",
@@ -452,10 +450,6 @@
           "config": {
             "type": "string",
             "description": "Path to the tunnel's TOML config."
-          },
-          "json": {
-            "type": "boolean",
-            "description": "Machine-readable output."
           }
         },
         "required": [
@@ -499,7 +493,7 @@
     },
     {
       "name": "vallum_policy",
-      "description": "Install, remove, or report the fail-closed egress block. `on` blocks everything except loopback, the tunnel and the peer endpoint; `off` removes it and needs neither daemon nor network; `status` reports what the config asks for and what the host has. Requires CAP_NET_ADMIN.",
+      "description": "Install, remove, or report the fail-closed egress block. `on` blocks everything except loopback, the tunnel and the peer endpoint; `off` removes it and needs neither daemon nor network; `status` reports what the config asks for and what the host has, in one object: `declared` (what the config says), `policy` (`declared` with `auto` resolved), `guard` (installed/absent/unknown), `egress` (blocked/unrestricted/unknown) and `fix` when a guard is wanted but missing. Requires CAP_NET_ADMIN for `on` and `off`.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -522,8 +516,65 @@
         ]
       },
       "outputs": {
-        "type": "string",
-        "description": "One line naming what changed (`on`/`off`), or the mode the config asks for and the mode the host has (`status`). This verb writes no JSON; read the line, or read the host with vallum_status. `vallum policy on --dry-run` prints the ruleset and is not exposed here."
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off",
+              "status"
+            ]
+          },
+          "interface": {
+            "type": "string"
+          },
+          "declared": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off",
+              "auto"
+            ]
+          },
+          "policy": {
+            "type": "string",
+            "enum": [
+              "on",
+              "off",
+              "auto"
+            ]
+          },
+          "guard": {
+            "type": "string",
+            "enum": [
+              "installed",
+              "absent",
+              "unknown"
+            ]
+          },
+          "egress": {
+            "type": "string",
+            "enum": [
+              "blocked",
+              "unrestricted",
+              "unknown"
+            ]
+          },
+          "families": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "v4",
+                "v6"
+              ]
+            }
+          },
+          "fix": {
+            "type": "string"
+          }
+        }
       },
       "tags": [
         "security",
@@ -533,7 +584,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "vallum policy UTCP_ARG_action_UTCP_END --config UTCP_ARG_config_UTCP_END",
+            "command": "vallum policy UTCP_ARG_action_UTCP_END --config UTCP_ARG_config_UTCP_END --json",
             "append_to_final_output": true
           }
         ]
@@ -541,25 +592,13 @@
     },
     {
       "name": "vallum_metrics",
-      "description": "Print the daemon's state as Prometheus metrics: per-peer bytes, handshake age, epoch, and vallum_peer_delivery_ratio \u2014 datagrams received over datagrams sent in the last 60 s window. A ratio near zero means the tunnel is sending and not being answered, which handshake age cannot show. An idle peer reports 1.",
+      "description": "Print the daemon's state as Prometheus metrics: per-peer bytes, handshake age, epoch, and vallum_peer_delivery_ratio — datagrams received over datagrams sent in the last 60 s window. A ratio near zero means the tunnel is sending and not being answered, which handshake age cannot show. An idle peer reports 1. Shell-only flags this template cannot express: `--control` (a socket instead of a config), `--prefix`, and `--output` (an atomic write for a `node_exporter` textfile collector — the file still gets `up 0` when the daemon is silent, while the command exits nonzero).",
       "inputs": {
         "type": "object",
         "properties": {
           "config": {
             "type": "string",
             "description": "Path to the tunnel's TOML config."
-          },
-          "control": {
-            "type": "string",
-            "description": "Control socket path, instead of a config."
-          },
-          "prefix": {
-            "type": "string",
-            "description": "Metric name prefix, default vallum."
-          },
-          "output": {
-            "type": "string",
-            "description": "Write atomically to this file instead of stdout."
           }
         },
         "required": [
@@ -613,6 +652,289 @@
         "commands": [
           {
             "command": "vallum peer list --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_peer_show",
+      "description": "Read one peer: prefixes, endpoint, keepalive, PSK, endpoint pinning, identity validity and fingerprint. This is the read before `vallum_peer_remove`, which has no dry run.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The peer's name in the config."
+          },
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          }
+        },
+        "required": [
+          "name",
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "allowed_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "psk": {
+            "type": "boolean"
+          },
+          "pin_endpoint": {
+            "type": "boolean"
+          }
+        }
+      },
+      "tags": [
+        "configuration",
+        "diagnostics"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer show UTCP_ARG_name_UTCP_END --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_peer_add",
+      "description": "Enrol a device that generated its own key: writes the peer into the server's config, allocates one address per family the interface carries, and tells a running daemon. The fingerprint it returns is the label vallum_metrics uses. Shell-only flags this template cannot express: `--bundle-out`/`--ship-key` (the server generating a client's key — a server compromise then means a client compromise), `--dns` (repeatable), `--psk`, `--pin-endpoint`, `--allowed-ips`, `--address`, `--keepalive`, `--shaping`, `--no-apply`.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name this device will have on the server."
+          },
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "The device's own public line (`vallum1:0003:…`), printed by `vallum pubkey` on the device."
+          }
+        },
+        "required": [
+          "name",
+          "config",
+          "public_key"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "allowed_ips": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "backup": {
+            "type": "string"
+          }
+        }
+      },
+      "tags": [
+        "configuration",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer add UTCP_ARG_name_UTCP_END --config UTCP_ARG_config_UTCP_END --public-key \"UTCP_ARG_public_key_UTCP_END\" --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_peer_invite",
+      "description": "Mint a single-use enrolment ticket so a device can join without SSH. The returned `ticket` is what the device runs: `vallum join <ticket>`. It expires after `ttl_minutes` and works once. The `token` is a secret — pass it to the device, never into a log or a transcript.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name the device will enrol under."
+          },
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          },
+          "ttl_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "How long the invite lives, in minutes."
+          }
+        },
+        "required": [
+          "name",
+          "config",
+          "ttl_minutes"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "expires_in_secs": {
+            "type": "integer"
+          },
+          "fingerprint": {
+            "type": "string"
+          }
+        }
+      },
+      "tags": [
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer invite UTCP_ARG_name_UTCP_END --config UTCP_ARG_config_UTCP_END --ttl UTCP_ARG_ttl_minutes_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_peer_invites",
+      "description": "List live one-time invites with their remaining TTL, pruning expired ones. Tokens are never printed here, so this is the safe half of inviting: use it to check whether the ticket you handed out was spent.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the server's TOML config."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "expires_in_secs": {
+              "type": "integer"
+            },
+            "pinned": {
+              "type": "boolean"
+            },
+            "spent": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "tags": [
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer invites --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_peer_remove",
+      "description": "Remove a peer from the config and tell a running daemon. Immediate: there is no dry run, so call `vallum_peer_show` first and keep the reported `backup` path — it is the only undo. Removing a peer does not revoke its key; rotate the server's identity if the device was lost.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The peer's name."
+          },
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config."
+          }
+        },
+        "required": [
+          "name",
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "applied": {
+            "type": "boolean"
+          },
+          "backup": {
+            "type": "string"
+          }
+        }
+      },
+      "tags": [
+        "configuration",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer remove UTCP_ARG_name_UTCP_END --config UTCP_ARG_config_UTCP_END --json",
             "append_to_final_output": true
           }
         ]
