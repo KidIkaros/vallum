@@ -118,13 +118,29 @@ path is right.
    arrived from the tunnel and went no further, while `ip_forward` read `1` and
    every sysctl-based check would have called it healthy.
 
-### The finding worth acting on
+### The finding, corrected
 
-**"Forwarding enabled" and "forwarding works" are different questions, and the
-product only asks the first.** A server can be running, handshaking, carrying
-ICMP, and silently dropping every TCP and UDP flow from its clients, with
-`doctor` green. The check that would catch it is a forwarded-packet probe, not a
-sysctl read.
+My first write-up of this gate said *"the product asks whether forwarding is
+enabled, never whether it works"*. **That was wrong**, and it is worth recording
+because the correction is the actual lesson.
+
+`doctor` already checks it. With the FORWARD rules removed it says:
+
+```
+WARN  forwarding  IP forwarding is on, but iptables filters forwarded traffic
+      (Docker, Tailscale, or another manager); run `vallum server init --force`,
+      or `iptables -I FORWARD -i vallum0 -j ACCEPT`
+```
+
+That is both the diagnosis and the fix — the exact command I eventually ran by
+hand, after six container cycles spent finding it. The check reads
+`iptables -S FORWARD` for `-i <interface> ... -j ACCEPT` whenever the policy
+drops, which is precisely this failure.
+
+So the gap was not in the product. It was in the order I worked: I diagnosed by
+hand instead of running the diagnostic that ships with it. `vallum doctor` was
+one command, it was already on the server, and it would have ended the hunt at
+the second run.
 
 Also resolved here rather than assumed: the traffic demonstrably crosses the
 tunnel (the server's per-peer `rx_bytes` moved 710 → 3456 during the probes), so
