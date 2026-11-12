@@ -217,7 +217,6 @@ restore_nat() {
 }
 
 cleanup() {
-    restore_nat
     set +e
     say "cleanup"
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null
@@ -253,6 +252,10 @@ cleanup() {
         fi
     fi
     rm -rf "$LOCAL_DIR"
+    # LAST, after every `nft delete` above has run. Restoring first — as this
+    # did — put the table back and then deleted it again, so the fix was a no-op
+    # that read like a fix (found by the premortem, 2026-11-12).
+    restore_nat
     ok "both ends restored"
 }
 kept() {
