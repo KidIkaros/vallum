@@ -255,10 +255,27 @@ EOF
         echo "$tag: the trace shows no bind, so there is no window to check" >&2
         exit 1
     fi
-    head -n "$((boundary - 1))" "$W/trace-$tag.txt" | grep -q 'execve(' || {
-        echo "$tag: the trace begins after the daemon started; strace missed the startup" >&2
+    # The trace must START at the program's entry, or the comparison below is
+    # against a partial set and the gate says nothing. `execve` is the entry.
+    #
+    # The boundary is the first bind AFTER the entry, not the first bind in the
+    # file: a trace that begins with a bind has already lost the startup, and
+    # that is a different failure from one where the entry is simply absent.
+    local entry
+    entry=$(grep -n 'execve(' "$W/trace-$tag.txt" | head -1 | cut -d: -f1) || true
+    if [ -z "$entry" ]; then
+        echo "$tag: the trace holds no execve at all - strace did not capture the startup" >&2
+        echo "  the first lines of the trace:" >&2
+        head -5 "$W/trace-$tag.txt" >&2
         exit 1
-    }
+    fi
+    if [ "$entry" -gt "$boundary" ]; then
+        echo "$tag: the trace begins after the daemon started; strace missed the startup" >&2
+        echo "  the entry is at line $entry, the first bind at line $boundary" >&2
+        echo "  the first lines of the trace:" >&2
+        head -5 "$W/trace-$tag.txt" >&2
+        exit 1
+    fi
 
     # strace prefixes each line with `[pid N]` when it follows threads and a bare
     # number when it does not; both are stripped before the call name is taken. An
