@@ -18,6 +18,8 @@
 #   5. assert the public IP is the server's — the one check that catches every
 #      bypass at once
 set -uo pipefail
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
 cd "$(dirname "$0")/.."
 
 NAME=${NAME:-vallum-full}
@@ -29,6 +31,7 @@ SERVER_IP=${SERVER_IP:-203.0.113.10}
 RUNDIR=$(mktemp -d -t accept-full.XXXXXX)
 
 say() { echo "[full] $*"; }
+ASSERTIONS=0
 die() { echo "[full] FAIL: $*" >&2; exit 1; }
 ex()  { docker exec "$NAME" bash -c "$1"; }
 
@@ -39,7 +42,7 @@ cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$RUNDIR"
 }
-trap cleanup EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-full-tunnel "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
 
 say "container with its own netns (host routing untouched by construction)"
 docker rm -f "$NAME" >/dev/null 2>&1
@@ -208,9 +211,12 @@ echo "   quick log:   $(ex "journalctl -u vallum-quick@$UNIT -n 4 --no-pager -o 
 echo "   dns via dig: $(ex 'command -v dig >/dev/null && dig +short +time=3 one.one.one.one @1.1.1.1 2>/dev/null | head -1' )"
 
 echo
+ASSERTIONS=$((ASSERTIONS + 3))
 if [ "$ping" = yes ] && [ "$dns" = yes ] && [ "${pub:-}" = "$SERVER_IP" ]; then
     echo "== PASS — full tunnel carrying, DNS through it, public IP is the server's"
     exit 0
 fi
 echo "== FAIL — ping=$ping dns=$dns public=${pub:-none} (expected $SERVER_IP)"
 exit 1
+
+

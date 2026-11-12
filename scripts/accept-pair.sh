@@ -16,6 +16,13 @@
 # network, so nothing here can collide with a real network, and the target is
 # destroyed on exit whether the run passed or failed.
 set -uo pipefail
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+# The verdict trap is installed FIRST: the backend dispatch below can exit
+# before anything else runs, and a gate that records nothing is the rot mode
+# this whole mechanism exists to end.
+trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-pair "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+ASSERTIONS=0
+
 cd "$(dirname "$0")/.."
 
 # Two backends, and docker is not one of them by default.
@@ -45,11 +52,16 @@ if [ "$BACKEND" = namespaces ]; then
     # user namespaces (Ubuntu 24.04's default) - the same shape ci.yml uses.
     echo "[pair] backend: namespaces (no docker required)"
     export QUICK="$PWD/target/release/vallum-quick"
-    if bash scripts/e2e-netns.sh "$PWD/target/release/vallum"; then
-        echo "== PASS - a server and a client, in namespaces, handshook and carried"
-        exit 0
+    NS_OUT=$(bash scripts/e2e-netns.sh "$PWD/target/release/vallum" 2>&1)
+    NS_RC=$?
+    if [ "$NS_RC" -ne 0 ]; then
+        NS_OUT=$(sudo -n -E bash scripts/e2e-netns.sh "$PWD/target/release/vallum" 2>&1)
+        NS_RC=$?
     fi
-    if sudo -n -E bash scripts/e2e-netns.sh "$PWD/target/release/vallum"; then
+    printf '%s\n' "$NS_OUT"
+    # the delegated gate's own checks are the assertions it made
+    ASSERTIONS=$(printf '%s\n' "$NS_OUT" | grep -c '^   ok')
+    if [ "$NS_RC" -eq 0 ]; then
         echo "== PASS - a server and a client, in namespaces, handshook and carried"
         exit 0
     fi
@@ -63,6 +75,7 @@ SERVER=vallum-pair-server
 CLIENT=vallum-pair-client
 IMAGE=${IMAGE:-debian:stable-slim}
 WORK=$(mktemp -d -t vallum-pair.XXXXXX)
+ASSERTIONS=0
 FAILED=""
 
 say() { echo "[pair] $*"; }
@@ -75,7 +88,6 @@ cleanup() {
     docker network rm "$NETWORK" >/dev/null 2>&1
     rm -rf "$WORK"
 }
-trap cleanup EXIT
 
 say "building the release binaries"
 cargo build --release -p vallum -p vallum-quick >/dev/null 2>&1 \
@@ -178,11 +190,13 @@ say "client daemon state"
 # After the keepalive tick, so the snapshot includes the session.
 STATE=$(ex "$CLIENT" "/usr/bin/vallum show --control /run/vallum/paircli.sock 2>/dev/null")
 echo "$STATE" | sed 's/^/   /'
+ASSERTIONS=$((ASSERTIONS + 1))
 echo "$STATE" | grep -q 'last_handshake_time_sec' || FAILED="the client never handshook"
 
 say "the only ping that can arrive is through the tunnel"
 PING=$(ex "$CLIENT" "ping -c3 -W3 10.7.0.1 2>&1 | tail -2")
 echo "$PING" | sed 's/^/   /'
+ASSERTIONS=$((ASSERTIONS + 1))
 echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry"
 
 say "the server's view"
@@ -194,3 +208,5 @@ if [ -n "$FAILED" ]; then
     exit 1
 fi
 echo "== PASS - a server and a client, provisioned here, handshook and carried"
+
+

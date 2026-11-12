@@ -19,6 +19,8 @@
 #
 # Everything is removed on exit: peers from the server, containers from docker.
 set -uo pipefail
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
 cd "$(dirname "$0")/.."
 
 COUNT=${1:-10}
@@ -41,7 +43,7 @@ cleanup() {
     done
     rm -rf "$RUNDIR"
 }
-trap cleanup EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-many "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
 
 server_rss_kb() {
     ssh "$VPS" 'pid=$(systemctl show -p MainPID --value vallum@vallum0); awk "/VmRSS/ {print \$2}" /proc/$pid/status' 2>/dev/null
@@ -119,7 +121,7 @@ done
 wait
 
 say "results per client"
-ok=0; failed=""
+ok=0; failed=""; ASSERTIONS=0
 for name in $(names); do
     addr=$(docker exec "vm-$name" bash -c \
         'grep -h "^address" /etc/vallum/*.toml 2>/dev/null | head -1 | cut -d"\"" -f2' 2>/dev/null)
@@ -166,6 +168,7 @@ echo
 # The PASS line used to claim the peers were "tracked separately" while the
 # exit condition only counted pings. The count is now compared, and a mismatch
 # fails the run (premortem, 2026-11-12).
+ASSERTIONS=$((ASSERTIONS + 2))
 if [ "$ok" = "$COUNT" ] && [ "$PEERS_ADDED" = "$COUNT" ]; then
     echo "== PASS — $ok/$COUNT clients joined and carried, and the server tracks $PEERS_ADDED of them"
 else
@@ -173,3 +176,5 @@ else
     [ "$PEERS_ADDED" != "$COUNT" ] && echo "== FAIL — the server tracked $PEERS_ADDED new peers, expected $COUNT"
     exit 1
 fi
+
+

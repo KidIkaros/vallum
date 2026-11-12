@@ -10,6 +10,8 @@
 # Reproducibility is the claim under test: nothing here may depend on the
 # operator's home directory, their shell history, or a file they happen to have.
 set -uo pipefail
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+
 
 # Everything machine-specific is an override, because a test only the
 # author can run does not prove reproducibility.
@@ -29,7 +31,7 @@ cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$TICKET_DIR"
 }
-trap cleanup EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-install "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
 
 say "starting a clean systemd container (own netns, not --network=host)"
 docker rm -f "$NAME" >/dev/null 2>&1
@@ -97,7 +99,9 @@ say "units after join"
 # The unit instance is the config stem, so it is the peer name - not a literal.
 UNITS=$(docker exec "$NAME" systemctl is-active "vallum@$PEER" "vallum-quick@$PEER" 2>&1 | tr '\n' ' ')
 echo "   $UNITS"
+ASSERTIONS=0
 FAILED=""
+ASSERTIONS=$((ASSERTIONS + 1))
 case "$UNITS" in
     *inactive*|*failed*|*unknown*) FAILED="the join left a unit inactive: $UNITS" ;;
 esac
@@ -108,6 +112,7 @@ say "does the tunnel carry (ICMP to the server's tunnel address)"
 # routes into the interface.
 PING=$(docker exec "$NAME" bash -c 'ping -c3 -W3 10.7.0.1 2>&1 | tail -2')
 echo "$PING" | sed 's/^/   /'
+ASSERTIONS=$((ASSERTIONS + 1))
 echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry (no 0% packet loss)"
 
 say "the server's view of this device"
@@ -122,3 +127,5 @@ if [ -n "$FAILED" ]; then
     exit 1
 fi
 echo "== PASS - installed, joined, and the tunnel carries"
+
+

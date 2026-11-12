@@ -31,3 +31,6 @@
 /packaging/vallum.bash
 /packaging/vallum.zsh
 /packaging/vallum.fish
+
+# gate verdicts are local evidence, regenerated per run
+.vallum-verdicts/

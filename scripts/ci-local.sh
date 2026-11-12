@@ -94,3 +94,19 @@ if [ -z "$FAILED" ]; then
 fi
 echo "== FAIL at: $FAILED"
 exit 1
+echo
+echo "the recorded verdicts (each bound to a commit):"
+if [ -d .vallum-verdicts ]; then
+    for f in .vallum-verdicts/*.json; do
+        [ -e "$f" ] || continue
+        printf '  %-22s %-8s %s assertions  %s\n' \
+            "$(basename "$f" .json)" \
+            "$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$f")" \
+            "$(sed -n 's/.*"assertions": \([0-9]*\).*/\1/p' "$f")" \
+            "$(sed -n 's/.*"tree": "\([^"]*\)".*/\1/p' "$f")"
+    done
+else
+    echo "  (none recorded yet)"
+fi
+echo
+echo "all gates passed"

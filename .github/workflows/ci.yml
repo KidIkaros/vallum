@@ -292,6 +292,14 @@ jobs:
         # unprivileged user namespaces it escalates with sudo -E itself.
         run: scripts/accept-pair.sh
 
+      - name: Publish the gate verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdicts
+          path: vallum/.vallum-verdicts/
+          if-no-files-found: ignore
+
   audit:
     name: advisories and supply chain
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

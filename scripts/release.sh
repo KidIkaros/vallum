@@ -115,6 +115,33 @@ else
    Or release anyway with: --skip-remote \"reason\""
 fi
 
+# The recorded verdicts. Each gate's verdict names the commit it ran against and
+# how many assertions it made, so a verdict from an older tree is VISIBLE rather
+# than silently standing in for this one, and a shrinking assertion count is a
+# signal that a gate got weaker.
+VERDICT_DIR="${VERDICT_DIR:-$PWD/.vallum-verdicts}"
+if [ -d "$VERDICT_DIR" ]; then
+    for vf in "$VERDICT_DIR"/*.json; do
+        [ -e "$vf" ] || continue
+        v_gate=$(basename "$vf" .json)
+        v_commit=$(sed -n 's/.*"commit": "\([^"]*\)".*/\1/p' "$vf")
+        v_status=$(sed -n 's/.*"status": "\([^"]*\)".*/\1/p' "$vf")
+        v_assert=$(sed -n 's/.*"assertions": \([0-9]*\).*/\1/p' "$vf")
+        if [ "$v_commit" = "$(git rev-parse HEAD)" ]; then
+            if [ "$v_status" = passed ]; then
+                ok "$v_gate passed this commit ($v_assert assertions)"
+            else
+                fail "$v_gate recorded a FAILED verdict for this commit"
+            fi
+        else
+            printf '   stale %s ran on %s (%s assertions), not this commit\n' \
+                "$v_gate" "$(printf '%s' "$v_commit" | cut -c1-7)" "$v_assert"
+        fi
+    done
+else
+    printf '   note  no verdict records in %s\n' "$VERDICT_DIR"
+fi
+
 # The signing key. Releases are only as trustworthy as the verification
 # install.sh can do, so an unsigned release is a refusal — except in --dry-run,
 # which signs nothing anyway.
