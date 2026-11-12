@@ -14,14 +14,21 @@ exists to stop wishes being quoted as facts.
 
 ## Capacity
 
-**Measured.** Handshake cost, `docs/proof/performance.md`:
-tri-hybrid `0x0003` **54.27 ms**, fast profile `0x0002` **1.81 ms**.
-Rekey interval 120 s, so steady-state handshake rate is `peers / 120`.
+**Measured:** the handshake cost of one exchange, `docs/proof/performance.md`:
+tri-hybrid `0x0003` **54.27 ms**, fast profile `0x0002` **1.81 ms**. That is a
+Criterion median of *both sides in one process* - single-threaded, no network,
+no fragmentation, no daemon.
 
-| Suite | Handshakes/s per core | Peers per core |
+**Derived, not measured:** everything in the next table. "Handshakes/s per
+core" is `1 / latency`, which assumes one handshake per core at a time with
+nothing else running; "peers per core" is that number times the 120 s rekey
+interval. Neither has been observed under load, and the second column's
+meaning depends on the first being true.
+
+| Suite | Derived handshakes/s per core | Derived peers per core |
 |---|---|---|
-| `0x0003` tri-hybrid (default) | 18.4 | **2,211** |
-| `0x0002` X25519+ML-KEM-768 | 552.5 | **66,298** |
+| `0x0003` tri-hybrid (default) | 18.4 | 2,211 |
+| `0x0002` X25519+ML-KEM-768 | 552.5 | 66,298 |
 
 **Stated target:** 2,000 peers per daemon on the default suite, 50,000 on
 `0x0002`. The gap between target and ceiling is headroom for the data plane,
@@ -38,21 +45,84 @@ device's inner address from that prefix. Enrolling peers one at a time into a
 running daemon succeeds **253 times** and then stops with "the tunnel has no free
 address left", having handed out 10.7.0.2 through 10.7.0.254. A default install
 therefore capped at 253 devices — eight times below the target above — and no
-amount of handshake headroom changes it. The fix is one line: a wider prefix
-(`/20`, 4,094 devices, is the default from this release).
+amount of handshake headroom changes it. The fix is a wider prefix: `/20`
+(4,094 devices) is the default in `vallum server init`
+(`crates/vallum/src/commands/server.rs:429`).
+
+**This page previously claimed the /20 was "the default from this release".
+It was not, on the documented path.** `vallum setup --server` carried its own
+`10.7.0.1/24` (`crates/vallum/src/commands/setup.rs:101`) and passed it
+explicitly, so the /20 default in `server.rs` was never reached and the
+documented install produced 253 devices — eight times below the target this
+page claims. Both now use the /20.
 
 **Memory per peer (measured).** 6.9 MB resident with no peers, 15.7 MB at 1,000,
 24.8 MB at 2,000 → **8.9 KB per peer**, ~0.25 ms of startup each. Worst case is
 the per-peer queue bound (256 packets ≈ 384 KB), which puts a 3.9 GB host at
 ~10,000 congested peers. Memory is not binding below that.
 
-**A restart is a two-minute event (measured, then derived).** One handshake
-costs the same whatever the peer table holds — 79.6 ms at 1 peer, 79.9 at 100,
-80.1 at 1,000, 77.1 at 2,000 (5 samples each, both sides in one process) — so
-recovery is `N × one handshake` with no cliff. At the 18.4 handshakes/s above,
-2,000 peers re-establish in **~109 s**, and for that window the single-threaded
-loop is spending its core on handshakes rather than on traffic. Size the restart
-window from this number, not from the handshake latency.
+**A restart is a two-minute event (measured, then derived — and the two
+figures disagree).** One handshake costs the same whatever the peer table holds
+— 79.6 ms at 1 peer, 79.9 at 100, 80.1 at 1,000, 77.1 at 2,000 (5 samples each,
+both sides in one process) — so recovery is `N × one handshake` with no cliff.
+
+Those four measured latencies give **2,000 peers in ~159 s** (2,000 × 79.6 ms).
+The **~109 s** figure published earlier came from the *other* measurement on
+this page — 18.4 handshakes/s, i.e. 54.27 ms — so the two published numbers
+describe different instruments and the smaller one was the one quoted. The
+honest statement is a range: **roughly 110–160 s**, from a per-handshake
+latency measured with both sides in one process and no network. Quote the range
+or neither; do not quote 109 s as if it were the outcome of the other
+measurement.
+
+For that window the single-threaded loop is spending its core on handshakes
+rather than on traffic. Size the restart window from this number, not from the
+handshake latency.
+
+**But a mass simultaneous rekey is not bounded by that number, and this is the
+exposure the page previously did not name.** Three structural limits, none of
+them CPU:
+
+1. **The reassembly table is 16 entries for the whole device**
+   (`crates/vallum-tunnel/src/segment/reassembly.rs:69`). One instance serves
+   a whole device, and an entry is one *message* - a handshake's fragments
+   accumulate into a single entry, so the bound is on **concurrent handshakes**,
+   not on fragments. Sixteen concurrent initiations fit; the seventeenth
+   evicts the entry that has waited longest, and the evicted message's later
+   fragments then open a *second* entry for the same id - so that message is
+   split across two entries and never completes. 16 is a deliberate bound:
+   the module docs call it "a hard bound on the hostile one", and the whole
+   table is 256 KiB at the ceiling. Raising it is a memory-versus-DoS decision
+   (256 entries would be 4 MiB), not a free fix, and it is not raised here.
+2. **A stalled handshake retransmits every 5 s**
+   (`crates/vallum-core/src/timer.rs:38,243`), so a herd that cannot get
+   through becomes a standing retransmission storm rather than a 2-minute
+   event.
+3. **The rekey trigger has no jitter.** `REKEY_JITTER_MS` applies to the
+   *retransmit* delay (`crates/vallum-core/src/timer.rs:271`), not to the
+   rekey trigger itself, which is exactly `established_at + 120 s`
+   (`crates/vallum-core/src/timer.rs:249`). Peers enrolled or rebooted together
+   rekey in the same instant, every 120 s.
+
+There is also less room than the number suggests: the protocol's own budget is
+60 s between the rekey trigger (120 s) and key death (180 s)
+(`crates/vallum-core/src/timer.rs:26,44`), which is **shorter** than the
+recovery time quoted above.
+
+**So the honest statement of the 2,000-peer target is: 2,000 peers fit in the
+address plan and in roughly 25 MB of RAM, and the handshake path cannot carry
+2,000 of them at once.** Two ceilings, neither of them the one the old number
+implied:
+
+- **at most 16 concurrent inbound initiations** (the reassembly table), and
+- **~18 handshakes/s sustained** (the loop thread's CPU, which is what the
+  18.4 figure above actually measures).
+
+A server absorbing a *fleet* re-establishing at once is outside both. What
+that means in practice, for an operator: size the restart window for the
+peers that will re-establish together, and stagger them yourself if that
+number is large. The daemon does not spread a fleet's rekeys for you — see
+point 3.
 
 **Peers are devices, not people.** At two to four devices per person the
 2,000-peer target is roughly 500–1,000 people. Quote it as devices.

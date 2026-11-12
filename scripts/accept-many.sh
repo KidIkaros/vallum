@@ -13,7 +13,8 @@
 #             separately, and the per-peer memory cost is what
 #             docs/requirements.md claims.
 #   does not — bandwidth at scale, or handshake timing under a full rekey herd.
-#             Those need the capacity harness in references/capacity.md.
+#             Those need a capacity harness that does not exist yet; the peer
+#             count and the memory figure live in docs/requirements.md.
 #
 #   scripts/accept-many.sh [count]      # default 10
 #

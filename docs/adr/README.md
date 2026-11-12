@@ -37,3 +37,5 @@
 | [0033](0033-bundle-policy-report.md) | An imported bundle states its policy, and a weak one is refused | proposed | 2026-11-11 |
 | [0034](0034-file-enrolment.md) | The file is the enrolment; the token protocol is a convenience | proposed | 2026-11-12 |
 | [0035](0035-ssh-as-the-control-plane.md) | SSH is the control plane — the mesh's coordination plane is not a new service | proposed | 2026-11-12 |
+| [0035](0035-ssh-as-the-control-plane.md) | SSH is the control plane — the mesh's coordination plane is not a new service | proposed | 2026-11-12 |
+| [0036](0036-rekey-spread.md) | A session's rekey is spread, so a fleet does not rekey in lockstep | proposed | 2026-11-12 |

@@ -71,6 +71,20 @@ impl Device {
             self.remap(index);
         }
 
+        // (2b) Draw this session's rekey spread, once. The rekey trigger is
+        //      otherwise exactly `established_at + 120 s`, so peers that
+        //      established together rekey together, in lockstep, forever - and
+        //      a fleet's initiations arrive at the server in the same second.
+        //      The device owns the randomness; `vallum-core` has none.
+        if self.peers[index].timers.is_established()
+            && self.peers[index].timers.rekey_offset().is_none()
+        {
+            let draw = rng.draw_u64();
+            self.peers[index]
+                .timers
+                .set_rekey_offset(draw % (vallum_core::timer::REKEY_SPREAD_MS + 1));
+        }
+
         // (3) Retransmit the initiator's `InitConf` until the responder answers.
         self.retransmit_conf(index, now, out);
 

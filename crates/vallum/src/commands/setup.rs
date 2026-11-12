@@ -98,7 +98,11 @@ pub struct SetupArgs {
     pub dry_run: bool,
 }
 
-const DEFAULT_ADDRESS: &str = "10.7.0.1/24";
+/// The address plan `vallum setup --server` offers. It must be the same plan
+/// `vallum server init` uses (`server::DEFAULT_ADDRESSES`), or the documented
+/// install path produces a /24 - 253 addresses - while the documentation
+/// claims the /20's 4,094.
+const DEFAULT_ADDRESS: &str = "10.7.0.1/20";
 
 /// `vallum setup`.
 ///
@@ -599,6 +603,22 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     let server_address = report
         .get("server_address")
         .and_then(|address| address.as_str());
+    // The server tells us whether the peer was actually applied to the running
+    // daemon. Ignoring that verdict is how a client ends up holding a config
+    // that can never handshake: the enrolment "succeeds", the file is written,
+    // and the failure surfaces 35 seconds later as "no handshake within 35s",
+    // which points at the client rather than at the server.
+    let applied = report.get("applied").and_then(|a| a.as_bool());
+    if applied == Some(false) {
+        return Err(Error::Precondition(
+            "the server accepted the peer but did NOT apply it to the running daemon.\n\
+             Its own report says: applied no. The most common cause is that the\n\
+             server's vallum daemon is not running, or was started with --no-service.\n\
+             On the server: sudo systemctl start vallum@<interface>\n\
+             Then enrol the device again."
+                .to_owned(),
+        ));
+    }
     // Before anything is written: is this the server the invite named?
     if let Some(expect) = &args.expect {
         let server_line = config_text

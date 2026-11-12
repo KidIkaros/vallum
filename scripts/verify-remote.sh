@@ -303,8 +303,19 @@ QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 
 say "remote checks ($TARGET)"
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
-rsh "sudo nft list table inet vallum 2>/dev/null" >"$NAT_SAVE" 2>/dev/null || true
-[ -s "$NAT_SAVE" ] && note "saved the host's existing \`inet vallum\` table to restore after the run"
+# The difference between "the host has no such table" and "we could not read it"
+# matters: the cleanup deletes `inet vallum`, so a table we failed to save is a
+# table we destroy and cannot put back - and the restore, seeing an empty save
+# file, would report success. So the second case refuses to run at all.
+if rsh "sudo nft list table inet vallum" >"$NAT_SAVE" 2>/dev/null; then
+    note "saved the host's existing \`inet vallum\` table to restore after the run"
+elif rsh "sudo nft list tables inet 2>/dev/null | grep -q '^inet vallum$'"; then
+    fail "the host HAS an \`inet vallum\` table but it could not be read"
+    fail "   refusing to run: the cleanup would delete a table we cannot restore"
+    exit 1
+else
+    note "the host has no \`inet vallum\` table to preserve"
+fi
 if rsh "test -e /etc/vallum" 2>/dev/null; then
     if [ "$CLEAN" != 1 ]; then
         bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.

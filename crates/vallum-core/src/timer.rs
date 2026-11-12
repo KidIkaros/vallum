@@ -43,6 +43,27 @@ pub const REKEY_ATTEMPT_TIME_MS: u64 = 90_000;
 /// Age at which a session's key must not be used, in milliseconds.
 pub const REJECT_AFTER_TIME_MS: u64 = 180_000;
 
+/// How far a session's rekey may be spread past [`REKEY_AFTER_TIME_MS`], in
+/// milliseconds.
+///
+/// Without this, a fleet that enrolled together - or rebooted together -
+/// rekeys in the same instant, forever: the rekey trigger was exactly
+/// `established_at + 120 s` with no spread, so a thousand clients that booted
+/// together sent a thousand initiations to the server in the same second. The
+/// server's reassembly table holds sixteen concurrent handshakes
+/// (`MAX_REASSEMBLIES`), so the herd evicts entries and the handshakes that
+/// lose their entry never complete.
+///
+/// The spread is bounded so the margin survives it. The rekey starts no later
+/// than 120 s + 20 s, the key is spent at 180 s, and the handshake has at
+/// least forty seconds - eight [`REKEY_TIMEOUT_MS`] intervals - to complete.
+/// The margin was the point of the numbers above: running out of key must be
+/// the peer's fault, not a scheduling coincidence.
+///
+/// The randomness is the caller's, as with [`REKEY_JITTER_MS`]: `vallum-core`
+/// has no RNG.
+pub const REKEY_SPREAD_MS: u64 = 20_000;
+
 /// Maximum jitter the caller should add to [`REKEY_TIMEOUT_MS`], in
 /// milliseconds.
 ///
@@ -77,6 +98,9 @@ pub enum TimerAction {
 pub struct Timers {
     now: u64,
     established_at: Option<u64>,
+    /// How far this session's rekey is spread, in milliseconds. Drawn once per
+    /// session by the caller, and cleared when the session changes.
+    rekey_offset: Option<u64>,
     last_sent: u64,
     last_received: u64,
     attempts: Option<Attempts>,
@@ -100,6 +124,7 @@ impl Timers {
         Self {
             now,
             established_at: None,
+            rekey_offset: None,
             last_sent: now,
             last_received: now,
             attempts: None,
@@ -118,7 +143,30 @@ impl Timers {
     pub fn on_established(&mut self, now: u64) {
         self.now = now;
         self.established_at = Some(now);
+        // A new session draws a new spread, so a peer that rekeys repeatedly
+        // does not always rekey at the same offset.
+        self.rekey_offset = None;
         self.attempts = None;
+    }
+
+    /// Whether this session is established.
+    #[must_use]
+    pub fn is_established(&self) -> bool {
+        self.established_at.is_some()
+    }
+
+    /// The spread applied to this session's rekey, if one has been drawn.
+    #[must_use]
+    pub fn rekey_offset(&self) -> Option<u64> {
+        self.rekey_offset
+    }
+
+    /// Record the spread for this session's rekey.
+    ///
+    /// The caller owns the randomness; this only records it, so that the
+    /// rekey trigger can be moved without shortening the key's life.
+    pub fn set_rekey_offset(&mut self, offset: u64) {
+        self.rekey_offset = Some(offset.min(REKEY_SPREAD_MS));
     }
 
     /// Record that the device tore down the session because its key expired.
@@ -247,7 +295,10 @@ impl Timers {
         }
 
         if let Some(established) = self.established_at {
-            if now.saturating_sub(established) >= REKEY_AFTER_TIME_MS {
+            // The spread moves the rekey later, never earlier: the key's life
+            // is not shortened by it.
+            let offset = self.rekey_offset.unwrap_or(0);
+            if now.saturating_sub(established) >= REKEY_AFTER_TIME_MS + offset {
                 return TimerAction::StartHandshake;
             }
         }
@@ -314,6 +365,52 @@ mod tests {
             timers.poll(REKEY_AFTER_TIME_MS),
             TimerAction::StartHandshake
         );
+    }
+
+    #[test]
+    fn a_rekey_spread_moves_the_trigger_later_not_earlier() {
+        let mut timers = Timers::established(0);
+        timers.on_received(1);
+        timers.set_rekey_offset(20_000);
+        assert_eq!(
+            timers.poll(REKEY_AFTER_TIME_MS),
+            TimerAction::None,
+            "the spread delays the rekey; it must not bring it forward"
+        );
+        assert_eq!(
+            timers.poll(REKEY_AFTER_TIME_MS + 20_000),
+            TimerAction::StartHandshake
+        );
+    }
+
+    #[test]
+    fn a_rekey_spread_never_eats_the_margin() {
+        // The whole point of the 60 s between the rekey (120 s) and the spent
+        // key (180 s) is that running out of key is the peer's fault. The
+        // spread may delay the rekey, so it must leave the margin intact.
+        let mut timers = Timers::established(0);
+        timers.set_rekey_offset(REKEY_SPREAD_MS);
+        let rekey_at = REKEY_AFTER_TIME_MS + REKEY_SPREAD_MS;
+        assert!(
+            REJECT_AFTER_TIME_MS - rekey_at >= 8 * REKEY_TIMEOUT_MS,
+            "at least eight retransmit intervals must remain: {} ms left",
+            REJECT_AFTER_TIME_MS - rekey_at
+        );
+    }
+
+    #[test]
+    fn a_rekey_spread_is_bounded_by_the_caller() {
+        let mut timers = Timers::established(0);
+        timers.set_rekey_offset(u64::MAX);
+        assert_eq!(timers.rekey_offset(), Some(REKEY_SPREAD_MS));
+    }
+
+    #[test]
+    fn a_new_session_draws_a_new_spread() {
+        let mut timers = Timers::established(0);
+        timers.set_rekey_offset(5_000);
+        timers.on_established(1_000);
+        assert_eq!(timers.rekey_offset(), None);
     }
 
     #[test]
