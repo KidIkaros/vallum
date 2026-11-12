@@ -175,6 +175,13 @@ pub fn new_secret(suite_id: u16, signing: bool, seed: [u8; 32]) -> SecretFile {
     }
 }
 
+/// The largest a key file may be.
+///
+/// A key is a seed and its metadata: a few hundred bytes. The cap is
+/// generous, and it exists so that a path which is not a file - a device, a
+/// FIFO, a growing log - is refused rather than read.
+pub const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
+
 /// Read a private-key file.
 ///
 /// # Errors
@@ -182,6 +189,33 @@ pub fn new_secret(suite_id: u16, signing: bool, seed: [u8; 32]) -> SecretFile {
 /// If it cannot be read or parsed, or if its format version is not
 /// [`KEY_FILE_VERSION`].
 pub fn load_secret(path: &Path) -> Result<SecretFile, Error> {
+    // A key file is a few hundred bytes, and it is read with no bound: a
+    // character device (/dev/zero) never reaches EOF, and a FIFO blocks in
+    // open. Both are things an operator plausibly writes into a config, and
+    // both leave the daemon - and `doctor`, the preflight tool - sitting
+    // there instead of reporting the mistake. So the shape of the file is
+    // checked before it is read.
+    let metadata = fs::metadata(path).map_err(|source| Error::IoPath {
+        action: "read key file",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::Invalid {
+            path: path.to_path_buf(),
+            what: "a key file must be a regular file - not a device, a FIFO, or a directory"
+                .to_owned(),
+        });
+    }
+    if metadata.len() > MAX_KEY_FILE_BYTES {
+        return Err(Error::Invalid {
+            path: path.to_path_buf(),
+            what: format!(
+                "a key file is at most {MAX_KEY_FILE_BYTES} bytes; this one is {}",
+                metadata.len()
+            ),
+        });
+    }
     let text = fs::read_to_string(path).map_err(|source| Error::IoPath {
         action: "read key file",
         path: path.to_path_buf(),

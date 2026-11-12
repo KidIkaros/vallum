@@ -189,7 +189,7 @@ fn main() -> ExitCode {
         Command::Showconf(args) => control::showconf(&args),
         Command::Stop(args) => control::stop(&args),
         Command::Bench(args) => bench::bench(&args),
-        Command::Doctor(args) => doctor::doctor(&args),
+        Command::Doctor(args) => doctor::doctor(&args, cli.allow_insecure_key_permissions),
         Command::Policy(args) => policy::policy(&args),
         Command::Status(args) => status::status(&args),
         Command::Server(args) => server::server(&args),

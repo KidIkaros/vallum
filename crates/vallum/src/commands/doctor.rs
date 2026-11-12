@@ -97,7 +97,7 @@ impl Check {
 /// # Errors
 ///
 /// Returns an error after printing if any check failed.
-pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
+pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let mut checks = Vec::new();
     checks.push(Check::new(
         "platform",
@@ -113,13 +113,33 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
     ));
 
     let config = match args.config.as_deref() {
-        Some(path) => match check_config(path) {
-            Ok(config) => {
+        Some(path) => match check_config(path, allow_insecure_key) {
+            Ok((config, key_path)) => {
                 checks.push(Check::new(
                     "config",
                     Status::Pass,
                     format!("{} parsed and resolved", path.display()),
                 ));
+                // The resolver computes the things that will bite - an
+                // `allowed_ips` outside the interface's prefix, an MTU over
+                // the outer budget, the cost of a TCP carrier - and the
+                // daemon logs them at startup. The doctor used to discard
+                // them, so every non-fatal "this will bite you" was invisible
+                // to the one tool that runs without a TUN.
+                if config.warnings.is_empty() {
+                    checks.push(Check::new(
+                        "config warnings",
+                        Status::Pass,
+                        "nothing the resolver wants to warn about",
+                    ));
+                } else {
+                    checks.push(Check::new(
+                        "config warnings",
+                        Status::Warn,
+                        config.warnings.join("; "),
+                    ));
+                }
+                checks.push(check_key_permissions(&key_path, allow_insecure_key));
                 Some(config)
             }
             Err(error) => {
@@ -498,12 +518,45 @@ fn probe_endpoints(
     }
 }
 
-fn check_config(path: &Path) -> Result<crate::config::Resolved, Error> {
+/// Resolve a config the way the daemon will.
+///
+/// With the permission override, because the flag is global and the doctor
+/// used to ignore it: it told the operator to pass
+/// `--allow-insecure-key-permissions` and then refused anyway, because the
+/// strict `resolve` never saw it. A preflight that disagrees with the daemon
+/// it preflights is worse than no preflight.
+fn check_config(
+    path: &Path,
+    allow_insecure_key: bool,
+) -> Result<(crate::config::Resolved, PathBuf), Error> {
     let config = Config::load(path)?;
     let suite_id = config.suite_id(path)?;
     let suite = SdkSuite::from_id(suite_id)
         .map_err(|e| Error::Suite(format!("suite 0x{suite_id:04x}: {e}")))?;
-    config.resolve(path, &suite)
+    let resolved = config.resolve_with(path, &suite, allow_insecure_key)?;
+    let key_path = crate::config::resolve_key_path(path, &config.interface.private_key);
+    Ok((resolved, key_path))
+}
+
+/// The private key's mode, checked the way the daemon checks it.
+///
+/// `run` refuses a key the group or the world can read. The doctor used not
+/// to look at all: it reported the config as healthy, and then the daemon
+/// refused to start on the same file.
+fn check_key_permissions(key_path: &Path, allow_insecure_key: bool) -> Check {
+    match crate::keys::check_permissions(key_path, allow_insecure_key) {
+        Ok(None) => Check::new(
+            "key permissions",
+            Status::Pass,
+            format!("{} is not readable by anyone else", key_path.display()),
+        ),
+        Ok(Some(warning)) => Check::new(
+            "key permissions",
+            Status::Warn,
+            format!("{warning} (allowed by --allow-insecure-key-permissions)"),
+        ),
+        Err(error) => Check::new("key permissions", Status::Fail, error.to_string()),
+    }
 }
 
 fn control_from_config(config: &crate::config::Resolved) -> Option<PathBuf> {
@@ -1471,6 +1524,137 @@ mod tests {
         assert!(nothing.detail.contains("nothing to dial"));
     }
 
+    /// A key path that is not a regular file must be refused, not read.
+    ///
+    /// `/dev/zero` never reaches EOF and a FIFO blocks in `open`, so the
+    /// unbounded read left the daemon - and `doctor`, the preflight tool -
+    /// sitting there instead of reporting the mistake. Both are things an
+    /// operator plausibly writes into a config.
+    #[test]
+    fn a_key_that_is_not_a_regular_file_is_refused_rather_than_read() {
+        let dir = std::env::temp_dir().join(format!("vallum-doctor-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let config_path = dir.join("dev.toml");
+        std::fs::write(
+            &config_path,
+            "[interface]\nname = \"dev\"\nprivate_key = \"/dev/zero\"\nlisten = \"127.0.0.1:0\"\n",
+        )
+        .unwrap();
+
+        // The point is that this RETURNS. Before the bound it did not: the
+        // read of a character device never ends.
+        let error =
+            super::check_config(&config_path, false).expect_err("a device is not a key file");
+        let message = error.to_string();
+        assert!(
+            message.contains("regular file"),
+            "the message must name what is wrong: {message}"
+        );
+    }
+
+    /// The doctor must honour the flag it tells the operator to pass.
+    ///
+    /// It used to print "pass --allow-insecure-key-permissions if this is
+    /// deliberate" and then refuse anyway, because the strict resolve never
+    /// saw the flag. A preflight that disagrees with the daemon it preflights
+    /// is worse than no preflight.
+    #[test]
+    fn the_doctor_honours_the_permission_override() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("vallum-doctor-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key = dir.join("mode.key");
+        let file = crate::keys::new_secret(0x0003, false, [7u8; 32]);
+        crate::keys::save_secret(&key, &file).unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config_path = dir.join("mode.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[interface]\nname = \"mode\"\nprivate_key = \"{}\"\nlisten = \"127.0.0.1:0\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+
+        // The resolver does not police the private key's mode - `run` does,
+        // in its own step - so the doctor does the same, and that check is
+        // where the two tools must agree.
+        let (_resolved, key_path) = super::check_config(&config_path, false).expect("resolves");
+
+        // Strict: the daemon would refuse this key, so the doctor must too.
+        let refused = super::check_key_permissions(&key_path, false);
+        assert_eq!(
+            refused.status,
+            super::Status::Fail,
+            "the doctor must fail a key the daemon refuses: {}",
+            refused.detail
+        );
+        assert!(
+            refused.detail.contains("allow-insecure-key-permissions"),
+            "the refusal must name the override: {}",
+            refused.detail
+        );
+
+        // With the override: accepted, and the report says why it was allowed.
+        let allowed = super::check_key_permissions(&key_path, true);
+        assert_eq!(allowed.status, super::Status::Warn);
+        assert!(
+            allowed.detail.contains("allow-insecure-key-permissions"),
+            "{}",
+            allowed.detail
+        );
+    }
+
+    /// The resolver's warnings are what the daemon logs at startup. The doctor
+    /// used to discard them, so every non-fatal "this will bite you" was
+    /// invisible to the one tool that runs without a TUN.
+    #[test]
+    fn the_doctor_surfaces_the_resolvers_warnings() {
+        let dir = std::env::temp_dir().join(format!("vallum-doctor-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let key = dir.join("warn.key");
+        let file = crate::keys::new_secret(0x0003, false, [7u8; 32]);
+        crate::keys::save_secret(&key, &file).unwrap();
+
+        // A real peer key: the suite's public key is 2374 bytes, and a stub
+        // is refused by the resolver before the warning is ever reached.
+        let suite = super::SdkSuite::from_id(0x0003).expect("the suite");
+        let secret = crate::keys::new_secret(0x0003, false, crate::entropy::seed());
+        let identity = crate::keys::identity(&suite, &secret).expect("an identity");
+        let peer_line = crate::keys::encode_public(0x0003, &identity.to_peer());
+
+        // The peer claims an address outside the interface's own prefix: the
+        // daemon logs "a route to it is needed" at startup.
+        let config_path = dir.join("warn.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[interface]\nname = \"warn\"\nprivate_key = \"{}\"\naddresses = [\"10.9.0.1/24\"]\nlisten = \"127.0.0.1:0\"\n\n[[peer]]\nname = \"laptop\"\npublic_key = \"{peer_line}\"\nallowed_ips = [\"192.168.44.0/24\"]\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+
+        let (resolved, _key_path) = super::check_config(&config_path, false).expect("resolves");
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("outside the interface")),
+            "the warning the daemon logs must be here: {:?}",
+            resolved.warnings
+        );
+    }
+
     #[test]
     fn doctor_reports_offline_daemon_as_warning_not_failure() {
         use std::os::unix::fs::PermissionsExt;
@@ -1502,13 +1686,13 @@ mod tests {
         };
         // Ephemeral port 0 means no firewall/forwarding check; socket is offline so control warns.
         // Overall result must be Ok(()), not Err(failure).
-        let outcome = super::doctor(&args);
+        let outcome = super::doctor(&args, false);
         assert!(
             outcome.is_ok(),
             "doctor on offline config should pass with warning, got: {outcome:?}"
         );
 
-        let resolved = super::check_config(&config_path).unwrap();
+        let (resolved, _key_path) = super::check_config(&config_path, false).unwrap();
         let loopback_check = super::check_path_mtu("127.0.0.1", &resolved);
         assert_eq!(loopback_check.status, super::Status::Pass);
         assert!(loopback_check.detail.contains("fits"));
