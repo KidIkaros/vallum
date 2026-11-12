@@ -94,16 +94,31 @@ docker exec "$NAME" bash -c 'base64 -d /root/t.b64 > /root/ticket && /usr/bin/va
 tail -6 "$LOG"
 
 say "units after join"
-docker exec "$NAME" systemctl is-active vallum@accept1 vallum-quick@accept1 2>&1 | tr '\n' ' '; echo
+# The unit instance is the config stem, so it is the peer name - not a literal.
+UNITS=$(docker exec "$NAME" systemctl is-active "vallum@$PEER" "vallum-quick@$PEER" 2>&1 | tr '\n' ' ')
+echo "   $UNITS"
+FAILED=""
+case "$UNITS" in
+    *inactive*|*failed*|*unknown*) FAILED="the join left a unit inactive: $UNITS" ;;
+esac
 
 say "does the tunnel carry (ICMP to the server's tunnel address)"
 # 51820 is UDP: a /dev/tcp probe there fails by construction and reads as a
 # dead tunnel. Ping the tunnel address, which the client's on-link prefix
 # routes into the interface.
-docker exec "$NAME" bash -c 'ping -c3 -W3 10.7.0.1 2>&1 | tail -2'
+PING=$(docker exec "$NAME" bash -c 'ping -c3 -W3 10.7.0.1 2>&1 | tail -2')
+echo "$PING" | sed 's/^/   /'
+echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry (no 0% packet loss)"
 
 say "the server's view of this device"
-ssh "$VPS" "sudo -n /usr/bin/vallum show --control /run/vallum/vallum0.sock 2>/dev/null | grep -A3 'accept1' | head -6"
+ssh "$VPS" "sudo -n /usr/bin/vallum show --control /run/vallum/vallum0.sock 2>/dev/null | grep -A3 '$PEER' | head -6"
 
 echo
-echo "== GATE 2 RESULT: see the lines above; any FAIL line means not reproducible"
+# The gate returns an exit code. Printing a FAIL line and exiting 0 is how this
+# gate passed once with an inactive unit and a dead ping - the reader noticed,
+# the script did not (premortem, 2026-11-12).
+if [ -n "$FAILED" ]; then
+    echo "== FAIL - $FAILED"
+    exit 1
+fi
+echo "== PASS - installed, joined, and the tunnel carries"

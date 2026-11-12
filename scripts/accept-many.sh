@@ -51,6 +51,14 @@ BEFORE_RSS=$(server_rss_kb)
 [ -n "${BEFORE_RSS:-}" ] || die "cannot read the server daemon's RSS"
 say "server RSS before: ${BEFORE_RSS} kB"
 
+# The daemon already tracks peers that are not ours, so the assertion has to be
+# a DELTA: the count before the joins plus the number we added.
+peer_count() {
+    ssh "$VPS" "sudo -n /usr/bin/vallum show --control /run/vallum/vallum0.sock 2>/dev/null | grep -c '^peer'" 2>/dev/null || echo 0
+}
+PEERS_BEFORE=$(peer_count)
+say "server peers before: $PEERS_BEFORE"
+
 say "starting $COUNT clients (own netns each, not --network=host)"
 for name in $(names); do
     docker run -d --name "vm-$name" --privileged --cgroupns=host \
@@ -150,13 +158,18 @@ EOF
 fi
 
 say "the server's peer table"
-ssh "$VPS" "sudo -n /usr/bin/vallum show --control /run/vallum/vallum0.sock 2>/dev/null | grep -c '^peer'" \
-    | sed 's/^/[many] peers the daemon reports: /'
+PEERS_AFTER=$(peer_count)
+echo "[many] peers the daemon reports: $PEERS_AFTER (was $PEERS_BEFORE)"
+PEERS_ADDED=$((PEERS_AFTER - PEERS_BEFORE))
 
 echo
-if [ "$ok" = "$COUNT" ]; then
-    echo "== PASS — $ok/$COUNT clients joined, carried and are tracked separately"
+# The PASS line used to claim the peers were "tracked separately" while the
+# exit condition only counted pings. The count is now compared, and a mismatch
+# fails the run (premortem, 2026-11-12).
+if [ "$ok" = "$COUNT" ] && [ "$PEERS_ADDED" = "$COUNT" ]; then
+    echo "== PASS — $ok/$COUNT clients joined and carried, and the server tracks $PEERS_ADDED of them"
 else
-    echo "== FAIL — $ok/$COUNT carried; failed:$failed"
+    [ "$ok" != "$COUNT" ] && echo "== FAIL — $ok/$COUNT carried; failed:$failed"
+    [ "$PEERS_ADDED" != "$COUNT" ] && echo "== FAIL — the server tracked $PEERS_ADDED new peers, expected $COUNT"
     exit 1
 fi
