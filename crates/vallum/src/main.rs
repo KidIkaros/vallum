@@ -200,6 +200,7 @@ fn main() -> ExitCode {
             client_config: None,
             allow_shipped_key: false,
             no_service: false,
+            expect_server: None,
             yes: false,
             endpoint: None,
             address: None,

@@ -58,6 +58,20 @@ installed.
 If the key is not beside the config, the command says so and tells you the
 command that creates it — the key never has to come from anywhere else.
 
+If the config travelled by email, USB or a chat, check whose key it names
+before you install it. The server prints its fingerprint, and the receiver
+refuses anything else — before it writes a single file:
+
+```sh
+sudo vallum setup --client-config laptop.toml --expect-server 9f2c...
+```
+
+The token path ([Path C](#path-c--with-a-token)) checks the same thing on its
+own, because the token is bound to the server's key. The file path has no
+token, so this is the only check it has: without it, the config's own contents
+are the only trust anchor, and a config you cannot check is a config you
+cannot verify.
+
 ## Path B — over SSH
 
 ```sh

@@ -132,7 +132,9 @@ verified against the tree) found seven failure modes. Four were fixed in the
 same pass, and they changed this ADR's substance rather than its wording:
 
 - **The receiver exists.** `vallum setup --client-config <file>`
-  (`--no-service` where there is no systemd to install into): it finds the
+  (`--no-service` where there is no systemd to install into;
+  `--expect-server <fingerprint>` to refuse a config that names another
+  server): it finds the
   key the config names, places both files in `/etc/vallum` as root `0600`,
   installs the units, proves the tunnel, and prints the command that checks
   it. If the key is not beside the config, the message IS the remedy. Before

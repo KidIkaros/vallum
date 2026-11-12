@@ -13,6 +13,7 @@ Three parts. Two check out; one does not.
 |---|---|---|
 | Same crypto dependency | **true** | Vallum: `origin-crypto-sdk` at git tag `v0.7.4` (`Cargo.toml:46`). origin-tools: the same crate at `=0.7.2` (`origin-tools/Cargo.toml:43`) — **two versions behind** |
 | Porting is mechanically feasible | **true for the crypto-facing crates** | A copy of origin-tools repointed at `v0.7.4` builds `origin-channel` and `origin-network` **unchanged** (`BUILD=0`). The whole workspace fails to resolve: the SDK's `zstd` feature pulls `zstd-safe 8.2.0 → zstd-sys`, and origin-tools' committed `Cargo.lock` conflicts (`origin-canary` is what pulls the feature) |
+| The two trees can converge on one SDK | **false, and it is a one-way door** | The registry holds **only 0.7.2** (`~/.cargo/registry/cache`: `origin-crypto-sdk-0.7.2.crate`); 0.7.3 and 0.7.4 exist **only as git tags**. So moving either tree means a *source* swap, not a version bump. And Vallum **cannot** move backwards: `crates/vallum-crypto-sdk/src/lib.rs:270` calls `MlKem768Kem::encapsulate_deterministic`, which is **absent from v0.7.2** (`git show v0.7.2:src/pqc/ml_kem.rs` → no match) — the adapter would not compile. Worse, `deny.toml:67` is `multiple-versions = "warn"`, so cargo-deny would **not** stop two SDK copies linking side by side |
 | "Literally port any code" | **false for the protocol** | origin-channel's handshake is an ephemeral-static Noise-shaped exchange with a running transcript hash (`origin-channel/src/handshake.rs:9-17,42-43`). Vallum's is its own hybrid X25519 + sntrup761 + ML-KEM-768 protocol with its own framing, admission gate, cookie and rekey (`crates/vallum-tunnel/src/device/handshake.rs`). Both are built on the same primitives — that is not the same protocol |
 
 ## What the two trees actually are
@@ -53,9 +54,9 @@ Vallum's remaining gaps, in the order they block a stranger:
 
 | Candidate | Source | Gap it would touch | Measured cost |
 |---|---|---|---|
-| STUN + hole punching | `origin-network/src/nat.rs` (666 lines; the file's own header says it was adapted from `signet-channel/src/transport/{stun,p2p}.rs`) | 4 | small, **but it discloses the client's public IP to a third party** — `DEFAULT_STUN_SERVER = "stun.l.google.com:19302"` (`nat.rs:39`) — against a project whose stated posture is that DNS does not leak (`docs/requirements.md`) |
+| STUN + hole punching | `origin-network/src/nat.rs` (666 lines; the file's own header says it was adapted from `signet-channel/src/transport/{stun,p2p}.rs`) | 4 | small, **but it discloses the client's public IP to a third party** — `DEFAULT_STUN_SERVER = "stun.l.google.com:19302"` (`nat.rs:39`) — against a project whose stated posture is that DNS does not leak (`docs/requirements.md`). Worse, **Vallum's own guard would drop the packet**: the egress table's terminal rule is `drop` (`crates/vallum/src/policy.rs:240`) with accepts only for the tunnel's endpoint and DHCP (`:197-207`), so a STUN query to Google never leaves — ADR-0018's whole rule is "a packet may leave this host only through the tunnel, or to the endpoint that carries the tunnel" |
 | Relay | `origin-network/src/relay.rs` (859 lines), `relay_server.rs` | 5, 4 | needs a publicly reachable server with bandwidth, state, eviction and abuse handling — a **deployment**, not a crate |
-| Ratcheted session for enrolment | `origin-channel/src/handshake.rs` (337), `session.rs` (370), `ratchet.rs` (154) | 3 | **a second protocol** (see the premise table) — and a ratchet needs an authenticated peer key, which is the thing the human copy carries today |
+| Ratcheted session for enrolment | `origin-channel/src/handshake.rs` (337), `session.rs` (370), `ratchet.rs` (154) | 3 | **a second protocol** (see the premise table) — and a ratchet needs an authenticated peer key, which is the thing the human copy carries today. Two of its ingredients are already *refused in writing* here: Vallum's crypto contract exposes **no DH operation** (so origin-channel's `DH(s_i, s_r)` cannot be expressed at all), and `crates/vallum-core/src/session.rs:14-30` rejects the symmetric chain origin-channel's ratchet implements, with the Babbage–Golić reason |
 | QUIC carrier | `origin-network/src/quic.rs` | 5 | a new carrier end to end: config, carrier dispatch, both ends, gates, docs |
 | Release attestation | `origin-tools/RELEASE_ATTESTATION_DESIGN.md` + implementation | 2 | **thin** — Vallum's release path already signs and stamps; origin-tools treats its own as "a reference implementation, not a product dependency" (its HEAD commit) |
 | Data-ops CLI (`origin-seal`) | `origin-seal/src` | — | nothing in Vallum needs it; Vallum's `bundle.rs` already does the encrypted-bundle job |
@@ -68,10 +69,54 @@ switch. Meanwhile the port opens a programme (a second protocol, a relay, a
 QUIC carrier, a STUN dependency) that would displace the two hours of work
 which would actually let a stranger install the product.
 
+## What the premortem found, and the one thing it changed
+
+Six investigators went deep on the plan. Their findings were checked against
+the trees before any of it was believed, and three claims died on contact:
+
+- *"crates.io has no 0.7.3 or 0.7.4"* — the registry cache holds only
+  `origin-crypto-sdk-0.7.2.crate` ✓, and the local SDK checkout's tags stop at
+  `v0.7.3` ✓. **Confirmed**, and it is worse than a version skew: the two
+  trees cannot converge without a *source* swap, and Vallum cannot move
+  backwards at all (`encapsulate_deterministic` is absent from v0.7.2).
+- *"cargo-deny would stop two SDK copies"* — **false**: `deny.toml:67` is
+  `multiple-versions = "warn"`, so the supply-chain gate would go green with
+  two SDKs linked.
+- *"a STUN client would work"* — **false**: Vallum's own egress guard drops
+  the packet before it leaves the host.
+
+Two findings **confirmed a decision already taken in writing**:
+
+- `docs/adr/0015-enrolment-v2.md:75-77` already refused this port's premise:
+  *"The client has no static key before enrolment; a static leg would require
+  provisioning the very thing enrolment exists to provision."* The ratchet
+  port re-introduces the static leg that ADR-0015 removed.
+- `crates/vallum-core/src/session.rs:14-30` already refuses the ratchet
+  origin-channel implements, with the reason (Babbage–Golić time/memory
+  tradeoff attacks), and `crates/vallum-crypto/src/suite.rs` exposes **no DH
+  operation** — so origin-channel's `DH(s_i, s_r)` cannot be expressed through
+  Vallum's contract at all.
+
+### And one finding that was a defect in this repository, now fixed
+
+The file path — the *primary* path, the one ADR-0034 calls a method rather
+than a ritual — installed whatever key the config named, with **no way to
+check it**: `--expect` carried `requires = "join"`, so the token path could
+verify the server's fingerprint and the file path could not. A config that
+travelled over email, USB or a chat could be anything, and the operator's
+copy was the only thing binding the client to that server.
+
+Now `vallum setup --client-config <file> --expect-server <fingerprint>`
+refuses a config naming a different server, **before anything is written**,
+with the decision in a pure function (`check_server_fingerprint`) and its own
+tests.
+
 ## Decision
 
 **Port nothing yet.** The premise is half right, and the half that is right
-does not point at the blockers.
+does not point at the blockers. Two of the port's ingredients are already
+refused in this repository's own ADRs and code comments, and the third — the
+enrolment — is a trust-bootstrap problem that a transport cannot solve.
 
 What the scouting *did* establish, and what is worth acting on:
 

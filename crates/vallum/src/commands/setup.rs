@@ -113,11 +113,21 @@ pub struct SetupArgs {
     #[arg(long, value_name = "HEX", requires = "join")]
     pub invite_id: Option<String>,
 
-    /// Refuse the answer unless the server's fingerprint matches this. Printed
-    /// by `vallum peer invite`; it is how a client knows it reached the right
+    /// Refuse unless the server's fingerprint matches this. Printed by
+    /// `vallum peer invite`; it is how a client knows it reached the right
     /// server rather than one that answered first.
+    ///
+    /// It works on the file path too, and there it matters most: a config
+    /// copied over email, USB or a chat can be anything, and the fingerprint
+    /// is the one thing the operator can check against the server itself.
     #[arg(long, value_name = "FINGERPRINT", requires = "join")]
     pub expect: Option<String>,
+
+    /// The fingerprint to check on the file path. The same value as `--expect`,
+    /// but a separate flag, because `--expect` requires `--join` and the file
+    /// path has no ticket.
+    #[arg(long, value_name = "FINGERPRINT", requires = "client_config")]
+    pub expect_server: Option<String>,
 
     /// On a server, allow devices to enrol with a one-time token (opens UDP
     /// `listen + 1`).
@@ -198,6 +208,7 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                     client_config: None,
                     allow_shipped_key: false,
                     no_service: false,
+                    expect_server: None,
                     server: false,
                     client: None,
                     remote: None,
@@ -560,6 +571,11 @@ struct ClientFiles {
     text: String,
     /// Where the private key is.
     key: PathBuf,
+    /// The server's public line, as the peer stanza names it.
+    ///
+    /// This is the trust anchor the operator carries, so it is the one thing
+    /// that can be checked against the server itself.
+    server_public_line: Option<String>,
 }
 
 /// Check a client config and its key without touching anything.
@@ -600,7 +616,24 @@ fn resolve_client_files(path: &Path) -> Result<ClientFiles, Error> {
         )));
     }
 
-    Ok(ClientFiles { name, text, key })
+    // The server's public line, from the peer stanza. Taken from the text
+    // rather than re-encoded from the parsed key, because the line is what the
+    // operator reads off the server and compares.
+    let server_public_line = text
+        .split_once("[[peer]]")
+        .and_then(|(_, peers)| {
+            peers.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("public_key = \"")?;
+                rest.split('"').next().map(str::to_owned)
+            })
+        });
+
+    Ok(ClientFiles {
+        name,
+        text,
+        key,
+        server_public_line,
+    })
 }
 
 /// Enrol this machine from a client config the server wrote.
@@ -609,12 +642,55 @@ fn resolve_client_files(path: &Path) -> Result<ClientFiles, Error> {
 /// of `peer add --client-config-out` was prose: copy the TOML to
 /// /etc/vallum, name the key file exactly as the peer is named, enable two
 /// units by hand. Now it is one command.
+/// Check a client config's server against a fingerprint the operator was
+/// given separately.
+///
+/// A config that travelled over email, USB or a chat can be anything. The
+/// fingerprint is the one thing that can be compared with the server itself,
+/// and it is the only trust anchor on the file path that is not simply
+/// "whatever this file says".
+///
+/// Separated from the receiver so the decision is testable without a
+/// filesystem or a root.
+fn check_server_fingerprint(expect: &str, server_line: Option<&str>) -> Result<String, Error> {
+    let server_line = server_line.ok_or_else(|| {
+        Error::Usage(
+            "the config names no server public line, so there is nothing to check against the \
+             fingerprint"
+                .to_owned(),
+        )
+    })?;
+    let got = crate::keys::fingerprint(server_line);
+    if !got.eq_ignore_ascii_case(expect.trim()) {
+        return Err(Error::Precondition(format!(
+            "this is not the server you were given a config for.\n\
+             \x20 expected {}\n\
+             \x20 the config names {}\n\
+             Nothing was written. If the server was rebuilt, ask for a new config; \
+             if not, treat this as an attack.",
+            expect.trim(),
+            got
+        )));
+    }
+    Ok(got)
+}
+
 fn as_client_config(path: &Path, args: &SetupArgs) -> Result<(), Error> {
     let files = resolve_client_files(path)?;
     let root = nix::unistd::Uid::effective().is_root();
     let name = files.name.clone();
 
     say!("enrolling `{name}` from {}", path.display());
+
+    // Before anything is written: is this the server the operator meant? A
+    // file copied over email, USB or a chat can be anything, and the
+    // fingerprint is the one thing that can be checked against the server
+    // itself - read it off the server's console, or read it out over a
+    // channel you already trust.
+    if let Some(expect) = &args.expect_server {
+        let got = check_server_fingerprint(expect, files.server_public_line.as_deref())?;
+        say!("   ok    server fingerprint {got}");
+    }
 
     if root {
         let directory = PathBuf::from("/etc/vallum");
@@ -1301,6 +1377,63 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A client config carries the server's public line, and that line is the
+    /// trust anchor the operator can check against the server itself.
+    #[test]
+    fn the_client_config_carries_the_servers_public_line() {
+        let dir = std::env::temp_dir().join(format!("vallum-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("laptop.toml");
+        std::fs::write(&config, "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:03:-\"\n").unwrap();
+        std::fs::write(dir.join("laptop.key"), "key").unwrap();
+
+        let files = resolve_client_files(&config).expect("the config and its key are there");
+        assert_eq!(
+            files.server_public_line.as_deref(),
+            Some("vallum1:0003:03:-"),
+            "the peer stanza's public line is what the operator checks"
+        );
+
+        // A config with no peer stanza has nothing to check, and says so
+        // rather than inventing an anchor.
+        let bare = dir.join("bare.toml");
+        std::fs::write(&bare, "[interface]\nname = \"bare\"\nprivate_key = \"bare.key\"\n").unwrap();
+        std::fs::write(dir.join("bare.key"), "key").unwrap();
+        let files = resolve_client_files(&bare).expect("the config and its key are there");
+        assert_eq!(files.server_public_line, None);
+    }
+
+    /// The check refuses before anything is written. A config that travelled
+    /// over email, USB or a chat can be anything; the fingerprint is the one
+    /// thing that can be compared with the server itself.
+    #[test]
+    fn a_config_naming_the_wrong_server_is_refused() {
+        let dir = std::env::temp_dir().join(format!("vallum-expect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "vallum-expect-check";
+        let config = dir.join(format!("{name}.toml"));
+        std::fs::write(&config, "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:03:-\"\n").unwrap();
+        std::fs::write(dir.join("laptop.key"), "key").unwrap();
+
+        let error = check_server_fingerprint("0000000000000000", Some("vallum1:0003:03:-"))
+            .expect_err("the fingerprint does not match");
+        let message = error.to_string();
+        assert!(message.contains("not the server"), "{message}");
+        assert!(message.contains("Nothing was written"), "{message}");
+
+        // The right fingerprint passes, and says what it accepted.
+        let right = crate::keys::fingerprint("vallum1:0003:03:-");
+        let got = check_server_fingerprint(&right, Some("vallum1:0003:03:-"))
+            .expect("the fingerprint matches");
+        assert_eq!(got, right);
+
+        // A config with no server line has nothing to check against.
+        let error = check_server_fingerprint(&right, None).expect_err("nothing to check");
+        assert!(error.to_string().contains("no server public line"), "{error}");
+    }
 
     /// Three causes, three different remedies. The old message called all of
     /// them "the server refused the enrolment".
