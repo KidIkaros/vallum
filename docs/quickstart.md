@@ -81,6 +81,14 @@ Copy `laptop.toml` to the device, beside `laptop.key`, and on the device:
 sudo vallum setup --client-config laptop.toml  # installs it and proves the tunnel
 ```
 
+Where there is no systemd - a container, a namespace, or a machine whose units
+are managed by something else - add `--no-service`: the files are placed and
+the command says how to run the daemon, and no unit is installed.
+
+```sh
+sudo vallum setup --client-config laptop.toml --no-service
+```
+
 Then, to know whether it is working:
 
 ```sh
