@@ -16,14 +16,29 @@ cd "$(dirname "$0")/.."
 # into the filenames it produces.
 install_list=$(
     {
+        # The words are checked against the tree, not against a pattern: a name
+        # with no extension (vallum-ops, vallum-panic, vallum-cleanup,
+        # vallum-heal-runtime-dir, vallum-guard-deadman) is as much a shipped
+        # file as a unit is, and a pattern that only matches known extensions
+        # cannot see it. The pattern is what let the deb, the rpm and the
+        # installer agree on all omitting the executables their units run.
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
-            | tr ' \\' '\n\n' \
-            | grep -oE 'vallum[a-z0-9@._-]*\.(service|timer|conf|[0-9])'
+            | grep -oE 'vallum[a-zA-Z0-9@._-]*' \
+            | while read -r name; do
+                [ -f "packaging/$name" ] && echo "$name"
+            done
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
             | grep -oE 'for shell in.*' | tr -s ' ;' '\n\n' \
             | grep -vxE 'for|shell|in|do' | sed 's/^/vallum./'
     } | sort -u
 )
+
+# The one file a channel legitimately differs on. The sudoers rule names a
+# user, and a package cannot know who is installing it, so the installer
+# renders it while the packages print the line at install time. It is a
+# template, not a shipped file, so it is in neither list.
+EXCLUDE="vallum-ops-sudoers"
+install_list=$(printf '%s\n' "$install_list" | grep -vx "$EXCLUDE" || true)
 
 # deb assets: "../../packaging/<file>" entries inside [package.metadata.deb].
 deb_list=$(

@@ -23,5 +23,17 @@ if [ -d /run/systemd/system ]; then
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
     fi
+    # The console's privileged path (its kill switch and its apply) needs a
+    # sudoers rule, and a package cannot write one: the rule names a user and
+    # the package does not know who is installing it. The installer renders it
+    # with the invoking user; here the operator is told the exact line. The
+    # console falls back to polkit without it, so this is a convenience, not
+    # a requirement.
+    if [ ! -f /etc/sudoers.d/vallum-ops ] && [ -x /usr/local/sbin/vallum-ops ]; then
+        echo "vallum: to let the console run its privileged path without a password:" >&2
+        echo "    echo 'YOUR_USER ALL=(root) NOPASSWD: /usr/local/sbin/vallum-ops' \\"
+        echo "      | sudo tee /etc/sudoers.d/vallum-ops >/dev/null" >&2
+        echo "    sudo visudo -cf /etc/sudoers.d/vallum-ops" >&2
+    fi
 fi
 exit 0

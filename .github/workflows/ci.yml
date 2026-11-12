@@ -296,9 +296,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.100.0
 
+      - uses: taiki-e/install-action@cargo-deb
+
       - name: The install layout
         working-directory: vallum
         run: scripts/accept-install-layout.sh
+
+      - name: What the packages actually contain
+        working-directory: vallum
+        # The manifest-parity check compares the three channels to EACH OTHER,
+        # which cannot see two channels agreeing on being wrong - and they did:
+        # every channel shipped the units and none of them shipped the
+        # executables those units run, so every packaged tunnel start failed.
+        # This builds the deb for real and asks the units themselves what they
+        # need.
+        run: scripts/accept-package-contents.sh
 
       - name: Publish the gate verdicts
         if: always()

@@ -242,15 +242,10 @@ run bash -c "cd crates/vallum && cargo generate-rpm"
 
 assemble() {
     local bindir=$1 name=$2
-    mkdir -p "dist/$name"
-    cp "$bindir/vallum" "$bindir/vallum-quick" "dist/$name/"
-    cp LICENSE README.md "dist/$name/"
-    cp packaging/vallum.8 packaging/vallum-quick.8 packaging/vallum.toml.5 "dist/$name/"
-    cp packaging/vallum.bash packaging/vallum.zsh packaging/vallum.fish "dist/$name/"
-    cp packaging/vallum@.service packaging/vallum-quick@.service \
-        packaging/vallum-quick-watch@.service \
-        packaging/vallum-enroll@.service packaging/vallum-metrics.service \
-        packaging/vallum-metrics.timer packaging/vallum-alerts.yml "dist/$name/"
+    # One list, shared with the gate that checks it: scripts/package-tarball.sh
+    # prints the members it staged, and those are the members asserted below.
+    local members
+    members=$(BINDIR="$bindir" bash scripts/package-tarball.sh "dist/$name")
     tar -C dist -czf "dist/$name.tar.gz" "$name"
     rm -rf "dist/$name"
     # Inspect what we are about to publish. A release once shipped a tarball
@@ -259,13 +254,12 @@ assemble() {
     # grep -c reads the whole listing; `grep -q` would exit on the first
     # match, tar would die on SIGPIPE, and pipefail would turn a present
     # member into a false failure.
-    for member in vallum vallum-quick vallum@.service vallum-quick@.service \
-        vallum-quick-watch@.service \
-        vallum-enroll@.service vallum-metrics.service vallum-metrics.timer \
-        vallum-alerts.yml vallum.8 vallum-quick.8 vallum.toml.5; do
+    local member
+    while read -r member; do
+        [ -n "$member" ] || continue
         [ "$(tar -tzf "dist/$name.tar.gz" | grep -xc "$name/$member")" -ge 1 ] \
             || fail "the tarball is missing $member"
-    done
+    done <<< "$members"
 }
 
 say "assembling the tarballs"

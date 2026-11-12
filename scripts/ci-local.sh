@@ -111,6 +111,7 @@ echo
 
 step "Install layout (staged; no root, no container runtime)"
 check "install layout" scripts/accept-install-layout.sh || true
+check "package contents" scripts/accept-package-contents.sh || true
 
 step "The acceptance pair (a server and a client, provisioned here)"
 check "acceptance pair" scripts/accept-pair.sh || true

@@ -111,6 +111,14 @@ assets = [
     ["target/release/vallum", "usr/bin/vallum", "755"],
     ["target/release/vallum-quick", "usr/bin/vallum-quick", "755"],
     ["../../packaging/vallum@.service", "lib/systemd/system/vallum@.service", "644"],
+    # The executables the units above run. `vallum@.service` execs
+    # vallum-heal-runtime-dir as its ExecStartPre, and ExecStartPre failure is
+    # fatal - a package without it cannot start a tunnel at all.
+    ["../../packaging/vallum-panic", "usr/local/sbin/vallum-panic", "755"],
+    ["../../packaging/vallum-guard-deadman", "usr/local/sbin/vallum-guard-deadman", "755"],
+    ["../../packaging/vallum-cleanup", "usr/local/sbin/vallum-cleanup", "755"],
+    ["../../packaging/vallum-heal-runtime-dir", "usr/local/sbin/vallum-heal-runtime-dir", "755"],
+    ["../../packaging/vallum-ops", "usr/local/sbin/vallum-ops", "755"],
     ["../../packaging/vallum-guard@.service", "lib/systemd/system/vallum-guard@.service", "644"],
     ["../../packaging/vallum-quick@.service", "lib/systemd/system/vallum-quick@.service", "644"],
     ["../../packaging/vallum-quick-watch@.service", "lib/systemd/system/vallum-quick-watch@.service", "644"],
@@ -137,6 +145,12 @@ assets = [
     { source = "../../target/release/vallum", dest = "/usr/bin/vallum", mode = "755" },
     { source = "../../target/release/vallum-quick", dest = "/usr/bin/vallum-quick", mode = "755" },
     { source = "../../packaging/vallum@.service", dest = "/lib/systemd/system/vallum@.service", mode = "644" },
+    # The executables the units above run - see the deb table for why.
+    { source = "../../packaging/vallum-panic", dest = "/usr/local/sbin/vallum-panic", mode = "755" },
+    { source = "../../packaging/vallum-guard-deadman", dest = "/usr/local/sbin/vallum-guard-deadman", mode = "755" },
+    { source = "../../packaging/vallum-cleanup", dest = "/usr/local/sbin/vallum-cleanup", mode = "755" },
+    { source = "../../packaging/vallum-heal-runtime-dir", dest = "/usr/local/sbin/vallum-heal-runtime-dir", mode = "755" },
+    { source = "../../packaging/vallum-ops", dest = "/usr/local/sbin/vallum-ops", mode = "755" },
     { source = "../../packaging/vallum-guard@.service", dest = "/lib/systemd/system/vallum-guard@.service", mode = "644" },
     { source = "../../packaging/vallum-quick@.service", dest = "/lib/systemd/system/vallum-quick@.service", mode = "644" },
     { source = "../../packaging/vallum-quick-watch@.service", dest = "/lib/systemd/system/vallum-quick-watch@.service", mode = "644" },
@@ -169,6 +183,14 @@ if [ -d /run/systemd/system ]; then
     systemctl daemon-reload 2>/dev/null || true
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
+    fi
+    # The console's privileged path needs a sudoers rule, and a package cannot
+    # write one: the rule names a user and the package does not know who is
+    # installing it. The console falls back to polkit without it.
+    if [ ! -f /etc/sudoers.d/vallum-ops ] && [ -x /usr/local/sbin/vallum-ops ]; then
+        echo "vallum: to let the console run its privileged path without a password:" >&2
+        echo "    echo 'YOUR_USER ALL=(root) NOPASSWD: /usr/local/sbin/vallum-ops' | sudo tee /etc/sudoers.d/vallum-ops >/dev/null" >&2
+        echo "    sudo visudo -cf /etc/sudoers.d/vallum-ops" >&2
     fi
 fi
 exit 0
