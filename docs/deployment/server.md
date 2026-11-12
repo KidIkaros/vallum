@@ -21,8 +21,8 @@ If you have not installed Vallum yet, start with [install](#1-install).
 From a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
-  | sudo bash -s -- --from-release --install-only
+curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
+  && sudo bash /tmp/vallum-install.sh -- --from-release --install-only
 ```
 
 The release assets are public, so this needs nothing but `curl`. Installing from

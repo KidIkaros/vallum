@@ -16,8 +16,8 @@ that `peer list` shows the same peers after the upgrade. The release gate
 ## Upgrading a server
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
-  | sudo bash -s -- --from-release v1.6.1 --install-only
+curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
+  && sudo bash /tmp/vallum-install.sh -- --from-release v1.6.1 --install-only
 sudo systemctl restart vallum@vallum0 vallum-quick@vallum0
 sudo vallum doctor --config /etc/vallum/vallum0.toml
 ```

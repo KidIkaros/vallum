@@ -129,7 +129,7 @@ repository is private in the comments.
 
 ## 4. What a stranger must be able to do
 
-- [ ] **Install without credentials.** `curl -fsSL …/scripts/install.sh | sudo bash -s -- --from-release --install-only`
+- [ ] **Install without credentials.** `curl -fsSL -o /tmp/vallum-install.sh …/scripts/install.sh && sudo bash /tmp/vallum-install.sh --from-release --install-only`
       resolves the release anonymously and verifies `SHA256SUMS.sig` against the
       key embedded in the script.
 - [ ] **Build from a bare clone.** `git clone … && cargo build` works with no

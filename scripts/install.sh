@@ -41,6 +41,26 @@
 # user, not root) or to `GH_TOKEN`/`GITHUB_TOKEN`.
 set -euo pipefail
 
+# Refuse to run from a pipe. Two reasons, both found by trying it:
+#
+#   - `curl -fsSL <url> | sudo bash -s -- ...` masks curl's failure. A 404
+#     (a private repository, a moved file) delivers an EMPTY script, and
+#     `bash -s` on empty input exits 0 - so the install reports SUCCESS while
+#     installing nothing at all. The stranger sees a green install and no
+#     binary.
+#   - piped, this script has no file to read itself from ($0 is `bash`), so
+#     `--help` would print bash's source instead of this usage.
+#
+# Download it, read it, then run it.
+if [ -z "${BASH_SOURCE[0]:-}" ]; then
+    echo "install.sh: refusing to run from a pipe." >&2
+    echo "  A failed download piped into bash exits 0 and installs nothing." >&2
+    echo "  Download it first:" >&2
+    echo "    curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh" >&2
+    echo "    sudo bash /tmp/vallum-install.sh --install-only" >&2
+    exit 1
+fi
+
 REPO="KidIkaros/vallum"
 BIN_DIR="/usr/bin"
 CONFIG_DIR="/etc/vallum"

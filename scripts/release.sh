@@ -319,7 +319,7 @@ fingerprint=$(ssh-keygen -lf "$SIGN_KEY" 2>/dev/null | awk '{print $2}')
         $0 ~ "^## " v "([^0-9]|$)" { f=1; next }
         /^## / && f { f=0 }
         f' CHANGELOG.md
-    printf '\n## Install\n\n```sh\ncurl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install.sh | sudo bash -s -- --from-release %s\n```\n' "$REPO" "$tag"
+    printf '\n## Install\n\n```sh\ncurl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/%s/main/scripts/install.sh\nsudo bash /tmp/vallum-install.sh --from-release %s\n```\n' "$REPO" "$tag"
     printf '\nAssets are SSH-signed (`SHA256SUMS.sig` + `allowed_signers`); install.sh verifies them. Signing key fingerprint: `%s`\n' "$fingerprint"
 } > /tmp/vallum-release-notes.md
 
