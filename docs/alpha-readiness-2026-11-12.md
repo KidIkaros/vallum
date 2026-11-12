@@ -110,20 +110,37 @@ end to end.
 
 ## Gate 4 — CI
 
-**Status: green except one step, fixed.**
+**Status: PASS** — run `43230663345` on commit `cbf5ec5`, all four jobs green:
 
-`fuzz` and `advisories` passed on every run. `ci` failed three times, each time
-for a reason outside the product:
+| job | result |
+|---|---|
+| `test (stable)` | ✓ — fmt, clippy `-D warnings`, workspace suite, lean daemon, TUI snapshot, packaging parity |
+| `test (1.95.0)` | ✓ — the declared MSRV compiles every target |
+| `end-to-end (two namespaces, real kernel)` | ✓ — netns gate, syscall allow-list, enforce-mode leg |
+| `advisories and supply chain` | ✓ — `cargo audit`: no vulnerabilities |
 
-1. `ui/dist` is a gitignored build artifact that `tauri::generate_context!()`
-   embeds at compile time, so a fresh checkout could not compile the workspace
-   at all — CI never built the frontend. Fixed by building it in the workflow.
-2. `utcp_manual.rs` asserted every documented command exists, including `tui`,
-   in the `--no-default-features` leg where that subcommand is not compiled.
-3. The deb and rpm omitted `vallum-cleanup.service`, `vallum-deadman@.service`
-   and `vallum-deadman@.timer` that `install.sh` installs — **a real packaging
-   defect**: a host installed from a package got no cleanup floor and no
-   dead-man switch.
+Five failures preceded it, and none was a product defect:
+
+1. **`ui/dist` was never built in CI.** `tauri::generate_context!()` embeds the
+   console's frontend at compile time and panics when it is absent; `dist/` is
+   gitignored because it is a build artifact, so a fresh checkout could not
+   compile the workspace at all. Fixed by building it in the workflow.
+2. **A test asserted a command the binary was not built with.**
+   `utcp_manual.rs` walks every command in the manual, but CI also runs
+   `cargo test --no-default-features`, where `tui` does not exist.
+3. **The deb and rpm shipped less than `install.sh`.** Both omitted
+   `vallum-cleanup.service`, `vallum-deadman@.service` and
+   `vallum-deadman@.timer` — a host installed from a package got no cleanup
+   floor and no dead-man switch. This one was a real packaging defect.
+4. **The audit job was red for bookkeeping.** `rustsec/audit-check` writes a
+   GitHub check run after reporting, and that write 404s on this repository even
+   with `checks: write`; its own output said
+   `"vulnerabilities":{"found":false,"count":0}`. Replaced with `cargo audit`.
+5. **Three runs were cancelled by the next push** (`concurrency:
+   cancel-in-progress`), and one cancellation was briefly misread as a failure.
+
+The lesson recorded in `scripts/ci-local.sh`: a push should be an assertion, not
+an experiment. Every gate above runs locally with the workflow's own commands.
 
 ## What this file will say when the gates finish
 
