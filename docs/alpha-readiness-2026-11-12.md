@@ -45,24 +45,39 @@ done under time pressure.
 
 ## Gate 2 — Fresh-machine install acceptance (the reproducibility gate)
 
-**Status: running** — `~/.hermes/cache/scratch/gate2-install-acceptance.sh`.
+**Status: PASS** — `scripts/accept-install.sh`, run from the repo, on a clean
+container that is not the operator's machine.
 
-The claim under test: a clean systemd container with its own network namespace
-installs from the shipped media, gets a ticket minted on the production server,
-joins, and carries traffic — with no dependence on the operator's home directory,
-shell, or any file that happens to exist on their machine. The script asserts
-that last part explicitly: after installing, it greps the installed tree for
-`/home/ikaaros` and fails if anything survives.
+Evidence, verbatim from the run:
 
-A systemd container with its own network namespace, `install.sh --local
---install-only`, a join ticket minted on the server and transferred base64, then
-`vallum join`. This is the gate that proves a stranger can install the product,
-which is the alpha claim.
+```
+installed: vallum 1.6.4 (linux-only, experimental-pq)
+author path: none
+ticket minted for accept1 (127 bytes)
+   ok    handshake with the server
+   ok    ping 10.7.0.1 (2/2)
+units after join: active active
+3 packets transmitted, 3 received, 0% packet loss
+rtt min/avg/max/mdev = 75.740/77.299/78.545/1.166 ms
+peer accept1  endpoint=198.51.100.7:44820  last_handshake_time_sec=…
+```
 
-Known traps already encoded in the skill, to be applied rather than rediscovered:
-the installer expects `/opt/vallum` with `target/release/` beneath it, a
-minimal container has no `ping`/`curl` (use `/dev/tcp`), and a failed join
-leaves the peer registered so it must be removed before re-inviting.
+The claim under test was reproducibility, so the script asserts the part that
+usually breaks it: after installing, it scans the installed tree for any
+`/home/<user>/` path and fails if one survives. Nothing in the install depends on
+the author's home directory, shell or files.
+
+The script lives in `scripts/` rather than in the operator's scratch space for
+the same reason — a test only its author can run does not prove anything about
+reproducibility. Everything machine-specific (host, peer name, config path) is an
+environment override.
+
+Three failures on the way were all in the harness, and each is now a pitfall in
+the `vallum-operations` skill: the container's cgroup volume spec
+(`-v /sys/fs/cgroup:rw` is rejected; source:dest plus `--cgroupns=host`),
+a ticket grep whose character class excluded `:` so it matched the *usage
+string* and produced a 27-byte "ticket", and a `/dev/tcp` probe aimed at **UDP**
+port 51820, which can only fail and looks exactly like a dead tunnel.
 
 ## Gate 3 — Full tunnel, guard and dead-man
 
