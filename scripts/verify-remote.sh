@@ -96,6 +96,12 @@ SRV_IP=${SRV_IP:-10.99.90.1}
 CLI_IP=${CLI_IP:-10.99.90.2}
 PREFIX=${PREFIX:-24}
 REMOTE_DIR=/tmp/vallum-remote-test
+# A live deployment's masquerade table is not this script's to destroy. It is
+# removed by the clean path below so the test starts from nothing, and that took
+# a working full-tunnel server's NAT with it: clients stopped carrying while the
+# tunnel still read `active` and handshakes still succeeded (2026-11-12). Save it
+# first, restore it on the way out.
+NAT_SAVE=$(mktemp -t vallum-nat.XXXXXX)
 LOCAL_DIR=/tmp/vallum-remote-client
 CIFACE=vallumrc0
 # The remote client namespace (--namespaced) and its host-side veth.
@@ -204,7 +210,14 @@ FORWARD_WAS=""
 SERVER_UNIT=""
 SERVER_PATTERN=""
 
+restore_nat() {
+    [ -s "$NAT_SAVE" ] || return 0
+    rsh "sudo nft -f -" <"$NAT_SAVE" >/dev/null 2>&1 && \
+        ok "the host's own \`inet vallum\` NAT table was restored"
+}
+
 cleanup() {
+    restore_nat
     set +e
     say "cleanup"
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null
@@ -259,6 +272,8 @@ QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 
 say "remote checks ($TARGET)"
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
+rsh "sudo nft list table inet vallum 2>/dev/null" >"$NAT_SAVE" 2>/dev/null || true
+[ -s "$NAT_SAVE" ] && note "saved the host's existing \`inet vallum\` table to restore after the run"
 if rsh "test -e /etc/vallum" 2>/dev/null; then
     if [ "$CLEAN" != 1 ]; then
         bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.
