@@ -95,6 +95,16 @@ export async function cancelApply(): Promise<{ ok: boolean; output: string }> {
   })
 }
 
+/** Revert an applied full tunnel to the split config. Deliberate by
+ * construction: the backend runs it only with the typed word. */
+export async function revertPlan(confirm: string): Promise<{ ok: boolean; output: string }> {
+  if (IN_TAURI) return invoke<{ ok: boolean; output: string }>("revert_command", { confirm })
+  return http<{ ok: boolean; output: string }>("/api/revert", {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  })
+}
+
 export async function reportWindowState(focused: boolean, visible: boolean): Promise<void> {
   // The HTTP transport has no window; its cadence is fixed server-side.
   if (!IN_TAURI) return

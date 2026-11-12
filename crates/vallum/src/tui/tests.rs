@@ -298,6 +298,41 @@ fn handshake_age_is_read_against_the_frame_s_clock_not_the_host_s() {
 }
 
 #[test]
+fn peer_verdict_names_a_next_step_only_where_one_exists() {
+    let now = 1_800_000_000;
+    let mut peer = super::app::PeerView::default();
+
+    // Never, no endpoint: the far end has never called home.
+    assert_eq!(
+        App::peer_verdict_at(&peer, now),
+        "no handshake yet — the far end has never connected; check it is running"
+    );
+    // Never, with an endpoint: the path itself is suspect.
+    peer.endpoint = "203.0.113.7:51820".to_owned();
+    assert_eq!(
+        App::peer_verdict_at(&peer, now),
+        "no handshake yet — check the far end is running and reachable at this endpoint"
+    );
+    // Healthy peers read as healthy, not as an absence of warnings.
+    peer.last_handshake = Some((now - 14, 0));
+    assert_eq!(
+        App::peer_verdict_at(&peer, now),
+        "live — last handshake 14s ago"
+    );
+    // Quiet names the idle case so it does not read as a fault.
+    peer.last_handshake = Some((now - 600, 0));
+    assert!(App::peer_verdict_at(&peer, now).starts_with("quiet — last handshake 10m ago;"));
+    // Stale with no keepalive names keepalive; with one it does not.
+    peer.last_handshake = Some((now - 7200, 0));
+    assert!(App::peer_verdict_at(&peer, now).contains("keepalive is set if it roams"));
+    peer.keepalive = Some(25);
+    assert!(!App::peer_verdict_at(&peer, now).contains("keepalive"));
+    // Rotation overrides everything: the open rotation is the news.
+    peer.rotating = true;
+    assert!(App::peer_verdict_at(&peer, now).contains("rotation in progress"));
+}
+
+#[test]
 fn service_state_labels_are_limited_to_known_systemd_states() {
     use super::app::ServiceState;
 

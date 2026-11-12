@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
-import { applyPlan, cancelApply, getPlan, type PlanData } from "@/lib/bridge"
+import { applyPlan, cancelApply, getPlan, revertPlan, type PlanData } from "@/lib/bridge"
 import { Button } from "@/components/ui/button"
 import { Panel } from "@/components/ui/panel"
 
@@ -132,17 +132,74 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
     setBackgrounded(true)
   }, [])
 
+  // Applied stays collapsed: a healthy full tunnel should not spend a panel's
+  // worth of attention on saying so. But the way back is here, not only in a
+  // terminal: reverting restarts the tunnel, so it takes the same typed word
+  // the apply took — the confirmation is the deliberation.
+  const revertArmed = confirm.trim().toUpperCase() === "REVERT"
+  const revert = useCallback(() => {
+    if (!revertArmed || running.current) return
+    running.current = true
+    setBusy(true)
+    setError(null)
+    void revertPlan("REVERT")
+      .then((result) => {
+        setOutput(result.output)
+        setConfirm("")
+        onChanged?.()
+        load()
+        toast.success("Full tunnel reverted — back on the split tunnel.")
+      })
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        running.current = false
+        setBusy(false)
+      })
+  }, [revertArmed, load, onChanged])
+
   if (!plan) return null
 
-  // Nothing to do stays collapsed: a healthy full tunnel should not spend a
-  // panel's worth of attention on saying so.
   if (plan.already_full) {
     return (
       <details className="surface rounded-lg">
         <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-4 py-2.5 text-xs select-none">
           <span className="text-signal text-xs font-semibold tracking-wide">FULL TUNNEL</span>
-          <span>already applied — nothing to do</span>
+          <span>already applied — open to revert to the split tunnel</span>
         </summary>
+        <div className="px-4 pb-3">
+          <p className="text-muted-foreground mb-2 text-xs leading-snug">
+            undo it all: {render_undo(plan.undo)} — or revert from here. The
+            revert restarts the tunnel, so it arms the same way the apply did.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              placeholder="type REVERT to arm"
+              disabled={busy}
+              className="border-border/60 bg-background/40 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70"
+              spellCheck={false}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              className="uppercase"
+              disabled={!revertArmed || busy}
+              onClick={() => revert()}
+              title="Restore the split config and restart the tunnel"
+            >
+              {busy ? `reverting… ${elapsed}s` : "revert to split"}
+            </Button>
+          </div>
+          {error && <p className="text-fault mt-2 text-xs">{error}</p>}
+          {output && (
+            <pre className="border-border bg-canvas text-muted-foreground mt-2 max-h-48 overflow-auto rounded border p-2 font-mono text-xs leading-snug whitespace-pre-wrap">
+              {output}
+            </pre>
+          )}
+        </div>
       </details>
     )
   }

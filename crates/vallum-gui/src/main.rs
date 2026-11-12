@@ -792,10 +792,9 @@ pub(crate) fn apply(confirm: &str) -> Result<String, String> {
 /// goes back and the unit is left running — the same end state a failed trial
 /// reaches on its own, reached now instead of at the deadline.
 ///
-/// Refused when no trial is armed. The revert is idempotent but not harmless:
-/// on a host that is not mid-trial it restores the split config and restarts
-/// the tunnel — a change the operator did not ask for and did not confirm.
-/// `sudo vallum-ops revert` stays the way to say that deliberately.
+/// Refused when no trial is armed. The revert restarts a working tunnel, so
+/// an unarmed cancel stays refused: the deliberate path is the confirmed
+/// [`revert`], where the operator types REVERT for exactly that outcome.
 pub(crate) fn apply_cancel(socket: &std::path::Path) -> Result<String, String> {
     let interface = socket
         .file_stem()
@@ -804,6 +803,28 @@ pub(crate) fn apply_cancel(socket: &std::path::Path) -> Result<String, String> {
     if !trial_armed(interface) {
         return Err(unarmed_cancel_error(interface));
     }
+    run_ops_revert()
+}
+
+/// Revert an applied full tunnel back to the split config, on purpose. The
+/// same `vallum-ops revert` the mid-trial cancel runs, minus the armed gate:
+/// the typed confirmation IS the deliberation the cancel refusal asks for.
+/// The console offers this from the already-full panel; the terminal spelling
+/// stays `sudo vallum-ops revert`.
+pub(crate) fn revert(confirm: &str) -> Result<String, String> {
+    if confirm != "REVERT" {
+        return Err(
+            "type REVERT in the confirmation field to revert to the split tunnel".to_owned(),
+        );
+    }
+    run_ops_revert()
+}
+
+/// Run `vallum-ops revert`: guard off, split config back, unit left running.
+/// Shared by the mid-trial cancel (gated on an armed trial) and the confirmed
+/// revert (gated on the typed word). Never call this without one of those
+/// gates: on a host nobody asked to change it restarts a working tunnel.
+fn run_ops_revert() -> Result<String, String> {
     let mut attempts: Vec<(&str, Vec<&str>)> =
         vec![("sudo", vec!["-n", "/usr/local/sbin/vallum-ops", "revert"])];
     if effective_uid() != 0 {
@@ -857,6 +878,19 @@ fn cancel_apply(console: State<'_, Arc<Console>>) -> Result<serde_json::Value, S
     let socket = selected(&console)?;
     crate::hostfacts::write_gate(&socket)?;
     match apply_cancel(&socket) {
+        Ok(output) => Ok(serde_json::json!({ "ok": true, "output": output })),
+        Err(error) => Err(error),
+    }
+}
+
+#[tauri::command]
+fn revert_command(
+    console: State<'_, Arc<Console>>,
+    confirm: String,
+) -> Result<serde_json::Value, String> {
+    let socket = selected(&console)?;
+    crate::hostfacts::write_gate(&socket)?;
+    match revert(&confirm) {
         Ok(output) => Ok(serde_json::json!({ "ok": true, "output": output })),
         Err(error) => Err(error),
     }
@@ -1112,7 +1146,8 @@ fn main() {
             write_config,
             plan_command,
             apply_command,
-            cancel_apply
+            cancel_apply,
+            revert_command
         ])
         .setup(move |app| {
             // One-shot startup report on stderr: which URL the webview loaded,
@@ -1218,6 +1253,17 @@ mod transport_parity_tests {
         assert!(error.contains("nothing to cancel"), "{error}");
         assert!(error.contains("vallum-ops revert"), "{error}");
         assert!(error.contains("vallum0"), "{error}");
+    }
+
+    /// The confirmed revert: the typed word is the deliberation the unarmed
+    /// cancel refuses without. Asserted on the gate alone — a test must never
+    /// run `vallum-ops revert` against the host's tunnel.
+    #[test]
+    fn revert_needs_the_typed_word() {
+        for wrong in ["", "apply", "revert", "REVERT "] {
+            let error = revert(wrong).expect_err(&format!("{wrong:?} must not revert"));
+            assert!(error.contains("REVERT"), "{error}");
+        }
     }
 
     #[test]

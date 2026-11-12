@@ -799,6 +799,11 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 )
             },
         ]));
+        lines.push(detail_kv(
+            "verdict",
+            App::peer_verdict_at(peer, app.now),
+            freshness_style(t, freshness),
+        ));
         let (rx_bar, tx_bar) = transfer_share_bar(peer.rx_bytes, peer.tx_bytes, 10);
         lines.push(Line::from(vec![
             Span::styled("transfer    ", t.muted()),

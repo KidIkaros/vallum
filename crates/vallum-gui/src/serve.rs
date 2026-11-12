@@ -302,6 +302,47 @@ fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::
         return Ok(());
     }
 
+    if request.path == "/api/revert" && request.method == "POST" {
+        let Some(socket) = console.known_socket() else {
+            json(
+                &mut stream,
+                "409 Conflict",
+                &serde_json::json!({ "error": "no interface selected" }),
+            );
+            return Ok(());
+        };
+        if let Err(error) = crate::write_gate(&socket) {
+            json(
+                &mut stream,
+                "403 Forbidden",
+                &serde_json::json!({ "error": error }),
+            );
+            return Ok(());
+        }
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let confirm = body
+            .get("confirm")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // The deliberate undo of an applied full tunnel: same `vallum-ops
+        // revert` the mid-trial cancel runs, gated here on the typed word
+        // instead of an armed trial. Long-running like apply: it restarts
+        // the unit, so the request holds until the verdict exists.
+        match crate::revert(confirm) {
+            Ok(output) => json(
+                &mut stream,
+                "200 OK",
+                &serde_json::json!({ "ok": true, "output": output }),
+            ),
+            Err(error) => json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({ "error": error }),
+            ),
+        }
+        return Ok(());
+    }
+
     if request.path == "/api/service" {
         let Some(socket) = console.known_socket() else {
             json(

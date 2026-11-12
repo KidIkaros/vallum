@@ -255,6 +255,23 @@ function peerState(peer: Peer, now: number) {
   return { f, tone: freshnessTone[f] }
 }
 
+// The one-line diagnosis: every peer gets a verdict, not just the sick ones,
+// so a healthy peer reads as healthy instead of as an absence of warnings.
+// An idle tunnel goes quiet on its own — only the never and stale cases name
+// a next step, and the quiet ones say so.
+function peerVerdict(peer: Peer, now: number): string {
+  if (peer.rotating) return "rotation in progress — finalize once the far end uses the new key"
+  const age = Math.max(0, now - peer.last_handshake_sec)
+  if (peer.last_handshake_sec === 0) {
+    return peer.endpoint
+      ? "no handshake yet — check the far end is running and reachable at this endpoint"
+      : "no handshake yet — the far end has never connected; check it is running"
+  }
+  if (age < 5 * 60) return `live — last handshake ${age}s ago`
+  if (age < 60 * 60) return `quiet — last handshake ${age}s ago; idle tunnels go quiet, ping if it should be carrying traffic`
+  return `stale — last handshake ${age}s ago; check the far end is up, the endpoint is right${peer.keepalive === null ? ", and keepalive is set if it roams" : ""}`
+}
+
 function PeersPanel({
   peers,
   now,
@@ -492,6 +509,7 @@ function PeerDetail({
               }`}
         </p>
       )}
+      <p className={`mb-1 text-xs ${tone}`}>{peerVerdict(peer, now)}</p>
       <Row label="fingerprint">{peer.fingerprint}</Row>
       <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
       <Row label="allowed IPs">{peer.allowed_ips.join(", ")}</Row>

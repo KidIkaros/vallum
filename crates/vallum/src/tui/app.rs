@@ -1145,6 +1145,55 @@ impl App {
         }
     }
 
+    /// One-line diagnosis for the detail pane: every peer gets a verdict, not
+    /// just the sick ones, so a healthy peer reads as healthy. The same words
+    /// as the GUI console's peer verdict; the age renders in this surface's
+    /// units (`handshake_age_at`), and the finalize hint names this surface's
+    /// key. An idle tunnel goes quiet on its own — only the never and stale
+    /// cases name a next step.
+    #[must_use]
+    pub fn peer_verdict_at(peer: &PeerView, now: u64) -> String {
+        if peer.rotating {
+            return "rotation in progress — finalize (f) once the far end uses the new key"
+                .to_owned();
+        }
+        let freshness = Self::handshake_freshness_at(peer, now);
+        match freshness {
+            HandshakeFreshness::Never => {
+                if peer.endpoint.is_empty() {
+                    "no handshake yet — the far end has never connected; check it is running"
+                        .to_owned()
+                } else {
+                    "no handshake yet — check the far end is running and reachable at this endpoint"
+                        .to_owned()
+                }
+            }
+            HandshakeFreshness::Recent => {
+                format!(
+                    "live — last handshake {} ago",
+                    Self::handshake_age_at(peer, now)
+                )
+            }
+            HandshakeFreshness::Aging => {
+                format!(
+                    "quiet — last handshake {} ago; idle tunnels go quiet, ping if it should be carrying traffic",
+                    Self::handshake_age_at(peer, now)
+                )
+            }
+            HandshakeFreshness::Old => {
+                let keepalive = if peer.keepalive.is_none() {
+                    ", and keepalive is set if it roams"
+                } else {
+                    ""
+                };
+                format!(
+                    "stale — last handshake {} ago; check the far end is up, the endpoint is right{keepalive}",
+                    Self::handshake_age_at(peer, now)
+                )
+            }
+        }
+    }
+
     #[must_use]
     pub fn handshake_freshness_at(peer: &PeerView, now: u64) -> HandshakeFreshness {
         let Some((sec, _)) = peer.last_handshake else {
