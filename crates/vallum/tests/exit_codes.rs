@@ -75,6 +75,67 @@ fn doctor_reports_its_verdict_as_a_failure_not_a_precondition() {
 }
 
 #[test]
+fn a_client_whose_daemon_is_not_running_fails_the_doctor() {
+    // The verdict is the product's headline: "am I protected?". A client whose
+    // daemon is not running is NOT protected - nothing is moving its traffic
+    // into a tunnel, so every byte goes out in the clear. The doctor used to
+    // call that a warning, and a warning does not fail the run, so the command
+    // exited 0 - "everything is fine" - while the user was in the open.
+    //
+    // No daemon is needed to prove it: the report is about the state it finds.
+    let dir = std::env::temp_dir().join(format!("vallum-exit-client-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let key = dir.join("client.key");
+    let (ok, stdout, stderr) = bin()
+        .args(["keygen", "--output"])
+        .arg(&key)
+        .args(["--suite", "3"])
+        .output()
+        .map(|output| {
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        })
+        .unwrap();
+    assert!(ok, "keygen failed: {stderr}");
+    let public = stdout.trim().to_owned();
+
+    // A client: an ephemeral listen port, a peer with an endpoint to dial, and
+    // a control socket that nothing is listening on.
+    let config = dir.join("client.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[interface]\nname = \"client\"\nprivate_key = \"{}\"\nlisten = \"0.0.0.0:0\"\ncontrol = \"{}\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"{public}\"\nendpoint = \"127.0.0.1:51820\"\nallowed_ips = [\"10.0.0.0/24\"]\n",
+            key.display(),
+            dir.join("client.sock").display()
+        ),
+    )
+    .unwrap();
+
+    let output = bin()
+        .args(["doctor", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a client with no daemon must fail the doctor, not warn:\n{stdout}"
+    );
+    // And it must say WHY, in words a person can act on.
+    assert!(
+        stdout.contains("NOT protected"),
+        "the report must say the client is not protected:\n{stdout}"
+    );
+}
+
+#[test]
 fn a_usage_error_from_the_parser_stays_two() {
     // clap's own contract, pinned so a future refactor cannot remap it.
     assert_eq!(code(&["doctor", "--nonsense"]), 2);

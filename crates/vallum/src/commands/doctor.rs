@@ -75,6 +75,7 @@ impl Status {
     }
 }
 
+#[derive(Clone)]
 struct Check {
     name: &'static str,
     status: Status,
@@ -136,48 +137,89 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         }
     };
 
+    // A client dials; a server listens. The doctor has to know which side it
+    // is looking at, because "no handshake yet" is ordinary for a server whose
+    // clients are offline and is a failure for a client.
+    //
+    // Two things have to hold, and both are needed. The listen port is
+    // ephemeral on a client and fixed on a server - but a config with NO peers
+    // is not a client that failed: it is a side with nothing to protect, and
+    // a report that fails it would be crying wolf over a config that has not
+    // been set up yet.
+    let is_client = config
+        .as_ref()
+        .is_some_and(|resolved| resolved.listen.port() == 0 && !resolved.peers.is_empty());
+
+    // The probe answers the one question the rest of the report cannot: is the
+    // path up? It runs first because the verdict for a silent tunnel depends
+    // on it - a server that answers and refuses this client is a different
+    // problem from a server that is not there.
+    let probe = if args.probe_path {
+        config.as_ref().map(check_path_probe)
+    } else {
+        None
+    };
+    let reachable = probe.as_ref().and_then(|(_, reachable)| *reachable);
+
     let socket = args
         .control
         .clone()
         .or_else(|| config.as_ref().and_then(control_from_config));
     match socket {
-        Some(path) => match check_control(&path) {
-            Ok(detail) => {
-                checks.push(Check::new("control", Status::Pass, detail));
-                // The parts can all pass while nothing crosses the wire. This
-                // is the only check that says whether the tunnel is *live*.
-                checks.push(check_tunnel(
-                    &path,
-                    config.as_ref().map(|resolved| resolved.carrier),
-                ));
-                // Handshake age says the keys were agreed; this says data is
-                // still moving. The two come apart in the one failure that
-                // matters — a path that dies while the daemon keeps dialling.
-                checks.push(check_path_liveness(&path));
-                checks.push(check_handshake_drops(&path));
-            }
-            Err(error) => {
-                let is_offline = match &error {
-                    Error::IoPath { source, .. } => matches!(
-                        source.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ),
-                    _ => false,
-                };
-                if is_offline && args.control.is_none() {
-                    checks.push(Check::new(
+        Some(path) => {
+            match check_control(&path) {
+                Ok(detail) => {
+                    checks.push(Check::new("control", Status::Pass, detail));
+                    // The parts can all pass while nothing crosses the wire. This
+                    // is the only check that says whether the tunnel is *live*.
+                    checks.push(check_tunnel(
+                        &path,
+                        config.as_ref().map(|resolved| resolved.carrier),
+                        is_client,
+                        reachable,
+                    ));
+                    // Handshake age says the keys were agreed; this says data is
+                    // still moving. The two come apart in the one failure that
+                    // matters — a path that dies while the daemon keeps dialling.
+                    checks.push(check_path_liveness(&path));
+                    checks.push(check_handshake_drops(&path));
+                }
+                Err(error) => {
+                    let is_offline = match &error {
+                        Error::IoPath { source, .. } => matches!(
+                            source.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ),
+                        _ => false,
+                    };
+                    if is_offline && args.control.is_none() {
+                        // A client whose daemon is not running is not protected -
+                        // and its traffic is going out in the clear, because
+                        // nothing is moving it into a tunnel. The report used to
+                        // say `Warn` here, and `Warn` does not fail the run, so
+                        // `doctor` exited 0 - "everything is fine" - for a client
+                        // that was sending every byte in the open.
+                        checks.push(Check::new(
                         "control",
-                        Status::Warn,
+                        if is_client { Status::Fail } else { Status::Warn },
                         format!(
-                            "daemon is not running (socket `{}` not responding; start service to inspect live session)",
-                            path.display()
+                            "daemon is not running (socket `{}` not responding{})",
+                            path.display(),
+                            if is_client {
+                                " - this client is NOT protected: nothing is moving its traffic \
+                                 into a tunnel, so it is going out in the clear. Start the service \
+                                 with `systemctl start vallum@<interface>`"
+                            } else {
+                                "; start service to inspect live session"
+                            }
                         ),
                     ));
-                } else {
-                    checks.push(Check::new("control", Status::Fail, error.to_string()));
+                    } else {
+                        checks.push(Check::new("control", Status::Fail, error.to_string()));
+                    }
                 }
             }
-        },
+        }
         None => checks.push(Check::new(
             "control",
             if args.config.is_none() && args.control.is_none() {
@@ -196,8 +238,8 @@ pub fn doctor(args: &DoctorArgs) -> Result<(), Error> {
         // different fix.
         checks.push(check_carrier(resolved.carrier));
         checks.push(check_sandbox(resolved));
-        if args.probe_path {
-            checks.push(check_path_probe(resolved));
+        if let Some((check, _)) = &probe {
+            checks.push(check.clone());
         }
         // A port of 0 is an ephemeral client; anything else is a server, and a
         // server that cannot forward or is not reachable is not working.
@@ -362,7 +404,7 @@ fn check_carrier(carrier: vallum_config::Carrier) -> Check {
 /// nothing either way. Only TCP can answer it — a UDP port that nobody listens
 /// on is silent, not refused — so under UDP the check says what it cannot do
 /// rather than reporting a pass it did not earn.
-fn check_path_probe(resolved: &crate::config::Resolved) -> Check {
+fn check_path_probe(resolved: &crate::config::Resolved) -> (Check, Option<bool>) {
     let endpoints: Vec<std::net::SocketAddr> = resolved
         .peers
         .iter()
@@ -383,30 +425,36 @@ fn probe_endpoints(
     mut endpoints: Vec<std::net::SocketAddr>,
     timeout: std::time::Duration,
     connect: impl Fn(&std::net::SocketAddr, std::time::Duration) -> std::io::Result<()>,
-) -> Check {
+) -> (Check, Option<bool>) {
     endpoints.sort();
     endpoints.dedup();
 
     if endpoints.is_empty() {
-        return Check::new(
-            "path",
-            Status::Pass,
-            "no peer endpoint configured, so this host listens and there is nothing to dial",
+        return (
+            Check::new(
+                "path",
+                Status::Pass,
+                "no peer endpoint configured, so this host listens and there is nothing to dial",
+            ),
+            None,
         );
     }
     if !carrier.is_probeable() {
-        return Check::new(
-            "path",
-            Status::Pass,
-            format!(
-                "udp: not probeable — a UDP port that is closed or filtered is silence, not a \
-                 refusal; `vallum show` reports the last handshake for {}",
-                endpoints
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        return (
+            Check::new(
+                "path",
+                Status::Pass,
+                format!(
+                    "udp: not probeable — a UDP port that is closed or filtered is silence, not a \
+                     refusal; `vallum show` reports the last handshake for {}",
+                    endpoints
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ),
+            None,
         );
     }
 
@@ -419,27 +467,33 @@ fn probe_endpoints(
         }
     }
     if failed.is_empty() {
-        Check::new(
-            "path",
-            Status::Pass,
-            format!(
-                "tcp: {} accepted a connection",
-                endpoints
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        (
+            Check::new(
+                "path",
+                Status::Pass,
+                format!(
+                    "tcp: {} accepted a connection",
+                    endpoints
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             ),
+            Some(true),
         )
     } else {
-        Check::new(
-            "path",
-            Status::Warn,
-            format!(
-                "tcp: no answer from {}; the port is closed or filtered, or the far end is not \
-                 on `carrier = \"tcp\"` — UDP to the same host is the other half of the question",
-                failed.join(", ")
+        (
+            Check::new(
+                "path",
+                Status::Warn,
+                format!(
+                    "tcp: no answer from {}; the port is closed or filtered, or the far end is not \
+                     on `carrier = \"tcp\"` — UDP to the same host is the other half of the question",
+                    failed.join(", ")
+                ),
             ),
+            Some(false),
         )
     }
 }
@@ -584,8 +638,15 @@ fn check_path_liveness(path: &Path) -> Check {
                 ),
             ),
             (None, Some(_)) => (
-                Status::Warn,
-                format!("peer `{name}`: datagrams sent, nothing has ever arrived"),
+                // Datagrams sent, nothing ever arrived: this side is the one
+                // dialling, and it has never been answered. `Warn` does not
+                // fail the run, and a report that exits 0 while nothing is
+                // protected is the one thing this command must never say.
+                Status::Fail,
+                format!(
+                    "peer `{name}`: datagrams sent, nothing has ever arrived - this side is \
+                     dialling and has never been answered, so nothing is protected"
+                ),
             ),
             (Some(received), _) => (
                 Status::Pass,
@@ -604,7 +665,60 @@ fn check_path_liveness(path: &Path) -> Check {
     verdict.unwrap_or_else(|| Check::new("path", Status::Warn, "no peers configured"))
 }
 
-fn check_tunnel(path: &Path, carrier: Option<vallum_config::Carrier>) -> Check {
+/// The verdict for a tunnel that has never handshook.
+///
+/// Separated from the socket so both branches are testable without a daemon.
+///
+/// The asymmetry is the whole point. A **server** whose peers have not
+/// connected is ordinary - the client is off, or asleep, or behind a wall.
+/// A **client** that has never completed a handshake is not ordinary: it is
+/// carrying nothing, and every byte it sends is going out in the clear. The
+/// doctor used to say `Warn` for both, and `Warn` does not fail the run, so
+/// a client that had never protected a single byte exited **0** - the report
+/// said everything was fine while nothing was.
+///
+/// `reachable` is what the path probe found, when it ran: `Some(true)` means
+/// the server answered, so the silence is the server refusing this client
+/// rather than the path being down.
+fn handshake_verdict(is_client: bool, reachable: Option<bool>) -> (Status, String) {
+    if !is_client {
+        return (
+            Status::Warn,
+            "no handshake since the daemon started: the peers may simply be offline".to_owned(),
+        );
+    }
+    let cause = match reachable {
+        Some(true) => {
+            "the server answers on the wire but does not complete a handshake with this client, \
+             so it is refusing this client - most likely the server no longer has this client's \
+             key (it was re-enrolled, or this config is stale). Re-enrol with `vallum peer add`"
+                .to_owned()
+        }
+        Some(false) => {
+            "the server does not answer on the wire at all, so the path is down - a firewall \
+             between the two, or the server's daemon is not running"
+                .to_owned()
+        }
+        None => "the likely causes, in the order to check them: the server does not have this \
+             client's key (it was re-enrolled, or this config is stale) - re-enrol with `vallum \
+             peer add`; the endpoint is wrong or filtered; or the server's daemon is not running"
+            .to_owned(),
+    };
+    (
+        Status::Fail,
+        format!(
+            "no handshake has ever completed - this client is NOT protected, and every byte \
+             it sends is going out in the clear. {cause}"
+        ),
+    )
+}
+
+fn check_tunnel(
+    path: &Path,
+    carrier: Option<vallum_config::Carrier>,
+    is_client: bool,
+    reachable: Option<bool>,
+) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,
         Err(error) => return Check::new("tunnel", Status::Warn, error.to_string()),
@@ -648,13 +762,12 @@ fn check_tunnel(path: &Path, carrier: Option<vallum_config::Carrier>) -> Check {
         }
         _ => {
             let protocol = carrier.map_or("udp", vallum_config::Carrier::protocol);
+            let (status, detail) = handshake_verdict(is_client, reachable);
             Check::new(
                 "tunnel",
-                Status::Warn,
+                status,
                 format!(
-                    "no handshake since the daemon started: {protocol} {} may be filtered \
-                     on one side, the endpoint may be wrong, or the other daemon may not be \
-                     running",
+                    "{detail} ({protocol} {})",
                     response.field(uapi::field::LISTEN_PORT).unwrap_or("?")
                 ),
             )
@@ -1153,6 +1266,41 @@ mod tests {
     }
 
     #[test]
+    fn a_client_that_never_handshook_is_a_failure() {
+        // The bug this closes: `Warn` does not fail the run, so a client that
+        // had never protected a single byte exited 0 - the report said
+        // everything was fine while nothing was.
+        let (status, detail) = super::handshake_verdict(true, None);
+        assert_eq!(status, super::Status::Fail);
+        assert!(detail.contains("NOT protected"), "{detail}");
+        // The likeliest cause is named, because the operator has to act on it.
+        assert!(detail.contains("key"), "{detail}");
+    }
+
+    #[test]
+    fn a_server_with_silent_peers_is_only_a_warning() {
+        // The asymmetry is deliberate: a server whose clients are offline is
+        // ordinary. Failing it would train people to ignore the line.
+        let (status, detail) = super::handshake_verdict(false, None);
+        assert_eq!(status, super::Status::Warn);
+        assert!(detail.contains("offline"), "{detail}");
+    }
+
+    #[test]
+    fn a_reachable_server_that_refuses_is_named_as_a_refusal() {
+        // The probe answered, so the path is up: the silence is the server
+        // refusing this client, not the server being absent. Those two have
+        // different fixes, and the old message gave neither.
+        let (status, detail) = super::handshake_verdict(true, Some(true));
+        assert_eq!(status, super::Status::Fail);
+        assert!(detail.contains("refusing"), "{detail}");
+
+        let (status, detail) = super::handshake_verdict(true, Some(false));
+        assert_eq!(status, super::Status::Fail);
+        assert!(detail.contains("does not answer"), "{detail}");
+    }
+
+    #[test]
     fn the_carrier_check_names_the_transport_and_its_price() {
         use vallum_config::Carrier;
 
@@ -1182,7 +1330,7 @@ mod tests {
 
         // UDP: no connection to make, so no pass and no fail — the honest
         // answer, because a filtered UDP port looks exactly like a quiet one.
-        let udp = super::probe_endpoints(
+        let (udp, udp_reachable) = super::probe_endpoints(
             Carrier::Udp,
             vec![endpoint],
             Duration::from_secs(1),
@@ -1190,22 +1338,26 @@ mod tests {
         );
         assert_eq!(udp.status, super::Status::Pass);
         assert!(udp.detail.contains("not probeable"), "{}", udp.detail);
+        // A carrier that cannot be probed must not claim a reachability: the
+        // verdict for a silent tunnel depends on this being the truth.
+        assert_eq!(udp_reachable, None);
 
         // A listening port answers.
-        let reachable = super::probe_endpoints(
+        let (reachable, reachable_says) = super::probe_endpoints(
             Carrier::Tcp,
             vec![endpoint, endpoint],
             Duration::from_secs(1),
             |_, _| Ok(()),
         );
         assert_eq!(reachable.status, super::Status::Pass);
+        assert_eq!(reachable_says, Some(true));
         assert!(reachable.detail.contains("accepted a connection"));
         // The same endpoint twice is one dial, because the report is per path.
         assert_eq!(reachable.detail.matches("127.0.0.1:51820").count(), 1);
 
         // A closed or filtered port is a warning naming the endpoint, not a
         // failure: the far end may simply be restarting.
-        let unreachable = super::probe_endpoints(
+        let (unreachable, unreachable_says) = super::probe_endpoints(
             Carrier::Tcp,
             vec![endpoint],
             Duration::from_secs(1),
@@ -1217,6 +1369,7 @@ mod tests {
             },
         );
         assert_eq!(unreachable.status, super::Status::Warn);
+        assert_eq!(unreachable_says, Some(false));
         assert!(unreachable.detail.contains("127.0.0.1:51820"));
         assert!(
             unreachable.detail.contains("carrier"),
@@ -1228,7 +1381,8 @@ mod tests {
         let nothing =
             super::probe_endpoints(Carrier::Tcp, Vec::new(), Duration::from_secs(1), |_, _| {
                 panic!("nothing to dial")
-            });
+            })
+            .0;
         assert_eq!(nothing.status, super::Status::Pass);
         assert!(nothing.detail.contains("nothing to dial"));
     }
