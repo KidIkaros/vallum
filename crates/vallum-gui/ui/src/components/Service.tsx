@@ -27,8 +27,22 @@ export function useServiceState(enabled: boolean) {
   return { service, refresh }
 }
 
+/** A refused start/stop is nearly always a permission, and stderr says so in a
+ * form that reads as an error rather than an instruction. The line stays — it is
+ * the evidence — and the way past it rides beside it. */
+function permissionHint(
+  action: "start" | "stop" | "restart",
+  message: string,
+  unit: string,
+): string | undefined {
+  if (!/password|polkit|not authorized|access denied|permission|authentication/i.test(message)) {
+    return undefined
+  }
+  return `Nothing changed. Grant this console the installer's sudo rule, or run it yourself: sudo systemctl ${action} ${unit}`
+}
+
 /** Run a lifecycle action and report what systemd says afterwards, not intent. */
-function useServiceAction(refresh: () => void) {
+function useServiceAction(refresh: () => void, unit: string) {
   const [pending, setPending] = useState<string | null>(null)
   const act = async (action: "start" | "stop" | "restart") => {
     setPending(action)
@@ -36,7 +50,9 @@ function useServiceAction(refresh: () => void) {
       const done = await serviceAction(action)
       toast.success(done.message)
     } catch (error) {
-      toast.error(String(error instanceof Error ? error.message : error))
+      const message = String(error instanceof Error ? error.message : error)
+      const hint = permissionHint(action, message, unit)
+      toast.error(message, hint ? { description: hint } : undefined)
     } finally {
       setPending(null)
       refresh()
@@ -55,7 +71,8 @@ export function ServiceStrip({
   /** The control socket answered: a daemon is running, whatever systemd says. */
   attached?: boolean
 }) {
-  const { pending, act } = useServiceAction(onChanged)
+  const unit = service?.unit ?? "vallum@vallum0"
+  const { pending, act } = useServiceAction(onChanged, unit)
   // Stopping takes the tunnel away from every user of this machine, so the
   // button asks once, names the effect, and disarms itself after 4 s.
   const [confirmStop, setConfirmStop] = useState(false)
@@ -137,8 +154,8 @@ export function StoppedCard({
   service: ServiceStatus | null
   onChanged: () => void
 }) {
-  const { pending, act } = useServiceAction(onChanged)
   const unit = service?.unit ?? "vallum@vallum0"
+  const { pending, act } = useServiceAction(onChanged, unit)
   const failed = service?.active === "failed"
   return (
     <section className="surface rounded-lg px-5 py-6">
@@ -209,6 +226,13 @@ export function LogsPanel() {
           refresh
         </Button>
       </summary>
+      {error && /not authorized|permission|access denied|insufficient/i.test(error) && (
+        <p className="text-stale px-3 pt-2 text-xs">
+          journald will not show another user's unit log — add this user to the
+          systemd-journal group, or read it with sudo journalctl -u{" "}
+          {unit || "vallum@vallum0"}.
+        </p>
+      )}
       <pre className="text-foreground/80 max-h-64 overflow-auto border-t border-border/70 px-3 py-2 font-mono text-xs leading-relaxed whitespace-pre-wrap">
         {error ? `journald: ${error}` : text || "no output"}
       </pre>

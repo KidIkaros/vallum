@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ShieldOff } from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import {
@@ -21,13 +21,13 @@ import { verdictTone } from "@/lib/verdict"
 import { PeerPalette } from "@/components/PeerPalette"
 import { PlanPanel } from "@/components/Plan"
 import { CopyButton } from "@/components/Copy"
-import { FirstRun } from "@/components/FirstRun"
+import { FirstRun, SocketUnreadable } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
 import { TopTalkers, type PeerRate } from "@/components/TopTalkers"
 import { TrafficChart } from "@/components/TrafficChart"
 import { Diamond, Panel, PanelTitle } from "@/components/ui/panel"
 import { TrafficHistory, freshness, freshnessLabel, loadHistory, rateLabel, saveHistory, type Sample } from "@/lib/traffic"
-import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
+import type { InterfaceEntry, Peer, Snapshot, SnapshotPayload } from "@/types"
 
 // The console is the TUI's dashboard rendered in the webview: same vocabulary
 // (◆ Vallum ) TUNNEL CONTROL, the semantic palette, traffic bars, the peer
@@ -37,6 +37,12 @@ import type { InterfaceEntry, Peer, SnapshotPayload } from "@/types"
 // surface says so rather than rendering a plausible zero.
 
 const FRESH_SEC = 5 * 60
+
+// The console asks for a snapshot once a second, and the first answer lands in
+// milliseconds. Three asks that carried no data is a socket with nothing behind
+// it, not a page that is still loading — counted in asks rather than in seconds,
+// so the answer does not move with the clock.
+const SILENT_ATTEMPTS = 3
 
 // The console renders inside the Tauri webview, where `__TAURI_INTERNALS__`
 // is the IPC bridge. A plain browser tab has no bridge and no daemon, so the
@@ -85,9 +91,9 @@ const freshnessTone: Record<string, string> = {
   old: "text-fault",
 }
 
-function anyPeerUp(payload: SnapshotPayload | null, now: number): boolean {
+function anyPeerUp(data: Snapshot | null, now: number): boolean {
   return (
-    payload?.data?.peers.some(
+    data?.peers.some(
       (p) => p.last_handshake_sec > 0 && now - p.last_handshake_sec < FRESH_SEC,
     ) ?? false
   )
@@ -104,23 +110,45 @@ function useLiveClock(): number {
 
 /** State, rate, and freshness at three sizes — the screen's focal point. */
 function Hero({
-  payload,
+  data,
   now,
   history,
   samples,
-  lastReply,
   health,
+  live,
+  seen,
+  attempts,
+  replyAge,
+  socket,
+  error,
 }: {
-  payload: SnapshotPayload | null
+  data: Snapshot | null
   now: number
   history: TrafficHistory
   samples: Sample[]
-  lastReply: string
   health: Health | null
+  /** The daemon answered the most recent poll. */
+  live: boolean
+  /** A snapshot arrived at some point: an absent one is a disconnect, not a cold start. */
+  seen: boolean
+  /** How many snapshots the console has asked for since the page opened. */
+  attempts: number
+  /** Seconds since the daemon last sent data — not since the last frame. */
+  replyAge: number | null
+  socket: string
+  error: string | null
 }) {
-  const data = payload?.data
-  const up = anyPeerUp(payload, now)
-  const unreachable = payload !== null && !payload.ok
+  const up = anyPeerUp(data, now)
+  // A socket in the runtime directory with nothing answering it is a stale file,
+  // a daemon that died, or a permission this user does not have. "…" is the one
+  // thing the focal point must not say, because all three have the same next
+  // step and none of them is "wait longer".
+  const silent = !seen && attempts >= SILENT_ATTEMPTS
+  // Data still on screen that has stopped arriving is retained, and says so. The
+  // TUI has said "showing retained snapshot" since it had a socket to lose; a
+  // console that keeps painting a dead tunnel in the live colours is worse than
+  // one that shows less.
+  const lost = seen && !live
   const handshake = data?.peers
     .map((p) => p.last_handshake_sec)
     .filter((s) => s > 0)
@@ -131,6 +159,7 @@ function Hero({
   // One derivation per render: the headline, its tone and its tooltip all read
   // this value.
   const verdict = health ? egressVerdict(health) : null
+  const tone = silent ? "text-fault" : verdictTone[verdict?.tone ?? "muted"]
 
   return (
     <section className="surface-raised rounded-lg px-5 py-4">
@@ -141,30 +170,32 @@ function Hero({
               with a second badge. Usability spec: <=2 s, no scrolling. */}
           <PanelTitle>PROTECTION</PanelTitle>
           <span
-            className={`text-3xl leading-none font-semibold tracking-tight ${
-              verdictTone[verdict?.tone ?? "muted"]
-            }`}
-            title={verdict?.detail}
+            className={`text-3xl leading-none font-semibold tracking-tight ${tone}`}
+            title={silent ? `nothing answers ${socket || "the control socket"}` : verdict?.detail}
           >
-            {verdict ? verdict.label : "…"}
+            {silent ? "NO DAEMON" : verdict ? verdict.label : "…"}
           </span>
           <span className="text-muted-foreground text-xs">
-            tunnel {up ? "up" : unreachable ? "unreachable" : data ? "idle" : "…"}
+            {silent ? "the control socket has nothing behind it" : `tunnel ${up ? "up" : data ? "idle" : "…"}`}
           </span>
+          {!silent && (
           <span className="text-muted-foreground mt-0.5 text-xs">
             {data ? (
               <>
                 {data.interface} · {data.addresses.join(" · ")} ·{" "}
                 {handshake ? `established ${Math.max(0, now - handshake)}s ago` : "no session yet"}
               </>
+            ) : seen ? (
+              "no snapshot since the disconnect"
             ) : (
               "waiting for the daemon's first snapshot"
             )}
-            <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
+            <span className={live ? "text-live" : "text-muted-foreground"}>
               {" "}
-              · control {lastReply}
+              · control {live ? "live" : seen ? "silent" : "—"}
             </span>
           </span>
+          )}
         </div>
 
         <div className="flex items-end gap-8">
@@ -184,15 +215,36 @@ function Hero({
                   tone === "signal" ? "text-signal" : "text-violet"
                 }`}
               >
-                {rateLabel(rate)}
+                {/* A rate is a measurement of now: where there is no now — no
+                    snapshot yet, or a retained one — 0.0 B/s would be a number the
+                    console does not have. The totals beside it are the last ones
+                    the daemon sent, which the note above the panel explains. */}
+                {live ? rateLabel(rate) : "—"}
               </span>
-              <span className="text-muted-foreground text-xs">total {bytes(total)}</span>
+              <span className="text-muted-foreground text-xs">
+                total {seen ? bytes(total) : "—"}
+              </span>
             </div>
           ))}
         </div>
       </div>
-      {payload && !payload.ok && payload.error && (
-        <p className="text-fault mt-2 text-xs">{payload.error}</p>
+      {lost && (
+        <p className="text-stale mt-2 text-xs">
+          the daemon is not answering — everything below is the last snapshot it sent
+          {replyAge !== null ? `, ${replyAge}s ago` : ""}, kept on screen rather than
+          blanked. Writes stay disabled until it answers.
+        </p>
+      )}
+      {silent && (
+        <p className="text-fault mt-2 text-xs">
+          a socket is here but nothing answers it{socket ? `: ${socket}` : ""} — start the tunnel
+          with START above, or read its own log for why it is not running.
+        </p>
+      )}
+      {error && (
+        <p className={`mt-1 text-xs ${live ? "text-fault" : "text-muted-foreground"}`}>
+          {live ? "daemon" : "last control error"}: {error}
+        </p>
       )}
     </section>
   )
@@ -213,6 +265,8 @@ function PeersPanel({
   onFilter,
   sort,
   onSort,
+  stale,
+  live,
 }: {
   peers: Peer[]
   now: number
@@ -223,8 +277,13 @@ function PeersPanel({
   onFilter: (value: string) => void
   sort: SortOrder
   onSort: (next: SortOrder) => void
+  /** The list is the last one the daemon sent, not a live one. */
+  stale: boolean
+  /** The daemon is answering now. */
+  live: boolean
 }) {
   const shown = useMemo(() => orderPeers(peers, filter, sort), [peers, filter, sort])
+  const unknown = !live && !stale
 
   return (
     <Panel
@@ -233,6 +292,15 @@ function PeersPanel({
           PEERS [<span className="text-foreground">{shown.length}</span>]
           {shown.length !== peers.length && (
             <span className="text-muted-foreground">/{peers.length}</span>
+          )}
+          {stale && (
+            <span
+              className="text-stale"
+              title="the daemon is not answering — this is the last list it sent"
+            >
+              {" "}
+              · stale
+            </span>
           )}
         </>
       }
@@ -273,8 +341,20 @@ function PeersPanel({
       </div>
       {peers.length === 0 ? (
         <p className="text-muted-foreground py-3 text-xs">
-          no peers yet — <span className="text-foreground/80">+ add peer</span> above mints the
-          first one, or <span className="text-foreground/80">invite</span> hands a ticket to a device.
+          {unknown ? (
+            <>no peer list yet — nothing is answering the control socket.</>
+          ) : stale ? (
+            <>
+              no peer list to show — the daemon is not answering, and the last snapshot it sent had
+              none.
+            </>
+          ) : (
+            <>
+              no peers yet — <span className="text-foreground/80">+ add peer</span> above mints
+              the first one, or <span className="text-foreground/80">invite</span> hands a ticket to
+              a device.
+            </>
+          )}
         </p>
       ) : shown.length === 0 ? (
         <p className="text-muted-foreground py-3 text-xs">nothing matches “{filter}”</p>
@@ -322,10 +402,13 @@ function PeerDetail({
   peer,
   now,
   blocked,
+  unknown,
 }: {
   peer: Peer | null
   now: number
   blocked?: string
+  /** Nothing has arrived from the daemon yet: there is no list to step through. */
+  unknown?: boolean
 }) {
   const [probe, setProbe] = useState<PingResult | null>(null)
   const [probing, setProbing] = useState(false)
@@ -333,9 +416,15 @@ function PeerDetail({
     return (
       <Panel title="PEER DETAIL">
         <p className="text-muted-foreground py-3 text-xs">
-          select a peer — <span className="text-foreground/80">j</span>/
-          <span className="text-foreground/80">k</span> steps through the list, or{" "}
-          <span className="text-foreground/80">:</span> runs any command by name.
+          {unknown ? (
+            "no peer data — the control socket has not answered yet."
+          ) : (
+            <>
+              select a peer — <span className="text-foreground/80">j</span>/
+              <span className="text-foreground/80">k</span> steps through the list, or{" "}
+              <span className="text-foreground/80">:</span> runs any command by name.
+            </>
+          )}
         </p>
       </Panel>
     )
@@ -539,13 +628,23 @@ export default function App() {
   const [facts, setFacts] = useState<Preflight | null>(null)
   const [interfaces, setInterfaces] = useState<InterfaceEntry[]>([])
   const [payload, setPayload] = useState<SnapshotPayload | null>(null)
+  // The last answer the daemon actually gave. A disconnect keeps it on screen,
+  // marked, instead of blanking the cockpit into "nothing is configured".
+  const [retained, setRetained] = useState<SnapshotPayload | null>(null)
   const [samples, setSamples] = useState<Sample[]>([])
   const [peerRates, setPeerRates] = useState<PeerRate[]>([])
   const prevPeers = useRef(new Map<string, { rx: number; tx: number; at: number }>())
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null)
+  // When the daemon last answered with data — not when a frame last arrived.
+  // Error frames keep coming every second, and a clock they reset would say
+  // "just now" about a snapshot that stopped an hour ago.
   const [lastUpdate, setLastUpdate] = useState<number | null>(null)
   const history = useRef(new TrafficHistory())
   const now = useLiveClock()
+  // How many snapshots have been asked for. A socket file with nothing behind it
+  // and a daemon one poll behind look identical for a moment, and the count is
+  // what tells them apart without waiting on a clock.
+  const [attempts, setAttempts] = useState(0)
 
   useEffect(() => watchWindowState(), [])
 
@@ -564,12 +663,16 @@ export default function App() {
   }, [])
 
   // What is installed here, read once: it decides whether the console offers a
-  // start button or an install step.
-  useEffect(() => {
+  // start button or an install step. A helper that cannot answer is a state of
+  // its own — not a bare machine — so it is worth retrying.
+  const loadFacts = useCallback(() => {
     preflight()
       .then(setFacts)
       .catch(() => setFacts(null))
   }, [])
+  useEffect(() => {
+    void loadFacts()
+  }, [loadFacts])
 
   // The TUI's keys, as far as the console has actions for them. Deliberately
   // suppressed while a field has focus or a dialog is open: a shortcut that
@@ -650,7 +753,11 @@ export default function App() {
   // exactly what a daemon would — and nothing else.
   const ingestRef = useRef((payload: SnapshotPayload) => {
     setPayload(payload)
-    setLastUpdate(Date.now() / 1000)
+    setAttempts((count) => count + 1)
+    if (payload.data) {
+      setRetained(payload)
+      setLastUpdate(Date.now() / 1000)
+    }
     if (payload.data) {
       const at = Date.now()
       const rx = payload.data.peers.reduce((sum, p) => sum + p.rx_bytes, 0)
@@ -710,7 +817,13 @@ export default function App() {
     return () => unlisten?.()
   }, [])
 
-  const data = payload?.data
+  const live = payload?.ok === true
+  // Data has arrived at some point: a failure frame with no data behind it is a
+  // daemon that never answered, not one that stopped.
+  const seen = retained !== null
+  // What the daemon last said, when it is no longer saying anything: the panels
+  // keep their content and the labels say which it is.
+  const data = payload?.data ?? retained?.data ?? null
   if (data?.interface && samples.length === 0) {
     const restored = loadHistory(data.interface)
     if (restored.length > 1) {
@@ -728,6 +841,7 @@ export default function App() {
     const next = interfaces[(currentIndex + 1) % interfaces.length]
     setSelectedPeer(null)
     setPayload(null)
+    setRetained(null)
     void selectInterface(next.path)
   }
   // The key handler is registered once; this keeps it pointed at the latest
@@ -738,10 +852,16 @@ export default function App() {
     setSelectedPeer(data.peers[0].fingerprint)
   }
   const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
-  // Demo data cannot be written to: the daemon is not there to write to.
-  const blocked = data ? undefined : "waiting for the daemon's first snapshot"
+  // Retained data cannot be written to: the daemon is not there to write to, and
+  // a form that opens over a dead socket fails only after the operator has typed
+  // into it.
+  const blocked = live
+    ? undefined
+    : seen
+      ? "the daemon is not answering — this is the last snapshot it sent"
+      : "waiting for the daemon's first snapshot"
   const replyAge = lastUpdate !== null ? Math.max(0, now - Math.floor(lastUpdate)) : null
-  const lastReply = replyAge === null ? "—" : replyAge < 1 ? "live" : `${replyAge}s`
+  const lastReply = replyAge === null ? "—" : replyAge < 1 ? "live" : `${replyAge}s ago`
 
   return (
     <div className={`mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4 ${comfortable ? "comfortable" : ""}`}>
@@ -764,6 +884,7 @@ export default function App() {
                   if (!next || next.name === currentName) return
                   setSelectedPeer(null)
                   setPayload(null)
+                  setRetained(null)
                   void selectInterface(next.path)
                 }}
                 className="bg-background/40 border-border/70 text-foreground h-7 cursor-pointer rounded border px-1"
@@ -825,24 +946,36 @@ export default function App() {
         interfaces.length === 0 ? (
         // Nothing installed: show what to run, not a start button for a unit
         // that does not exist.
-        <FirstRun facts={facts} />
-      ) : service && service.active !== "active" && !payload?.ok ? (
+        <FirstRun facts={facts} onRetry={loadFacts} />
+      ) : service && service.active !== "active" && !live ? (
         // The unit being down is only the reason the cockpit is empty when the
         // daemon is also unreachable. A daemon can answer with no unit behind it
         // (a lab, a hand-run process), and hiding a live tunnel because systemd
         // has never heard of it is the console lying in the wrong direction.
         <StoppedCard service={service} onChanged={refreshService} />
       ) : interfaces.length === 0 ? (
-        <FirstRun facts={facts} />
+        // A socket the installer created and this user cannot open is the other
+        // reason for an empty list, and it is not the bare machine FirstRun
+        // describes: there the steps are the news, here they are a misdiagnosis.
+        facts && facts.sockets > 0 ? (
+          <SocketUnreadable facts={facts} onRetry={loadFacts} />
+        ) : (
+          <FirstRun facts={facts} onRetry={loadFacts} />
+        )
       ) : (
         <>
           <Hero
-            payload={payload}
+            data={data}
             now={now}
             history={history.current}
             samples={samples}
-            lastReply={lastReply}
             health={hostHealth}
+            live={live}
+            seen={seen}
+            attempts={attempts}
+            replyAge={replyAge}
+            socket={interfaces[currentIndex]?.path ?? ""}
+            error={payload?.error ?? null}
           />
           {/* Task grouping, not tabs: overview first, then zoom/filter, then
               details on demand. Status answers "am I protected?" at a glance;
@@ -859,7 +992,7 @@ export default function App() {
                 </Panel>
               </div>
               <div className="min-w-0 flex-[2]">
-                <HealthPanel health={hostHealth} />
+                <HealthPanel health={hostHealth} stale={!live} />
               </div>
             </div>
           </section>
@@ -876,6 +1009,8 @@ export default function App() {
                   onFilter={setFilter}
                   sort={sort}
                   onSort={setSort}
+                  stale={seen && !live}
+                  live={live}
                   actions={
                     <span className="flex gap-1.5">
                       <Button
@@ -896,7 +1031,7 @@ export default function App() {
                 />
               </div>
               <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
-                <PeerDetail peer={detail} now={now} blocked={blocked} />
+                <PeerDetail peer={detail} now={now} blocked={blocked} unknown={!seen} />
               </div>
             </div>
           </section>
@@ -911,7 +1046,7 @@ export default function App() {
             </div>
           </section>
           <footer className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
-            <span>{lastReply === "live" ? "snapshot live" : lastReply === "—" ? "waiting for snapshot" : `snapshot updated ${lastReply} ago`}</span>
+            <span>{lastReply === "live" ? "snapshot live" : lastReply === "—" ? "waiting for snapshot" : `snapshot updated ${lastReply}`}</span>
             <span>·</span>
             <span>snapshot stream</span>
             <span>·</span>

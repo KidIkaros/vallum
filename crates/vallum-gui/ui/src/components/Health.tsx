@@ -121,11 +121,18 @@ export function PanicButton({ compact = false }: { compact?: boolean }) {
   )
 }
 
-export function HealthPanel({ health }: { health: Health | null }) {
+export function HealthPanel({ health, stale }: { health: Health | null; stale?: boolean }) {
   if (!health) {
     return (
       <Panel title="EGRESS HEALTH">
-        <p className="text-muted-foreground py-3 text-xs">waiting for the host</p>
+        {/* Routes and resolvers are read every 5 s. Nothing back for a while is a
+            different sentence from "the first read has not landed yet", and only
+            one of them is worth waiting on. */}
+        <p className="text-muted-foreground py-3 text-xs">
+          {stale
+            ? "no host reading — the console's helper is not answering, so the routes and resolvers below cannot be checked"
+            : "waiting for the host"}
+        </p>
       </Panel>
     )
   }

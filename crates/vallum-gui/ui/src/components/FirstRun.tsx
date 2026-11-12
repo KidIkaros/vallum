@@ -7,6 +7,78 @@ import { Panel } from "@/components/ui/panel"
 // read off the host: is it installed, is anything running, and what is the next
 // single step. Nothing here changes the network; the commands are shown, not run.
 
+/** The console asks the host what is installed. When that fails, say which
+ * failure it is: the operator's next step is different. */
+function HostUnreadable({ onRetry }: { onRetry?: () => void }) {
+  const command = "./target/release/vallum-gui --serve 7317"
+  return (
+    <Panel title="COULD NOT READ THIS HOST">
+      <p className="text-muted-foreground max-w-2xl text-xs">
+        The console's helper did not answer, so nothing here can say what this
+        machine has installed. That is not the same as a bare machine, and the
+        install steps would be a guess.
+      </p>
+      <p className="text-muted-foreground mt-2 max-w-2xl text-xs">
+        Reload the page. If it stays empty, run the console from a terminal and
+        read what it prints:
+      </p>
+      <div className="mt-1 flex items-center gap-2">
+        <code className="text-foreground/80 truncate font-mono text-xs">{command}</code>
+        <CopyButton value={command} label="copy" />
+      </div>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="text-signal mt-3 cursor-pointer text-xs uppercase"
+        >
+          try again
+        </button>
+      )}
+    </Panel>
+  )
+}
+
+/** A socket exists and this user can open none of them. The tunnel may be running
+ * fine — the console is the thing that cannot see it — so the copy names the
+ * permissions and the installer that sets them, not the tunnel. */
+export function SocketUnreadable({
+  facts,
+  onRetry,
+}: {
+  facts: Preflight
+  onRetry?: () => void
+}) {
+  const command = "sudo scripts/install.sh --local --install-only"
+  return (
+    <Panel title="CONTROL SOCKET UNREADABLE">
+      <p className="text-muted-foreground max-w-2xl text-xs">
+        {facts.sockets} control socket{facts.sockets === 1 ? "" : "s"} in{" "}
+        <code className="text-foreground/80 font-mono">{facts.runtime_dir}</code> — and this
+        user can open none of them. The tunnel may be running fine; the console is
+        what cannot see it.
+      </p>
+      <p className="text-muted-foreground mt-2 max-w-2xl text-xs">
+        The directory is{" "}
+        <code className="text-foreground/80 font-mono">{facts.runtime_mode}</code>. A daemon
+        that drops privileges publishes its socket for the installer's group, which
+        sets 0770 — so the repair is the installer's own rule:
+      </p>
+      <div className="mt-1 flex items-center gap-2">
+        <code className="text-foreground/80 truncate font-mono text-xs">{command}</code>
+        <CopyButton value={command} label="copy" />
+      </div>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="text-signal mt-3 cursor-pointer text-xs uppercase"
+        >
+          check again
+        </button>
+      )}
+    </Panel>
+  )
+}
+
 type Step = {
   title: string
   detail: string
@@ -47,7 +119,13 @@ function stepsFor(preflight: Preflight | null): Step[] {
   ]
 }
 
-export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
+export function FirstRun({
+  facts: given,
+  onRetry,
+}: {
+  facts?: Preflight | null
+  onRetry?: () => void
+}) {
   const [fetched, setFacts] = useState<Preflight | null>(null)
   useEffect(() => {
     if (given !== undefined) return
@@ -56,6 +134,9 @@ export function FirstRun({ facts: given }: { facts?: Preflight | null }) {
       .catch(() => setFacts(null))
   }, [given])
   const facts = given !== undefined ? given : fetched
+  // A helper that did not answer is not a machine with nothing installed: the
+  // steps below are read off the host, so without them there is nothing to say.
+  if (facts === null) return <HostUnreadable onRetry={onRetry} />
   const steps = stepsFor(facts)
   const next = steps.find((step) => !step.done)
 
