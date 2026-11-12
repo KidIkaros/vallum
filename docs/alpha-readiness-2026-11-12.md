@@ -4,20 +4,21 @@ The question: is this product alpha-ready end to end? The answer is only worth
 as much as the gates behind it, so this file is the gate list and the evidence,
 not a narrative.
 
-**What "alpha" means here, in the operator's words (2026-11-12):** reproducibility
-matters more than working on the operator's own devices. The VPS exists to
-validate that Vallum works; the next phase serves the VPN to many devices like a
-service, free, so that strangers' usage continues the validation. So the bar is
-not "it works for me" — it is **"a machine that is not mine can install it, join
-it, and be served, repeatedly and without me in the loop."**
+**What "alpha" means here, in the operator's words (2026-11-12):** this is *not*
+a service. It is an alpha that proves the **protocol** and the **harness** work,
+and that the proof is **reproducible by anyone** — not only on the operator's own
+devices. The VPS is an instrument for validating that, not a product being
+operated for users.
 
-That reorders the gates and adds one: install reproducibility and multi-device
-service become the centre, and the security work (admission, bundle policy, hook
-refusal) is re-read as the boundary a free service needs rather than hardening
-for one operator's sake.
+So the bar is: **a machine that is not the operator's can install it, join it,
+and be served — and someone else can run the same validation and get the same
+answer.** Nothing here is about operating a service for strangers: there are no
+users, no SLA, and no front door to defend. Invite minting stays a root command
+on the server, which is correct for an instrument.
 
-The contract comes from the `vallum-operations` skill, which names the gates and
-the traps. It is deliberately not a new flow: every gate below already existed.
+That reframes the security work as well: admission, bundle policy and the hook
+refusal are properties of the protocol's boundary — the things a stranger
+*reproducing* the validation would otherwise have to trust on faith.
 
 ## Gate 1 — `scripts/verify-remote.sh <host>` (the release gate)
 
@@ -75,20 +76,22 @@ failure runs the panic path, never a `set -e` exit.
 This is the gate that separates "the tunnel works" from "production", because
 its failure mode is a host with no internet.
 
-## Gate 5 — Many devices, as a service
+## Gate 5 — The harness at scale (a protocol claim, not a service one)
 
-**Status: not run.** The gap between "a client" and "a service".
+**Status: not run.** The gap between "a client" and "a protocol that carries a
+crowd" — the claim `requirements.md` already makes and nobody has demonstrated
+end to end.
 
 - Enrol N devices (10 is enough to catch the arithmetic) and confirm each gets
   its own address, its own peer entry, and its own handshake.
 - The server must be able to answer "who is on, and is each one carrying?"
-  per device — that is what `vallum show` per peer plus the metrics gauges
-  exist for; nobody has read them with ten peers present.
-- Minting an invite is a root command on the server today. For a free service
-  that is the front door, and it needs a rate limit and an audit trail before
-  strangers use it, not after.
-- Capacity arithmetic already measured (2,000 peers, 8.9 KB/peer, ~109 s to
-  re-establish a full herd) becomes the operating envelope rather than a claim.
+  per device — `vallum show` per peer plus the metrics gauges exist for exactly
+  this; nobody has read them with ten peers present.
+- The measured ceilings (2,000 peers, 8.9 KB/peer, ~109 s to re-establish a
+  full herd, 18.4 handshakes/s) become a demonstrated envelope rather than a
+  quoted number.
+- **Not** in scope, because this is not a service: invite rate limiting, an
+  enrolment audit trail, or anything that defends a public front door.
 
 ## Gate 4 — CI
 
