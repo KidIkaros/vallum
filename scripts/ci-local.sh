@@ -17,6 +17,26 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# The rehearsal is only a rehearsal if it runs on the toolchain CI runs on. The
+# repo pins it in rust-toolchain.toml; if the local toolchain is not that one,
+# every gate below is a different gate from the one CI executes - which is how
+# a green local run and a red CI run happen on the same commit.
+PINNED=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml 2>/dev/null | head -1)
+if [ -n "$PINNED" ]; then
+    LOCAL=$(rustc --version 2>/dev/null | awk '{print $2}')
+    case "$LOCAL" in
+        "$PINNED"|"$PINNED".*) ;;
+        *)
+            echo "the local toolchain ($LOCAL) is not the pinned one ($PINNED)."
+            echo "The gates below would not be the gates CI runs."
+            echo "  rustup toolchain install $PINNED"
+            exit 1
+            ;;
+    esac
+    echo "toolchain $LOCAL (pinned: $PINNED)"
+fi
+cd "$(dirname "$0")/.."
+
 FULL=0
 [ "${1:-}" = "--full" ] && FULL=1
 FAILED=""
@@ -87,13 +107,10 @@ if [ "$FULL" = 1 ]; then
 fi
 
 echo
-if [ -z "$FAILED" ]; then
-    echo "== PASS — every gate CI runs is green here"
-    [ "$FULL" = 0 ] && echo "   (e2e skipped; run with --full before a release)"
-    exit 0
-fi
-echo "== FAIL at: $FAILED"
-exit 1
+
+step "The acceptance pair (a server and a client, provisioned here)"
+check "acceptance pair" scripts/accept-pair.sh || true
+
 echo
 echo "the recorded verdicts (each bound to a commit):"
 if [ -d .vallum-verdicts ]; then
@@ -108,5 +125,12 @@ if [ -d .vallum-verdicts ]; then
 else
     echo "  (none recorded yet)"
 fi
+
 echo
-echo "all gates passed"
+if [ -z "$FAILED" ]; then
+    echo "== PASS - every gate CI runs is green here"
+    [ "$FULL" = 0 ] && echo "   (e2e skipped; run with --full before a release)"
+    exit 0
+fi
+echo "== FAIL at: $FAILED"
+exit 1

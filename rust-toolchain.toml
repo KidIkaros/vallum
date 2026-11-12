@@ -1,0 +1,6 @@
+# The toolchain the CI gate runs on. Pinned deliberately: an unpinned `stable`
+# job is a moving target, and a gate that moves is a gate nobody can rehearse.
+# The nightly job is the early warning - it does not gate the release.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]

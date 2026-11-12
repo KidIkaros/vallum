@@ -23,6 +23,11 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-pair "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
 ASSERTIONS=0
 
+say "building the release binaries"
+cargo build --release -p vallum -p vallum-quick >/dev/null 2>&1 \
+    || die "cargo build --release -p vallum -p vallum-quick failed"
+[ -x target/release/vallum ] || die "no binary after build"
+
 cd "$(dirname "$0")/.."
 
 # Two backends, and docker is not one of them by default.
@@ -97,10 +102,7 @@ cleanup() {
     rm -rf "$WORK"
 }
 
-say "building the release binaries"
-cargo build --release -p vallum -p vallum-quick >/dev/null 2>&1 \
-    || die "cargo build --release -p vallum -p vallum-quick failed"
-[ -x target/release/vallum ] || die "no binary after build"
+
 
 say "creating a private bridge (nothing here can reach the host network)"
 docker network rm "$NETWORK" >/dev/null 2>&1
