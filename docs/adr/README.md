@@ -35,3 +35,4 @@
 | [0031](0031-stale-timestamp-scope.md) | A stale initiation is refused only while a session exists | accepted | 2026-11-11 |
 | [0032](0032-reader-thread-admission.md) | The admission allowance belongs in the socket reader | accepted | 2026-11-11 |
 | [0033](0033-bundle-policy-report.md) | An imported bundle states its policy, and a weak one is refused | proposed | 2026-11-11 |
+| [0034](0034-file-enrolment.md) | The file is the enrolment; the token protocol is a convenience | proposed | 2026-11-12 |
