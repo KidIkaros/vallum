@@ -692,6 +692,13 @@ export default function App() {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
       if (event.key === "Escape") {
+        // The shortcuts overlay holds no input, so it is the one dialog
+        // Escape dismisses: a keyboard-only operator has no other way out
+        // of it, and an open dialog swallows every other key.
+        if (shortcuts) {
+          setShortcuts(false)
+          return
+        }
         // Clearing the peer filter from inside a dialog (or while typing in
         // any other field) destroys input the operator did not mean to lose.
         if (dialogOpen()) return
@@ -732,9 +739,10 @@ export default function App() {
           break
       }
     }
+    // Re-registered when the overlay opens or closes, so Escape can see it.
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [])
+  }, [shortcuts])
 
   // Health is measured on the host every 5 s: route, v6, DNS, guard, restarts.
   useEffect(() => {
@@ -1104,8 +1112,8 @@ export default function App() {
                 [":", "command palette — every action lives here"],
                 ["⌘K", "command palette (alias)"],
                 ["Tab", "next interface"],
-                ["esc", "clear the peer filter"],
-                ["?", "this list"],
+                ["esc", "close this list · clear the peer filter"],
+                ["?", "open / close this list"],
               ].map(([key, meaning]) => (
                 <div key={key} className="contents">
                   <dt className="text-foreground/80 font-mono">{key}</dt>
