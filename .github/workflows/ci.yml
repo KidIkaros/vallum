@@ -41,12 +41,18 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
   # On a branch, a newer push makes the older run irrelevant - cancel it. On
   # main it does NOT: a run that completes is the evidence that a commit is
   # good, and cancelling it means the evidence for a commit never exists. The
   # queue is slower than the work; losing the record is worse than waiting.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  #
+  # Main runs get a group of their own, keyed by run id, so that no other run
+  # can ever land in it and cancel them. An earlier version expressed this as
+  # `cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}`, and runs on
+  # main were still being cancelled - the expression was not evaluated the way
+  # it reads. A group nothing else can join does not depend on that.
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
