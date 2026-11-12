@@ -877,14 +877,8 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     if root && systemd {
         say!();
         say!("   when the device has joined, close the second port again:");
-        say!(
-            "      sudo systemctl stop vallum-enroll@{}",
-            interface
-        );
-        say!(
-            "      sudo ufw delete allow {}/udp",
-            port
-        );
+        say!("      sudo systemctl stop vallum-enroll@{}", interface);
+        say!("      sudo ufw delete allow {}/udp", port);
     }
     say!(
         "   the token lives in {} (0600) and is never logged;",
@@ -905,10 +899,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 "   this needs `[enroll] enabled = true` in {} and then",
                 args.config.display()
             );
-            say!(
-                "   `sudo systemctl start vallum-enroll@{}`.",
-                interface
-            );
+            say!("   `sudo systemctl start vallum-enroll@{}`.", interface);
         }
     }
     Ok(())
