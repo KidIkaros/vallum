@@ -178,6 +178,15 @@ pub mod field {
         "vallum_handshake_dropped_endpoint_conflict";
     /// See [`Self::VALLUM_HANDSHAKE_DROPPED_NO_MAC`].
     pub const VALLUM_HANDSHAKE_DROPPED_STALE: &str = "vallum_handshake_dropped_stale";
+    /// Datagrams from this peer that were authenticated and then rejected —
+    /// a bad tag, or a peer whose key is not the one this side enrolled.
+    ///
+    /// This is the counter that says "the server's key changed": on the
+    /// client, the server's response fails verification and lands here. It
+    /// used to be counted and never published, so the doctor could not tell a
+    /// changed server key from a dead path — the one difference that decides
+    /// whether the operator should re-enrol or chase a firewall.
+    pub const VALLUM_DROPPED_AFTER_AUTH: &str = "vallum_dropped_after_auth";
     /// Request markers and flags.
     pub const GET: &str = "get=1";
     /// Request markers and flags.
@@ -525,6 +534,14 @@ pub struct PeerState {
     pub dropped_allowed_ips: u64,
     /// Reactive re-handshake offers this peer was given (ADR-0019).
     pub reinit_offered: u64,
+    /// Datagrams from this peer that were authenticated and then rejected — a
+    /// bad tag, or a peer whose key is not the one this side enrolled.
+    ///
+    /// On the client, the server's response lands here when the server's key
+    /// has changed. It was counted and never published, so the doctor could
+    /// not tell a changed server key from a dead path — the one difference
+    /// that decides whether the operator should re-enrol or chase a firewall.
+    pub rejected: u64,
     /// The most recent inner source rejected by `allowed_ips`.
     pub last_rejected_source: Option<std::net::IpAddr>,
     /// Persistent keepalive, in seconds.
@@ -734,6 +751,11 @@ pub fn render_get(state: &DeviceState) -> String {
             "{}={}\n",
             field::REINIT_OFFERED,
             peer.reinit_offered
+        ));
+        out.push_str(&format!(
+            "{}={}\n",
+            field::VALLUM_DROPPED_AFTER_AUTH,
+            peer.rejected
         ));
         let rejected = match (peer.dropped_allowed_ips, peer.last_rejected_source) {
             (0, _) => "-".to_owned(),
@@ -1135,6 +1157,7 @@ mod tests {
                 any::<u64>(),
                 any::<u64>(),
                 any::<u64>(),
+                any::<u64>(),
             ),
             prop::option::of(any::<u16>()),
             proptest::collection::vec(a_prefix(), 0..3),
@@ -1159,6 +1182,7 @@ mod tests {
                         dropped_replay,
                         dropped_allowed_ips,
                         reinit_offered,
+                        rejected,
                     ),
                     keepalive,
                     allowed_ips,
@@ -1182,6 +1206,7 @@ mod tests {
                     dropped_replay,
                     dropped_allowed_ips,
                     reinit_offered,
+                    rejected,
                     last_rejected_source: None,
                     keepalive,
                     allowed_ips,
@@ -1451,6 +1476,7 @@ mod tests {
                 dropped_replay: 2,
                 dropped_allowed_ips: 3,
                 reinit_offered: 4,
+                rejected: 0,
                 last_rejected_source: None,
                 keepalive: Some(25),
                 allowed_ips: vec!["10.7.0.2/32".parse().unwrap()],
@@ -1522,6 +1548,7 @@ mod tests {
                 dropped_replay: 0,
                 dropped_allowed_ips: 0,
                 reinit_offered: 0,
+                rejected: 0,
                 last_rejected_source: None,
                 keepalive: None,
                 allowed_ips: Vec::new(),

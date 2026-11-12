@@ -547,6 +547,41 @@ fn check_control(path: &Path) -> Result<String, Error> {
 /// unauthenticated datagram gets no oracle. That is correct and it is also why a
 /// server that receives an initiation and ignores it looks exactly like one that
 /// never received it. This is the only place the reason reaches a human.
+/// A peer whose messages were authenticated and then rejected.
+///
+/// On the client, the server's response lands here when the server's key has
+/// changed. The counter was there and was never published, so this report
+/// could not tell a changed server key from a dead path - and those two have
+/// opposite fixes: re-enrol, or chase a firewall.
+///
+/// Separated from the socket so the verdict is testable without a daemon.
+fn rejected_peer(response: &uapi::Response) -> Option<Check> {
+    for peer in &response.peers {
+        let rejected = peer
+            .iter()
+            .find(|(name, _)| name == uapi::field::VALLUM_DROPPED_AFTER_AUTH)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if rejected > 0 {
+            let name = peer
+                .iter()
+                .find(|(key, _)| key == uapi::field::VALLUM_NAME)
+                .map_or("unnamed", |(_, value)| value.as_str());
+            return Some(Check::new(
+                "handshakes",
+                Status::Fail,
+                format!(
+                    "peer `{name}`: {rejected} of its messages were authenticated and then \
+                     rejected - its key is NOT the one this side enrolled. The server was \
+                     re-enrolled, or something is answering in its place. Re-enrol with \
+                     `vallum peer add` before trusting the tunnel"
+                ),
+            ));
+        }
+    }
+    None
+}
+
 fn check_handshake_drops(path: &Path) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,
@@ -587,6 +622,9 @@ fn check_handshake_drops(path: &Path) -> Check {
         if value > 0 {
             reasons.push(format!("{value} {why}"));
         }
+    }
+    if let Some(check) = rejected_peer(&response) {
+        return check;
     }
     if reasons.is_empty() {
         Check::new("handshakes", Status::Pass, "no initiation refused")
@@ -1263,6 +1301,52 @@ mod tests {
         });
         assert_eq!(found, Some(1200));
         assert!(probes <= 12, "{probes} probes is too many");
+    }
+
+    #[test]
+    fn a_peer_whose_key_does_not_match_is_a_failure() {
+        // The gap this closes: the client counts a server response that fails
+        // verification - the server's key changed - but the counter was never
+        // published, so the doctor could not tell that from a dead path.
+        let response = crate::uapi::Response {
+            device: Vec::new(),
+            peers: vec![vec![
+                (
+                    crate::uapi::field::VALLUM_NAME.to_owned(),
+                    "server".to_owned(),
+                ),
+                (
+                    crate::uapi::field::VALLUM_DROPPED_AFTER_AUTH.to_owned(),
+                    "4".to_owned(),
+                ),
+            ]],
+        };
+        let check = super::rejected_peer(&response).expect("a peer that was rejected");
+        assert_eq!(check.status, super::Status::Fail);
+        assert!(
+            check.detail.contains("NOT the one this side enrolled"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.contains("re-enrol"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_peer_with_no_rejections_is_not_a_failure() {
+        let response = crate::uapi::Response {
+            device: Vec::new(),
+            peers: vec![vec![
+                (
+                    crate::uapi::field::VALLUM_NAME.to_owned(),
+                    "server".to_owned(),
+                ),
+                (
+                    crate::uapi::field::VALLUM_DROPPED_AFTER_AUTH.to_owned(),
+                    "0".to_owned(),
+                ),
+            ]],
+        };
+        assert!(super::rejected_peer(&response).is_none());
     }
 
     #[test]

@@ -427,9 +427,14 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
     // Read once so every peer in one answer is aged against the same instant.
     let now_ms = context.clock.monotonic_ms();
     for (id, config) in device.peers() {
-        let (tx_bytes, rx_bytes, last_handshake) = match device.stats(id) {
-            Some(stats) => (stats.tx_bytes, stats.rx_bytes, stats.last_handshake),
-            None => (0, 0, None),
+        let (tx_bytes, rx_bytes, last_handshake, rejected) = match device.stats(id) {
+            Some(stats) => (
+                stats.tx_bytes,
+                stats.rx_bytes,
+                stats.last_handshake,
+                stats.rejected,
+            ),
+            None => (0, 0, None, 0),
         };
         peers.push(uapi::PeerState {
             name: config.name().to_owned(),
@@ -446,6 +451,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
             endpoint: device.endpoint(id),
             last_handshake: last_handshake.map(|stamp| (stamp.unix_seconds(), stamp.nanos())),
             tx_bytes,
+            rejected,
             rx_bytes,
             window_sent: device.stats(id).map_or(0, |stats| stats.window_sent),
             window_received: device.stats(id).map_or(0, |stats| stats.window_received),

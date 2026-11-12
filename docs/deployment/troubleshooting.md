@@ -80,13 +80,31 @@ Check in this order:
   from the server (`nc -u -z <server> 51820` succeeds against a filter that
   silently drops), then compare `vallum show` on both ends — a client whose
   handshake is `never` and a server with no rejected handshake at all is a path
-  problem, not a key problem. The one answer is the fallback in
+  problem, not a key problem. `vallum doctor` now makes that call itself: a
+  client that is dialling and has never been answered FAILS the report and
+  says so, and with `--probe-path` a server that answers on the wire but
+  refuses the handshake is named as a *refusal* rather than left to guess at.
+  The one answer is the fallback in
   [ADR-0026](../adr/0026-censorship-resistance.md): put `carrier = "tcp"` in
   `[interface]` on **both** ends and open the TCP port. It carries the same
   packets, framed, about 1 % larger, in one order, and a peer cannot roam under
   it. On TCP the question is answerable rather than guesswork: `vallum doctor
   --config … --probe-path` dials each peer's endpoint, so a refusal or a timeout
   names the side that is not listening.
+- **The server's key changed.** The doctor says so directly:
+
+  ```
+  FAIL  handshakes  peer `server`: 4 of its messages were authenticated and then rejected
+                   - its key is NOT the one this side enrolled. The server was re-enrolled,
+                   or something is answering in its place. Re-enrol with `vallum peer add`
+                   before trusting the tunnel
+  ```
+
+  That counter is the client's own: the server's response failed
+  verification, so the client dropped it. It was counted and never
+  published, which is why the report could not tell a changed server key
+  from a dead path — the one difference that decides whether you re-enrol or
+  chase a firewall.
 - **Suite mismatch.** A peer key generated with `--suite 2` on a `0x0003` server
   is refused at load time with the two suites named. Regenerate with the server's
   suite.
