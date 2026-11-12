@@ -81,42 +81,46 @@ version and a key distribution answer.
 
 ## Prior art in `origin-tools`, and what to take
 
-**The author of those crates has given permission to copy or depend.** Having
-looked at what it would cost, this ADR still declines the dependency and takes
-the design, for a reason that is about Vallum rather than about permission:
-`origin-provenance` pulls `origin-common`, `origin-crypto-sdk`, `origin-attest`
-and `origin-proof` — four crates including a Merkle-proof engine — for one
-manifest type. A VPN that carries its own PQ crypto should not acquire a
-provenance stack to describe a config file.
+**The author of those crates has given permission to copy or depend.**
 
-What was **mirrored, not copied**: the `Err` / `Ok(non-Valid)` split from
-`ReleaseVerdict`. `Err` means not authentic — hard fail. `Ok` with findings means
-authentic but refused by policy — refuse and report, never treat as corruption.
-That distinction is in `PolicyFinding` and `import_with_policy` now, and it is
-the part worth having.
+*Correction (same day).* An earlier draft of this section declined the
+dependency on the grounds that Vallum "carries its own PQ crypto" and should not
+acquire a provenance stack. **That was wrong.** Vallum's `vallum-crypto-sdk` is an
+adapter over `origin-crypto-sdk` — the same crate, the same git tag — so the
+cryptographic dependency `origin-provenance` would add is one Vallum already
+carries. Checked, not assumed: `Cargo.toml:48` pins
+`origin-crypto-sdk = { git = "…/OriginSDK", tag = "v0.7.4" }`, and
+`crates/vallum-crypto-sdk` exists to be the only crate that names SDK types.
 
-**Take the shape, not the dependency.** `origin-provenance` is a separate tree
-with its own harness; vendoring it would couple Vallum to an unrelated crate for
-one manifest type.
+What actually blocks the dependency is **publication status**, verified against
+crates.io rather than inferred:
 
-Directly reusable as design:
+| crate | crates.io |
+|---|---|
+| `origin-crypto-sdk` | published (200) |
+| `origin-common`, `origin-proof`, `origin-attest`, `origin-provenance` | not published (404) |
 
-- **`ReleaseManifest`** (`origin-provenance/src/release.rs:68`) — signed
-  `product` / `channel` / `sequence`, artifacts in canonical order.
-- **`sequence` as rollback defence** — a bundle signed with sequence *n* loses to
-  a stored *n-1*, which is the "server serves you the old, sandbox-off config"
-  attack. This is the half that makes the report more than a courtesy.
-- **`--artifact` narrowing** (`commands.rs:630`) — verify only the members the
-  importer will install, so a large manifest does not become an import cost.
-- **Verify-before-use in `verify.rs`** — the refusal happens before anything is
-  written, which is the ordering `import` must adopt.
-- **`origin-attest`'s revocation journal** — if a signer key is ever retired, the
-  answer already exists there; it also gives a trust-graph vocabulary for "who is
-  allowed to sign a bundle for this relay" instead of inventing one.
+A path or git dependency on unpublished crates makes Vallum unbuildable anywhere
+but this laptop, and breaks the CI that is already the weakest link in the
+release gate. The `fuzz` and `origin-cross-tests` crates set `publish = false`;
+these four do not — they are simply not published yet.
 
-Not reusable: the types (different crate, different serde and error shapes), the
-C2PA/watermark surface (image provenance), and the CLI (`clap` structures tied to
-its own commands).
+So the decision is conditional rather than closed:
+
+- **Preferred**: publish the four crates (the author owns them), then depend on
+  `origin-provenance` directly. The signed manifest, the monotonic `sequence`
+  rollback defence, `--artifact` narrowing and verify-before-use are already
+  written and tested; re-deriving them here would be strictly worse than
+  depending, and the crypto is already shared.
+- **Fallback if publishing is not wanted now**: vendor the specific module with
+  attribution, which is what half 2 would do anyway.
+- **What is not acceptable**: a path dependency that only resolves on this host.
+
+What was **mirrored regardless, and is in the code today**: the
+`Err` / `Ok(non-Valid)` split from `ReleaseVerdict`. `Err` means not authentic —
+hard fail. `Ok` with findings means authentic but refused by policy — refuse and
+report, never treat as corruption. That distinction is in `PolicyFinding` and
+`import_with_policy` now.
 
 ## Consequences
 
