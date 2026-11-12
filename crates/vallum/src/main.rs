@@ -199,6 +199,7 @@ fn main() -> ExitCode {
             client: None,
             client_config: None,
             allow_shipped_key: false,
+            no_service: false,
             yes: false,
             endpoint: None,
             address: None,

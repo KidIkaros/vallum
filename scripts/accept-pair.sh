@@ -108,6 +108,17 @@ say "creating a private bridge (nothing here can reach the host network)"
 docker network rm "$NETWORK" >/dev/null 2>&1
 docker network create "$NETWORK" >/dev/null || die "could not create $NETWORK"
 
+# Defined before its first use: bash needs the definition first, and a
+# function called before it exists is not an error you notice - it is a line
+# that silently does nothing.
+install_ping() {
+    local c=$1
+    ex "$c" "command -v ping >/dev/null" && return 0
+    say "   installing ping in $c (a missing ip reads like a dead tunnel)"
+    ex "$c" "apt-get update -qq && apt-get install -y -qq iputils-ping" >/dev/null 2>&1
+    ex "$c" "command -v ping >/dev/null" || die "no ping in $c - cannot prove the tunnel carries"
+}
+
 say "starting the server"
 docker run -d --name "$SERVER" --privileged --network "$NETWORK" \
     --tmpfs /run --tmpfs /tmp "$IMAGE" sleep infinity >/dev/null \
@@ -132,14 +143,6 @@ docker exec -d "$SERVER" bash -c "/usr/bin/vallum run --config /srv/server.toml 
 sleep 3
 ex "$SERVER" "tail -2 /tmp/server.log" 2>/dev/null | sed 's/^/   /'
 
-install_ping() {
-    local c=$1
-    ex "$c" "command -v ping >/dev/null" && return 0
-    say "   installing ping in $c (a missing ip reads like a dead tunnel)"
-    ex "$c" "apt-get update -qq && apt-get install -y -qq iputils-ping" >/dev/null 2>&1
-    ex "$c" "command -v ping >/dev/null" || die "no ping in $c - cannot prove the tunnel carries"
-}
-
 say "starting the client and generating its key"
 docker run -d --name "$CLIENT" --privileged --network "$NETWORK" \
     --tmpfs /run --tmpfs /tmp "$IMAGE" sleep infinity >/dev/null \
@@ -162,43 +165,57 @@ docker cp "$WORK/client.line" "$SERVER:/c/client.pub" >/dev/null
 SERVER_LINE=$(ex "$SERVER" "/usr/bin/vallum pubkey --private-key /srv/server.key" 2>&1 | grep -oE 'vallum1:[^[:space:]]+' | head -1 | tr -d '.,;')
 [ -n "$SERVER_LINE" ] || die "no server public line"
 
-say "teaching the server about the client"
-ex "$SERVER" "/usr/bin/vallum peer add client --config /srv/server.toml --public-key-file /c/client.pub" \
+say "teaching the server about the client, and having it write the config"
+# The config the CLIENT gets is the one the SERVER wrote. It used to be
+# hand-written here, which meant this gate proved a config no server ever
+# produces: the real one names the key after the peer, claims the tunnel
+# prefix, and carries the endpoint the server was told to advertise.
+ex "$SERVER" "/usr/bin/vallum peer add client --config /srv/server.toml --public-key-file /c/client.pub --endpoint $SERVER_IP:51820 --client-config-out /c/client.toml" \
     >"$WORK/peer-add.log" 2>&1 || { tail -10 "$WORK/peer-add.log"; die "peer add failed"; }
-
-say "writing the client config"
-cat >"$WORK/client.toml" <<EOF
-[interface]
-name = "paircli"
-private_key = "client.key"
-address = "10.7.0.2/24"
-listen = "0.0.0.0:51821"
-control = "/run/vallum/paircli.sock"
-
-[[peer]]
-name = "server"
-public_key = "$SERVER_LINE"
-endpoint = "$SERVER_IP:51820"
-allowed_ips = ["10.7.0.1/32"]
-persistent_keepalive = 25
-EOF
+ex "$SERVER" "test -s /c/client.toml" >/dev/null 2>&1 || die "the server wrote no client config"
+# docker cannot copy between two containers, so the file travels through the host.
+docker cp "$SERVER:/c/client.toml" "$WORK/client.toml" >/dev/null
 docker cp "$WORK/client.toml" "$CLIENT:/c/client.toml" >/dev/null
 docker cp "$WORK/client.pub" "$CLIENT:/c/client.pub" >/dev/null 2>&1 || true
 # the key itself lives in the container; copy it out only for the public line
 ex "$CLIENT" "ls -l /c/client.key" >/dev/null 2>&1 || die "no client key in the container"
 
+say "installing that config on the client"
+# The receiver, the same command a person runs: it finds the key the config
+# names, places both files, and - with --no-service, because this container has
+# no systemd - says how to run it.
+ex "$CLIENT" "/usr/bin/vallum setup --client-config /c/client.toml --no-service" \
+    >"$WORK/client-setup.log" 2>&1 || { tail -10 "$WORK/client-setup.log"; die "the client could not install the config"; }
+ex "$CLIENT" "test -s /etc/vallum/client.toml" >/dev/null 2>&1 || die "the client config was not placed"
+ex "$CLIENT" "test -s /etc/vallum/client.key" >/dev/null 2>&1 || die "the client key was not placed"
+
+say "the config the client received"
+ex "$CLIENT" "cat /etc/vallum/client.toml" 2>/dev/null | sed 's/^/   /'
+
 say "running the client daemon"
 # `docker exec` waits for the command, and the daemon never exits - so it must
 # be detached (`-d`), not backgrounded inside the exec.
-docker exec -d "$CLIENT" bash -c "mkdir -p /run/vallum && /usr/bin/vallum run --config /c/client.toml >/tmp/client.log 2>&1"
+docker exec -d "$CLIENT" bash -c "mkdir -p /run/vallum && /usr/bin/vallum run --config /etc/vallum/client.toml >/tmp/client.log 2>&1"
 # The client's persistent_keepalive is 25 s and it has no session to send on
 # until then, so a handshake needs a tick - judge after one, not immediately.
 sleep 30
-ex "$CLIENT" "tail -3 /tmp/client.log" 2>/dev/null | sed 's/^/   /'
+ex "$CLIENT" "tail -20 /tmp/client.log" 2>/dev/null | sed 's/^/   /'
 
 say "client daemon state"
 # After the keepalive tick, so the snapshot includes the session.
-STATE=$(ex "$CLIENT" "/usr/bin/vallum show --control /run/vallum/paircli.sock 2>/dev/null")
+# The control socket is named after the interface, and the interface is named
+# after the peer - so the config the server wrote puts it here. The old
+# hand-written config called its interface `paircli`.
+# The error is kept, not discarded: a `show` that fails for its own reasons
+# printed nothing at all, and the assertion could only say "the client never
+# handshook" - a symptom wearing a cause's clothes.
+# Ask the CONFIG where its socket is. The name is the server's choice - it
+# names the interface after the peer - so a gate that assumes the name is
+# testing its own assumption, not the product. This gate wrote a config by
+# hand for months and therefore never noticed.
+CLIENT_CONTROL=$(ex "$CLIENT" "grep -m1 '^control' /etc/vallum/client.toml | cut -d'\"' -f2")
+[ -n "$CLIENT_CONTROL" ] || die "the client config names no control socket"
+STATE=$(ex "$CLIENT" "/usr/bin/vallum show --control $CLIENT_CONTROL 2>&1")
 echo "$STATE" | sed 's/^/   /'
 ASSERTIONS=$((ASSERTIONS + 1))
 echo "$STATE" | grep -q 'last_handshake_time_sec' || FAILED="the client never handshook"
@@ -210,7 +227,8 @@ ASSERTIONS=$((ASSERTIONS + 1))
 echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry"
 
 say "the server's view"
-ex "$SERVER" "/usr/bin/vallum show --control /run/vallum/server.sock 2>/dev/null | grep -A3 client | head -6" | sed 's/^/   /'
+SERVER_CONTROL=$(ex "$SERVER" "grep -m1 '^control' /srv/server.toml | cut -d'\"' -f2")
+ex "$SERVER" "/usr/bin/vallum show --control $SERVER_CONTROL 2>&1 | grep -A3 client | head -6" | sed 's/^/   /'
 
 echo
 if [ -n "$FAILED" ]; then

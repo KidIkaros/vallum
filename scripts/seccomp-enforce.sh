@@ -207,6 +207,27 @@ done
 kill -0 "$pid_a" 2> /dev/null || die_at_startup
 [ -S "$W/ctl-a.sock" ] || fail "daemon A never published its control socket"
 
+# The second daemon is started and then never waited for, while the script
+# goes on to route into its device. B has no control socket of its own, so
+# there was nothing to wait on - and a daemon that was merely SLOWER than A
+# looked exactly like a daemon that never came up. The device is what the
+# routes below name, so wait for the device, and if a daemon died, say so
+# with its own log rather than with the symptom.
+for _ in $(seq 1 100); do
+    ip link show vallum0 > /dev/null 2>&1 && ip link show vallum1 > /dev/null 2>&1 && break
+    kill -0 "$pid_a" 2> /dev/null || break
+    kill -0 "$pid_b" 2> /dev/null || break
+    sleep 0.1
+done
+if ! ip link show vallum0 > /dev/null 2>&1; then
+    cat "$W/a.log" >&2
+    fail "the device vallum0 never appeared"
+fi
+if ! ip link show vallum1 > /dev/null 2>&1; then
+    cat "$W/b.log" >&2
+    fail "the device vallum1 never appeared"
+fi
+
 # 1. What the daemon says.
 grep -q 'syscall filter installed in enforce mode' "$W/a.log" \
     || fail "the startup log does not say the filter was installed in enforce mode"

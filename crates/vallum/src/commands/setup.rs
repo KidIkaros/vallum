@@ -71,6 +71,14 @@ pub struct SetupArgs {
     #[arg(long, value_name = "FILE", conflicts_with_all = ["server", "client", "remote"])]
     pub client_config: Option<PathBuf>,
 
+    /// Do not install the systemd units; place the files and say how to run it.
+    ///
+    /// The same switch `vallum server init` has. It is what makes the
+    /// receiver usable where there is no systemd - a container, a namespace, or
+    /// a machine whose units are managed by something else.
+    #[arg(long)]
+    pub no_service: bool,
+
     /// Accept a bundle that carries this client's **private key**.
     ///
     /// A bundle is the one enrolment path where the key existed on another
@@ -189,6 +197,7 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                 let joined = SetupArgs {
                     client_config: None,
                     allow_shipped_key: false,
+                    no_service: false,
                     server: false,
                     client: None,
                     remote: None,
@@ -635,6 +644,17 @@ fn as_client_config(path: &Path, args: &SetupArgs) -> Result<(), Error> {
         }
         say!("   config     {}", config_path.display());
         say!("   key        {}", key_path.display());
+        if args.no_service {
+            // The files are placed; the unit is not installed. Where there is
+            // no systemd, or the units belong to something else, this is the
+            // whole job.
+            say!("   service    skipped (--no-service)");
+            say!(
+                "Run it with `sudo vallum run --config {}`.",
+                config_path.display()
+            );
+            return Ok(());
+        }
         crate::commands::server::install_service(&name, false)?;
         let server_address = vallum_config::Config::load(&config_path)
             .ok()
