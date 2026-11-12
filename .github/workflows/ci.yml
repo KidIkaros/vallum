@@ -270,6 +270,28 @@ jobs:
         # the tunnel still carries traffic — as root, where the drop works.
         run: bash scripts/seccomp-enforce.sh || sudo -E bash scripts/seccomp-enforce.sh
 
+  acceptance:
+    name: acceptance (a server and a client, provisioned here)
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
+    # The pair provisions its own target: two namespaces joined by a veth, two
+    # daemons, a real handshake and a ping that can only arrive through the
+    # tunnel. No host, no SSH alias, no IP, no credential - so this gate can
+    # run on any machine, which is the point of it (ADR-0032's shape, applied
+    # to the harness).
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: vallum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: The acceptance pair
+        working-directory: vallum
+        # The script picks its backend: namespaces by default, docker only when
+        # asked for and installed. On a runner whose AppArmor forbids
+        # unprivileged user namespaces it escalates with sudo -E itself.
+        run: scripts/accept-pair.sh
+
   audit:
     name: advisories and supply chain
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

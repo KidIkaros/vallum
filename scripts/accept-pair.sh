@@ -18,6 +18,46 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Two backends, and docker is not one of them by default.
+#
+#   namespaces (default) - two network namespaces joined by a veth pair, the
+#       same shape scripts/e2e-netns.sh uses. Needs no docker, no root (an
+#       unprivileged user namespace grants the CAP_NET_ADMIN the TUN setup
+#       wants), and nothing else on the host.
+#   docker - optional, for a machine where container isolation is preferred.
+#       Selected with BACKEND=docker, and skipped with a clear message when
+#       docker is not installed.
+#
+# The namespace backend is the default because a gate that needs a specific
+# container runtime installed is a gate fewer machines can run.
+BACKEND=${BACKEND:-namespaces}
+if [ "$BACKEND" = namespaces ] && ! command -v unshare >/dev/null 2>&1; then
+    BACKEND=docker
+fi
+if [ "$BACKEND" = docker ] && ! command -v docker >/dev/null 2>&1; then
+    echo "[pair] docker is not installed - falling back to the namespace backend"
+    BACKEND=namespaces
+fi
+if [ "$BACKEND" = namespaces ]; then
+    # The namespace pair is scripts/e2e-netns.sh: two daemons, two namespaces,
+    # a veth between them and a ping that can only arrive through the tunnel.
+    # `sudo -E` is the fallback for a host whose AppArmor forbids unprivileged
+    # user namespaces (Ubuntu 24.04's default) - the same shape ci.yml uses.
+    echo "[pair] backend: namespaces (no docker required)"
+    export QUICK="$PWD/target/release/vallum-quick"
+    if bash scripts/e2e-netns.sh "$PWD/target/release/vallum"; then
+        echo "== PASS - a server and a client, in namespaces, handshook and carried"
+        exit 0
+    fi
+    if sudo -n -E bash scripts/e2e-netns.sh "$PWD/target/release/vallum"; then
+        echo "== PASS - a server and a client, in namespaces, handshook and carried"
+        exit 0
+    fi
+    echo "== FAIL - the namespace pair did not pass (and sudo was not available)"
+    exit 1
+fi
+echo "[pair] backend: docker"
+
 NETWORK=vallumpair   # no dash: docker's -f template cannot address a name with one
 SERVER=vallum-pair-server
 CLIENT=vallum-pair-client
@@ -38,7 +78,8 @@ cleanup() {
 trap cleanup EXIT
 
 say "building the release binaries"
-cargo build --release -p vallum >/dev/null 2>&1 || die "cargo build --release -p vallum failed"
+cargo build --release -p vallum -p vallum-quick >/dev/null 2>&1 \
+    || die "cargo build --release -p vallum -p vallum-quick failed"
 [ -x target/release/vallum ] || die "no binary after build"
 
 say "creating a private bridge (nothing here can reach the host network)"
