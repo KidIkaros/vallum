@@ -23,6 +23,10 @@ pub struct ImportArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Refuse a bundle that weakens this client's defaults instead of warning.
+    #[arg(long)]
+    pub strict: bool,
+
     /// Install to /etc/vallum, install the units, and start the tunnel.
     #[arg(long)]
     pub install: bool,
@@ -51,7 +55,15 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
     }
 
     let bundle = crate::bundle::read(&args.bundle).map_err(Error::Usage)?;
-    let imported = crate::bundle::import(&bundle, &directory, args.force).map_err(Error::Usage)?;
+    // Say what the bundle does to this client's policy *before* writing it:
+    // a server deciding the client's sandbox is not a detail to discover later
+    // (ADR-0033).
+    let policy = crate::bundle::inspect_policy(&bundle).map_err(Error::Usage)?;
+    for finding in &policy {
+        eprintln!("warning: {}", finding.label());
+    }
+    let imported = crate::bundle::import_with_policy(&bundle, &directory, args.force, args.strict)
+        .map_err(Error::Usage)?;
 
     say!("config {}", imported.config.display());
     say!("key    {}", imported.key.display());

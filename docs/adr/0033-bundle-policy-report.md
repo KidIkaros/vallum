@@ -1,7 +1,7 @@
 # ADR-0033: An imported bundle states its policy, and a weak one is refused
 
 **Date**: 2026-11-11
-**Status**: proposed
+**Status**: half 1 accepted and implemented; half 2 proposed
 **Deciders**: Vallum maintainers
 **Answers**: `security-redteam-round2.md` R2-2
 
@@ -11,7 +11,10 @@ A bundle is a file a stranger's server hands to a root-running daemon. `import`
 validates it syntactically — `toml::from_str`, then `Config::load` — and writes
 it. Every one of these is a legal, accepted config:
 
-- `seccomp = "off"` — the sandbox is gone, and nothing says so;
+- `seccomp = "log"` — the filter is installed but only reports; **correction:
+  there is no `"off"`.** `Seccomp` has exactly two variants, `Log` and
+  `Enforce` (ADR-0028), so a bundle cannot disable the sandbox at all. The red
+  team's first bullet was wrong, and the enum is why;
 - no `user` — the daemon runs as root and never drops privileges;
 - `control = "/tmp/vallum.sock"` — a control socket in a world-writable
   directory, reachable by every local user and pre-creatable by any of them;
@@ -30,6 +33,13 @@ installer verifies only the members it installs. Its `verify.rs` refuses before
 use. That is the same shape this problem needs.
 
 ## Decision
+
+**Half 1 is implemented** (`bundle::policy_report`, `inspect_policy`,
+`import_with_policy`, `--strict`). It reports log-only seccomp, a control socket
+in a world-writable directory, and a bundle-supplied DNS resolver — the three
+settings a server can actually choose for the client. Verified against a crafted
+bundle: two warnings and a successful import, then the same bundle refused under
+`--strict` with the reasons and the way out.
 
 **Two halves, the first cheap and the second the real one.**
 
@@ -70,6 +80,20 @@ version and a key distribution answer.
 - **Why not**: true and insufficient.
 
 ## Prior art in `origin-tools`, and what to take
+
+**The author of those crates has given permission to copy or depend.** Having
+looked at what it would cost, this ADR still declines the dependency and takes
+the design, for a reason that is about Vallum rather than about permission:
+`origin-provenance` pulls `origin-common`, `origin-crypto-sdk`, `origin-attest`
+and `origin-proof` — four crates including a Merkle-proof engine — for one
+manifest type. A VPN that carries its own PQ crypto should not acquire a
+provenance stack to describe a config file.
+
+What was **mirrored, not copied**: the `Err` / `Ok(non-Valid)` split from
+`ReleaseVerdict`. `Err` means not authentic — hard fail. `Ok` with findings means
+authentic but refused by policy — refuse and report, never treat as corruption.
+That distinction is in `PolicyFinding` and `import_with_policy` now, and it is
+the part worth having.
 
 **Take the shape, not the dependency.** `origin-provenance` is a separate tree
 with its own harness; vendoring it would couple Vallum to an unrelated crate for

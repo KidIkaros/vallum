@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ pub struct Bundle {
 pub struct Imported {
     pub config: PathBuf,
     pub key: PathBuf,
+    /// Ways this bundle weakens the client, for the operator to read.
+    pub findings: Vec<PolicyFinding>,
 }
 
 /// Build a client bundle for a generated key and one server-side peer.
@@ -105,6 +108,74 @@ pub fn read(path: &Path) -> Result<Bundle, String> {
     Ok(bundle)
 }
 
+/// A way an authentic bundle makes this client weaker than its own defaults.
+///
+/// These are *not* parse failures: the bundle is well formed and the server is
+/// entitled to send it. They are the settings a server can use to decide how
+/// safely the client runs, which the client's operator otherwise never sees
+/// (ADR-0033, red team round two R2-2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyFinding {
+    /// `seccomp = "log"` — syscalls are reported but not refused. There is no
+    /// "off": the filter is always installed (ADR-0028), so log-only is the
+    /// weakest a config can ask for.
+    SeccompLogOnly,
+    /// A control socket in a directory other local users can write to.
+    ControlWorldWritable { path: std::path::PathBuf },
+    /// `[quick] dns` — every lookup goes where the server says.
+    DnsFromBundle { servers: Vec<String> },
+}
+
+impl PolicyFinding {
+    /// One line, for the import report.
+    pub fn label(&self) -> String {
+        match self {
+            PolicyFinding::SeccompLogOnly => {
+                "sandbox: the bundle only logs syscalls, it does not refuse them".to_owned()
+            }
+            PolicyFinding::ControlWorldWritable { path } => format!(
+                "control: `{}` is in a directory other users can write to",
+                path.display()
+            ),
+            PolicyFinding::DnsFromBundle { servers } => format!(
+                "dns: the bundle sets the resolver to {}",
+                servers.join(", ")
+            ),
+        }
+    }
+}
+
+/// Everything about `config` that is weaker than this client's defaults.
+///
+/// Deliberately short: a report that always prints the same lines is skipped, so
+/// only explicit weakening is listed. An absent `user` is not a finding — the
+/// systemd unit already drops privileges.
+pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
+    let mut findings = Vec::new();
+    match config.interface.seccomp {
+        Some(vallum_config::Seccomp::Log) => findings.push(PolicyFinding::SeccompLogOnly),
+        _ => {}
+    }
+    if let Some(control) = &config.interface.control {
+        if let Some(parent) = control.parent() {
+            let world_writable = std::fs::metadata(parent)
+                .map(|meta| meta.permissions().mode() & 0o002 != 0)
+                .unwrap_or(false);
+            if world_writable {
+                findings.push(PolicyFinding::ControlWorldWritable {
+                    path: control.clone(),
+                });
+            }
+        }
+    }
+    if !config.quick.dns.is_empty() {
+        findings.push(PolicyFinding::DnsFromBundle {
+            servers: config.quick.dns.clone(),
+        });
+    }
+    findings
+}
+
 /// Import a bundle into `directory`: write the config and a 0600 key file.
 ///
 /// # Errors
@@ -112,6 +183,23 @@ pub fn read(path: &Path) -> Result<Bundle, String> {
 /// If the config does not parse, references a path outside the bundle, the
 /// target exists and `force` is false, or a write fails.
 pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported, String> {
+    import_with_policy(bundle, directory, force, false)
+}
+
+/// The policy report for a bundle, without importing it.
+pub fn inspect_policy(bundle: &Bundle) -> Result<Vec<PolicyFinding>, String> {
+    let config: vallum_config::Config =
+        toml::from_str(&bundle.config).map_err(|error| format!("bundle config: {error}"))?;
+    Ok(policy_report(&config))
+}
+
+/// [`import`], refusing a bundle that weakens this client when `strict`.
+pub fn import_with_policy(
+    bundle: &Bundle,
+    directory: &Path,
+    force: bool,
+    strict: bool,
+) -> Result<Imported, String> {
     if bundle.version != 1 {
         return Err(format!("unsupported bundle version {}", bundle.version));
     }
@@ -125,6 +213,17 @@ pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported
         return Err(format!(
             "bundle key path `{}` must be a file name, not a path",
             declared.display()
+        ));
+    }
+    let findings = policy_report(&config);
+    if strict && !findings.is_empty() {
+        return Err(format!(
+            "refusing this bundle under --strict:\n  {}\n(import without --strict to accept it)",
+            findings
+                .iter()
+                .map(PolicyFinding::label)
+                .collect::<Vec<_>>()
+                .join("\n  ")
         ));
     }
     let key_name = declared
@@ -153,6 +252,7 @@ pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported
     Ok(Imported {
         config: config_path,
         key: key_path,
+        findings,
     })
 }
 

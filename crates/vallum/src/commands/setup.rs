@@ -486,6 +486,9 @@ fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Resu
         bundle: bundle.to_path_buf(),
         output_dir: None,
         force: false,
+        // Joining is the client's own act, not a file handed over by a
+        // stranger; the report still prints, the refusal does not apply.
+        strict: false,
         install: root,
     };
     crate::commands::import::import(&import)?;
