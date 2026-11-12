@@ -67,16 +67,44 @@ in `cargo test --workspace`, which is what CI runs on every push.
 
 ## Agent Usage
 
-### With UTCP SDK (Python)
-```python
-from utcp import UTCPClient
+### With the Python SDK
 
-client = UTCPClient()
-client.load_manual("packaging/utcp/vallum.utcp.json")
+Two packages, not one: `utcp` carries the client and models, and **`utcp-cli`
+registers the `cli` call-template type** every tool here uses. Without the
+second, `CallTemplateSerializer` has no `cli` entry and every tool fails to
+parse.
 
-# Run readiness diagnostics
-diagnostics = client.call_tool("vallum_doctor")
-
-# Generate post-quantum keypair
-pubkey = client.call_tool("vallum_keygen", {"output_file": "/tmp/client.key", "suite": 3})
+```sh
+pip install utcp utcp-cli
 ```
+
+```python
+import asyncio
+from utcp.plugins.plugin_loader import ensure_plugins_initialized
+ensure_plugins_initialized()          # registers `cli` from utcp-cli
+
+from utcp.data.call_template import CallTemplateSerializer
+from utcp.data.tool import Tool
+from utcp_cli.cli_communication_protocol import CliCommunicationProtocol
+
+import json
+tools = {t["name"]: Tool.model_validate(t)
+         for t in json.load(open("packaging/utcp/vallum.utcp.json"))["tools"]}
+
+protocol = CliCommunicationProtocol()
+result = asyncio.run(protocol.call_tool(
+    None, "vallum_doctor", {}, tools["vallum_doctor"].tool_call_template))
+print(result)
+```
+
+A tool that fails (missing config, no permission, `vallum_status` saying
+`LEAKING`) comes back as the command's **stderr text**, not an exception — read
+it, it is the product's own sentence about what to fix next.
+
+**Version note (checked 2026-11-11, `utcp` 1.2.0).** The package's `UtcpManual`
+model still wants `{version, tools}`, while the current specification — and this
+file — carry `utcp_version` and `manual_version`. Loading this manual as a single
+`UtcpManual` therefore fails on a current-spec file, which is why the snippet
+above validates tools individually. `$schema` was removed for the same reason it
+would be useless: the URL the specification's own manuals point at
+(`.../utcp-specification/main/schemas/manual.schema.json`) returns 404.

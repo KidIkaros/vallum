@@ -1,6 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/universal-tool-calling-protocol/utcp-specification/main/schemas/manual.schema.json",
-  "manual_version": "1.0.0",
+  "manual_version": "1.1.0",
   "utcp_version": "1.0.1",
   "name": "vallum",
   "description": "Universal Tool Calling Protocol (UTCP) manual for Vallum \u2014 hybrid post-quantum layer-3 tunnel operations, diagnostics, key management, and runtime telemetry.",
