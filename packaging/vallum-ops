@@ -18,7 +18,10 @@ set -uo pipefail
 # every host but the one it was built on, and it was a password-less root
 # escalation for whoever owned that checkout (review, 2026-11-11).
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
-REPO=${VALLUM_REPO:-}
+# The source tree, if this host has one. `sudo` resets the environment, so the
+# path cannot come from VALLUM_REPO alone: it comes from a root-owned pointer
+# file that an operator writes once. Nothing is compiled into this file.
+REPO=${VALLUM_REPO:-$(cat /etc/vallum/repo 2>/dev/null || true)}
 CONF=/etc/vallum/vallum0.toml
 IFACE=vallum0
 UNIT=vallum@$IFACE
