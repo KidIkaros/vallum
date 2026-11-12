@@ -1,7 +1,7 @@
 # ADR-0034: The file is the enrolment; the token protocol is a convenience
 
 **Date:** 2026-11-12
-**Status:** accepted — the code implements it (the responder is started, never armed; `peer invite` prints its own teardown), and the file path is the one the docs lead with
+**Status:** accepted in part — the responder is started and never armed, and `peer invite` prints its own teardown. **The file path is not yet a method**: it has no client-side receiver. That gap is the open decision this ADR left, and a premortem on the client's first hour found it.
 **Deciders:** Vallum maintainers
 **Answers:** the operator's question — "comparing how WireGuard's client/server connects, can we replicate that?"
 
@@ -133,8 +133,25 @@ definition of how a peer joins.
    as the alternative; `docs/wireguard-comparison.md` now spells out the
    side-by-side for readers.
 2. **`vallum peer add --client-config-out` as the advertised way to get a client
-   config.** *Effectively done* — `setup --remote` performs the same exchange
-   with the copy automated.
+   config.** **NOT DONE, and the premise was wrong.** The flag is not
+   mentioned in the quickstart or the README; the only exercise of it in the
+   tree is a unit test (`crates/vallum/tests/provisioning.rs:124`); and
+   **nothing on the client consumes its output.** `vallum import-bundle` reads
+   only a versioned JSON bundle (`crates/vallum/src/bundle.rs:98-103`), and
+   there is no command that takes a plain client config.
+
+   The client side of the file path is therefore prose in
+   `docs/deployment/client.md:42-47`: copy the TOML to
+   `/etc/vallum/<name>.toml` next to `<name>.key`, then enable two units by
+   hand. And the config names the key by **peer name**
+   (`crates/vallum/src/commands/peer.rs:2068` — `private_key = "{name}.key"`),
+   so a keyfile the operator named anything else is orphaned: `keygen
+   --output desk.key` with `peer add laptop` yields a config pointing at a
+   file that does not exist.
+
+   "The server writes the config" is not "the client receives and installs the
+   config". The handover was somebody else's problem, and the somebody was the
+   user.
 3. **The responder stops standing open.** *Done, and enforced in code* — it
    was first done by hand on one host, and the premortem's investigators then
    found that the code undid it:
@@ -154,6 +171,11 @@ definition of how a peer joins.
    invite` prints the teardown (`systemctl stop`, `ufw delete allow`) where the
    invite is minted. `docs/deployment/server.md` gives the same procedure.
 4. **`vallum join` keeps working and says which path it used.** *Not done.*
+   The ticket path also never checks the server's `applied` verdict — that
+   check exists only in `setup --remote` (`crates/vallum/src/commands/setup.rs:611`)
+   — so a ticket enrolment can be accepted by a server that never applied the
+   peer, and the failure surfaces 35 seconds later as "no handshake within
+   35s".
 5. **Only then consider removing the responder.** *Not done, deliberately* — a
    device that cannot reach the server over SSH has no other way in.
 6. **New, from the comparison**: the SSH variant (`setup --remote`) is the
