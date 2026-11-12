@@ -125,13 +125,23 @@ definition of how a peer joins.
 - **Rotation and revocation get no cheaper** → they never did; both are server
   operations either way.
 
-## Implementation order
+## Implementation order, and where it stands
 
-1. **Document the file path as the primary one**, with the WireGuard comparison
-   and the exact commands. No code change; the flow is already proven by
-   `accept-pair.sh`.
-2. **`vallum peer add --client-config-out` becomes the advertised way to get a
-   client config**, including the public line the operator must send.
-3. **`vallum join` keeps working and says which path it used.**
-4. **Only then consider removing the responder** — a separate decision, after
-   an alpha has proved the file path is enough.
+1. **Document the file path as the primary one.** *Done* —
+   `docs/quickstart.md` already leads with `vallum setup --remote` ("its key is
+   generated here, and only the public line crosses SSH") and offers the ticket
+   as the alternative; `docs/wireguard-comparison.md` now spells out the
+   side-by-side for readers.
+2. **`vallum peer add --client-config-out` as the advertised way to get a client
+   config.** *Effectively done* — `setup --remote` performs the same exchange
+   with the copy automated.
+3. **The responder stops standing open.** *Done* — it is no longer enabled at
+   boot on the server, and `docs/deployment/server.md` gives the procedure that
+   opens 51821 and starts the responder only for the seconds an enrolment takes.
+4. **`vallum join` keeps working and says which path it used.** *Not done.*
+5. **Only then consider removing the responder.** *Not done, deliberately* — a
+   device that cannot reach the server over SSH has no other way in.
+6. **New, from the comparison**: the SSH variant (`setup --remote`) is the
+   documented primary path but is **not** covered by any gate. `accept-pair.sh`
+   proves the manual file path; the SSH variant needs a reachable server and a
+   login, and deserves its own.
