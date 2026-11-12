@@ -280,6 +280,34 @@ jobs:
         # the tunnel still carries traffic — as root, where the drop works.
         run: bash scripts/seccomp-enforce.sh || sudo -E bash scripts/seccomp-enforce.sh
 
+  install:
+    name: install (staged; no root, no container runtime)
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}
+    # The installer is run into a staging directory: it lays the real files
+    # down and touches nothing else. This is the install tier that needs no
+    # docker, no root and no network, so it runs wherever CI runs - and it
+    # checks what the installer PRODUCES, which the manifest-parity check
+    # cannot: that check compares three manifests written by the same hand and
+    # so cannot see a file all three of them promise and none of them ships.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: vallum
+
+      - uses: dtolnay/rust-toolchain@1.100.0
+
+      - name: The install layout
+        working-directory: vallum
+        run: scripts/accept-install-layout.sh
+
+      - name: Publish the gate verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdicts-install
+          path: vallum/.vallum-verdicts/
+          if-no-files-found: ignore
+
   acceptance:
     name: acceptance (a server and a client, provisioned here)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

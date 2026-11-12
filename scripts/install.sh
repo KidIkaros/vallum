@@ -11,6 +11,7 @@
 #   scripts/install.sh --remove-client NAME
 #   scripts/install.sh --uninstall           # keeps /etc/vallum (configs+keys)
 #   scripts/install.sh --uninstall --purge   # removes /etc/vallum too
+#   scripts/install.sh --root DIR           # stage into DIR; touch nothing
 #   scripts/install.sh --from-release --no-verify-signature   # skip sig check
 #   scripts/install.sh --from-release --require-signature     # fail if unsigned
 #   scripts/install.sh --from-release --package deb|rpm       # verified dpkg/rpm install
@@ -62,6 +63,9 @@ if [ -z "${BASH_SOURCE[0]:-}" ]; then
 fi
 
 REPO="KidIkaros/vallum"
+ROOT=""
+dest() { printf '%s%s' "$ROOT" "$1"; }
+
 BIN_DIR="/usr/bin"
 CONFIG_DIR="/etc/vallum"
 RUNTIME_DIR="/run/vallum"
@@ -93,6 +97,12 @@ run() {
     fi
 }
 need_root() {
+    # A staged install writes into a directory and touches nothing else, so it
+    # does not need root - which is the point: the layout can then be checked
+    # on any machine, including a CI runner with no sudo.
+    if [ -n "$ROOT" ]; then
+        return 0
+    fi
     if [ "$DRY" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
         echo "this installer must run as root (or use --dry-run)" >&2
         exit 1
@@ -127,6 +137,8 @@ while [ $# -gt 0 ]; do
         --uninstall) UNINSTALL=1 ;;
         --purge) UNINSTALL_ARGS+=(--purge) ;;
         --dry-run) DRY=1; PASSTHRU+=(--dry-run); UNINSTALL_ARGS+=(--dry-run) ;;
+        --root) shift; ROOT=${1:-} ;;
+        --root=*) ROOT=${1#--root=} ;;
         --help|-h)
             sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -138,6 +150,20 @@ while [ $# -gt 0 ]; do
 done
 
 # ── release download ────────────────────────────────────────────────
+
+if [ -n "$ROOT" ]; then
+    case "$ROOT" in
+        /*) ;;
+        *) ROOT="$(cd "$(dirname "$ROOT")" 2>/dev/null && pwd)/$(basename "$ROOT")" ;;
+    esac
+    mkdir -p "$ROOT"
+    BIN_DIR="$(dest /usr/bin)"
+    CONFIG_DIR="$(dest /etc/vallum)"
+    RUNTIME_DIR="$(dest /run/vallum)"
+    UNIT_DIR="$(dest /etc/systemd/system)"
+    TMPFILES_DIR="$(dest /etc/tmpfiles.d)"
+    SYSCTL_FILE="$(dest /etc/sysctl.d/90-vallum.conf)"
+fi
 
 arch() {
     case "$(uname -m)" in
@@ -376,7 +402,7 @@ install_from_local() {
 # ── install ─────────────────────────────────────────────────────────
 
 install_binaries() {
-    run install -d -m 0755 "$BIN_DIR" "$CONFIG_DIR" "$RUNTIME_DIR"
+    run install -d -m 0755 "$BIN_DIR" "$CONFIG_DIR" "$RUNTIME_DIR" "$UNIT_DIR" "$TMPFILES_DIR"
     run install -m 0755 "$SOURCE_DIR/vallum" "$BIN_DIR/vallum"
     run install -m 0755 "$SOURCE_DIR/vallum-quick" "$BIN_DIR/vallum-quick"
 }
@@ -410,9 +436,9 @@ install_docs() {
     # can lose its internet and need a human to fix it.
     for tool in vallum-panic vallum-guard-deadman vallum-cleanup vallum-heal-runtime-dir; do
         if [ -f "packaging/$tool" ]; then
-            run install -D -m 0755 "packaging/$tool" "/usr/local/sbin/$tool"
+            run install -D -m 0755 "packaging/$tool" "$(dest /usr/local/sbin/$tool)"
         elif [ -f "$SOURCE_DIR/$tool" ]; then
-            run install -D -m 0755 "$SOURCE_DIR/$tool" "/usr/local/sbin/$tool"
+            run install -D -m 0755 "$SOURCE_DIR/$tool" "$(dest /usr/local/sbin/$tool)"
         fi
     done
     # The console's privileged path and the full-tunnel deploy scripts ship
@@ -420,22 +446,24 @@ install_docs() {
     # that prints a sudo error (see the premortem, 2026-11-11).
     # vallum-quick shells out to `ip` for its interface gate; a machine
     # without iproute2 would fail attach with a message blaming the interface.
-    run sh -c 'command -v ip >/dev/null || { echo "iproute2 is required (command ip not found)" >&2; exit 1; }'
-    run install -d -m 0755 /usr/local/lib/vallum
+    if [ -z "$ROOT" ]; then
+        run sh -c 'command -v ip >/dev/null || { echo "iproute2 is required (command ip not found)" >&2; exit 1; }'
+    fi
+    run install -d -m 0755 "$(dest /usr/local/lib/vallum)"
     for lib in trial.sh go-full-tunnel.sh; do
         if [ -f "scripts/$lib" ]; then
-            run install -m 0755 "scripts/$lib" "/usr/local/lib/vallum/$lib"
+            run install -m 0755 "scripts/$lib" "$(dest /usr/local/lib/vallum/$lib)"
         fi
     done
     if [ -f "packaging/vallum-ops" ]; then
-        run install -m 0755 "packaging/vallum-ops" "/usr/local/sbin/vallum-ops"
+        run install -m 0755 "packaging/vallum-ops" "$(dest /usr/local/sbin/vallum-ops)"
     fi
     if [ -f "packaging/vallum-ops-sudoers" ]; then
         ops_user=${SUDO_USER:-$(id -un 2>/dev/null || echo root)}
-        run mkdir -p /etc/sudoers.d
-        run sh -c "sed 's/@USER@/$ops_user/' packaging/vallum-ops-sudoers > /etc/sudoers.d/vallum-ops"
-        run chmod 440 /etc/sudoers.d/vallum-ops
-        run visudo -cf /etc/sudoers.d/vallum-ops || { run rm -f /etc/sudoers.d/vallum-ops; echo "sudoers validation failed — ops rule not installed" >&2; }
+        run mkdir -p "$(dest /etc/sudoers.d)"
+        run sh -c "sed 's/@USER@/$ops_user/' packaging/vallum-ops-sudoers > $(dest /etc/sudoers.d)/vallum-ops"
+        run chmod 440 "$(dest /etc/sudoers.d)/vallum-ops"
+        run visudo -cf "$(dest /etc/sudoers.d)/vallum-ops" || { run rm -f "$(dest /etc/sudoers.d)/vallum-ops"; echo "sudoers validation failed — ops rule not installed" >&2; }
     fi
     for unit in vallum-deadman@.service vallum-deadman@.timer; do
         if [ -f "packaging/$unit" ]; then
@@ -446,6 +474,8 @@ install_docs() {
     # every other unit starts only on explicit choice, but "a power cycle
     # restores the network" has to be true on machines where nobody ever
     # enables a tunnel at all.
+    # A staged tree has no systemd to talk to.
+    if [ -z "$ROOT" ]; then
     if [ -f "$UNIT_DIR/vallum-cleanup.service" ]; then
         run systemctl enable vallum-cleanup || true
     fi
@@ -456,29 +486,30 @@ install_docs() {
     fi
     # The metrics timer is opt-in: it only earns an `enable` when this host
     # already runs node_exporter's textfile collector, which is what it feeds.
-    if [ -d /var/lib/node_exporter/textfile_collector ]; then
+    if [ -z "$ROOT" ] && [ -d /var/lib/node_exporter/textfile_collector ]; then
         run systemctl daemon-reload
         run systemctl enable --now vallum-metrics.timer
+    fi
     fi
     local man
     for man in vallum.8 vallum-quick.8 vallum.toml.5; do
         if [ -f "$SOURCE_DIR/$man" ]; then
-            run install -D -m 0644 "$SOURCE_DIR/$man" "/usr/share/man/man${man##*.}/$man"
+            run install -D -m 0644 "$SOURCE_DIR/$man" "$(dest /usr/share/man/man${man##*.}/$man)"
         elif [ -f "packaging/$man" ]; then
-            run install -D -m 0644 "packaging/$man" "/usr/share/man/man${man##*.}/$man"
+            run install -D -m 0644 "packaging/$man" "$(dest /usr/share/man/man${man##*.}/$man)"
         fi
     done
     for shell in bash zsh fish; do
         local dest
         case "$shell" in
-            bash) dest=/usr/share/bash-completion/completions/vallum ;;
-            zsh)  dest=/usr/share/zsh/site-functions/_vallum ;;
-            fish) dest=/usr/share/fish/vendor_completions.d/vallum.fish ;;
+            bash) destpath=/usr/share/bash-completion/completions/vallum ;;
+            zsh)  destpath=/usr/share/zsh/site-functions/_vallum ;;
+            fish) destpath=/usr/share/fish/vendor_completions.d/vallum.fish ;;
         esac
         if [ -f "$SOURCE_DIR/vallum.$shell" ]; then
-            run install -D -m 0644 "$SOURCE_DIR/vallum.$shell" "$dest"
+            run install -D -m 0644 "$SOURCE_DIR/vallum.$shell" "$(dest "$destpath")"
         elif [ -f "packaging/vallum.$shell" ]; then
-            run install -D -m 0644 "packaging/vallum.$shell" "$dest"
+            run install -D -m 0644 "packaging/vallum.$shell" "$(dest "$destpath")"
         fi
     done
 }
@@ -624,7 +655,11 @@ fi
 if [ -z "$PACKAGE" ] && { [ "$DRY" -eq 0 ] || [ -n "$SOURCE_DIR" ]; }; then
     install_binaries
     install_docs
-    run systemctl daemon-reload
+    # A staged tree has no systemd to reload, and the operator staging it is
+    # not root.
+    if [ -z "$ROOT" ]; then
+        run systemctl daemon-reload
+    fi
 fi
 
 if [ -n "$ADD_CLIENT" ]; then

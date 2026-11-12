@@ -108,6 +108,9 @@ fi
 
 echo
 
+step "Install layout (staged; no root, no container runtime)"
+check "install layout" scripts/accept-install-layout.sh || true
+
 step "The acceptance pair (a server and a client, provisioned here)"
 check "acceptance pair" scripts/accept-pair.sh || true
 
