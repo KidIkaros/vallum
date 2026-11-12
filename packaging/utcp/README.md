@@ -23,13 +23,47 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_pubkey` | `vallum pubkey --private-key <file>` | Extract public identity line from a private key file. |
 | `vallum_genpsk` | `vallum genpsk` | Generate a 32-byte (64 hex character) preshared key. |
 | `vallum_bench` | `vallum bench --iterations <n> --bytes <n>` | Benchmark PQ data plane seal/open latency and throughput. |
-| `vallum_syncconf` | `vallum syncconf -c <file>` | Apply atomic peer configuration diffs to a running tunnel. |
+| `vallum_syncconf` | `vallum syncconf <file>` | Apply atomic peer configuration diffs to a running tunnel. |
 | `vallum_tui_snapshot` | `vallum tui --snapshot ...` | Capture a headless ASCII render of the cockpit dashboard. |
 | `vallum_status` | `vallum status --config <file> [--json]` | Answer "in the tunnel, blocked, or leaking?" by reading the host, so it works with the daemon dead. |
 | `vallum_policy` | `vallum policy on\|off\|status --config <file>` | Install, remove, or report the fail-closed egress block. |
 | `vallum_metrics` | `vallum metrics --config <file>` | Prometheus metrics, including `vallum_peer_delivery_ratio`. |
 | `vallum_peer_list` | `vallum peer list --config <file>` | Peers, prefixes, endpoints and fingerprints. |
-| `vallum_server_init` | `vallum server init --config <file> [--dry-run]` | Provision this host as a server: keys, units, port, forwarding, masquerade. |
+| `vallum_server_init_plan` | `vallum server init --config <file> --dry-run` | Print every host change provisioning would make. No root needed. |
+| `vallum_server_init` | `vallum server init --config <file> --json` | Provision this host as a server: keys, units, port, forwarding, masquerade. |
+| `vallum_server_teardown_plan` | `vallum server teardown --config <file> --dry-run` | Print what teardown would remove. No root needed. |
+| `vallum_server_teardown` | `vallum server teardown --config <file>` | Reverse `server init`: units, NAT, firewall, sysctl. Keeps the config and key. |
+
+### Activation
+
+A host gets a tunnel three ways. Each has a plan tool, because the apply tool
+starts a root daemon and changes the host:
+
+| Tool | CLI Command | Purpose |
+|---|---|---|
+| `vallum_join_plan` | `vallum join <ticket> --dry-run` | Print what a ticket would write and start. Contacts nothing. |
+| `vallum_join` | `vallum join <ticket>` | Enrol this machine with the one-time `vallum1-join:…` ticket. |
+| `vallum_import_bundle` | `vallum import-bundle <file> --install` | Install a client from a `.vallum-bundle`: `/etc/vallum`, key, units, started. |
+| `vallum_stop` | `vallum stop --config <file>` | Ask the daemon to stop and wait for its acknowledgement. |
+
+## Two rules the manual follows
+
+1. **Every placeholder is a required input.** A UTCP CLI template substitutes
+   its placeholders verbatim, so an optional one arrives as an empty string and
+   `--suite UTCP_ARG_suite_UTCP_END` becomes `--suite --output …`. Where the CLI
+   has a default, the manual asks for the default explicitly (`bench`,
+   `tui_snapshot`).
+2. **Anything that changes the host as root has a plan tool beside it.**
+   `server init`, `server teardown` and `join` each ship with a `_plan` variant
+   running the same command under `--dry-run`, so an agent can show its work
+   before it acts. Flags that a template cannot express — a repeated `--address`,
+   `--purge`, `--force`, `--allow-hooks` — are named in the tool description as
+   shell-only, rather than silently missing.
+
+`crates/vallum/tests/utcp_manual.rs` holds the manual against the binary on
+three points: every tool has a call template, every placeholder is required, and
+both the subcommand and every flag in each template exist in `--help`. It runs
+in `cargo test --workspace`, which is what CI runs on every push.
 
 ## Agent Usage
 

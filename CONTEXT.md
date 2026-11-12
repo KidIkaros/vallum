@@ -37,7 +37,12 @@ consequence is a rule, not a preference.
 |---|---|---|
 | The **operator** already running a tunnel | exact state in exact terms — `SPLIT`, `PSK`, fingerprint, epoch | the panels as they stand; the `:` palette for every verb |
 | The **newcomer** who just installed | the next single step, in plain words, with a command to copy | `FirstRun`, the hero's sentence, the failure cards |
-| An **agent** reading the page (or its text) | stable ids, `aria-label`s, copyable commands, and no state that exists only as colour or only in a `title=` | `id=` on every action, the copy buttons, the failure cards' raw error lines |
+| An **agent** in a harness — OMP, DeepSeek Harness, Pi, Hermes, OpenCode, Freebuff — or a page reader | stable ids, `aria-label`s, copyable commands, and no state that exists only as colour or only in a `title=` | `id=` on every action, the copy buttons, the failure cards' raw error lines |
+
+The agent reader's real surface is not the page: it is
+`packaging/utcp/vallum.utcp.json`, the published manual those harnesses load. A
+verb the console can do and the manual cannot is a gap, and one with a test —
+`crates/vallum/tests/utcp_manual.rs` — behind it.
 
 **The rule: plain words on the surface, exact terms one level down.** A panel's
 headline reads without the glossary; its row labels, tooltips and the palette keep

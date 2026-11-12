@@ -235,7 +235,8 @@
           }
         },
         "required": [
-          "output_file"
+          "output_file",
+          "suite"
         ]
       },
       "outputs": {
@@ -316,21 +317,25 @@
     },
     {
       "name": "vallum_bench",
-      "description": "Benchmark the post-quantum data plane seal/open cryptographic performance on the current host.",
+      "description": "Benchmark the post-quantum data plane seal/open cryptographic performance on the current host. Both arguments are required because a CLI template substitutes them into the command verbatim: pass 2000 and 1380 for the defaults.",
       "inputs": {
         "type": "object",
         "properties": {
           "iterations": {
             "type": "integer",
-            "description": "Number of iterations to benchmark (default: 2000).",
+            "description": "Number of iterations to benchmark (the CLI default is 2000).",
             "default": 2000
           },
           "bytes": {
             "type": "integer",
-            "description": "Payload size in bytes (default: 1380).",
+            "description": "Payload size in bytes (the CLI default is 1380).",
             "default": 1380
           }
-        }
+        },
+        "required": [
+          "iterations",
+          "bytes"
+        ]
       },
       "outputs": {
         "type": "string",
@@ -377,7 +382,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "vallum syncconf -c UTCP_ARG_config_path_UTCP_END",
+            "command": "vallum syncconf UTCP_ARG_config_path_UTCP_END",
             "append_to_final_output": true
           }
         ]
@@ -385,7 +390,7 @@
     },
     {
       "name": "vallum_tui_snapshot",
-      "description": "Render a single headless frame of the Vallum TUI dashboard or status views. Bypasses TTY requirements so agents and CI harnesses can inspect visual dashboard state without hanging or crashing.",
+      "description": "Render a single headless frame of the Vallum TUI dashboard or status views. Bypasses TTY requirements so agents and CI harnesses can inspect visual dashboard state without hanging or crashing. All three arguments are required because a CLI template substitutes them verbatim: pass dashboard, 120 and 36 for the defaults.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -413,7 +418,12 @@
             "description": "Terminal height in rows.",
             "default": 36
           }
-        }
+        },
+        "required": [
+          "view",
+          "width",
+          "height"
+        ]
       },
       "outputs": {
         "type": "string",
@@ -477,7 +487,16 @@
       "tags": [
         "diagnostics",
         "security"
-      ]
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum status --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
     },
     {
       "name": "vallum_policy",
@@ -496,10 +515,6 @@
           "config": {
             "type": "string",
             "description": "Path to the tunnel's TOML config."
-          },
-          "dry_run": {
-            "type": "boolean",
-            "description": "Print the nft ruleset instead of applying it."
           }
         },
         "required": [
@@ -508,20 +523,22 @@
         ]
       },
       "outputs": {
-        "type": "object",
-        "properties": {
-          "mode": {
-            "type": "string"
-          },
-          "installed": {
-            "type": "boolean"
-          }
-        }
+        "type": "string",
+        "description": "One line naming what changed (`on`/`off`), or the mode the config asks for and the mode the host has (`status`). This verb writes no JSON; read the line, or read the host with vallum_status. `vallum policy on --dry-run` prints the ruleset and is not exposed here."
       },
       "tags": [
         "security",
         "networking"
-      ]
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum policy UTCP_ARG_action_UTCP_END --config UTCP_ARG_config_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
     },
     {
       "name": "vallum_metrics",
@@ -546,7 +563,9 @@
             "description": "Write atomically to this file instead of stdout."
           }
         },
-        "required": []
+        "required": [
+          "config"
+        ]
       },
       "outputs": {
         "type": "string",
@@ -555,7 +574,16 @@
       "tags": [
         "telemetry",
         "diagnostics"
-      ]
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum metrics --config UTCP_ARG_config_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
     },
     {
       "name": "vallum_peer_list",
@@ -580,41 +608,279 @@
       },
       "tags": [
         "configuration"
-      ]
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum peer list --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
     },
     {
-      "name": "vallum_server_init",
-      "description": "Provision this host as a server: generate keys, write the config, install and start the systemd units, open the listen port, and enable forwarding and masquerade. Handles a UFW deny (routed) default. Use --dry-run first; it prints every step without changing the host.",
+      "name": "vallum_server_init_plan",
+      "description": "Print every host change `vallum server init` would make (key, config, units, firewall, forwarding, NAT) without changing anything. Call this first: the apply tool below starts a root daemon, opens a UDP port and edits forwarding. Needs no root.",
       "inputs": {
         "type": "object",
         "properties": {
           "config": {
             "type": "string",
-            "description": "Path to the tunnel's TOML config."
-          },
-          "address": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Tunnel addresses; defaults to one per family (10.7.0.1/24 and fd00:7::1/64)."
-          },
-          "dry_run": {
-            "type": "boolean"
-          },
-          "force": {
-            "type": "boolean",
-            "description": "Rewrite an existing config."
+            "description": "Path to the .toml config that would be written."
           }
         },
-        "required": []
+        "required": [
+          "config"
+        ]
       },
       "outputs": {
-        "type": "object"
+        "type": "string",
+        "description": "The plan, one step per line, each prefixed `would`."
+      },
+      "tags": [
+        "provisioning",
+        "planning"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum server init --config UTCP_ARG_config_UTCP_END --dry-run",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_server_init",
+      "description": "Provision this host as a server: generate keys, write the config, install and start the systemd units, open the listen port, and enable forwarding and masquerade. Handles a UFW deny (routed) default. Needs root. Run `vallum_server_init_plan` first — that is the console's plan-then-apply rule, and this tool is the apply. One address per family is chosen for you (10.7.0.1/24, fd00:7::1/64); anything else needs `vallum server init --address` (repeatable) from a shell, and `--force` to rewrite an existing config is likewise not exposed here.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the .toml config to write."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "description": "The provisioning report with --json: config, key, interface, addresses, listen, endpoint, public_key, firewall, host_steps[], service, control, and next — the one command to run next."
       },
       "tags": [
         "provisioning"
-      ]
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum server init --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_server_teardown_plan",
+      "description": "Print what `vallum_server_teardown` would remove — units, NAT, firewall rules, the forwarding sysctl — without changing the host. The counterpart of `vallum_server_init_plan`; call it before the teardown so a trial server can be reversed on evidence rather than on faith. Needs no root.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the server config being torn down."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The plan, one step per line, each prefixed `would`."
+      },
+      "tags": [
+        "provisioning",
+        "planning"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum server teardown --config UTCP_ARG_config_UTCP_END --dry-run",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_server_teardown",
+      "description": "Reverse `vallum_server_init`: stop and disable the units, remove the NAT table, firewall accepts and the forwarding sysctl. Needs root. The config and its key are kept, so `vallum_server_init` can bring the same server back; `--purge` deletes them too and is not exposed here.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the server config being torn down."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "One line per removed step, then `torn down: server <name>`."
+      },
+      "tags": [
+        "provisioning",
+        "reversal"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum server teardown --config UTCP_ARG_config_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_join",
+      "description": "Enrol this machine as a client with the one-time `vallum1-join:…` ticket `vallum peer invite` printed on the server. The ticket carries the responder address, invite id, token and the server fingerprint in one string, so there are no other flags to get right. On a root host this writes /etc/vallum and starts the tunnel; `vallum_join_plan` prints the same steps without changing anything. Fails if the invite expired, was minted for another name, or the server is unreachable.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "description": "The `vallum1-join:…` ticket."
+          }
+        },
+        "required": [
+          "ticket"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The config written, the key, and the unit started."
+      },
+      "tags": [
+        "activation",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum join UTCP_ARG_ticket_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_join_plan",
+      "description": "Print what `vallum_join` would write and start for a ticket, without contacting the server or changing the host. Use it when the ticket is in hand and the intent is not yet certain.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "description": "The `vallum1-join:…` ticket."
+          }
+        },
+        "required": [
+          "ticket"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The plan, one step per line."
+      },
+      "tags": [
+        "activation",
+        "planning"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum join UTCP_ARG_ticket_UTCP_END --dry-run",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_import_bundle",
+      "description": "Install this machine as a client from the `.vallum-bundle` file a server wrote: /etc/vallum, the key at 0600, the units, and the tunnel started. Needs root. A bundle that carries `[quick]` hooks — strings that run as root — is refused unless `--allow-hooks` is passed, which this tool does not do: a hook-bearing bundle must be read by a person first.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "bundle": {
+            "type": "string",
+            "description": "Path to the .vallum-bundle file."
+          }
+        },
+        "required": [
+          "bundle"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The config path, the key path at 0600, and the unit started."
+      },
+      "tags": [
+        "activation",
+        "client"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum import-bundle UTCP_ARG_bundle_UTCP_END --install",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_stop",
+      "description": "Ask a running daemon to stop and wait for its acknowledgement, so a script that calls this can trust the tunnel is down afterwards. Reads the control socket from the config.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the tunnel's TOML config, for its `control` path."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The daemon's acknowledgement, or an error if it did not answer."
+      },
+      "tags": [
+        "runtime",
+        "lifecycle"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum stop --config UTCP_ARG_config_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
     }
   ]
 }
