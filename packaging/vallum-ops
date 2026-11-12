@@ -55,6 +55,34 @@ case "${1:-}" in
 full-tunnel)
     exec bash "$LIB/go-full-tunnel.sh"
     ;;
+service)
+    # Start, stop or restart the tunnel's unit.
+    #
+    # The console's START and STOP buttons need this. It lives in THIS
+    # dispatcher so the sudoers rule keeps granting one binary: a rule for
+    # `systemctl start|stop|restart vallum@*` would let its holder pass any
+    # arguments to systemctl, which is a much wider grant than the console
+    # needs.
+    #
+    # The second argument is the action, the third names the interface.
+    action=${2:-start}
+    iface=${3:-$IFACE}
+    case "$action" in
+        start|stop|restart) ;;
+        *)
+            echo "vallum-ops: unknown service action '$action'" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$action" = start ]; then
+        # A unit that has been killed a few times refuses to start until its
+        # failure counter is cleared, and the console reports a failure it
+        # caused.
+        systemctl reset-failed "vallum@$iface" 2>/dev/null || true
+    fi
+    systemctl "$action" "vallum@$iface"
+    systemctl is-active "vallum@$iface"
+    ;;
 enable)
     # Boot persistence: the tunnel comes up after every power-up, in the
     # config's current mode (split unless the operator applied the full tunnel).

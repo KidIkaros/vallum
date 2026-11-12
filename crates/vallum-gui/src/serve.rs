@@ -24,18 +24,77 @@ const CONTENT_TYPES: &[(&str, &str)] = &[
     ("ico", "image/x-icon"),
 ];
 
+/// The cookie the console's session is carried in.
+const COOKIE: &str = "vallum-console";
+
+/// A token for this console run.
+///
+/// The console is the only way an unprivileged user can read their own
+/// protection state: the control socket is 0600 root and the config is
+/// unreadable to them. That makes it the verdict surface - and a verdict
+/// surface that any web page can drive is not a verdict surface, it is a
+/// remote control.
+///
+/// So the console is authenticated: the operator's terminal prints a URL with
+/// a token in it, the first request exchanges the token for a cookie, and
+/// every later request must present the cookie. The token is in the URL
+/// because the operator has to be able to click a link; it is exchanged for a
+/// cookie immediately so it does not stay in the address bar, the history, or
+/// a Referer header.
+fn new_token() -> String {
+    let bytes = vallum::entropy::seed();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Whether this request may touch the console.
+///
+/// Two independent checks, because they stop different attacks:
+///
+/// * the **Host** header must name the loopback. A page that rebinds a
+///   hostname to 127.0.0.1 sends its own hostname, and this is what stops
+///   it - without the check, a rebind makes the browser treat the console as
+///   same-origin and read every answer.
+/// * the **cookie** must carry this run's token. Without it, any page the
+///   user opens can POST to the console: the kill switch, the apply, the
+///   peer verbs.
+fn authorized(request: &Request, port: u16, token: &str) -> bool {
+    let host_ok = request.header("host").is_some_and(|host| {
+        let host = host.split(',').next().unwrap_or(host).trim();
+        host == "127.0.0.1" || host == "localhost" || host.ends_with(&format!(":{port}"))
+    });
+    if !host_ok {
+        return false;
+    }
+    request.cookie(COOKIE) == Some(token)
+}
+
+/// The response that hands the browser its cookie and clears the token from
+/// the address bar.
+fn exchange(stream: &mut TcpStream, token: &str) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 302 Found\r\nLocation: /\r\nSet-Cookie: {COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes())
+}
+
 pub fn serve(port: u16, ui_dir: PathBuf, console: Arc<Console>) -> Result<(), String> {
+    let token = new_token();
     let listener = TcpListener::bind(("127.0.0.1", port))
         .map_err(|error| format!("cannot bind 127.0.0.1:{port}: {error}"))?;
     eprintln!(
-        "vallum-gui: serving the console at http://127.0.0.1:{port} (ui from {})",
+        "vallum-gui: serving the console at http://127.0.0.1:{port}/?token={token} (ui from {})",
         ui_dir.display()
     );
     for stream in listener.incoming().flatten() {
         let console = Arc::clone(&console);
         let ui_dir = ui_dir.clone();
+        let token = token.clone();
         std::thread::spawn(move || {
-            let _ = handle(stream, &console, &ui_dir);
+            let _ = handle(stream, &console, &ui_dir, &token, port);
         });
     }
     Ok(())
@@ -45,6 +104,33 @@ struct Request {
     method: String,
     path: String,
     body: Vec<u8>,
+    headers: Vec<(String, String)>,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The value of a query parameter, if the path has one.
+    fn query(&self, key: &str) -> Option<&str> {
+        let (_, query) = self.path.split_once('?')?;
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == key).then_some(value)
+        })
+    }
+
+    /// The value of a cookie, if the request has one.
+    fn cookie(&self, name: &str) -> Option<&str> {
+        self.header("cookie")?.split(';').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key.trim() == name).then_some(value.trim())
+        })
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
@@ -56,6 +142,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let path = parts.next()?.to_owned();
 
     let mut content_length = 0usize;
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).ok()? == 0 {
@@ -66,6 +153,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
             break;
         }
         if let Some((name, value)) = header.split_once(':') {
+            headers.push((name.trim().to_owned(), value.trim().to_owned()));
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.trim().parse().unwrap_or(0);
             }
@@ -75,7 +163,12 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     if content_length > 0 {
         reader.read_exact(&mut body).ok()?;
     }
-    Some(Request { method, path, body })
+    Some(Request {
+        method,
+        path,
+        body,
+        headers,
+    })
 }
 
 fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
@@ -97,11 +190,33 @@ fn json(stream: &mut TcpStream, status: &str, value: &serde_json::Value) {
     );
 }
 
-fn handle(mut stream: TcpStream, console: &Arc<Console>, ui_dir: &Path) -> std::io::Result<()> {
+fn handle(
+    mut stream: TcpStream,
+    console: &Arc<Console>,
+    ui_dir: &Path,
+    token: &str,
+    port: u16,
+) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let Some(request) = read_request(&mut stream) else {
         return Ok(());
     };
+
+    // The exchange: the request that carries the token gets the cookie, and
+    // the token leaves the address bar.
+    if request.query("token") == Some(token) {
+        return exchange(&mut stream, token);
+    }
+    // Everything else needs the cookie and a loopback Host.
+    if !authorized(&request, port, token) {
+        respond(
+            &mut stream,
+            "403 Forbidden",
+            "text/plain; charset=utf-8",
+            b"this console needs the token from the terminal that started it",
+        );
+        return Ok(());
+    }
 
     // SSE stream: one snapshot per second, straight from the control socket.
     if request.path == "/api/stream" {

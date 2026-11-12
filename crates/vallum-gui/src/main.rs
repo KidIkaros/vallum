@@ -917,36 +917,51 @@ pub(crate) fn service_state(socket: &std::path::Path) -> serde_json::Value {
 /// Start/stop/restart through polkit. `pkexec` shows the desktop's own
 /// authentication dialog; nothing here ever prompts for a password in the UI.
 pub(crate) fn service_action(socket: &std::path::Path, action: &str) -> Result<Done, String> {
-    // Both transports pass here; the gate lives with the write, not the route.
-    crate::hostfacts::write_gate(socket)?;
     if !matches!(action, "start" | "stop" | "restart") {
         return Err(format!("unknown service action `{action}`"));
     }
     let unit = unit_for(socket);
-    // sudo -n first: a console that runs as a login user should not prompt for
-    // every start/stop once the operator has granted the narrow rule. pkexec is
-    // the fallback, and its prompt is the desktop's own.
+    // The interface, not the unit: the dispatcher names the unit itself.
+    let iface = unit.trim_start_matches("vallum@").to_owned();
+
+    // The write gate is NOT applied here, and the difference matters. It
+    // guards writes THROUGH the control socket - a socket wider than 0600
+    // exposes the private key to `show --dump`. Starting a unit does not go
+    // through the socket, and the daemon checks its own runtime directory
+    // before it publishes anything.
+    //
+    // It used to be applied, and that made the console unable to do the one
+    // thing it exists for: a stopped daemon has no socket, so START failed
+    // with "control socket unreadable" and never reached systemctl. A tunnel
+    // killed by the panic switch could not be started again from the console.
+    //
+    // The privileged path is `vallum-ops`, the ONE binary the sudoers rule
+    // covers. A rule for `systemctl start|stop|restart vallum@*` would let its
+    // holder pass any arguments to systemctl, which is a far wider grant than
+    // the console needs.
     let attempts: Vec<(&str, Vec<&str>)> = if effective_uid() == 0 {
-        vec![("systemctl", vec![action, unit.as_str()])]
+        vec![(
+            "/usr/local/sbin/vallum-ops",
+            vec!["service", action, &iface],
+        )]
     } else {
         vec![
-            ("sudo", vec!["-n", "systemctl", action, unit.as_str()]),
-            ("pkexec", vec!["systemctl", action, unit.as_str()]),
+            (
+                "sudo",
+                vec![
+                    "-n",
+                    "/usr/local/sbin/vallum-ops",
+                    "service",
+                    action,
+                    &iface,
+                ],
+            ),
+            (
+                "pkexec",
+                vec!["/usr/local/sbin/vallum-ops", "service", action, &iface],
+            ),
         ]
     };
-    // A unit that has been killed a few times refuses to start until its
-    // failure counter is cleared; START must be able to do that too, or the
-    // console reports a failure it caused.
-    if action == "start" {
-        let reset: &[&str] = if effective_uid() == 0 {
-            &["systemctl", "reset-failed", unit.as_str()]
-        } else {
-            &["sudo", "-n", "systemctl", "reset-failed", unit.as_str()]
-        };
-        let _ = std::process::Command::new(reset[0])
-            .args(&reset[1..])
-            .output();
-    }
 
     let mut last_error = String::from("no way to run systemctl");
     for (program, args) in attempts {
