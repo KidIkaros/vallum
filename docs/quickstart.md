@@ -56,33 +56,56 @@ verify nothing themselves.
 
 ### A — a client of an existing server
 
-Pick the enrolment path by what the client can reach:
+The file path, and the one the product leads with. The device makes its own
+key; the server records the public line and writes a config; the device
+installs that config with one command. **The private key never leaves the
+device**, and no second port is open.
+
+On the device:
 
 ```sh
-# The client can SSH to the server: its key is generated here, and only the
-# public line crosses SSH.
-sudo vallum setup --remote you@vpn.example.com
+sudo vallum keygen --output laptop.key
+sudo vallum pubkey --private-key laptop.key    # send this line to the server operator
+```
 
-# It cannot: mint a single-use ticket on the server (or press `v` in `vallum tui`),
-# then redeem it here. One use, fingerprint pinned, no private key on the wire.
-#
-# The ticket path answers on UDP 51821, so that port must be open in the cloud
-# security group as well as on the host - for the enrolment only. A filtered
-# port gives you "no answer from <host>:51821: timed out", which reads like a
-# token problem and is a firewall problem.
+On the server, with that public line:
+
+```sh
+sudo vallum peer add laptop --public-key-file laptop.pub \
+    --client-config-out laptop.toml             # the config names laptop.key
+```
+
+Copy `laptop.toml` to the device, beside `laptop.key`, and on the device:
+
+```sh
+sudo vallum setup --client-config laptop.toml  # installs it and proves the tunnel
+```
+
+Then, to know whether it is working:
+
+```sh
+sudo vallum status --config /etc/vallum/laptop.toml
+```
+
+The other three paths reach the same place, and `vallum setup` with no flags
+prints all four in this order:
+
+```sh
+# It cannot SSH to the server: mint a single-use ticket on the server
+# (or press `v` in `vallum tui`), then redeem it here. One use, fingerprint
+# pinned, no private key on the wire. The responder answers on UDP 51821, so
+# that port must be open in the cloud security group as well as on the host -
+# for the enrolment only.
 sudo vallum peer invite laptop
 sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
 
-# Offline fallback: the server mints a bundle that carries the client's private
-# key. Move it over a channel you trust, then delete it.
-sudo vallum import-bundle laptop.vallum-bundle --install
-```
+# Or over SSH: the key is generated here, only the public line crosses.
+sudo vallum setup --remote you@vpn.example.com
 
-Every path ends the same way: `/etc/vallum/<name>.toml` and its key at `0600`,
-with `vallum@<name>`, `vallum-quick@<name>` and the route watchdog
-`vallum-quick-watch@<name>` enabled and started. The server writes a full tunnel
-by default; narrow `allowed_ips` in the peer's config for a split tunnel, and
-`vallum-quick` will add one route per prefix instead.
+# Or from a bundle file - which carries the client's private key from the
+# server, and is refused unless you say you accept that.
+sudo vallum setup --client <file>.vallum-bundle
+```
 
 ### B — your own server, then a client
 

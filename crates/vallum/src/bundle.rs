@@ -128,6 +128,14 @@ pub enum PolicyFinding {
     /// tunnel comes up. A bundle carrying these is not a config, it is a
     /// program (security-redteam-round2.md R2-4).
     HooksFromBundle { count: usize },
+    /// The bundle carries this client's **private key**.
+    ///
+    /// Every other path generates the key on the device and sends only the
+    /// public line. A bundle that carries the key means the key existed on the
+    /// server first, and travelled in a file - which is the one custody fact
+    /// the report could not previously see, because the report only ever
+    /// looked at the config.
+    PrivateKeyInBundle,
 }
 
 impl PolicyFinding {
@@ -148,6 +156,9 @@ impl PolicyFinding {
                 "dns: the bundle sets the resolver to {}",
                 servers.join(", ")
             ),
+            PolicyFinding::PrivateKeyInBundle =>
+                "key: the bundle carries this client's PRIVATE KEY - it was generated on the server and travelled in a file"
+                    .to_owned(),
         }
     }
 }
@@ -194,14 +205,18 @@ pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
 /// If the config does not parse, references a path outside the bundle, the
 /// target exists and `force` is false, or a write fails.
 pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported, String> {
-    import_with_policy(bundle, directory, force, false, false)
+    import_with_policy(bundle, directory, force, false, false, false)
 }
 
 /// The policy report for a bundle, without importing it.
 pub fn inspect_policy(bundle: &Bundle) -> Result<Vec<PolicyFinding>, String> {
     let config: vallum_config::Config =
         toml::from_str(&bundle.config).map_err(|error| format!("bundle config: {error}"))?;
-    Ok(policy_report(&config))
+    let mut findings = policy_report(&config);
+    if !bundle.key.trim().is_empty() {
+        findings.push(PolicyFinding::PrivateKeyInBundle);
+    }
+    Ok(findings)
 }
 
 /// [`import`], refusing a bundle that weakens this client when `strict`.
@@ -211,6 +226,7 @@ pub fn import_with_policy(
     force: bool,
     strict: bool,
     allow_hooks: bool,
+    allow_shipped_key: bool,
 ) -> Result<Imported, String> {
     if bundle.version != 1 {
         return Err(format!("unsupported bundle version {}", bundle.version));
@@ -227,7 +243,14 @@ pub fn import_with_policy(
             declared.display()
         ));
     }
-    let findings = policy_report(&config);
+    // The same list the operator is shown and the list the refusals act on.
+    // They were two computations, and the second one only looked at the
+    // config - so a bundle carrying a private key was reported by one and
+    // accepted by the other.
+    let mut findings = policy_report(&config);
+    if !bundle.key.trim().is_empty() {
+        findings.push(PolicyFinding::PrivateKeyInBundle);
+    }
     // Hooks are refused by default rather than reported: a warning next to a
     // root `sh -c` is not a control. `--allow-hooks` is for an operator who
     // wrote the hooks themselves.
@@ -247,6 +270,33 @@ pub fn import_with_policy(
                     .collect::<Vec<_>>()
                     .join("\n  ")
             ));
+        }
+    }
+    // A bundle that carries the client's private key is refused by default.
+    // Every other path generates the key on the device, so the safe
+    // alternative always exists - and a key that travelled in a file is a
+    // custody fact the operator chose without being told.
+    if !allow_shipped_key {
+        if findings
+            .iter()
+            .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle))
+        {
+            return Err(
+                "refusing this bundle: it carries this client's PRIVATE KEY.\n\
+                 The key was generated on the server and travelled in this file, so \
+                 anyone holding the file holds the key.\n\
+                 \n\
+                 Generate the key on the device instead - it never has to leave:\n\
+                 \n\
+                 \x20  vallum keygen --output <name>.key\n\
+                 \x20  vallum pubkey --private-key <name>.key   # send this line to the server\n\
+                 \n\
+                 and on the server: vallum peer add <name> --public-key-file <name>.pub \
+                 --client-config-out <name>.toml\n\
+                 \n\
+                 Pass --allow-shipped-key if you understand and accept this."
+                    .to_owned(),
+            );
         }
     }
     if strict && !findings.is_empty() {
@@ -321,6 +371,58 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(test)]
+/// The one fact about a bundle that matters most: whether it carries the
+/// client's private key. The report only ever looked at the config.
+#[test]
+fn a_bundle_that_carries_the_key_is_reported_and_refused() {
+    let bundle = Bundle {
+            version: 1,
+            name: "laptop".to_owned(),
+            config: "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\naddresses = [\"10.7.0.4/20\"]\n"
+                .to_owned(),
+            key: "-----BEGIN KEY-----".to_owned(),
+        };
+    let findings = inspect_policy(&bundle).expect("the bundle parses");
+    assert!(
+        findings
+            .iter()
+            .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
+        "the custody fact must be in the report: {findings:?}"
+    );
+
+    let dir =
+        std::env::temp_dir().join(format!("vallum-bundle-{}-{}", std::process::id(), line!()));
+    let refused = import_with_policy(&bundle, &dir, false, false, false, false)
+        .expect_err("a shipped key is refused by default");
+    assert!(
+        refused.contains("PRIVATE KEY"),
+        "the refusal must name the fact: {refused}"
+    );
+    assert!(
+        refused.contains("vallum keygen"),
+        "the refusal must offer the safe path: {refused}"
+    );
+}
+
+/// A bundle with no key in it is fine: the report sees nothing wrong.
+#[test]
+fn a_bundle_without_a_key_has_no_custody_finding() {
+    let bundle = Bundle {
+            version: 1,
+            name: "laptop".to_owned(),
+            config: "[interface]\nname = \"laptop\"\nprivate_key = \"laptop.key\"\naddresses = [\"10.7.0.4/20\"]\n"
+                .to_owned(),
+            key: String::new(),
+        };
+    let findings = inspect_policy(&bundle).expect("the bundle parses");
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| matches!(finding, PolicyFinding::PrivateKeyInBundle)),
+        "no key, no finding: {findings:?}"
+    );
+}
+
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -340,7 +442,8 @@ mod tests {
     fn an_import_writes_a_config_and_a_0600_key() {
         let dir = std::env::temp_dir().join(format!("vallum-bundle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let imported = import(&bundle("laptop"), &dir, false).expect("import");
+        let imported =
+            import_with_policy(&bundle("laptop"), &dir, false, false, false, true).expect("import");
         assert!(imported.config.exists());
         let mode = std::fs::metadata(&imported.key)
             .unwrap()
@@ -356,8 +459,11 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("vallum-bundle-overwrite-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        import(&bundle("laptop"), &dir, false).expect("first");
-        assert!(import(&bundle("laptop"), &dir, false).is_err());
+        import_with_policy(&bundle("laptop"), &dir, false, false, false, true).expect("first");
+        assert!(
+            import_with_policy(&bundle("laptop"), &dir, false, false, false, true).is_err(),
+            "a second import must not overwrite"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

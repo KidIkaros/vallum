@@ -729,6 +729,44 @@ pub fn socket_path(interface: &str) -> PathBuf {
     runtime_dir().join(format!("{interface}.sock"))
 }
 
+/// Point a client config at the key file that actually sits beside it.
+///
+/// The server names the key by the PEER's name (`private_key = "laptop.key"`),
+/// which is a coupling the client cannot satisfy if the operator named the
+/// keyfile anything else - and the key never leaves the device, so the client
+/// is the only party that can decide what the file is called. This is the same
+/// kind of local rewrite as [`with_local_fwmark`]: a detail of THIS machine,
+/// applied on this machine.
+#[must_use]
+pub fn with_local_private_key(config_text: &str, key_name: &str) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.interface.private_key.as_os_str() == key_name {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + key_name.len() + 8);
+    let mut placed = false;
+    let mut in_interface = false;
+    for line in config_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_interface = trimmed == "[interface]";
+        }
+        if in_interface && !placed && trimmed.starts_with("private_key") {
+            out.push_str(&format!("private_key = \"{key_name}\"\n"));
+            placed = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !placed {
+        return config_text.to_owned();
+    }
+    out
+}
+
 /// Complete a full-tunnel client config for this machine: if a peer's
 /// `allowed_ips` covers `0.0.0.0/0` or `::/0`, `vallum-quick` requires
 /// `[interface] fwmark` or it refuses to attach (an unmarked full tunnel
@@ -803,6 +841,38 @@ pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_local_private_key_rename_moves_only_the_interface_field() {
+        // A real client config: the interface names the key, the peer names
+        // the server. Only the interface's field may move.
+        let text = "[interface]\nname = \"laptop\"\nprivate_key = \"desk.key\"\n\
+                    addresses = [\"10.7.0.4/20\"]\n\n\
+                    [[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:x:y:-\"\n\
+                    allowed_ips = [\"0.0.0.0/0\"]\n";
+        let out = with_local_private_key(text, "laptop.key");
+        assert!(
+            out.contains("private_key = \"laptop.key\""),
+            "the interface's key is renamed: {out}"
+        );
+        assert!(!out.contains("desk.key"), "the old name is gone: {out}");
+        assert!(
+            out.contains("public_key = \"vallum1:0003:x:y:-\""),
+            "the peer's own fields are untouched: {out}"
+        );
+    }
+
+    #[test]
+    fn a_local_private_key_rename_is_a_no_op_when_it_already_matches() {
+        let text = "[interface]\nprivate_key = \"laptop.key\"\n";
+        assert_eq!(with_local_private_key(text, "laptop.key"), text);
+    }
+
+    #[test]
+    fn a_local_private_key_rename_leaves_unparsable_text_alone() {
+        let text = "not toml at all";
+        assert_eq!(with_local_private_key(text, "laptop.key"), text);
+    }
 
     #[test]
     fn seccomp_accepts_only_the_two_stages() {

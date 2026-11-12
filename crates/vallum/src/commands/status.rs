@@ -106,8 +106,34 @@ impl Verdict {
 
     /// Whether this state deserves a non-zero exit code.
     #[must_use]
+    /// Whether traffic is leaving outside the tunnel.
+    ///
+    /// This is the LEAK contract, and it is deliberately narrow: a split
+    /// tunnel with no daemon is not leaking (that is what a split tunnel
+    /// asked for), an unreadable guard is not leaking (it is unknown), and a
+    /// stale session with the guard holding is not leaking (it is blocked).
+    /// Each of those has a test that says so.
+    ///
+    /// The question "is the tunnel working?" is a different question, and
+    /// [`Self::is_working`] answers it. Both are needed: one command has one
+    /// exit code, and the message it prints has to be true.
     pub fn is_failure(self) -> bool {
         matches!(self, Self::Leaking)
+    }
+
+    /// Whether the tunnel is doing its job.
+    ///
+    /// `Up` is a working tunnel; `Starting` is one that has not handshook yet
+    /// - a daemon that is still coming up, not a broken one. Everything else
+    /// is a tunnel that is not carrying: the peer is not answering
+    /// (`Degraded`), the session is dead (`Stale`), the daemon is gone
+    /// (`Blocked`, `Down`), or the guard cannot be determined (`Unknown`).
+    ///
+    /// A gate that only fails on `Leaking` says "fine" while the tunnel is
+    /// dead, which is the opposite of what a user asking "am I protected?"
+    /// needs to hear.
+    pub fn is_working(self) -> bool {
+        matches!(self, Self::Up | Self::Starting)
     }
 }
 
@@ -320,11 +346,46 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
                 .to_owned(),
         ));
     }
+    if !verdict.is_working() {
+        // Not a leak - the guard may well be holding - but the tunnel is not
+        // carrying, so this is still a failure for anything asking "am I
+        // protected?". The verdict's own sentence says which.
+        return Err(Error::Usage(format!(
+            "the tunnel is not carrying: {}",
+            verdict.detail()
+        )));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+/// Two contracts, two names. The leak contract is narrow on purpose, and
+/// the tests that say so are older than this one.
+#[test]
+fn the_leak_contract_is_only_leaking() {
+    assert!(Verdict::Leaking.is_failure());
+    assert!(!Verdict::Blocked.is_failure());
+    assert!(!Verdict::Stale.is_failure());
+    assert!(!Verdict::Down.is_failure());
+    assert!(!Verdict::Unknown.is_failure());
+    assert!(!Verdict::Degraded.is_failure());
+}
+
+/// The gate contract: a tunnel that is not carrying is not working, even
+/// when nothing is leaking.
+#[test]
+fn a_tunnel_that_is_not_carrying_is_not_working() {
+    assert!(Verdict::Up.is_working());
+    assert!(Verdict::Starting.is_working());
+    assert!(!Verdict::Stale.is_working());
+    assert!(!Verdict::Degraded.is_working());
+    assert!(!Verdict::Blocked.is_working());
+    assert!(!Verdict::Down.is_working());
+    assert!(!Verdict::Unknown.is_working());
+    assert!(!Verdict::Leaking.is_working());
+}
+
 mod tests {
     use super::*;
 

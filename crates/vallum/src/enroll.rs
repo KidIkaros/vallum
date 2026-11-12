@@ -1109,10 +1109,21 @@ pub fn join(
             }
         }
     }
+    // The old message pointed at one cause - a stale invite - when there are
+    // three, and the one it pointed at is the least likely: the port is
+    // filtered upstream of the host far more often than a token is stale.
     Err(Error::Usage(format!(
-        "no answer from {server}: {}. Is the invite still valid, and was it \
-         made for `{name}`?",
-        last_error.unwrap_or_else(|| "no response".to_owned())
+        "no answer from {server}: {}.\n\
+         Three different things end here, and they need different fixes:\n\
+         \n   1. the port is not reachable. The responder answers on the port in \
+         `{server}`, which must be open in the cloud security group as well as \
+         on the host, and only while enrolling. Check that first.\n\
+         \n   2. the responder is not running. On the server: \
+         sudo systemctl start vallum-enroll@<interface>\n\
+         \n   3. the invite is stale, or it was made for another device. Mint a \
+         new one: sudo vallum peer invite {name}",
+        last_error.unwrap_or_else(|| "no response".to_owned()),
+        name = name,
     )))
 }
 

@@ -31,6 +31,15 @@ pub struct ImportArgs {
     #[arg(long)]
     pub allow_hooks: bool,
 
+    /// Accept a bundle that carries this client's **private key**.
+    ///
+    /// The bundle is the one path where the key existed on another machine
+    /// first. Every other path generates it on the device, so the safe
+    /// alternative always exists - which is why this is refused by default
+    /// rather than warned about.
+    #[arg(long)]
+    pub allow_shipped_key: bool,
+
     /// Install to /etc/vallum, install the units, and start the tunnel.
     #[arg(long)]
     pub install: bool,
@@ -72,6 +81,7 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
         args.force,
         args.strict,
         args.allow_hooks,
+        args.allow_shipped_key,
     )
     .map_err(Error::Usage)?;
 
@@ -79,10 +89,12 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
     say!("key    {}", imported.key.display());
     // A bundle is the one path where this machine's private key existed on
     // another machine first. Say so: it is a custody fact, not a detail.
-    say!();
-    say!("note: this key was generated on the server and travelled in the bundle.");
-    say!("      `vallum setup --remote` and `vallum setup --join` never do that —");
-    say!("      the key is generated here and only its public line leaves.");
+    if args.allow_shipped_key {
+        say!();
+        say!("note: this key was generated on the server and travelled in the bundle.");
+        say!("      `vallum setup --remote` and `vallum setup --join` never do that —");
+        say!("      the key is generated here and only its public line leaves.");
+    }
 
     if !args.install {
         say!();

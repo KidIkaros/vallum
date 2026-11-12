@@ -57,6 +57,29 @@ pub struct SetupArgs {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
 
+    /// Enrol this machine from a client config the server wrote.
+    ///
+    /// The client side of `vallum peer add --client-config-out`: the server
+    /// writes a config that names the key file it expects beside it, and this
+    /// command is what the device runs once it has both. It finds the key,
+    /// places the pair where the unit reads them, installs the service and
+    /// proves the tunnel.
+    ///
+    /// The key never leaves this device, which is the whole point of the file
+    /// path - so the device must already have it, and this command says so if
+    /// it does not.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["server", "client", "remote"])]
+    pub client_config: Option<PathBuf>,
+
+    /// Accept a bundle that carries this client's **private key**.
+    ///
+    /// A bundle is the one enrolment path where the key existed on another
+    /// machine first. Every other path generates it here, so the safe
+    /// alternative always exists - which is why a bundle carrying the key is
+    /// refused by default rather than warned about.
+    #[arg(long)]
+    pub allow_shipped_key: bool,
+
     /// Enrol this machine against a server over SSH, which needs no bundle and
     /// never sends this machine's private key anywhere.
     #[arg(long, value_name = "USER@HOST", conflicts_with_all = ["server", "client", "join", "token"])]
@@ -114,10 +137,13 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
         return as_server(args);
     }
     if let Some(bundle) = &args.client {
-        return as_client(bundle, args.dry_run, false);
+        return as_client(bundle, args.dry_run, false, args.allow_shipped_key);
     }
     if let Some(remote) = &args.remote {
         return as_remote(remote, args);
+    }
+    if let Some(config) = &args.client_config {
+        return as_client_config(config, args);
     }
     if let Some(join) = &args.join {
         return as_join(join, args);
@@ -161,6 +187,8 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                     None,
                 )?;
                 let joined = SetupArgs {
+                    client_config: None,
+                    allow_shipped_key: false,
                     server: false,
                     client: None,
                     remote: None,
@@ -181,7 +209,7 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
             }
             "3" | "bundle" => {
                 let bundle = ask_bundle()?;
-                return as_client(&bundle, args.dry_run, true);
+                return as_client(&bundle, args.dry_run, true, args.allow_shipped_key);
             }
             other => say!("`{other}` is not one of the three. Type 1, 2, or 3."),
         }
@@ -455,7 +483,12 @@ fn summarise(bundle: &std::path::Path) -> Result<Summary, Error> {
     })
 }
 
-fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Result<(), Error> {
+fn as_client(
+    bundle: &std::path::Path,
+    dry_run: bool,
+    interactive: bool,
+    allow_shipped_key: bool,
+) -> Result<(), Error> {
     let summary = summarise(bundle)?;
     say!();
     say!("{} — {}", bundle.display(), summary.name);
@@ -487,6 +520,7 @@ fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Resu
     }
     let root = nix::unistd::Uid::effective().is_root();
     let import = ImportArgs {
+        allow_shipped_key,
         bundle: bundle.to_path_buf(),
         output_dir: None,
         force: false,
@@ -506,6 +540,190 @@ fn as_client(bundle: &std::path::Path, dry_run: bool, interactive: bool) -> Resu
         say!("To run it as a service instead, re-run this with sudo.");
     }
     Ok(())
+}
+
+/// What a client config and its key look like on this device, once checked.
+#[derive(Debug)]
+struct ClientFiles {
+    /// The instance name: the config file's stem.
+    name: String,
+    /// The config's text.
+    text: String,
+    /// Where the private key is.
+    key: PathBuf,
+    /// The server's endpoint, for the handover message.
+    endpoint: String,
+}
+
+/// Check a client config and its key without touching anything.
+///
+/// The validation is separated from the placement so it can be tested without
+/// writing to /etc, and so the one thing that can go wrong - a missing key -
+/// is reported before anything is moved.
+fn resolve_client_files(path: &Path) -> Result<ClientFiles, Error> {
+    let text = std::fs::read_to_string(path).map_err(|source| Error::IoPath {
+        action: "read the client config",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let config = vallum_config::Config::load(path).map_err(|error| {
+        Error::Usage(format!(
+            "{} is not a config Vallum can use: {error}",
+            path.display()
+        ))
+    })?;
+    let name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "vallum0".to_owned());
+
+    // The config names its own key, and the key never leaves this device - so
+    // the device is the only party that can have it. If it is not here, the
+    // message is the remedy, because there is nothing else the user can do.
+    let key = crate::config::resolve_key_path(path, &config.interface.private_key);
+    if !key.is_file() {
+        return Err(Error::Usage(format!(
+            "the config names its private key `{}`, and there is no such file beside it.\n\
+             The key never leaves this device, so it has to be made here:\n\
+             \n     vallum keygen --output {}\n\
+             \n then run this command again.",
+            config.interface.private_key.display(),
+            key.display(),
+        )));
+    }
+
+    let endpoint = config
+        .peers
+        .first()
+        .and_then(|peer| peer.endpoint.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "?".to_owned());
+
+    Ok(ClientFiles {
+        name,
+        text,
+        key,
+        endpoint,
+    })
+}
+
+/// Enrol this machine from a client config the server wrote.
+///
+/// This is the receiver the file path never had. Before it, the client side
+/// of `peer add --client-config-out` was prose: copy the TOML to
+/// /etc/vallum, name the key file exactly as the peer is named, enable two
+/// units by hand. Now it is one command.
+fn as_client_config(path: &Path, args: &SetupArgs) -> Result<(), Error> {
+    let files = resolve_client_files(path)?;
+    let root = nix::unistd::Uid::effective().is_root();
+    let name = files.name.clone();
+
+    say!("enrolling `{name}` from {}", path.display());
+
+    if root {
+        let directory = PathBuf::from("/etc/vallum");
+        std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
+            action: "create",
+            path: directory.clone(),
+            source,
+        })?;
+        let config_path = directory.join(format!("{name}.toml"));
+        let key_path = directory.join(format!("{name}.key"));
+
+        // The key is renamed to sit beside the config, and the config is told
+        // the new name: the server named it after the PEER, and the file name
+        // is this machine's business.
+        let text = vallum_config::with_local_private_key(&files.text, &format!("{name}.key"));
+        let text = vallum_config::with_local_fwmark(&text);
+        crate::keys::write_private(&config_path, text.as_bytes())?;
+        std::fs::copy(&files.key, &key_path).map_err(|source| Error::IoPath {
+            action: "copy the private key",
+            path: files.key.clone(),
+            source,
+        })?;
+        // The units drop capabilities, so root loses CAP_DAC_OVERRIDE and
+        // cannot read a 0600 file owned by anyone else.
+        for path in [&config_path, &key_path] {
+            let _ = std::os::unix::fs::chown(path, Some(0), Some(0));
+        }
+        say!("   config     {}", config_path.display());
+        say!("   key        {}", key_path.display());
+        crate::commands::server::install_service(&name, false)?;
+        let server_address = vallum_config::Config::load(&config_path)
+            .ok()
+            .and_then(|config| config.peers.first().and_then(|peer| peer.endpoint.clone()));
+        prove_tunnel(&name, &config_path, server_address.as_deref());
+        say!(
+            "Check it with `vallum status --config {}`, then watch it with `vallum tui`.",
+            config_path.display()
+        );
+        return Ok(());
+    }
+
+    // Not root: the files stay where they are, and the user is told how to
+    // run it - with the config path, not a guess.
+    let text = vallum_config::with_local_private_key(&files.text, &format!("{name}.key"));
+    let text = vallum_config::with_local_fwmark(&text);
+    let config_path = path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!("{name}.toml"));
+    crate::keys::write_private(&config_path, text.as_bytes())?;
+    say!("   config     {}", config_path.display());
+    say!("   key        {} (this machine only)", files.key.display());
+    say!(
+        "Run it with `sudo vallum run --config {}`,",
+        config_path.display()
+    );
+    say!("or re-run this with sudo to install it as a service.");
+    let _ = args;
+    Ok(())
+}
+
+/// Name what actually went wrong when the SSH leg of an enrolment fails.
+///
+/// Three different causes arrive as one exit status, and the old message called
+/// all of them "the server refused the enrolment" - which is wrong twice over:
+/// the server refused nothing, and the causes need different remedies. A sudo
+/// that wants a password, a `vallum` that is not installed, and an ssh
+/// connection that failed are three different problems, and the user can only
+/// fix the one they are actually having.
+fn ssh_failure(code: Option<i32>, stderr: &str, remote: &str, name: &str) -> String {
+    let text = stderr.to_ascii_lowercase();
+    let (reason, remedy) = if code == Some(127) || text.contains("command not found") {
+        (
+            "the server has no `vallum` on that user's PATH",
+            "install it there first (the same installer: sudo ./scripts/install.sh), then enrol again".to_owned(),
+        )
+    } else if text.contains("terminal is required")
+        || text.contains("no tty")
+        || text.contains("askpass")
+        || text.contains("a password is required")
+    {
+        (
+            "the server's sudo wants a password, and this command runs with no terminal to ask on",
+            format!(
+                "give that user passwordless sudo for `vallum peer enroll`, or enrol with a \
+                 bundle instead: vallum peer add {name} --ship-key --bundle-out {name}.vallum-bundle"
+            ),
+        )
+    } else if code == Some(255) {
+        (
+            "the ssh connection itself failed",
+            format!("check the login first: ssh {remote} true"),
+        )
+    } else {
+        (
+            "the server refused the enrolment",
+            "the server's own words are below".to_owned(),
+        )
+    };
+    format!(
+        "the enrolment of `{name}` over SSH did not work: {reason}.\n\
+         {remedy}\n\
+         \n   the server said: {stderr}"
+    )
 }
 
 /// Enrol this machine against a server over SSH.
@@ -576,13 +794,11 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
         .map_err(|error| Error::Usage(format!("ssh: {error}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Precondition(format!(
-            "the server refused the enrolment: {}\n\
-             That command runs `sudo vallum peer enroll` there, so it needs vallum \
-             installed on the server and passwordless sudo for this user. \
-             If that is not available, ask the server for a bundle instead: \
-             `vallum peer add {name} --ship-key --bundle-out {name}.vallum-bundle`",
-            stderr.trim()
+        return Err(Error::Precondition(ssh_failure(
+            output.status.code(),
+            stderr.trim(),
+            remote,
+            &name,
         )));
     }
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -982,21 +1198,40 @@ fn hostname() -> Option<String> {
         .map(|name| name.split('.').next().unwrap_or(&name).to_owned())
 }
 
-/// The non-interactive default: say what the two paths are, without running
-/// either. A prompt a script cannot answer is worse than a clear instruction.
+/// The one place the product says how a client gets its configuration.
+///
+/// Three surfaces used to answer this question - `vallum` with no arguments,
+/// `vallum setup` with no arguments, and the deployment docs - and they
+/// disagreed, in a different order each. A user who asked "how do I get my
+/// config" got a different answer depending on where they looked, and the
+/// answer they got first was the token path: the one ADR-0034 demoted.
+///
+/// So the text lives here, once, and every surface prints it.
+#[must_use]
+pub fn guidance_text() -> String {
+    let mut text = String::new();
+    text.push_str("Vallum — a post-quantum tunnel between two machines.\n\n");
+    text.push_str("On the server, where clients connect:\n");
+    text.push_str("   sudo vallum setup --server\n\n");
+    text.push_str("On a client, with what the server gave you:\n");
+    text.push_str(
+        "   sudo vallum setup --client-config laptop.toml   (a config the server wrote)\n",
+    );
+    text.push_str("   sudo vallum setup --remote you@<server>        (over SSH instead)\n");
+    text.push_str("   sudo vallum join vallum1-join:…                (a one-time token)\n");
+    text.push_str("   sudo vallum setup --client <file>.vallum-bundle (a bundle file)\n\n");
+    text.push_str("Every one of these keeps this machine's private key here.\n");
+    text.push_str("`vallum setup` with no flags asks which of the two this machine is.\n");
+    text.push_str("Every individual command is under `vallum --help`.");
+    text
+}
+
+/// The non-interactive default: say what the paths are, without running any
+/// of them. A prompt a script cannot answer is worse than a clear instruction.
 fn guidance() -> Result<(), Error> {
-    say!("Vallum — a post-quantum tunnel between two machines.");
-    say!();
-    say!("On the server, where clients connect:");
-    say!("   sudo vallum setup --server");
-    say!();
-    say!("On a client (generates its own key here — nothing secret leaves):");
-    say!("   sudo vallum join vallum1-join:…   (`vallum peer invite` on the server prints this)");
-    say!("   sudo vallum setup --remote you@<server>");
-    say!("   sudo vallum setup --client <file>.vallum-bundle");
-    say!();
-    say!("`vallum setup` with no flags asks which of the two this machine is.");
-    say!("Every individual command is under `vallum --help`.");
+    for line in guidance_text().lines() {
+        say!("{}", line);
+    }
     Ok(())
 }
 
@@ -1058,6 +1293,60 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+/// Three causes, three different remedies. The old message called all of
+/// them "the server refused the enrolment".
+#[test]
+fn the_ssh_failure_names_the_cause_that_actually_applies() {
+    let sudo = ssh_failure(
+        Some(1),
+        "sudo: a terminal is required to read the password",
+        "vpn.example.com",
+        "laptop",
+    );
+    assert!(sudo.contains("sudo wants a password"), "{sudo}");
+
+    let missing = ssh_failure(
+        Some(127),
+        "sudo: vallum: command not found",
+        "vpn.example.com",
+        "laptop",
+    );
+    assert!(
+        missing.contains("no `vallum` on that user's PATH"),
+        "{missing}"
+    );
+
+    let transport = ssh_failure(
+        Some(255),
+        "Host key verification failed.",
+        "vpn.example.com",
+        "laptop",
+    );
+    assert!(
+        transport.contains("ssh connection itself failed"),
+        "{transport}"
+    );
+
+    for message in [sudo, missing, transport] {
+        assert!(
+            message.contains("vpn.example.com") || message.contains("laptop"),
+            "every message names something to act on: {message}"
+        );
+    }
+}
+
+/// The guidance is one text, and it leads with the file path.
+#[test]
+fn the_guidance_leads_with_the_file_path() {
+    let text = guidance_text();
+    let file = text
+        .find("--client-config")
+        .expect("the file path is named");
+    let ssh = text.find("--remote").expect("ssh is named");
+    let token = text.find("vallum1-join").expect("the token is named");
+    assert!(file < ssh && ssh < token, "the order is the order: {text}");
+}
+
 mod tests {
     use super::*;
 

@@ -1,7 +1,7 @@
 # ADR-0034: The file is the enrolment; the token protocol is a convenience
 
 **Date:** 2026-11-12
-**Status:** accepted in part — the responder is started and never armed, and `peer invite` prints its own teardown. **The file path is not yet a method**: it has no client-side receiver. That gap is the open decision this ADR left, and a premortem on the client's first hour found it.
+**Status:** accepted — and the file path now has the receiver it lacked. A premortem on the client's first hour found that this ADR's premise was wrong: *"the server writes the config" is not "the client receives and installs the config"*. The client side was prose. `vallum setup --client-config` is that receiver, and the file path is a method rather than a ritual.
 **Deciders:** Vallum maintainers
 **Answers:** the operator's question — "comparing how WireGuard's client/server connects, can we replicate that?"
 
@@ -125,6 +125,39 @@ definition of how a peer joins.
 - **Rotation and revocation get no cheaper** → they never did; both are server
   operations either way.
 
+## What the premortem changed
+
+The premortem on the client's first hour (seven investigators, every claim
+verified against the tree) found seven failure modes. Four were fixed in the
+same pass, and they changed this ADR's substance rather than its wording:
+
+- **The receiver exists.** `vallum setup --client-config <file>`: it finds the
+  key the config names, places both files in `/etc/vallum` as root `0600`,
+  installs the units, proves the tunnel, and prints the command that checks
+  it. If the key is not beside the config, the message IS the remedy. Before
+  this, the primary path was a ritual.
+- **One guidance screen, one order.** `vallum setup` with no flags, `vallum`
+  with no arguments, the quickstart, the README and the client guide all used
+  to name a *different* set of paths in a different order — and the answer a
+  user got first was the token path this ADR demoted. The text now lives in
+  one function (`setup::guidance_text`) that every surface prints.
+- **The bundle path is guarded.** A bundle carries the client's private key,
+  and the policy report could not see it: `PolicyFinding` had no variant for
+  it. There is one now, and the import **refuses** a bundle that carries a
+  key unless `--allow-shipped-key` says so explicitly. Every other path keeps
+  the key on the device.
+- **The failures name their cause.** The SSH leg reported "the server refused
+  the enrolment" for three different causes — no `vallum` on the server, a
+  sudo that wants a password, an ssh connection that failed — and the server
+  refused nothing: the command never ran. The join timeout pointed at a stale
+  invite when the likelier cause is a filtered port. Both name their causes
+  now.
+
+Three remain open, and are recorded in `docs/alpha-readiness-2026-11-12.md`:
+the ticket's port is derived three ways, the client's doctor cannot tell a
+changed server key from a dead path, and `vallum join` does not say which path
+it used.
+
 ## Implementation order, and where it stands
 
 1. **Document the file path as the primary one.** *Done* —
@@ -133,17 +166,19 @@ definition of how a peer joins.
    as the alternative; `docs/wireguard-comparison.md` now spells out the
    side-by-side for readers.
 2. **`vallum peer add --client-config-out` as the advertised way to get a client
-   config.** **NOT DONE, and the premise was wrong.** The flag is not
+   config, and a client command that consumes it.** **DONE.** The flag is not
    mentioned in the quickstart or the README; the only exercise of it in the
    tree is a unit test (`crates/vallum/tests/provisioning.rs:124`); and
    **nothing on the client consumes its output.** `vallum import-bundle` reads
    only a versioned JSON bundle (`crates/vallum/src/bundle.rs:98-103`), and
    there is no command that takes a plain client config.
 
-   The client side of the file path is therefore prose in
-   `docs/deployment/client.md:42-47`: copy the TOML to
+   The client side of the file path was therefore prose: copy the TOML to
    `/etc/vallum/<name>.toml` next to `<name>.key`, then enable two units by
-   hand. And the config names the key by **peer name**
+   hand. **That prose is now `vallum setup --client-config <file>`** — it finds
+   the key the config names, places both files, installs the units, proves the
+   tunnel, and prints the command that checks it. And the config names the key
+   by **peer name**
    (`crates/vallum/src/commands/peer.rs:2068` — `private_key = "{name}.key"`),
    so a keyfile the operator named anything else is orphaned: `keygen
    --output desk.key` with `peer add laptop` yields a config pointing at a

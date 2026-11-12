@@ -183,9 +183,12 @@ fn a_server_generated_bundle_round_trips_through_import() {
     assert!(stderr.contains("--ship-key"), "{stderr}");
 
     let imported = dir.join("imported");
+    // The bundle carries the key - that is what this path is - so the import
+    // needs the explicit consent the new refusal demands.
     let (ok, stdout, stderr) = run(bin()
         .arg("import-bundle")
         .arg(&bundle)
+        .arg("--allow-shipped-key")
         .args(["--output-dir"])
         .arg(&imported));
     assert!(ok, "{stdout}{stderr}");
@@ -678,6 +681,99 @@ fn peer_invites_lists_live_invites_without_leaking_tokens_and_prunes_expired_one
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["name"].as_str(), Some("laptop"));
     assert_eq!(arr[0]["spent"].as_bool(), Some(false));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The file path, end to end, the way a person walks it.
+///
+/// The premortem on the client's first hour found that the path ADR-0034
+/// calls primary had no client-side receiver: the server wrote a config, and
+/// the client side was prose - copy two files to /etc/vallum, name the key
+/// exactly as the peer is named, enable two units by hand. This test walks
+/// the three steps a person actually takes, and asserts that the last one is
+/// a single command.
+#[test]
+fn a_client_config_the_server_wrote_is_installed_by_one_command() {
+    let dir = scratch("file-path");
+    let server = init(&dir);
+
+    // 1. The device makes its own key. It never leaves this machine.
+    let public_line = keygen(&dir, "laptop");
+    assert!(public_line.starts_with("vallum1:"));
+
+    // 2. The server writes a config that NAMES that key.
+    let client = dir.join("laptop.toml");
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "add", "laptop", "--config"])
+        .arg(&server)
+        .args(["--public-key", &public_line, "--endpoint", "203.0.113.5"])
+        .arg("--client-config-out")
+        .arg(&client));
+    assert!(ok, "peer add failed\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        client.exists(),
+        "the server did not write the client config"
+    );
+
+    // The config names the key by the PEER's name - which is the coupling the
+    // receiver has to satisfy.
+    let parsed = vallum_config::Config::load(&client).unwrap();
+    assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
+
+    // 3. The device installs it, with one command.
+    let (ok, stdout, stderr) = run(bin().args(["setup", "--client-config"]).arg(&client));
+    assert!(
+        ok,
+        "setup --client-config failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The config the device now holds names the key that is actually beside
+    // it, and the daemon accepts it.
+    let parsed = vallum_config::Config::load(&client).unwrap();
+    assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
+    let key = dir.join("laptop.key");
+    assert!(key.exists(), "the key the config names is not beside it");
+    assert_eq!(mode(&key), 0o600, "the key stays private");
+    assert!(
+        stdout.contains("laptop.toml"),
+        "the output must say where the config ended up: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The receiver's one real failure: the config names a key that is not here.
+/// The message must BE the remedy, because there is nothing else the user can
+/// do - and the key genuinely never has to leave the device.
+#[test]
+fn a_missing_key_is_reported_with_the_command_that_creates_it() {
+    let dir = scratch("missing-key");
+    let server = init(&dir);
+    let public_line = keygen(&dir, "laptop");
+    let client = dir.join("laptop.toml");
+    let (ok, stdout, stderr) = run(bin()
+        .args(["peer", "add", "laptop", "--config"])
+        .arg(&server)
+        .args(["--public-key", &public_line, "--endpoint", "203.0.113.5"])
+        .arg("--client-config-out")
+        .arg(&client));
+    assert!(ok, "peer add failed\nstdout: {stdout}\nstderr: {stderr}");
+
+    // The device does not have the key yet.
+    std::fs::remove_file(dir.join("laptop.key")).unwrap();
+
+    let (ok, stdout, stderr) = run(bin().args(["setup", "--client-config"]).arg(&client));
+    assert!(!ok, "a config with no key beside it must not install");
+    let message = format!("{stdout}{stderr}");
+    assert!(
+        message.contains("vallum keygen --output"),
+        "the message must be the remedy: {message}"
+    );
+    assert!(
+        message.contains("laptop.key"),
+        "the message must name the file: {message}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

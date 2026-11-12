@@ -153,17 +153,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
         // A wall of twenty subcommands is not an answer to "what now?".
-        println!(
-            "Vallum — a post-quantum tunnel between two machines.\n\n\
-             On the server, where clients connect:\n\
-             \x20  sudo vallum setup --server\n\n\
-             On a client, with what the server printed:\n\
-             \x20  sudo vallum join vallum1-join:…   (`vallum peer invite` prints this)\n\
-             \x20  sudo vallum setup --remote you@<server>   (over SSH instead)\n\
-             \x20  sudo vallum setup --client <file>.vallum-bundle   (a bundle file)\n\n\
-             `vallum setup` with no flags asks which one this machine is.\n\
-             Every command is under `vallum --help`; the dashboard is `vallum tui`."
-        );
+        // A wall of twenty subcommands is not an answer to "what now?" - and
+        // the answer must be the same one `vallum setup` gives, in the same
+        // order, or a user gets two different instructions.
+        println!("{}", setup::guidance_text());
         return ExitCode::SUCCESS;
     };
     let outcome = match command {
@@ -204,6 +197,8 @@ fn main() -> ExitCode {
         Command::Join(args) => setup::setup(&SetupArgs {
             server: false,
             client: None,
+            client_config: None,
+            allow_shipped_key: false,
             yes: false,
             endpoint: None,
             address: None,

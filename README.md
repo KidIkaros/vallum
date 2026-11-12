@@ -81,16 +81,25 @@ sudo ./scripts/install.sh --from-release
 # 1. Server — key, config, IP forwarding, firewall, NAT, systemd units
 sudo vallum setup --server
 
-# 2a. Client with SSH access — generates its own key locally; only the public line crosses SSH
+# 2a. Client — the file path. The key is made on the device; only the public
+#     line crosses. The server writes a config that NAMES the key file.
+sudo vallum keygen --output laptop.key          # on the device
+sudo vallum pubkey --private-key laptop.key     # send that line to the server
+sudo vallum peer add laptop --public-key-file laptop.pub \
+    --client-config-out laptop.toml             # on the server; copy the file back
+sudo vallum setup --client-config laptop.toml   # on the device: installs and proves it
+
+# 2b. Client with SSH access — same custody, the copy done over SSH
 sudo vallum setup --remote you@vpn.example.com
 
-# 2b. Client without SSH — one invite ticket, one command, fingerprint pinned
+# 2c. Client without SSH — one invite ticket, one command, fingerprint pinned
 sudo vallum peer invite laptop                  # on the server (or press `v` in `vallum tui`)
 sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
 
-# 2c. Offline fallback — server-minted bundle (carries the client private key)
+# 2d. Offline fallback — server-minted bundle. It carries the client private
+#     key, so it is refused unless you say you accept that.
 sudo vallum peer add laptop --ship-key --bundle-out laptop.vallum-bundle --forget-key
-sudo vallum setup --client laptop.vallum-bundle
+sudo vallum setup --client laptop.vallum-bundle --allow-shipped-key
 ```
 
 Operational lifecycle commands:

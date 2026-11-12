@@ -146,6 +146,9 @@ fn rotate_with_a_bundle_generates_a_new_key_without_overwriting_the_old_one() {
     let (ok, _, stderr) = run(bin()
         .arg("import-bundle")
         .arg(&bundle)
+        // The bundle carries the key - that is what this path is - so the
+        // import needs the explicit consent the refusal demands.
+        .arg("--allow-shipped-key")
         .args(["--output-dir"])
         .arg(&imported));
     assert!(ok, "{stderr}");

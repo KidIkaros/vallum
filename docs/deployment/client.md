@@ -11,44 +11,98 @@ This guide assumes a server is already up. If not, start with
 
 - Linux with systemd.
 - Root, or `sudo`.
-- The client's config and key, from one of the two enrolment paths below.
+- The client's config and key, from one of the four enrolment paths below. The
+  first is the one the product leads with; all four end in the same place:
+  `/etc/vallum/<name>.toml` and `/etc/vallum/<name>.key`, both `0600`, with
+  the units installed.
 - Outbound UDP to the server's port (default `51820`), or TCP to it if the path
   drops UDP ([below](#if-the-path-blocks-udp)).
 
-## Path A — the server handed you a bundle
+## Path A — the server wrote you a config
 
-A `.vallum-bundle` is a JSON file containing the config and the key. It contains
-a private key: move it over a channel you trust, and delete it afterwards.
+The path the product leads with, and the one with the best custody: **the
+private key never leaves the device.**
+
+On the device, the key is made first:
+
+```sh
+sudo vallum keygen --output laptop.key
+sudo vallum pubkey --private-key laptop.key     # send this line to the server
+```
+
+On the server, that public line becomes a peer, and a config that **names**
+`laptop.key`:
+
+```sh
+sudo vallum peer add laptop --public-key-file laptop.pub \
+    --client-config-out laptop.toml
+```
+
+Copy `laptop.toml` to the device, beside `laptop.key`, and install it:
+
+```sh
+sudo vallum setup --client-config laptop.toml
+```
+
+That writes `/etc/vallum/laptop.toml` and `/etc/vallum/laptop.key` (both
+`0600`), installs the units, starts `vallum@laptop` and `vallum-quick@laptop`,
+proves the tunnel, and prints the `status` command to check it.
+
+The config names its key as a bare file name (`private_key = "laptop.key"`),
+and a relative path resolves against the config's own directory — so the pair
+works wherever the two files sit together. The name matters: the server names
+the key after the **peer**, so `peer add laptop` expects `laptop.key`, and a
+keyfile called anything else is renamed into place when the config is
+installed.
+
+If the key is not beside the config, the command says so and tells you the
+command that creates it — the key never has to come from anywhere else.
+
+## Path B — over SSH
+
+```sh
+sudo vallum setup --remote you@vpn.example.com
+```
+
+The key is generated here and only the public line crosses. The server must
+have `vallum` installed and passwordless sudo for that user; the error names
+which of those is missing.
+
+## Path C — a one-time ticket
+
+For a device that cannot reach the server over SSH. The server mints a ticket
+and the device redeems it:
+
+```sh
+sudo vallum peer invite laptop          # on the server
+sudo vallum join vallum1-join:…          # on the device
+```
+
+The responder answers on UDP `51821`, which must be open in the cloud security
+group as well as on the host — for the enrolment only. One use, fingerprint
+pinned, no private key on the wire.
+
+## Path D — the server handed you a bundle
+
+A `.vallum-bundle` is a JSON file containing the config **and the client's
+private key**. The key was generated on the server and travelled in the file,
+so anyone holding the file holds the key — which is why this import is
+**refused by default**:
 
 ```sh
 sudo vallum import-bundle laptop.vallum-bundle --install
 ```
 
-That writes `/etc/vallum/laptop.toml` and `/etc/vallum/laptop.key` (both `0600`),
-installs the units, enables and starts `vallum@laptop` and
-`vallum-quick@laptop`, and prints the `doctor` command to check it.
-
-Without `--install`, it only writes the two files into `--output-dir` (the
-current directory by default), and prints the `systemctl` line to run.
-
-## Path B — you generated your own key
-
-You already ran:
-
-```sh
-sudo vallum keygen --output /etc/vallum/laptop.key --suite 3 > laptop.pub
+```
+vallum: refusing this bundle: it carries this client's PRIVATE KEY.
+...
+Generate the key on the device instead - it never has to leave:
+   vallum keygen --output <name>.key
+   vallum pubkey --private-key <name>.key   # send this line to the server
 ```
 
-and sent `laptop.pub` to the server, which returned `laptop.toml`. Copy that
-file to `/etc/vallum/laptop.toml`, next to `laptop.key`, then:
-
-```sh
-sudo systemctl enable --now vallum@laptop vallum-quick@laptop
-```
-
-The config names its key as a bare file name (`private_key = "laptop.key"`), and
-a relative path resolves against the config's own directory — so the pair works
-from `/etc/vallum` regardless of where the daemon was started.
+If you understand and accept that, `--allow-shipped-key` says so explicitly.
+The other three paths never need it, because they never move the key.
 
 ## Verify
 

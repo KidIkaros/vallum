@@ -1256,10 +1256,18 @@ fn add(args: &AddArgs) -> Result<(), Error> {
         if let Some((endpoint, source)) = &bundle_endpoint_result {
             say_bundle_endpoint(endpoint, *source);
         }
+        say!();
+        say!("   on the device, before the file arrives:");
+        say!("      vallum keygen --output {}.key", args.name);
         say!(
-            "              copy it to the device, with its key file named `{}.key`",
+            "      vallum pubkey --private-key {}.key   # send that line back here",
             args.name
         );
+        say!();
+        say!("   then, with {} beside {}.key:", path.display(), args.name);
+        say!("      vallum setup --client-config {}", path.display());
+        say!("   (the key never leaves the device: the config names it, and the");
+        say!("    device makes it - so it must be made BEFORE the file arrives)");
     }
     if let Some(path) = &bundle_path {
         say!("   bundle     {}", path.display());
