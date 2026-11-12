@@ -1,7 +1,7 @@
 # ADR-0034: The file is the enrolment; the token protocol is a convenience
 
 **Date:** 2026-11-12
-**Status:** proposed
+**Status:** accepted — the code implements it (the responder is started, never armed; `peer invite` prints its own teardown), and the file path is the one the docs lead with
 **Deciders:** Vallum maintainers
 **Answers:** the operator's question — "comparing how WireGuard's client/server connects, can we replicate that?"
 

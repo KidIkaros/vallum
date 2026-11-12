@@ -12,6 +12,7 @@ that owns the detail.
 | Root, or `sudo` | the installer, `setup`, and the units need it; the daemon drops privileges itself | [`proof/privileges.md`](proof/privileges.md) |
 | One reachable address, for a server | public IPv4, public IPv6, or a DNS name resolving to one | [`deployment/server.md`](deployment/server.md) |
 | One UDP port, `51820` by default | open it on the host **and** in the cloud security group — `vallum server init` only manages the host firewall | [`deployment/server.md`](deployment/server.md) |
+| A second UDP port, `51821`, **only if you enrol by ticket** | the token path answers on `listen + 1`; open it for the enrolment and close it again afterwards — a ticket's join times out with `no answer from <host>:51821` if it is filtered upstream of the host | [`deployment/server.md`](deployment/server.md#enrolment-open-the-second-port-only-while-you-are-enrolling) |
 | A decision: full or split tunnel | full carries everything (`0.0.0.0/0`, `::/0`); split carries the prefixes you name | [`deployment/client.md`](deployment/client.md#full-tunnel-vs-split-tunnel) |
 | A DNS answer | systemd-resolved, resolvconf, or deliberately left to the host | [`deployment/client.md`](deployment/client.md#dns) |
 | UDP that actually gets through | the tunnel speaks UDP by default; a path that drops it — hotel, campus, some mobile carriers — needs `carrier = "tcp"` on **both** ends and the TCP port opened, which is reachability at a measured cost rather than vapour | [`adr/0026`](adr/0026-censorship-resistance.md) |
@@ -64,6 +65,11 @@ sudo vallum setup --remote you@vpn.example.com
 
 # It cannot: mint a single-use ticket on the server (or press `v` in `vallum tui`),
 # then redeem it here. One use, fingerprint pinned, no private key on the wire.
+#
+# The ticket path answers on UDP 51821, so that port must be open in the cloud
+# security group as well as on the host - for the enrolment only. A filtered
+# port gives you "no answer from <host>:51821: timed out", which reads like a
+# token problem and is a firewall problem.
 sudo vallum peer invite laptop
 sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
 
