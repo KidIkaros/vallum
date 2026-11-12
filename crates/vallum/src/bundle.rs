@@ -124,6 +124,10 @@ pub enum PolicyFinding {
     ControlWorldWritable { path: std::path::PathBuf },
     /// `[quick] dns` — every lookup goes where the server says.
     DnsFromBundle { servers: Vec<String> },
+    /// `[quick] pre_up`/`post_up`/`post_down` — `sh -c` **as root** when the
+    /// tunnel comes up. A bundle carrying these is not a config, it is a
+    /// program (security-redteam-round2.md R2-4).
+    HooksFromBundle { count: usize },
 }
 
 impl PolicyFinding {
@@ -136,6 +140,9 @@ impl PolicyFinding {
             PolicyFinding::ControlWorldWritable { path } => format!(
                 "control: `{}` is in a directory other users can write to",
                 path.display()
+            ),
+            PolicyFinding::HooksFromBundle { count } => format!(
+                "hooks: the bundle runs {count} shell command(s) as root when the tunnel comes up"
             ),
             PolicyFinding::DnsFromBundle { servers } => format!(
                 "dns: the bundle sets the resolver to {}",
@@ -168,6 +175,10 @@ pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
             }
         }
     }
+    let hooks = config.quick.pre_up.len() + config.quick.post_up.len() + config.quick.post_down.len();
+    if hooks > 0 {
+        findings.push(PolicyFinding::HooksFromBundle { count: hooks });
+    }
     if !config.quick.dns.is_empty() {
         findings.push(PolicyFinding::DnsFromBundle {
             servers: config.quick.dns.clone(),
@@ -183,7 +194,7 @@ pub fn policy_report(config: &vallum_config::Config) -> Vec<PolicyFinding> {
 /// If the config does not parse, references a path outside the bundle, the
 /// target exists and `force` is false, or a write fails.
 pub fn import(bundle: &Bundle, directory: &Path, force: bool) -> Result<Imported, String> {
-    import_with_policy(bundle, directory, force, false)
+    import_with_policy(bundle, directory, force, false, false)
 }
 
 /// The policy report for a bundle, without importing it.
@@ -199,6 +210,7 @@ pub fn import_with_policy(
     directory: &Path,
     force: bool,
     strict: bool,
+    allow_hooks: bool,
 ) -> Result<Imported, String> {
     if bundle.version != 1 {
         return Err(format!("unsupported bundle version {}", bundle.version));
@@ -216,6 +228,27 @@ pub fn import_with_policy(
         ));
     }
     let findings = policy_report(&config);
+    // Hooks are refused by default rather than reported: a warning next to a
+    // root `sh -c` is not a control. `--allow-hooks` is for an operator who
+    // wrote the hooks themselves.
+    if !allow_hooks {
+        if let Some(PolicyFinding::HooksFromBundle { count }) = findings
+            .iter()
+            .find(|finding| matches!(finding, PolicyFinding::HooksFromBundle { .. }))
+        {
+            return Err(format!(
+                "refusing this bundle: it carries {count} shell command(s) that would run as root \
+                 when the tunnel comes up (\n  {}\n). Add hooks yourself after importing, or pass \
+                 --allow-hooks if you wrote them.",
+                findings
+                    .iter()
+                    .filter(|finding| matches!(finding, PolicyFinding::HooksFromBundle { .. }))
+                    .map(PolicyFinding::label)
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            ));
+        }
+    }
     if strict && !findings.is_empty() {
         return Err(format!(
             "refusing this bundle under --strict:\n  {}\n(import without --strict to accept it)",

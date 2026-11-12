@@ -58,6 +58,15 @@ Half 1 is judgement about a config. Half 2 is authentication of the file, and
 they are separate because half 1 is provable today and half 2 needs a format
 version and a key distribution answer.
 
+### Deviation: hooks are refused, not reported
+
+R2-4 (found while auditing `[quick]`) showed the same file can carry
+`pre_up`/`post_up`/`post_down`, which `vallum-quick` runs with `sh -c` as root.
+For that one finding the decision is **refuse by default** with an
+`--allow-hooks` escape, not "report and let `--strict` decide": a warning beside
+a root shell command is not a control. Every other finding keeps the
+report-plus-`--strict` shape.
+
 ## Alternatives Considered
 
 ### Alternative 1: refuse anything not matching the defaults, no report

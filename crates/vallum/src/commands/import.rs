@@ -27,6 +27,10 @@ pub struct ImportArgs {
     #[arg(long)]
     pub strict: bool,
 
+    /// Accept a bundle that carries `[quick]` hooks, which run as root.
+    #[arg(long)]
+    pub allow_hooks: bool,
+
     /// Install to /etc/vallum, install the units, and start the tunnel.
     #[arg(long)]
     pub install: bool,
@@ -62,7 +66,13 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
     for finding in &policy {
         eprintln!("warning: {}", finding.label());
     }
-    let imported = crate::bundle::import_with_policy(&bundle, &directory, args.force, args.strict)
+    let imported = crate::bundle::import_with_policy(
+        &bundle,
+        &directory,
+        args.force,
+        args.strict,
+        args.allow_hooks,
+    )
         .map_err(Error::Usage)?;
 
     say!("config {}", imported.config.display());

