@@ -205,8 +205,34 @@ notes until the build moves to an older base.
 | Addressing | dual-stack by default — `10.7.0.1/20` (4,094 peer addresses) and `fd00:7::1/64`; a peer gets one address per family |
 | Independent audit | **None.** Stated plainly in the README |
 | Fail-closed | **Implemented** — `vallum-guard@` blocks egress outside the tunnel, endpoint excepted (ADR-0018) |
+| DNS | **Does not leak** — UDP and TCP port 53 egress is dropped outside the tunnel by the killswitch filter before any allow rule; `attach` and `up` fail closed when a resolver cannot be installed; the server pushes a resolver into the tunnel with `--dns`. See the boundary below. |
 | Privilege | control socket `0600 root`; daemon drops to the configured user where possible |
 | Secret storage | keys `0600`; invites `0600` in tmpfs with a 15-minute TTL |
+
+### What the DNS guarantee is, and is not
+
+**Is:** while the tunnel is attached, DNS queries do not leave it. Port 53
+egress outside the tunnel is dropped by the killswitch filter
+(`crates/vallum/src/policy.rs`) before any allow rule, so a rogue or
+host-local resolver cannot answer; and if a resolver is configured but cannot
+be installed, `attach` and `up` fail closed rather than fall back to the
+physical link. The server can also push a resolver into the tunnel
+(`vallum peer add --dns`, `vallum server init --dns`).
+
+**Is not:** that the resolver is private. The guarantee is about the *path*,
+not the *endpoint*: the resolver operator still sees the query names. In a
+hub-and-spoke deployment the resolver is usually the server's, so the server
+operator sees the client's queries. RFC 8932 puts the same point plainly for
+encrypted DNS — the resolver operator still has full visibility of the query
+data — and RFC 9076 §6.1.4.1 says encryption does not reduce what the
+recursive resolver can see.
+
+That boundary is why the product does not ship a blocklist engine. A
+sinkhole on the server would put the operator in the position of seeing every
+client's browsing, and its updater would add a third-party list supply chain
+to a daemon whose job is to be trusted with keys. Blocking belongs on the
+client's side of the resolver, where the trust already is. See
+[`research/pi-hole-in-vallum.md`](research/pi-hole-in-vallum.md).
 
 ---
 
