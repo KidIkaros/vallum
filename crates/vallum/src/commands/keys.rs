@@ -5,11 +5,12 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use serde_json::{Value, json};
 use vallum_crypto_sdk::SdkSuite;
 
+use crate::Error;
 use crate::entropy;
 use crate::keys;
-use crate::Error;
 
 #[derive(Debug, Args)]
 pub struct KeygenArgs {
@@ -24,6 +25,9 @@ pub struct KeygenArgs {
     /// Also derive a hybrid signing key pair, turning on P3 identity.
     #[arg(long)]
     signing: bool,
+    /// Emit JSON instead of the bare public line, so an agent can read the answer.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -50,17 +54,48 @@ pub fn keygen(args: &KeygenArgs) -> Result<(), Error> {
     let file = keys::new_secret(suite_id, args.signing, entropy::seed());
     let identity = keys::identity(&suite, &file)?;
     keys::save_secret(&args.output, &file)?;
+    let public = keys::encode_public(suite_id, &identity.to_peer());
 
-    println!("{}", keys::encode_public(suite_id, &identity.to_peer()));
-    eprintln!(
-        "vallum: wrote {} ({}, {})",
-        args.output.display(),
-        keys::describe_suite(suite_id),
-        if args.signing {
-            "with signing"
-        } else {
-            "KEM-only"
-        },
+    if args.json {
+        emit(&json!({
+            "action": "keygen",
+            "output": args.output.display().to_string(),
+            "suite": suite_id,
+            "signing": args.signing,
+            "public": public,
+        }))?;
+    } else {
+        // The bare line is the interface: operators redirect it into a `.pub` file.
+        println!("{public}");
+    }
+    if !args.json {
+        // Under `--json` the object above already says all of this, and some
+        // transports hand the agent stdout and stderr as one text — a note
+        // here would stop the object parsing.
+        eprintln!(
+            "vallum: wrote {} ({}, {})",
+            args.output.display(),
+            keys::describe_suite(suite_id),
+            if args.signing {
+                "with signing"
+            } else {
+                "KEM-only"
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Print one JSON object.
+///
+/// Failures are not JSON: they keep the exit-1/stdout-silent contract in
+/// `docs/deployment/automation.md`, and a caller that wants the reason reads
+/// stderr the same way it does for every other verb.
+fn emit(report: &Value) -> Result<(), Error> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(report)
+            .map_err(|error| Error::Usage(format!("json: {error}")))?
     );
     Ok(())
 }

@@ -217,7 +217,7 @@
     },
     {
       "name": "vallum_keygen",
-      "description": "Generate a post-quantum hybrid private key file (with strict 0600 permissions) and output the public line for peers. Defaults to tri-hybrid Suite 3 (X25519 + sntrup761 + ML-KEM-768).",
+      "description": "Generate a post-quantum hybrid private key file (with strict 0600 permissions) and report the public line for peers as one JSON object: `action`, `output`, `suite`, `signing`, `public`. KEM-only; the line ends in `-`. For a key with a hybrid signing pair (a CA), use `vallum_keygen_signing`. Defaults to tri-hybrid Suite 3 (X25519 + sntrup761 + ML-KEM-768). Refuses to overwrite an existing file: that refusal is exit 1 with silent stdout, so a second call never destroys the first key.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -237,8 +237,24 @@
         ]
       },
       "outputs": {
-        "type": "string",
-        "description": "The public line formatted as 'vallum1:<suite_id>:<kem_public_key>:<signing_key|->'."
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "suite": {
+            "type": "integer"
+          },
+          "signing": {
+            "type": "boolean"
+          },
+          "public": {
+            "type": "string"
+          }
+        }
       },
       "tags": [
         "keys",
@@ -248,7 +264,62 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "vallum keygen --suite UTCP_ARG_suite_UTCP_END --output UTCP_ARG_output_file_UTCP_END",
+            "command": "vallum keygen --suite UTCP_ARG_suite_UTCP_END --output UTCP_ARG_output_file_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_keygen_signing",
+      "description": "Generate a post-quantum hybrid private key file with a hybrid signing pair (P3 identity, strict 0600 permissions) and report the public line for peers as one JSON object: `action`, `output`, `suite`, `signing: true`, `public`. The line's last segment is a signing key, not `-`. For ordinary device keys use `vallum_keygen`; reach for this one when the key will sign — a CA whose public line other interfaces will trust. Refuses to overwrite an existing file: that refusal is exit 1 with silent stdout.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "output_file": {
+            "type": "string",
+            "description": "File path where the private key will be saved. Refused if it exists."
+          },
+          "suite": {
+            "type": "integer",
+            "description": "Crypto suite ID (default 3 for tri-hybrid PQ).",
+            "default": 3
+          }
+        },
+        "required": [
+          "output_file",
+          "suite"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          },
+          "suite": {
+            "type": "integer"
+          },
+          "signing": {
+            "type": "boolean"
+          },
+          "public": {
+            "type": "string"
+          }
+        }
+      },
+      "tags": [
+        "keys",
+        "crypto"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum keygen --suite UTCP_ARG_suite_UTCP_END --output UTCP_ARG_output_file_UTCP_END --signing --json",
             "append_to_final_output": true
           }
         ]

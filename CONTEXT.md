@@ -47,7 +47,10 @@ verb the console can do and the manual cannot is a gap, and one with a test —
 That reader cannot read a sentence and act on it. Every verb an agent is handed
 has to answer in a shape it can branch on, which is why `vallum policy` grew
 `--json` (`egress: blocked | unrestricted | unknown`, and `fix` when a guard is
-wanted but missing) and why `vallum_status` already had it. A tool description
+wanted but missing) and why `vallum_status` already had it. `vallum keygen`
+grew it next (`public` as a field, not a line to scrape), with `--signing` as a
+second tool rather than a flag input — a CLI template cannot branch, so a toggle
+is either always on or a tool of its own, and the manual already speaks in pairs. A tool description
 that names a field the command does not emit is the same defect as a page that
 names a state the host does not have.
 

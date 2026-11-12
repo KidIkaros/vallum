@@ -8,7 +8,7 @@ AI agents fail when trying to run interactive terminal applications like `vallum
 
 UTCP provides a standardized, zero-overhead bridge:
 - **No wrapper proxy daemon**: The agent calls `vallum` CLI directly.
-- **Deterministic JSON**: `--json` wherever the verb offers it — `doctor`, `show`, `status`, `policy`, and the `peer` family — and Prometheus text from `metrics`.
+- **Deterministic JSON**: `--json` wherever the verb offers it — `doctor`, `show`, `status`, `policy`, `keygen`, and the `peer` family — and Prometheus text from `metrics`.
 - **Headless visual verification**: Exposes `vallum_tui_snapshot` (`vallum tui --snapshot`) so agents can inspect the dashboard layout without hanging or requiring a TTY.
 
 ## Available Tools
@@ -19,7 +19,8 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_doctor_config` | `vallum doctor --json --config <file>` | Validate configuration syntax and declared sockets. |
 | `vallum_show_config` | `vallum show --json --config <file>` | Inspect offline configuration parameters and peer definitions. |
 | `vallum_show_control` | `vallum show --json --control <socket>` | Real-time daemon telemetry: handshakes, bytes transferred, connected peers. |
-| `vallum_keygen` | `vallum keygen --suite <id> --output <file>` | Generate post-quantum hybrid keypairs (default: tri-hybrid Suite 3). |
+| `vallum_keygen` | `vallum keygen --suite <id> --output <file> --json` | Generate a KEM-only keypair; reports `action`, `output`, `suite`, `signing`, `public` (default: tri-hybrid Suite 3). |
+| `vallum_keygen_signing` | `vallum keygen --suite <id> --output <file> --signing --json` | Generate a keypair with a hybrid signing pair (P3 identity, for a CA). |
 | `vallum_pubkey` | `vallum pubkey --private-key <file>` | Extract public identity line from a private key file. |
 | `vallum_genpsk` | `vallum genpsk` | Generate a 32-byte (64 hex character) preshared key. |
 | `vallum_bench` | `vallum bench --iterations <n> --bytes <n>` | Benchmark PQ data plane seal/open latency and throughput. |
@@ -116,8 +117,12 @@ A tool that fails (missing config, no permission, `vallum_status` saying
 it, it is the product's own sentence about what to fix next.
 
 Python parses JSON stdout for you, so `vallum_doctor` returns a list and
-`vallum_peer_add` returns a dict. The TypeScript SDK does not: it hands back the
-raw text, quoted, and the caller parses it.
+`vallum_peer_add` returns a dict. The TypeScript CLI protocol parses too, but
+only when stdout is a JSON object: `vallum_keygen` returns an object, while
+`vallum_doctor` (a top-level array) and `vallum_genpsk` (bare text) come back
+as strings the caller parses. A caller that accepts both shapes works against
+either SDK — and a `--json` success writes nothing to stderr, because transports
+that merge the streams would otherwise corrupt the object.
 
 ### With the TypeScript SDK
 
@@ -152,7 +157,7 @@ namespaced under the template's `name` (`vallum.vallum_doctor`), and without
 with *"uses communication protocol 'cli' which is not in allowed protocols
 ['file']"*.
 
-**Version note (checked 2026-11-11).** The two SDKs disagree about the manual's
+**Version note (checked 2026-11-12).** The two SDKs disagree about the manual's
 envelope, and this file follows the specification: `utcp_version`,
 `manual_version`, `tools` — nothing else.
 

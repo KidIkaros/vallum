@@ -17,6 +17,11 @@ built *around* it without patching it. This page is that contract.
 "nothing happened" from "half happened", which is the difference between a retry
 and a repair.
 
+One more steadiness rule for `--json`: success writes nothing to stderr. Some
+agent transports merge the two streams into one text, so a `wrote …` note there
+would stop the object parsing. Human notes stay in the human report; the object
+already carries them as fields.
+
 ## `vallum server init --json`
 
 ```json
@@ -92,6 +97,28 @@ vallum_peer_handshaked{...} 1
 `--prefix` renames every metric. There is no listener: a systemd timer writes the
 output into `node_exporter`'s textfile directory, or a scraper runs the command
 over SSH. A peer that never handshook reports `-1` for its age, not "now".
+
+## `vallum keygen --json`
+
+```json
+{
+  "action": "keygen",
+  "output": "/etc/vallum/laptop.key",
+  "suite": 3,
+  "signing": false,
+  "public": "vallum1:0003:…:-"
+}
+```
+
+- `suite` is the numeric id the command was given (`3` for `--suite 0x0003`);
+  `public` is the same line the human report prints, so either form feeds
+  `peer add --public-key`.
+- `--signing` flips `signing` to `true` and puts a signing key where the `-`
+  was. That is the key a CA signs with (`identity issue`).
+- The key file is never overwritten: a second run for the same path exits `1`
+  with silent stdout, so a play that generates keys cannot destroy one. A
+  suite id the parser does not recognise fails the same way, before anything
+  is written.
 
 ## `vallum identity` and rotation
 

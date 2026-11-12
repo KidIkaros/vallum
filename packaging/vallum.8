@@ -36,8 +36,10 @@ same ticket is accepted by \fBsetup --join\fR.
 .B run --config FILE
 Run the tunnel. Requires CAP_NET_ADMIN for the interface and socket.
 .TP
-.B keygen --output FILE [--suite ID] [--signing]
-Generate a private key and print the peer public line.
+.B keygen --output FILE [--suite ID] [--signing] [--json]
+Generate a private key and print the peer public line. `--json` reports
+`action`, `output`, `suite`, `signing` and `public` as one object; refusals
+stay silent on stdout and exit 1.
 .TP
 .B pubkey --private-key FILE
 Print the public line for an existing key.
