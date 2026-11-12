@@ -45,6 +45,21 @@ What a private repository cannot prove:
 - [ ] `release.yml`'s tag preflight is green on the hosted runner (a tag push is
       trusted input either way).
 
+**Correction (2026-11-11): the wiring has been exercised.** The self-hosted
+runner is live — `actions.runner.KidIkaros-vallum.wingman-vps.service` is active
+on `wingman-vps` — and it ran two jobs to `Succeeded` on 2026-11-09:
+
+    12:36:35Z Running job: test (1.95.0)
+    12:42:35Z Job test (1.95.0) completed with result: Succeeded
+    12:42:57Z Job advisories and supply chain completed with result: Succeeded
+
+So "the runner wiring is actually exercised for the first time" is no longer what
+the flip risks: the YAML *has* been parsed and run by a runner. The real gap is
+narrower — **127 commits are ahead of `origin/main`**, so nothing since
+2026-11-09 has been through one. Pushing `main` closes that today, on the
+self-hosted runner, without waiting for the flip. The boxes below stay unticked
+because each is specifically about the **hosted** runner after going public.
+
 Re-check the guard, not the intent:
 
 ```sh
