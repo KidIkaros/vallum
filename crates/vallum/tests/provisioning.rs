@@ -131,8 +131,9 @@ fn a_client_generated_key_produces_a_client_config_the_daemon_accepts() {
     assert_eq!(parsed.interface.private_key, PathBuf::from("laptop.key"));
     assert_eq!(
         parsed.interface.addresses,
-        vec!["10.7.0.2/32".to_owned(), "fd00:7::2/128".to_owned()],
-        "a dual-stack server gives the peer an address in each family"
+        vec!["10.7.0.2/20".to_owned(), "fd00:7::2/64".to_owned()],
+        "the client carries the tunnel prefix, so the server is on-link; the \
+         server's own peer entry stays a host route"
     );
     let peer = &parsed.peers[0];
     assert_eq!(peer.endpoint.as_deref(), Some("203.0.113.5:51820"));
@@ -369,7 +370,14 @@ fn enroll_hands_back_a_config_and_is_idempotent() {
     let address = report["address"].as_str().unwrap().to_owned();
     let client_config = report["config"].as_str().unwrap();
     // The device gets its address, the server's line, and nothing secret.
-    assert!(client_config.contains(&address), "{client_config}");
+    // The host part must match; the prefix differs on purpose, because the
+    // client takes the tunnel prefix while the peer entry stays a /32.
+    let host = address.split('/').next().unwrap();
+    assert!(client_config.contains(host), "{client_config}");
+    assert!(
+        !client_config.contains(&format!("{address}\n")),
+        "the client should not carry the peer's host route verbatim"
+    );
     assert!(client_config.contains("public_key = \"vallum1:0003:"));
     assert!(
         !client_config.contains("seed"),

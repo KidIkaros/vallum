@@ -584,10 +584,12 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&text).map_err(|source| ConfigError::Toml {
+        let config: Self = toml::from_str(&text).map_err(|source| ConfigError::Toml {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        config.validate(path)?;
+        Ok(config)
     }
 
     /// [`load`] with [`with_local_fwmark`] applied first: a full-tunnel
@@ -598,16 +600,65 @@ impl Config {
             path: path.to_path_buf(),
             source,
         })?;
-        toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
+        let config: Self = toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        config.validate(path)?;
+        Ok(config)
     }
+
+    /// Semantic checks TOML cannot express.
+    fn validate(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(name) = &self.interface.name {
+            validate_interface_name(name).map_err(|message| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// The kernel's own limits on an interface name, checked here because the name
+/// reaches file paths (`/run/vallum/<name>.…`) before the kernel ever sees it.
+///
+/// Without this, `name = "../.."` makes a root process create files outside
+/// `/run/vallum` (security-redteam-round2.md R2-5).
+pub fn validate_interface_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("interface name is empty".to_owned());
+    }
+    if name.len() > 15 {
+        return Err(format!(
+            "interface name `{name}` is {} bytes; the kernel allows 15",
+            name.len()
+        ));
+    }
+    if name == "." || name == ".." {
+        return Err(format!("interface name `{name}` is a directory reference"));
+    }
+    if name.starts_with('-') {
+        return Err(format!(
+            "interface name `{name}` starts with `-`, which `ip` would read as a flag"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.'))
+    {
+        return Err(format!(
+            "interface name `{name}` contains `{bad}`; only letters, digits, `_`, `-` and `.` are allowed"
+        ));
+    }
+    Ok(())
 }
 
 /// A configuration file that could not be read or parsed.
 #[derive(Debug)]
 pub enum ConfigError {
+    /// Parsed, but a value cannot be used.
+    Invalid { path: PathBuf, message: String },
     /// The file could not be read.
     Io {
         /// The path involved.
@@ -633,6 +684,9 @@ impl std::fmt::Display for ConfigError {
             Self::Toml { path, source } => {
                 write!(f, "parse config `{}`: {source}", path.display())
             }
+            Self::Invalid { path, message } => {
+                write!(f, "config `{}`: {message}", path.display())
+            }
         }
     }
 }
@@ -642,6 +696,7 @@ impl std::error::Error for ConfigError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Toml { source, .. } => Some(source),
+            Self::Invalid { .. } => None,
         }
     }
 }
@@ -919,5 +974,35 @@ size = 1400
         let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
         let with = with_outer_mtu(text, 1400);
         assert_eq!(with, text);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::validate_interface_name;
+
+    #[test]
+    fn an_ordinary_name_passes() {
+        for name in ["vallum0", "alpha5", "wg-0", "a.b_c"] {
+            assert!(validate_interface_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_traversing_name_is_refused() {
+        // The name reaches `/run/vallum/<name>.quick-ns.log` before the kernel
+        // ever sees it, so `..` has to be refused here (R2-5).
+        for name in ["../..", "a/b", "..", "."] {
+            assert!(validate_interface_name(name).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_name_the_kernel_would_reject_is_refused_here() {
+        assert!(validate_interface_name(&"a".repeat(16)).is_err());
+        assert!(validate_interface_name("a".repeat(15).as_str()).is_ok());
+        assert!(validate_interface_name("-rf").is_err());
+        assert!(validate_interface_name("sp ace").is_err());
+        assert!(validate_interface_name("").is_err());
     }
 }

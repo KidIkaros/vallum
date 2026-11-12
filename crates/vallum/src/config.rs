@@ -155,6 +155,11 @@ impl From<ConfigError> for Error {
                 source,
             },
             ConfigError::Toml { path, source } => Error::Toml { path, source },
+            // Parsed but unusable — a usage error, and the message names the
+            // value, which the TOML diagnostics cannot (R2-5).
+            ConfigError::Invalid { path, message } => {
+                Error::Usage(format!("config `{}`: {message}", path.display()))
+            }
         }
     }
 }
