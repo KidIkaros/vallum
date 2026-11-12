@@ -183,7 +183,29 @@ peers and this sample can neither confirm nor refute it. The capacity harness in
 
 ## Gate 4 — CI
 
-**Status: PASS** — run `43230663345` on commit `cbf5ec5`, all four jobs green:
+**Status: PASS** — the whole pipeline, six jobs, on commit `def8170`
+(run `43311779511`):
+
+| job | result |
+|---|---|
+| `test (stable)` | ✓ — fmt, clippy `-D warnings`, workspace suite, lean daemon, TUI snapshot, packaging parity |
+| `test (1.95.0)` | ✓ — the declared MSRV compiles every target |
+| `end-to-end (two namespaces, real kernel)` | ✓ — netns gate, syscall allow-list, enforce-mode leg |
+| `advisories and supply chain` | ✓ — `cargo audit`: no vulnerabilities |
+| `install (staged; no root, no container runtime)` | ✓ — the installer, into a staging tree, with the modes and the completions checked |
+| `acceptance (a server and a client, provisioned here)` | ✓ — the path a stranger follows, end to end |
+
+The two newer jobs are the ones that closed the gaps this file recorded. The
+**install** job runs the real installer with `--root` into a staging directory
+and checks what it produced — every promised file at the path it lands at, the
+modes right, the completions matching what the CLI generates now, and nothing
+written outside the tree. The **acceptance** job proves the path a person
+follows: the server writes the client config, the client installs it with the
+receiver, and the tunnel carries.
+
+### The earlier run, with four jobs
+
+Run `43230663345` on commit `cbf5ec5`, all four jobs green:
 
 | job | result |
 |---|---|
@@ -214,6 +236,29 @@ Five failures preceded it, and none was a product defect:
 
 The lesson recorded in `scripts/ci-local.sh`: a push should be an assertion, not
 an experiment. Every gate above runs locally with the workflow's own commands.
+
+## What a release needs now
+
+`scripts/release.sh --dry-run` refuses today, and its refusal is the whole
+remaining story:
+
+```
+FAIL  v1.6.4 is at 0505f7b, but HEAD is def8170; move the tag or release the tagged commit
+```
+
+Three things are needed, and only the first two are mechanical:
+
+1. **A version.** The tree has moved far past `v1.6.4` (the published release
+   is 2026-11-05). This is a decision, not a computation: the version number is
+   the project's, not the tool's.
+2. **A tag at HEAD**, signed with the release key. The key is present
+   (`~/.config/vallum/release-signing-key`, 0600) and the script refuses to
+   publish an unsigned release — an unsigned artifact is one `install.sh` cannot
+   check, and the whole point of the script is that it can.
+3. **A public repository.** Every gate above proves the product works; none of
+   them makes it *reachable*. As long as the repository is private, a stranger
+   cannot install what has been verified, and the gates are the only ones who
+   know it exists.
 
 ## What this file will say when the gates finish
 
