@@ -289,10 +289,18 @@ jobs:
       # toolchain keeps this job independent of the image's Rust version.
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: vallum
+      # `cargo audit`, not `rustsec/audit-check`. The action reports the audit on
+      # stdout and then writes a GitHub check run; on this repository that write
+      # fails with `404 Not Found - checks/runs#update-a-check-run` even with
+      # `checks: write` granted, which reddens the job while the audit itself
+      # says `"vulnerabilities":{"found":false,"count":0}`. The check run is
+      # bookkeeping; the audit is the signal, and this has no API dependency.
+      - uses: taiki-e/install-action@cargo-audit
+      - name: cargo audit (RustSec advisories)
+        working-directory: vallum
+        # Warnings (unmaintained, unsound) are informational and do not fail;
+        # a real advisory does, which is the behaviour the action had.
+        run: cargo audit
 
       - uses: taiki-e/install-action@cargo-deny
       - name: deny.toml (licenses, sources, bans, advisories)
