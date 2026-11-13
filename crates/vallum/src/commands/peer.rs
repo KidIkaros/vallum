@@ -293,6 +293,16 @@ pub struct RemoveArgs {
     #[arg(long)]
     pub no_apply: bool,
 
+    /// Also delete the server's copies of the device's key material.
+    ///
+    /// Removing a peer from the config never touched `clients/<name>.key` -
+    /// the private key the device enrolled with - or `clients/<name>.psk`,
+    /// so both sat on the server forever. Without this flag the report names
+    /// the files that remain, so what is left is a fact in the output rather
+    /// than something an operator has to remember.
+    #[arg(long)]
+    pub forget_key: bool,
+
     /// Emit JSON instead of a report.
     #[arg(long)]
     pub json: bool,
@@ -1169,11 +1179,14 @@ fn add(args: &AddArgs) -> Result<(), Error> {
                 .as_bytes(),
         )?;
         if args.forget_key {
-            let key_path = file
-                .directory()
-                .join("clients")
-                .join(format!("{}.key", args.name));
-            let _ = std::fs::remove_file(key_path);
+            // Both copies: the private key AND the pre-shared key. Only the
+            // key was deleted here, so a bundle made with --psk left the PSK
+            // on the server after --forget-key claimed to have forgotten it.
+            let clients = file.directory().join("clients");
+            for suffix in ["key", "psk"] {
+                let path = clients.join(format!("{}.{}", args.name, suffix));
+                let _ = std::fs::remove_file(path);
+            }
         }
         bundle_path = Some(path.clone());
         bundle_endpoint_result = Some((endpoint, source));
@@ -1684,6 +1697,27 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
     } else {
         syncconf_running(&args.config)?
     };
+
+    // The server's copies of the device's key material outlive the config
+    // entry. With --forget-key they are deleted; without it, the report
+    // names exactly which files remain, because "the device is gone" and
+    // "the server has forgotten the device" are different claims. The
+    // deletion is AFTER the apply on purpose: if the daemon refuses the
+    // update, the removal has not completed, and the key material is left
+    // for the operator's next attempt rather than consumed by a failed one.
+    let clients = file.directory().join("clients");
+    let mut forgotten = Vec::new();
+    let mut remaining = Vec::new();
+    for suffix in ["key", "psk"] {
+        let path = clients.join(format!("{}.{}", args.name, suffix));
+        if args.forget_key {
+            if std::fs::remove_file(&path).is_ok() {
+                forgotten.push(path);
+            }
+        } else if path.is_file() {
+            remaining.push(path);
+        }
+    }
     if args.json {
         let report = Removed {
             name: removed.name,
@@ -1691,6 +1725,8 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
             config: args.config.clone(),
             backup,
             applied: apply.applied(),
+            forgotten,
+            remaining,
         };
         say!(
             "{}",
@@ -1706,7 +1742,39 @@ fn remove(args: &RemoveArgs) -> Result<(), Error> {
         backup.display()
     );
     say!("   applied  {}", apply.describe());
-    say!("   client key files are left in place; delete them by hand if the device is gone");
+    if args.no_apply {
+        // The operator asked for this one.
+    } else {
+        // What "not applied" MEANS depends on why, and the two reasons are
+        // opposite: no socket means no daemon holds the peer at all, while a
+        // config that declares no socket means a daemon may be running and
+        // still holding it. One sentence for both was a lie for one of them.
+        match &apply {
+            ApplyOutcome::Applied | ApplyOutcome::Skipped => {}
+            ApplyOutcome::NoControlSocket(path) => {
+                say!(
+                    "   note     nothing is listening at {}, so no daemon holds this peer;",
+                    path.display()
+                );
+                say!("            a daemon started later reads this config and will not load it");
+            }
+            ApplyOutcome::NoControlDeclared => {
+                say!("   note     the config declares no control socket; a daemon that IS running");
+                say!("            was not told and still holds this peer until it reloads");
+            }
+        }
+    }
+    for path in &forgotten {
+        say!("   forgot   {}", path.display());
+    }
+    if remaining.is_empty() && forgotten.is_empty() {
+        say!("   keys     the server holds no key material for this device");
+    } else if !remaining.is_empty() {
+        say!("   keys     the server still holds, delete by hand or use --forget-key:");
+        for path in &remaining {
+            say!("            {}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -1795,6 +1863,10 @@ struct Removed {
     config: PathBuf,
     backup: PathBuf,
     applied: bool,
+    /// The server's key files deleted by --forget-key.
+    forgotten: Vec<PathBuf>,
+    /// The server's key files still on disk when --forget-key was not given.
+    remaining: Vec<PathBuf>,
 }
 
 fn now_unix() -> u64 {
