@@ -24,10 +24,13 @@ pub fn refresh(app: &mut App) {
             Err(error) => interface.set_error(error),
         }
         if interface.should_check_service(std::time::Instant::now()) {
+            // Socket-discovered interfaces carry no config path; their socket
+            // stem is the unit's instance name either way.
             let state = interface
                 .config_path
                 .as_deref()
-                .and_then(systemd_service_state);
+                .and_then(systemd_service_state)
+                .or_else(|| unit_state(&interface.name, "vallum@"));
             interface.set_service_state(state);
             // The unit name needs only the interface name: the config may be
             // root-only and unreadable to the operator, but the guard's state
@@ -1743,10 +1746,13 @@ fn facts(app: &App) -> crate::guidance::Facts {
         .unwrap_or_else(|| crate::guidance::infer_role(&peers));
 
     Facts {
+        // A socket-discovered interface has no config_path, but a daemon that
+        // answers the control socket is definitionally running a config —
+        // saying "no config" there would offer enrolment on a configured box.
         config_present: app
             .interfaces
             .iter()
-            .any(|iface| iface.config_path.is_some()),
+            .any(|iface| iface.config_path.is_some() || iface.device.is_some()),
         role,
         unit_active: current
             .and_then(|iface| iface.service_state)

@@ -340,7 +340,11 @@ impl Interface {
 
     #[must_use]
     pub fn should_check_service(&self, now: Instant) -> bool {
-        self.config_path.is_some()
+        // Config-backed interfaces always check; a socket-discovered one does
+        // too — a daemon answering the control socket still has a unit name
+        // worth asking systemd about, and "NO UNIT" while systemd runs the
+        // tunnel is the console lying.
+        (self.config_path.is_some() || self.device.is_some())
             && self
                 .last_service_check
                 .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(5))
