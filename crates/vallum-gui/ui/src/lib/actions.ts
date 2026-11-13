@@ -79,6 +79,48 @@ export const setupServer = (fields: ServerSetupFields) =>
 export const closeEnrollment = (sshTarget: string) =>
   command<Done>("close_enrollment", { sshTarget })
 
+/** The button a suggestion renders. Unit variants arrive as plain strings;
+ *  `FinalizePeer` carries the peer name, matching the Rust enum's serde shape. */
+export type SuggestionAction =
+  | "JoinNetwork"
+  | "SetupServer"
+  | "StartService"
+  | "EnableService"
+  | "RestartService"
+  | "DisableUnits"
+  | "InvitePeer"
+  | "CloseEnrolment"
+  | "PingPeer"
+  | "SyncHost"
+  | "OpenLogs"
+  | "HealthCheck"
+  | "EditConfig"
+  | "CopyPublicLine"
+  | { FinalizePeer: string }
+
+/** What the console believes the operator should do next — the machine's
+ *  answer to "I opened the app, now what", derived from observed state only. */
+export interface Suggestion {
+  id: string
+  tone: "Act" | "Warn" | "Info"
+  title: string
+  detail: string
+  action: SuggestionAction | null
+}
+
+export const suggestions = () => command<{ suggestions: Suggestion[] }>("suggestions", {})
+
+/** Update this host's installed binaries/units from the tracked source tree. */
+export const syncHost = () => command<Done>("sync", {})
+
+/** Is the installed build behind the source tree? */
+export const syncCheck = () => command<Done>("sync_check", {})
+
+/** Boot persistence for an interface's units; `iface` defaults to the
+ *  selected socket's interface when omitted. */
+export const enableUnits = (iface?: string) => command<Done>("enable_units", { iface })
+export const disableUnits = (iface?: string) => command<Done>("disable_units", { iface })
+
 export const exportBundle = (fingerprint: string, endpoint: string) =>
   command<BundleOut>("export_bundle", { fingerprint, endpoint })
 

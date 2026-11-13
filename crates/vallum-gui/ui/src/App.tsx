@@ -29,6 +29,7 @@ import {
 import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, serviceState, watchWindowState, type Health, type PingResult, type Preflight, type ServiceStatus } from "@/lib/bridge"
 import { LogsPanel, ServiceStrip, StoppedCard } from "@/components/Service"
 import { HealthPanel } from "@/components/Health"
+import { NextSteps } from "@/components/NextSteps"
 import { egressVerdict, verdictTone } from "@/lib/verdict"
 import { formatError, suiteLabel } from "@/lib/validate"
 import { BoundaryGeometry, CryptoArchitecture, RampartSeal } from "@/components/BrandVisuals"
@@ -1650,6 +1651,12 @@ export default function App() {
               error={payload?.error ?? null}
               onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
               onOpenUserKeys={() => setSection("settings")}
+            />
+            <NextSteps
+              onChanged={refreshAfterChange}
+              onNavigate={setSection}
+              onOpenDiagnostics={(tab) => openDiagnostics(tab)}
+              publicLine={data?.public_line}
             />
             <TunnelFlowMap
               data={data}

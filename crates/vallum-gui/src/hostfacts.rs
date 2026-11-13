@@ -244,18 +244,19 @@ pub(crate) fn plan_from_facts(facts: &HostFacts, already_full: bool) -> serde_js
 /// What is on this host, before any daemon exists to ask. Every field is a fact
 /// read from disk or systemd — a first-run screen that guesses is worse than one
 /// that says nothing.
+/// A file the console cannot read is not the same as a file that is absent;
+/// saying "no config" when it is merely root-owned sends the operator to
+/// reinstall something they already have.
+fn present(path: &str) -> Option<bool> {
+    match std::fs::metadata(path) {
+        Ok(_) => Some(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    }
+}
+
 pub(crate) fn preflight() -> serde_json::Value {
     let exists = |path: &str| std::path::Path::new(path).exists();
-    // A file the console cannot read is not the same as a file that is absent;
-    // saying "no config" when it is merely root-owned sends the operator to
-    // reinstall something they already have.
-    let present = |path: &str| -> Option<bool> {
-        match std::fs::metadata(path) {
-            Ok(_) => Some(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
-            Err(_) => None,
-        }
-    };
     let unit_installed = std::process::Command::new("systemctl")
         .args(["list-unit-files", "vallum@.service", "--no-legend"])
         .output()
@@ -278,17 +279,7 @@ pub(crate) fn preflight() -> serde_json::Value {
         })
         .unwrap_or(0);
 
-    let config_present = match present("/etc/vallum/vallum0.toml") {
-        Some(true) => Some(true),
-        other => std::fs::read_dir("/etc/vallum")
-            .ok()
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("toml"))
-            })
-            .or(other),
-    };
+    let config_present = any_config_present();
 
     serde_json::json!({
         "vallum": exists("/usr/bin/vallum"),
@@ -303,6 +294,78 @@ pub(crate) fn preflight() -> serde_json::Value {
         "sockets": sockets,
         "ssh_hosts": ssh_hosts(),
     })
+}
+
+/// Does any interface config exist? `/etc/vallum` is root-only on most
+/// installs, so an unreadable directory answers `None`, not `false` — a guess
+/// here would have the console say "no config" on a configured machine.
+pub(crate) fn any_config_present() -> Option<bool> {
+    match present("/etc/vallum/vallum0.toml") {
+        Some(true) => Some(true),
+        other => std::fs::read_dir("/etc/vallum")
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("toml"))
+            })
+            .or(other),
+    }
+}
+
+/// `systemctl is-active` on every unit matching a glob — true when at least
+/// one is running. Used for the unit families an interface stem cannot name:
+/// the responder (`vallum-enroll@*`) and the egress guard (`vallum-guard@*`).
+pub(crate) fn any_unit_active(pattern: &str) -> Option<bool> {
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--no-ask-password",
+            "list-units",
+            pattern,
+            "--state=active",
+            "--no-legend",
+        ])
+        .output()
+        .ok()?;
+    Some(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+/// `systemctl is-enabled` on `vallum@{stem}.service`.
+pub(crate) fn unit_enabled(stem: &str) -> Option<bool> {
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--no-ask-password",
+            "is-enabled",
+            &format!("vallum@{stem}.service"),
+        ])
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "enabled" => Some(true),
+        "disabled" | "masked" | "static" | "indirect" => Some(false),
+        _ => None,
+    }
+}
+
+/// systemd's restart counter for `vallum@{stem}.service`.
+pub(crate) fn unit_restarts(stem: &str) -> Option<u64> {
+    let output = std::process::Command::new("systemctl")
+        .args([
+            "--no-ask-password",
+            "show",
+            "-p",
+            "NRestarts",
+            "--value",
+            &format!("vallum@{stem}.service"),
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// How many non-wildcard SSH targets the operator's config knows.
+pub(crate) fn ssh_host_count() -> usize {
+    ssh_hosts().len()
 }
 
 /// Discover non-wildcard SSH host entries from the current user's `~/.ssh/config`

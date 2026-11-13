@@ -490,6 +490,44 @@ fn close_enrollment(console: State<'_, Arc<Console>>, ssh_target: String) -> Res
     close_enrollment_at(socket.as_deref(), &ssh_target)
 }
 
+/// The stem `enable_units`/`disable_units` acts on: the caller's `iface`,
+/// else the live socket's interface name.
+fn units_stem(console: &Arc<Console>, iface: Option<String>) -> Option<String> {
+    iface.or_else(|| {
+        console
+            .current_socket()
+            .and_then(|socket| snapshot::fetch(&socket).ok())
+            .map(|snap| snap.interface)
+    })
+}
+
+#[tauri::command]
+fn suggestions(console: State<'_, Arc<Console>>) -> serde_json::Value {
+    actions::suggestions(console.current_socket().as_deref())
+}
+
+#[tauri::command]
+fn sync(_console: State<'_, Arc<Console>>) -> Result<Done, String> {
+    actions::sync_host()
+}
+
+#[tauri::command]
+fn sync_check(_console: State<'_, Arc<Console>>) -> Result<Done, String> {
+    actions::sync_check()
+}
+
+#[tauri::command]
+fn enable_units(console: State<'_, Arc<Console>>, iface: Option<String>) -> Result<Done, String> {
+    let stem = units_stem(&console, iface).ok_or_else(|| "no interface to act on".to_owned())?;
+    actions::units_enabled_set(&stem, true)
+}
+
+#[tauri::command]
+fn disable_units(console: State<'_, Arc<Console>>, iface: Option<String>) -> Result<Done, String> {
+    let stem = units_stem(&console, iface).ok_or_else(|| "no interface to act on".to_owned())?;
+    actions::units_enabled_set(&stem, false)
+}
+
 /// A bundle export reads the snapshot and mints randomness; nothing is
 /// written anywhere, so no gate and no privilege question — the downloaded
 /// file is the key's only copy.
@@ -845,6 +883,29 @@ pub(crate) fn dispatch(
                 console.current_socket().as_deref(),
             )?)
             .map_err(|error| error.to_string());
+        }
+        // Guidance and host-state commands must also answer on a bare machine:
+        // their whole job is telling the operator what the first step is.
+        "suggestions" => {
+            return Ok(actions::suggestions(console.current_socket().as_deref()));
+        }
+        "sync" => return answer(actions::sync_host()?),
+        "sync_check" => return answer(actions::sync_check()?),
+        "enable_units" | "disable_units" => {
+            // The stem comes from the caller's `iface`, else the live
+            // socket's interface name; a bare machine can pass `iface` in
+            // the body so retirement still works without a daemon.
+            let stem = units_stem(
+                console,
+                body.get("iface")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+            );
+            let enabled = name == "enable_units";
+            return match stem {
+                Some(stem) => answer(actions::units_enabled_set(&stem, enabled)?),
+                None => Err("no interface to act on".to_owned()),
+            };
         }
         _ => {}
     }
@@ -1316,7 +1377,10 @@ fn sudo_may_succeed_via_pkexec(output: &str) -> bool {
 
 /// Run a privileged `vallum-ops` subcommand (with optional stdin payload),
 /// trying direct execution when root, `sudo -n`, and `pkexec`.
-fn run_ops_with_stdin(ops_args: &[&str], stdin_data: Option<&str>) -> Result<String, String> {
+pub(crate) fn run_ops_with_stdin(
+    ops_args: &[&str],
+    stdin_data: Option<&str>,
+) -> Result<String, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -1532,6 +1596,11 @@ fn main() {
             join_network,
             setup_server,
             close_enrollment,
+            suggestions,
+            sync,
+            sync_check,
+            enable_units,
+            disable_units,
             plan_command,
             apply_command,
             cancel_apply,
@@ -1666,6 +1735,28 @@ mod transport_parity_tests {
         for name in COMMAND_NAMES {
             let error = dispatch(&console, name, serde_json::Value::Null)
                 .expect_err(&format!("{name} should fail on arguments, not be unknown"));
+            assert!(
+                !error.starts_with("unknown command"),
+                "{name} is registered but not dispatched"
+            );
+        }
+    }
+
+    /// The socket-free commands are excluded from COMMAND_NAMES because they
+    /// cannot "fail on arguments" — they take none. `suggestions` must always
+    /// answer (it is the first thing a bare machine renders); `enable_units`
+    /// with no stem and no reachable socket fails before ever touching ops.
+    /// `sync`/`sync_check` are deliberately not dispatched here: they would
+    /// run real `vallum-ops` as a test side-effect on a dev host.
+    #[test]
+    fn socket_free_commands_dispatch() {
+        let console = console_with_socket();
+        dispatch(&console, "suggestions", serde_json::Value::Null)
+            .expect("suggestions answers on every host");
+        for name in ["enable_units", "disable_units"] {
+            let error = dispatch(&console, name, serde_json::Value::Null).expect_err(&format!(
+                "{name} should fail without a stem, not be unknown"
+            ));
             assert!(
                 !error.starts_with("unknown command"),
                 "{name} is registered but not dispatched"

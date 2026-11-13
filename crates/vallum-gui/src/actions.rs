@@ -1156,6 +1156,130 @@ pub fn save_runtime(path: &Path, config: &Path) -> Result<Done, String> {
     )))
 }
 
+// ---------------------------------------------------------------------------
+// Guidance: the machine says what it needs next
+// ---------------------------------------------------------------------------
+
+/// The machine's next steps per `vallum::guidance`, as this surface sees them.
+///
+/// `socket` is optional: on a bare machine there is no daemon to ask, and the
+/// unenrolled suggestions are exactly what the console should show. Facts that
+/// need systemd are read unprivileged; the one privileged probe (`sync
+/// --check`) is cached for five minutes so a polling console does not meter
+/// sudo calls.
+pub(crate) fn suggestions(socket: Option<&Path>) -> serde_json::Value {
+    use vallum::guidance::{self, Facts, PeerFact};
+
+    let snap = socket.and_then(|path| snapshot::fetch(path).ok());
+    let stem = snap.as_ref().map(|s| s.interface.clone());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+
+    let peers: Vec<PeerFact> = snap
+        .as_ref()
+        .map(|s| {
+            s.peers
+                .iter()
+                .map(|p| PeerFact {
+                    name: if p.name.is_empty() {
+                        p.fingerprint.clone()
+                    } else {
+                        p.name.clone()
+                    },
+                    has_endpoint: !p.endpoint.is_empty() && p.endpoint != "(roaming)",
+                    handshake_age_secs: (p.last_handshake_sec > 0)
+                        .then(|| now.saturating_sub(p.last_handshake_sec)),
+                    rotating: p.rotating,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let facts = Facts {
+        config_present: crate::hostfacts::any_config_present().unwrap_or_else(|| snap.is_some()),
+        role: guidance::infer_role(&peers),
+        unit_active: crate::hostfacts::any_unit_active("vallum@*"),
+        unit_enabled: stem.as_deref().and_then(crate::hostfacts::unit_enabled),
+        daemon_reachable: Some(snap.is_some()),
+        interface_present: Some(snap.is_some()),
+        peers,
+        enrolment_open: crate::hostfacts::any_unit_active("vallum-enroll@*"),
+        trial_armed: crate::hostfacts::any_unit_active("vallum-guard@*"),
+        unit_restarts: stem.as_deref().and_then(crate::hostfacts::unit_restarts),
+        sync_stale: sync_stale_cached(),
+        ssh_hosts: crate::hostfacts::ssh_host_count(),
+    };
+
+    serde_json::json!({ "suggestions": guidance::suggest(&facts) })
+}
+
+/// `vallum-ops sync --check`, cached: the verdict changes only when the tree or
+/// the install does, so polling it is a sudo call for nothing. A failed check
+/// answers `None` — a host without a trusted tree simply has no sync story.
+fn sync_stale_cached() -> Option<bool> {
+    if let Ok(mut cache) = SYNC_CHECK_CACHE.lock() {
+        if let Some((at, stale)) = *cache {
+            if at.elapsed() < std::time::Duration::from_secs(300) {
+                return Some(stale);
+            }
+        }
+        let result = crate::run_ops_with_stdin(&["sync", "--check"], None)
+            .ok()
+            .map(|text| text.contains("stale files found"));
+        if let Some(stale) = result {
+            *cache = Some((std::time::Instant::now(), stale));
+        }
+        result
+    } else {
+        crate::run_ops_with_stdin(&["sync", "--check"], None)
+            .ok()
+            .map(|text| text.contains("stale files found"))
+    }
+}
+
+/// The five-minute `sync --check` verdict, shared with `sync_host`.
+static SYNC_CHECK_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+    std::sync::Mutex::new(None);
+
+/// The verdict line of a `vallum-ops sync*` run. stderr is merged into the
+/// captured output, so a naive last-line read can land on the untrusted-source
+/// warning's tail — the script's own lines all carry the `sync` prefix.
+fn sync_verdict(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .rfind(|line| line.starts_with("sync"))
+        .unwrap_or("sync complete")
+}
+
+/// `vallum-ops sync`: make the host match the build under test.
+pub(crate) fn sync_host() -> Result<Done, String> {
+    let text = crate::run_ops_with_stdin(&["sync"], None)?;
+    // A successful sync IS a check: the host now matches the tree.
+    if let Ok(mut cache) = SYNC_CHECK_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), false));
+    }
+    Ok(Done::message(sync_verdict(&text)))
+}
+
+/// `vallum-ops sync --check` on demand — the "check for updates" button, not
+/// the cached value the suggestion strip uses.
+pub(crate) fn sync_check() -> Result<Done, String> {
+    let text = crate::run_ops_with_stdin(&["sync", "--check"], None)?;
+    Ok(Done::message(sync_verdict(&text)))
+}
+
+/// `vallum-ops enable|disable <stem>` — boot persistence for the unit set.
+pub(crate) fn units_enabled_set(stem: &str, enabled: bool) -> Result<Done, String> {
+    let verb = if enabled { "enable" } else { "disable" };
+    crate::run_ops_with_stdin(&[verb, stem], None)?;
+    Ok(Done::message(if enabled {
+        format!("`{stem}` starts at boot")
+    } else {
+        format!("units for `{stem}` disabled — the tunnel stays off after reboot")
+    }))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod config_tests {
