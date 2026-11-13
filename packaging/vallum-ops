@@ -6,10 +6,15 @@
 # audited operation — the sudoers file grants this dispatcher, not a
 # wildcard, so `vallum-ops -h` lists everything root can be asked to do.
 #
-#   vallum-ops full-tunnel   # the phase-3 trial (drift check, 90s revert timer)
-#   vallum-ops revert        # panic, restore split config, restart unit
-#   vallum-ops status        # units, route, handshake, resolver, public IP
-#   vallum-ops journal [N]   # last N lines from the vallum units' journals
+#   vallum-ops full-tunnel [iface]   # the phase-3 trial (drift check, 90s revert timer)
+#   vallum-ops revert [iface]        # panic, restore split config, restart unit
+#   vallum-ops join                  # redeem a vallum1-join: ticket read on stdin
+#   vallum-ops setup-remote <u@h>    # SSH enrolment against a remote server
+#   vallum-ops setup-server [..]     # initialise this host as a server
+#   vallum-ops invite <name> [..]    # mint an invite + start the responder
+#   vallum-ops enroll-off [iface]    # close the UDP 51821 enrolment responder
+#   vallum-ops status [iface]        # units, route, handshake, resolver, public IP
+#   vallum-ops journal [N] [iface]   # last N lines from the vallum units' journals
 set -uo pipefail
 
 # LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
@@ -24,7 +29,32 @@ LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
 REPO=${VALLUM_REPO:-$(cat /etc/vallum/repo 2>/dev/null || true)}
 CONF=/etc/vallum/vallum0.toml
 IFACE=vallum0
-UNIT=vallum@$IFACE
+
+require_iface() {
+    case "${1:-}" in
+        ""|*[!A-Za-z0-9._-]*)
+            echo "vallum-ops: invalid interface name '${1:-}'" >&2
+            exit 2
+            ;;
+    esac
+    if [ "${#1}" -gt 15 ]; then
+        echo "vallum-ops: interface name '${1}' exceeds 15 characters" >&2
+        exit 2
+    fi
+}
+
+resolve_conf() {
+    local req=${1:-$IFACE}
+    if [ -f "/etc/vallum/${req}.toml" ]; then
+        printf '/etc/vallum/%s.toml' "$req"
+    elif [ -f "/etc/vallum/${req#vallum-}.toml" ]; then
+        printf '/etc/vallum/%s.toml' "${req#vallum-}"
+    else
+        local first
+        first=$(ls /etc/vallum/*.toml 2>/dev/null | head -1 || true)
+        printf '%s' "${first:-$CONF}"
+    fi
+}
 
 # A verb that installs from a working tree must not exec code from a directory
 # its owner can rewrite: under a NOPASSWD sudoers rule that is password-less
@@ -53,7 +83,87 @@ require_trusted_source() {
 
 case "${1:-}" in
 full-tunnel)
-    exec bash "$LIB/go-full-tunnel.sh"
+    target_iface=${2:-$IFACE}
+    require_iface "$target_iface"
+    exec bash "$LIB/go-full-tunnel.sh" "$target_iface"
+    ;;
+join)
+    # Redeem a vallum1-join:... ticket passed on stdin.
+    exec /usr/bin/vallum join -
+    ;;
+setup-remote)
+    # Enrol this client over SSH against a remote Vallum server.
+    remote=${2:-}
+    name=${3:-}
+    case "$remote" in
+        ""|*[!A-Za-z0-9._@:-]*|-*)
+            echo "vallum-ops: invalid SSH target '$remote'" >&2
+            exit 2
+            ;;
+    esac
+    # This ssh can never prompt - no tty under sudo/pkexec - so force batch
+    # behaviour and a fast failure on unreachable hosts. SSH_ASKPASS/force
+    # covers vallum builds that predate VALLUM_SSH_OPTS; the timeout bounds
+    # even a connect() that waits out the kernel's full retry window.
+    export VALLUM_SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10"
+    export SSH_ASKPASS=/bin/false SSH_ASKPASS_REQUIRE=force
+    if [ -n "$name" ]; then
+        require_iface "$name"
+        exec timeout 120 /usr/bin/vallum setup --remote "$remote" --name "$name"
+    else
+        exec timeout 120 /usr/bin/vallum setup --remote "$remote"
+    fi
+    ;;
+setup-server)
+    # Initialize this host as a Vallum server.
+    addr=${2:-}
+    listen=${3:-}
+    endpoint=${4:-}
+    args=(setup --server)
+    if [ -n "$addr" ]; then
+        case "$addr" in
+            *[!A-Za-z0-9.:,/_-]*|-*) echo "vallum-ops: invalid address '$addr'" >&2; exit 2 ;;
+        esac
+        args+=(--address "$addr")
+    fi
+    if [ -n "$listen" ]; then
+        case "$listen" in
+            *[!A-Za-z0-9.:\[\]_-]*|-*) echo "vallum-ops: invalid listen '$listen'" >&2; exit 2 ;;
+        esac
+        args+=(--listen "$listen")
+    fi
+    if [ -n "$endpoint" ]; then
+        case "$endpoint" in
+            *[!A-Za-z0-9.:\[\]_-]*|-*) echo "vallum-ops: invalid endpoint '$endpoint'" >&2; exit 2 ;;
+        esac
+        args+=(--endpoint "$endpoint")
+    fi
+    exec /usr/bin/vallum "${args[@]}"
+    ;;
+invite)
+    # Mint a single-use invite token and start the responder / firewall rule.
+    peer_name=${2:-}
+    ttl=${3:-60}
+    req_iface=${4:-$IFACE}
+    pinned=${5:-}
+    require_iface "$peer_name"
+    require_iface "$req_iface"
+    case "$ttl" in
+        ""|*[!0-9]*) echo "vallum-ops: invalid TTL '$ttl'" >&2; exit 2 ;;
+    esac
+    target_conf=$(resolve_conf "$req_iface")
+    if [ -n "$pinned" ]; then
+        exec /usr/bin/vallum peer invite "$peer_name" --ttl "$ttl" --config "$target_conf" --public-key "$pinned"
+    else
+        exec /usr/bin/vallum peer invite "$peer_name" --ttl "$ttl" --config "$target_conf"
+    fi
+    ;;
+enroll-off)
+    # Close the temporary UDP 51821 enrolment responder and firewall port.
+    req_iface=${2:-$IFACE}
+    require_iface "$req_iface"
+    target_conf=$(resolve_conf "$req_iface")
+    exec /usr/bin/vallum server enroll --disable --config "$target_conf"
     ;;
 service)
     # Start, stop or restart the tunnel's unit.
@@ -67,6 +177,8 @@ service)
     # The second argument is the action, the third names the interface.
     action=${2:-start}
     iface=${3:-$IFACE}
+    require_iface "$iface"
+    stem=$(basename "$(resolve_conf "$iface")" .toml)
     case "$action" in
         start|stop|restart) ;;
         *)
@@ -78,10 +190,10 @@ service)
         # A unit that has been killed a few times refuses to start until its
         # failure counter is cleared, and the console reports a failure it
         # caused.
-        systemctl reset-failed "vallum@$iface" 2>/dev/null || true
+        systemctl reset-failed "vallum@$stem" 2>/dev/null || true
     fi
-    systemctl "$action" "vallum@$iface"
-    systemctl is-active "vallum@$iface"
+    systemctl "$action" "vallum@$stem"
+    systemctl is-active "vallum@$stem"
     ;;
 enable)
     # Boot persistence: the tunnel comes up after every power-up, in the
@@ -89,8 +201,10 @@ enable)
     # The restore floor (vallum-cleanup) runs before it by unit ordering.
     # Optional second argument names another interface (a second tunnel).
     iface=${2:-$IFACE}
-    systemctl enable "vallum@$iface"
-    systemctl is-enabled "vallum@$iface"
+    require_iface "$iface"
+    stem=$(basename "$(resolve_conf "$iface")" .toml)
+    systemctl enable "vallum@$stem"
+    systemctl is-enabled "vallum@$stem"
     ;;
 disable)
     # Nothing Vallum starts at boot. quick/guard are session units: an enabled
@@ -100,9 +214,13 @@ disable)
     # a test (`vallum@owtest0`, which failed at every boot) can be retired
     # through this dispatcher rather than a shell that needs a password.
     iface=${2:-$IFACE}
-    systemctl disable "vallum@$iface" "vallum-quick@$iface" "vallum-guard@$iface" 2>/dev/null || true
-    systemctl reset-failed "vallum@$iface" 2>/dev/null || true
-    for u in vallum@$iface vallum-quick@$iface vallum-guard@$iface; do
+    require_iface "$iface"
+    stem=$(basename "$(resolve_conf "$iface")" .toml)
+    systemctl disable "vallum@$stem" "vallum-quick@$stem" "vallum-guard@$stem" \
+        "vallum-quick-watch@$stem" "vallum-enroll@$stem" 2>/dev/null || true
+    systemctl reset-failed "vallum@$stem" 2>/dev/null || true
+    for u in vallum@$stem vallum-quick@$stem vallum-guard@$stem \
+        vallum-quick-watch@$stem vallum-enroll@$stem; do
         if systemctl is-enabled --quiet "$u" 2>/dev/null; then
             printf '  %s: enabled\n' "$u"
         else
@@ -113,7 +231,11 @@ disable)
 trace)
     # Phase 2's deferred diagnostic: name the openat that the seccomp filter
     # EPERMs under load. Bounded at 60 s, read-only attach, output kept.
-    pid=$(systemctl show -p MainPID --value "vallum@$IFACE")
+    # Optional second argument names another interface's config stem.
+    req_iface=${2:-$IFACE}
+    require_iface "$req_iface"
+    trace_stem=$(basename "$(resolve_conf "$req_iface")" .toml)
+    pid=$(systemctl show -p MainPID --value "vallum@$trace_stem")
     [ -n "$pid" ] && [ "$pid" != "0" ] || { echo "daemon not running" >&2; exit 1; }
     echo "tracing openat on pid $pid for 60 s under load..."
     # A fixed path in /tmp is a root-owned file an unprivileged user can
@@ -164,24 +286,36 @@ self-update)
     exit 0
     ;;
 revert)
+    req_iface=${2:-$IFACE}
+    require_iface "$req_iface"
+    target_conf=$(resolve_conf "$req_iface")
+    stem=$(basename "$target_conf" .toml)
+    target_unit="vallum@$stem"
     /usr/local/sbin/vallum-panic
-    install -m 600 -o root -g root /etc/vallum/vallum0.split.bak "$CONF"
-    systemctl reset-failed "$UNIT" 2>/dev/null || true
-    systemctl restart "$UNIT"
+    if [ -f "/etc/vallum/${stem}.split.bak" ]; then
+        install -m 600 -o root -g root "/etc/vallum/${stem}.split.bak" "$target_conf"
+    elif [ -f /etc/vallum/vallum0.split.bak ]; then
+        install -m 600 -o root -g root /etc/vallum/vallum0.split.bak "$target_conf"
+    fi
+    systemctl reset-failed "$target_unit" 2>/dev/null || true
+    systemctl restart "$target_unit"
     sleep 3
     echo "reverted; internet: $(ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && echo ok || echo DOWN)"
     ;;
 status)
-    echo "unit:      $(systemctl is-active "$UNIT") ($(systemctl is-enabled "$UNIT" 2>&1))"
-    echo "guard:     $(systemctl is-active vallum-guard@$IFACE 2>&1)"
-    echo "quick:     $(systemctl is-active vallum-quick@$IFACE 2>&1)"
-    echo "dead-man:  $(systemctl is-active vallum-deadman@$IFACE.timer 2>&1)"
+    req_iface=${2:-$IFACE}
+    require_iface "$req_iface"
+    stem=$(basename "$(resolve_conf "$req_iface")" .toml)
+    echo "unit:      $(systemctl is-active "vallum@$stem") ($(systemctl is-enabled "vallum@$stem" 2>&1))"
+    echo "guard:     $(systemctl is-active "vallum-guard@$stem" 2>&1)"
+    echo "quick:     $(systemctl is-active "vallum-quick@$stem" 2>&1)"
+    echo "dead-man:  $(systemctl is-active "vallum-deadman@$stem.timer" 2>&1)"
     echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
     echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
-    echo "handshake: $(/usr/bin/vallum show --control /run/vallum/$IFACE.sock 2>/dev/null | grep -m1 last_handshake_time_sec || echo none)"
+    echo "handshake: $(/usr/bin/vallum show --control "/run/vallum/$stem.sock" 2>/dev/null | grep -m1 last_handshake_time_sec || echo none)"
     # The build the daemon is actually running, so two hosts can be compared
     # without trusting either one's working tree.
-    echo "build:     $(/usr/bin/vallum show --control /run/vallum/$IFACE.sock 2>/dev/null | sed -n 's/^ *vallum_build=//p' | head -1 || echo none)"
+    echo "build:     $(/usr/bin/vallum show --control "/run/vallum/$stem.sock" 2>/dev/null | sed -n 's/^ *vallum_build=//p' | head -1 || echo none)"
     # Every enabled tunnel unit needs a config, or boot ends with a failed unit
     # the operator has to interpret. A leftover test unit (vallum@owtest0) did
     # exactly that until 2026-11-11. Enabled instances of a template are the
@@ -197,11 +331,18 @@ status)
     echo "public ip: $(curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo unknown)"
     ;;
 journal)
-    journalctl -u "$UNIT" -u "vallum-quick@$IFACE" -u "vallum-guard@$IFACE" \
-        --no-pager -o short-iso -n "${2:-40}"
+    lines=${2:-40}
+    req_iface=${3:-$IFACE}
+    case "$lines" in
+        ""|*[!0-9]*) lines=40 ;;
+    esac
+    require_iface "$req_iface"
+    stem=$(basename "$(resolve_conf "$req_iface")" .toml)
+    journalctl -u "vallum@$stem" -u "vallum-quick@$stem" -u "vallum-guard@$stem" \
+        --no-pager -o short-iso -n "$lines"
     ;;
 *)
-    echo "usage: vallum-ops {full-tunnel|revert|status|journal [N]|enable [iface]|disable [iface]|trace|sync|self-update}" >&2
+    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update}" >&2
     exit 2
     ;;
 esac

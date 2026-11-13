@@ -27,7 +27,10 @@ PEER=${PEER:-full01}
 IMAGE=jrei/systemd-ubuntu:24.04
 VPS=${VPS:-wingman-vps}
 CONFIG=${CONFIG:-/etc/vallum/vallum0.toml}
-SERVER_IP=${SERVER_IP:-203.0.113.10}
+if [ -z "${SERVER_IP:-}" ]; then
+    SERVER_IP=$(ssh -G "$VPS" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')
+    SERVER_IP=${SERVER_IP:-203.0.113.10}
+fi
 RUNDIR=$(mktemp -d -t accept-full.XXXXXX)
 
 say() { echo "[full] $*"; }
@@ -38,7 +41,7 @@ ex()  { docker exec "$NAME" bash -c "$1"; }
 cleanup() {
     say "cleanup"
     docker exec "$NAME" bash -c 'systemctl stop vallum-guard@* vallum-quick@* vallum-deadman@*.timer 2>/dev/null' >/dev/null 2>&1
-    ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config $CONFIG" >/dev/null 2>&1
+    ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config $CONFIG; sudo -n /usr/bin/vallum server enroll --disable --config $CONFIG" >/dev/null 2>&1
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$RUNDIR"
 }

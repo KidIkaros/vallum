@@ -27,7 +27,7 @@ die() { echo "[accept] FAIL: $*" >&2; exit 1; }
 
 cleanup() {
     say "cleanup"
-    ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config "${CONFIG:-/etc/vallum/vallum0.toml}"" >/dev/null 2>&1
+    ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config "${CONFIG:-/etc/vallum/vallum0.toml}"; sudo -n /usr/bin/vallum server enroll --disable --config "${CONFIG:-/etc/vallum/vallum0.toml}"" >/dev/null 2>&1
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$TICKET_DIR"
 }

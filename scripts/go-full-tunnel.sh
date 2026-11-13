@@ -25,12 +25,42 @@ vallum_guard_table() {
 CHANGED=0
 
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
-CONF=${VALLUM_CONF:-/etc/vallum/vallum0.toml}
-IFACE=${VALLUM_IFACE:-vallum0}
-UNIT=vallum@$IFACE
-# The tunnel exit this client must present to the internet. Overridable for
-# lab or alternate servers.
-EXPECTED_IP=${VALLUM_EXIT_IP:-203.0.113.10}
+REQ_IFACE=${1:-${VALLUM_IFACE:-vallum0}}
+if [ -n "${VALLUM_CONF:-}" ]; then
+    CONF=$VALLUM_CONF
+elif [ -f "/etc/vallum/${REQ_IFACE}.toml" ]; then
+    CONF="/etc/vallum/${REQ_IFACE}.toml"
+elif [ -f "/etc/vallum/${REQ_IFACE#vallum-}.toml" ]; then
+    CONF="/etc/vallum/${REQ_IFACE#vallum-}.toml"
+else
+    CONF=$(ls /etc/vallum/*.toml 2>/dev/null | head -1 || true)
+    CONF=${CONF:-/etc/vallum/vallum0.toml}
+fi
+UNIT_STEM=$(basename "$CONF" .toml)
+IFACE=$(sed -n 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF" 2>/dev/null | head -1)
+IFACE=${IFACE:-$UNIT_STEM}
+UNIT=vallum@$UNIT_STEM
+SPLIT_BAK="/etc/vallum/${UNIT_STEM}.split.bak"
+
+# Derive the tunnel gateway IP from the peer's /32 allowed_ips or the interface subnet (.1).
+GATEWAY_IP=$(sed -n 's/.*"\([0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+\)\/32".*/\1/p' "$CONF" 2>/dev/null | head -1)
+if [ -z "$GATEWAY_IP" ]; then
+    GATEWAY_IP=$(sed -n 's/.*"\([0-9]\+\.[0-9]\+\.[0-9]\+\)\.[0-9]\+\/[0-9]\+".*/\1.1/p' "$CONF" 2>/dev/null | head -1)
+fi
+GATEWAY_IP=${GATEWAY_IP:-10.7.0.1}
+
+# Derive the expected exit IP from the peer endpoint in $CONF (overridable via VALLUM_EXIT_IP).
+if [ -n "${VALLUM_EXIT_IP:-}" ]; then
+    EXPECTED_IP=$VALLUM_EXIT_IP
+else
+    ENDPOINT_HOST=$(sed -n 's/^[[:space:]]*endpoint[[:space:]]*=[[:space:]]*"\([^":]*\):[0-9]*".*/\1/p' "$CONF" 2>/dev/null | head -1)
+    if [ -n "$ENDPOINT_HOST" ]; then
+        EXPECTED_IP=$(getent ahostsv4 "$ENDPOINT_HOST" 2>/dev/null | awk 'NR==1{print $1}')
+        EXPECTED_IP=${EXPECTED_IP:-$ENDPOINT_HOST}
+    else
+        EXPECTED_IP=""
+    fi
+fi
 
 say() { printf '\n=== %s\n' "$*"; }
 fail() {
@@ -43,8 +73,8 @@ fail() {
         { nft delete table inet "$(vallum_guard_table "$IFACE")" 2>/dev/null; \
           nft delete table inet vallum_policy 2>/dev/null; \
           ip route del default dev "$IFACE" 2>/dev/null; }
-    [ -f /etc/vallum/vallum0.split.bak ] && \
-        install -m 600 -o root -g root /etc/vallum/vallum0.split.bak "$CONF" 2>/dev/null
+    [ -f "$SPLIT_BAK" ] && \
+        install -m 600 -o root -g root "$SPLIT_BAK" "$CONF" 2>/dev/null
     systemctl reset-failed "$UNIT" 2>/dev/null || true
     systemctl restart "$UNIT" 2>/dev/null || true
     local net=DOWN
@@ -75,22 +105,23 @@ systemctl is-active --quiet "$UNIT" || {
     echo "  unit not running — starting it"
     systemctl start "$UNIT" || { echo "cannot start $UNIT" >&2; exit 1; }
     for _ in $(seq 1 40); do
-        ping -c 1 -W 1 10.7.0.1 >/dev/null 2>&1 && break
+        ping -c 1 -W 1 "$GATEWAY_IP" >/dev/null 2>&1 && break
         sleep 1
     done
 }
-grep -q 'allowed_ips = \["10.7.0.1/32"\]\|allowed_ips = \["0.0.0.0/0"\]' "$CONF" || \
+grep -q "allowed_ips = \\[\"$GATEWAY_IP/32\"\\]\\|allowed_ips = \\[\"0.0.0.0/0\"\\]" "$CONF" || \
     echo "  note: peer allowlist is neither the known split nor full form — continuing"
 carry=no
 for _ in $(seq 1 30); do
-    ping -c 1 -W 1 10.7.0.1 >/dev/null 2>&1 && { carry=yes; break; }
+    ping -c 1 -W 1 "$GATEWAY_IP" >/dev/null 2>&1 && { carry=yes; break; }
     sleep 1
 done
 [ "$carry" = yes ] || fail "the tunnel is not carrying right now"
 echo "  units and tools present; trial script present; tunnel carrying"
 
 say "1/6 saving the split config"
-cp "$CONF" /etc/vallum/vallum0.split.bak && chmod 600 /etc/vallum/vallum0.split.bak
+cp "$CONF" "$SPLIT_BAK" && chmod 600 "$SPLIT_BAK"
+[ "$SPLIT_BAK" != "/etc/vallum/vallum0.split.bak" ] && cp "$CONF" /etc/vallum/vallum0.split.bak && chmod 600 /etc/vallum/vallum0.split.bak
 
 say "2/6 deriving the full-tunnel config from this machine's own config"
 cp "$CONF" "${CONF}.work"
@@ -120,13 +151,13 @@ systemctl reset-failed "$UNIT" 2>/dev/null || true
 systemctl restart "$UNIT" || fail "the daemon did not restart on the new config"
 up=no
 for i in $(seq 1 45); do
-    ping -c 1 -W 1 10.7.0.1 >/dev/null 2>&1 && { up=yes; echo "  handshake + echo at ${i}s"; break; }
+    ping -c 1 -W 1 "$GATEWAY_IP" >/dev/null 2>&1 && { up=yes; echo "  handshake + echo at ${i}s"; break; }
     sleep 1
 done
 [ "$up" = yes ] || fail "no echo over the full tunnel in 45s"
 
 say "4/6 arming the dead-man timer (checks every 10s from here on)"
-out=$(systemctl enable --now "vallum-deadman@$IFACE.timer" 2>&1) || \
+out=$(systemctl enable --now "vallum-deadman@$UNIT_STEM.timer" 2>&1) || \
     echo "  warning: dead-man timer did not start: $out — the trial still has its own deadline"
 
 say "5/6 the trial: 90s deadline armed before the routes move"
@@ -135,15 +166,19 @@ say "5/6 the trial: 90s deadline armed before the routes move"
 say "6/6 proving browsing rides the tunnel"
 PUBLIC=$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null || echo unknown)
 echo "  public IP as the internet sees it: $PUBLIC"
-[ "$PUBLIC" = "$EXPECTED_IP" ] || fail "the public IP is $PUBLIC, not $EXPECTED_IP — traffic is still bypassing the tunnel"
+if [ -n "$EXPECTED_IP" ]; then
+    [ "$PUBLIC" = "$EXPECTED_IP" ] || fail "the public IP is $PUBLIC, not $EXPECTED_IP — traffic is still bypassing the tunnel"
+else
+    [ "$PUBLIC" != "unknown" ] && [ -n "$PUBLIC" ] || fail "could not verify public IP over the full tunnel"
+fi
 DNS=$(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' || true)
 [ -n "$DNS" ] || fail "no resolver after the switch"
 
 say "FULL TUNNEL ACTIVE"
 echo "  route:  $(ip route get 1.1.1.1 | head -1)"
 echo "  dns:    $DNS"
-echo "  guard:  $(systemctl is-active vallum-guard@$IFACE)"
-echo "  dead-man: $(systemctl is-active vallum-deadman@$IFACE.timer)"
+echo "  guard:  $(systemctl is-active vallum-guard@$UNIT_STEM)"
+echo "  dead-man: $(systemctl is-active vallum-deadman@$UNIT_STEM.timer)"
 echo
 echo "to go back to the split tunnel:"
 echo "  sudo vallum-ops revert"

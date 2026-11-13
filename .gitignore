@@ -15,6 +15,7 @@
 .DS_Store
 .idea/
 .vscode/
+__pycache__/
 
 # Agent tooling installed per machine (skills and their lockfile). Nothing
 # here is needed to build, test or run vallum.
