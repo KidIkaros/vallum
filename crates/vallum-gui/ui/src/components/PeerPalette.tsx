@@ -1,3 +1,6 @@
+import { useState } from "react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
 import {
   CommandDialog,
   CommandEmpty,
@@ -8,6 +11,21 @@ import {
   CommandList,
   CommandShortcut,
 } from "@/components/ui/command"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  disableUnits,
+  enableUnits,
+  syncCheck,
+  syncHost,
+} from "@/lib/actions"
+import { serviceAction } from "@/lib/bridge"
 import { freshness, freshnessLabel } from "@/lib/traffic"
 import type { Peer } from "@/types"
 
@@ -84,7 +102,30 @@ export function PeerPalette({
     window.setTimeout(fn, 0)
   }
 
+  // Ops verbs: async calls through the bridge, toasted like every other
+  // console action. `disable` is the one destructive verb and detours through
+  // the confirm dialog below — same deliberation the stop button buys with a
+  // second click.
+  const [confirmDisable, setConfirmDisable] = useState(false)
+  const [opsBusy, setOpsBusy] = useState(false)
+
+  const ops = (fn: () => Promise<{ message: string }>) =>
+    run(() => {
+      void (async () => {
+        setOpsBusy(true)
+        try {
+          toast.success((await fn()).message)
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : String(error))
+        } finally {
+          setOpsBusy(false)
+          onRefresh()
+        }
+      })()
+    })
+
   return (
+    <>
     <CommandDialog
       open={open}
       onOpenChange={onOpenChange}
@@ -282,6 +323,46 @@ export function PeerPalette({
             <span className="min-w-0 flex-1 truncate">stop tunnel service</span>
           </CommandItem>
           <CommandItem
+            value="restart tunnel service"
+            keywords={["service", "systemd", "restart", "bounce", "cycle"]}
+            onSelect={() => ops(() => serviceAction("restart"))}
+          >
+            <Tag label="SERVICE" />
+            <span className="min-w-0 flex-1 truncate">restart tunnel service</span>
+          </CommandItem>
+          <CommandItem
+            value="enable tunnel units (start at boot)"
+            keywords={["service", "systemd", "boot", "enable", "persist", "autostart"]}
+            onSelect={() => ops(() => enableUnits())}
+          >
+            <Tag label="SERVICE" />
+            <span className="min-w-0 flex-1 truncate">enable tunnel units (start at boot)</span>
+          </CommandItem>
+          <CommandItem
+            value="disable tunnel units"
+            keywords={["service", "systemd", "boot", "disable", "retire", "off"]}
+            onSelect={() => run(() => setConfirmDisable(true))}
+          >
+            <Tag label="SERVICE" />
+            <span className="min-w-0 flex-1 truncate">disable tunnel units…</span>
+          </CommandItem>
+          <CommandItem
+            value="check for updates"
+            keywords={["update", "sync", "checkout", "stale", "version", "upgrade"]}
+            onSelect={() => ops(() => syncCheck())}
+          >
+            <Tag label="SERVICE" />
+            <span className="min-w-0 flex-1 truncate">check for updates</span>
+          </CommandItem>
+          <CommandItem
+            value="sync host with checkout"
+            keywords={["update", "sync", "checkout", "install", "deploy", "upgrade"]}
+            onSelect={() => ops(() => syncHost())}
+          >
+            <Tag label="SERVICE" />
+            <span className="min-w-0 flex-1 truncate">sync host with checkout</span>
+          </CommandItem>
+          <CommandItem
             value="view logs"
             keywords={["journald", "logs", "tail", "follow", "l"]}
             onSelect={() =>
@@ -456,5 +537,35 @@ export function PeerPalette({
       </CommandList>
       <CommandFooter />
     </CommandDialog>
+
+    <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="text-base font-semibold">
+            Disable tunnel units
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            Stops the tunnel and keeps every vallum unit off after reboot —
+            including the enrollment responder and the egress guard. Peers
+            lose this machine until the units are enabled again.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter showCloseButton className="mt-2 items-center gap-3">
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            disabled={opsBusy}
+            onClick={() => {
+              setConfirmDisable(false)
+              ops(() => disableUnits())
+            }}
+          >
+            {opsBusy ? "Disabling…" : "Disable units"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }
