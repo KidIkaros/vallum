@@ -73,6 +73,8 @@ pub fn submit_form(app: &mut App) {
         FormKind::ExportBundle => finish_export(app, &form),
         FormKind::ImportBundle => finish_import_bundle(app, &form),
         FormKind::Interface => apply_interface_form(app, &form),
+        FormKind::JoinNetwork => join_network(app, &form),
+        FormKind::SetupServer => setup_server(app, &form),
     };
     match result {
         Ok(message) => {
@@ -125,17 +127,58 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
             .map_err(|e| field_error("pinned public line", e.to_string()))?;
         Some(pinned_raw.to_owned())
     };
+    let ssh_target = form.field("remote SSH (optional)").trim();
+    if !ssh_target.is_empty() {
+        return invite_via_ssh(app, ssh_target, name, ttl_mins, pinned.as_deref());
+    }
     let interface_name = app
         .current()
         .map_or_else(|| "vallum0".to_owned(), |iface| iface.name.clone());
+    let stem = app
+        .current()
+        .and_then(|iface| {
+            iface
+                .config_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| interface_name.clone());
     let (token, id, path) =
-        crate::enroll::issue_invite(&interface_name, name, ttl_mins * 60, pinned)
-            .map_err(|e| form_error(None, e.to_string()))?;
+        match crate::enroll::issue_invite(&interface_name, name, ttl_mins * 60, pinned.clone()) {
+            Ok(ok) => ok,
+            Err(error) => {
+                // The console cannot write the root-owned runtime dir or read the
+                // 0600 config: mint through the privileged dispatcher instead, which
+                // also starts the UDP 51821 responder and its firewall rule.
+                let ttl = ttl_mins.to_string();
+                let mut args = vec!["invite", name, ttl.as_str(), stem.as_str()];
+                if let Some(pin) = pinned.as_deref() {
+                    args.push(pin);
+                }
+                let output = run_privileged(&args, None)
+                    .map_err(|ops_error| form_error(None, format!("{error}\n{ops_error}")))?;
+                let Some(ticket) = output
+                    .split_whitespace()
+                    .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
+                else {
+                    return Err(form_error(None, error.to_string()));
+                };
+                return show_invite(app, name, ticket, &stem);
+            }
+        };
     let (host_port, fp) = if let Some(device) = app.current_device() {
         let config = app
             .current()
             .and_then(|iface| iface.config_path.as_deref())
             .and_then(|cfg| crate::config::Config::load(cfg).ok());
+        if let Some(cfg) = &config {
+            // The same refusal the privileged `peer invite` path gives: an
+            // enrolment port that cannot be bound mints a dead ticket.
+            crate::commands::server::enroll_port(cfg)
+                .map_err(|e| form_error(None, e.to_string()))?;
+        }
         (
             crate::enroll::join_target(config.as_ref(), Some(&device.listen)),
             keys::fingerprint(&device.public_line),
@@ -143,6 +186,16 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
     } else {
         (crate::enroll::join_target(None, None), "?".to_owned())
     };
+    // A ticket that says `<server>` cannot be redeemed — the config does not
+    // name the address peers dial, so invite on the server instead.
+    if host_port.starts_with("<server>") {
+        return Err(form_error(
+            None,
+            "this config has no `[interface] public_endpoint`, so the ticket would \
+             say `<server>` — mint the invite on the server (or set the endpoint first)"
+                .to_owned(),
+        ));
+    }
     let ticket = crate::enroll::JoinTicket {
         server: host_port,
         name: name.to_owned(),
@@ -1361,37 +1414,274 @@ fn optional_name(text: &str) -> Option<String> {
 // below and for `tui::tests`.
 pub(crate) use crate::form::{parse_endpoint, parse_keepalive, parse_prefixes, parse_psk};
 
-/// Answer the first-run question: this machine is a server, or a client.
-///
-/// The dashboard cannot change the host — that needs root and a terminal — so
-/// it hands over the exact command for *this* machine and copies it, rather
-/// than pretending to run it.
-pub fn setup_hint(app: &mut App, server: bool) {
-    let command = if server {
-        "sudo vallum setup --server".to_owned()
+/// Run a `vallum-ops` subcommand with privilege: directly as root, or through
+/// the installer's passwordless sudoers rule (`sudo -n`). On failure the error
+/// carries the exact `sudo vallum-ops …` command — the TUI never raises a
+/// password prompt mid-dashboard.
+fn run_privileged(ops_args: &[&str], stdin_data: Option<&str>) -> Result<String, String> {
+    use std::process::Stdio;
+    let attempts: Vec<(String, Vec<String>)> = if nix::unistd::geteuid().is_root() {
+        vec![
+            (
+                "/usr/local/sbin/vallum-ops".to_owned(),
+                ops_args.iter().map(|s| s.to_string()).collect(),
+            ),
+            (
+                "vallum-ops".to_owned(),
+                ops_args.iter().map(|s| s.to_string()).collect(),
+            ),
+        ]
     } else {
-        let bundles = std::fs::read_dir(".")
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|entry| {
-                        entry
-                            .path()
-                            .extension()
-                            .is_some_and(|extension| extension == "vallum-bundle")
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        if bundles > 0 {
-            "sudo vallum setup --client <file>.vallum-bundle   (press i to import one here)"
-                .to_owned()
-        } else {
-            "sudo vallum setup --remote you@<server>".to_owned()
-        }
+        vec![
+            (
+                "sudo".to_owned(),
+                std::iter::once("-n".to_owned())
+                    .chain(std::iter::once("/usr/local/sbin/vallum-ops".to_owned()))
+                    .chain(ops_args.iter().map(|s| s.to_string()))
+                    .collect(),
+            ),
+            (
+                "sudo".to_owned(),
+                std::iter::once("-n".to_owned())
+                    .chain(std::iter::once("vallum-ops".to_owned()))
+                    .chain(ops_args.iter().map(|s| s.to_string()))
+                    .collect(),
+            ),
+        ]
     };
-    let channels = copy_to_clipboard(&command);
-    app.notify(format!("{command} — {}", clipboard_report(&channels)));
+    let mut last = String::new();
+    for (program, args) in attempts {
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if stdin_data.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            continue;
+        };
+        if let Some(input) = stdin_data {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = writeln!(stdin, "{input}");
+            }
+        }
+        if let Ok(output) = child.wait_with_output() {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if output.status.success() {
+                return Ok(text);
+            }
+            if !text.trim().is_empty() {
+                last = text.trim().to_owned();
+            }
+            // The second attempt only relocates ops on PATH — it can help
+            // when the first path was missing, never when ops ran and gave a
+            // verdict or sudo refused auth. Don't run the command twice.
+            if !text.contains("command not found") && !text.contains("No such file or directory") {
+                break;
+            }
+        }
+    }
+    let suggested = format!("sudo vallum-ops {}", ops_args.join(" "));
+    Err(if last.is_empty() {
+        format!("run it elevated: {suggested}")
+    } else {
+        format!("{last} (or run: {suggested})")
+    })
+}
+
+/// Mint the invite on a remote server over SSH — for an operator running this
+/// console on a client laptop. Prints the join ticket into a QR modal.
+fn invite_via_ssh(
+    app: &mut App,
+    ssh_target: &str,
+    name: &str,
+    ttl_mins: u64,
+    pinned: Option<&str>,
+) -> FormResult {
+    if ssh_target.starts_with('-')
+        || !ssh_target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':'))
+    {
+        return Err(field_error(
+            "remote SSH (optional)",
+            "SSH host may only contain letters, digits, '.', '_', '-', '@', or ':'",
+        ));
+    }
+    let mut remote = format!("sudo -n /usr/bin/vallum peer invite '{name}' --ttl {ttl_mins}");
+    if let Some(pin) = pinned {
+        remote.push_str(&format!(" --public-key '{pin}'"));
+    }
+    let output = Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            ssh_target,
+            &remote,
+        ])
+        .output()
+        .map_err(|error| form_error(None, format!("cannot run ssh to {ssh_target}: {error}")))?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        return Err(form_error(
+            None,
+            format!(
+                "remote invite on `{ssh_target}` failed: {}",
+                combined.trim()
+            ),
+        ));
+    }
+    let Some(ticket) = combined
+        .split_whitespace()
+        .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
+    else {
+        return Err(form_error(
+            None,
+            format!(
+                "`{ssh_target}` returned no vallum1-join ticket: {}",
+                combined.trim()
+            ),
+        ));
+    };
+    show_invite(app, name, ticket, ssh_target)
+}
+
+/// Copy the join ticket and open the QR modal — shared by the local, privileged,
+/// and remote-SSH invite paths.
+fn show_invite(app: &mut App, name: &str, ticket: &str, responder_label: &str) -> FormResult {
+    let join_cmd = format!("sudo vallum join {ticket}");
+    let _ = copy_to_clipboard(&join_cmd);
+    if let Ok(qr_state) = qr::encode_invite(&join_cmd, responder_label) {
+        app.qr = Some(qr_state);
+    }
+    Ok(format!(
+        "invite minted for `{name}` on {responder_label} (copied the join ticket)"
+    ))
+}
+
+/// Join this machine to a network: a pasted `vallum1-join:` ticket goes to
+/// `vallum-ops join` on stdin (never in argv); anything else is an SSH target
+/// for zero-custody enrolment via `vallum-ops setup-remote`.
+fn join_network(_app: &mut App, form: &super::app::Form) -> FormResult {
+    let target = form.field("ticket or user@host").trim();
+    if target.is_empty() {
+        return Err(field_error(
+            "ticket or user@host",
+            "paste a `vallum1-join:` ticket or enter user@host",
+        ));
+    }
+    let name = form.field("device name (optional)").trim();
+    if !name.is_empty()
+        && !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(field_error(
+            "device name (optional)",
+            "letters, digits, '.', '_', '-' only",
+        ));
+    }
+    let output = if let Some(ticket) = target
+        .split_whitespace()
+        .find(|token| token.starts_with("vallum1-join:"))
+    {
+        run_privileged(&["join"], Some(ticket)).map_err(|e| form_error(None, e))?
+    } else {
+        if target.starts_with('-')
+            || !target
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | ':'))
+        {
+            return Err(field_error(
+                "ticket or user@host",
+                "not a ticket — enter a valid SSH host (user@host or alias)",
+            ));
+        }
+        let mut args = vec!["setup-remote", target];
+        if !name.is_empty() {
+            args.push(name);
+        }
+        run_privileged(&args, None).map_err(|e| form_error(None, e))?
+    };
+    let summary = output
+        .lines()
+        .find(|line| line.contains("enrolled ") || line.contains("handshake with the server"))
+        .unwrap_or("joined network and started tunnel service")
+        .trim()
+        .to_owned();
+    Ok(summary)
+}
+
+/// Initialise this machine as a server through `vallum-ops setup-server`.
+fn setup_server(_app: &mut App, form: &super::app::Form) -> FormResult {
+    let address = form.field("tunnel subnet").trim();
+    if !address.contains('/') {
+        return Err(field_error(
+            "tunnel subnet",
+            "needs a prefix, e.g. 10.7.0.1/20",
+        ));
+    }
+    parse_prefixes(address).map_err(|e| field_error("tunnel subnet", e))?;
+    let listen = form.field("listen").trim();
+    if !listen.is_empty() && listen.parse::<std::net::SocketAddr>().is_err() {
+        return Err(field_error("listen", "must be IP:port, e.g. 0.0.0.0:51820"));
+    }
+    let endpoint = form.field("public endpoint (optional)").trim();
+    if !endpoint.is_empty() {
+        let valid = endpoint
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if !valid {
+            return Err(field_error(
+                "public endpoint (optional)",
+                "must be host:port, e.g. vpn.example.com:51820",
+            ));
+        }
+    }
+    let output = run_privileged(&["setup-server", address, listen, endpoint], None)
+        .map_err(|e| form_error(None, e))?;
+    let summary = output
+        .lines()
+        .find(|line| line.contains("server ready") || line.contains("vallum0"))
+        .unwrap_or("server initialized and service started")
+        .trim()
+        .to_owned();
+    Ok(summary)
+}
+
+/// Close the temporary UDP 51821 enrolment responder on the selected
+/// interface — the one-click tidy-up after a device joins.
+pub fn close_enrollment(app: &mut App) {
+    let stem = app
+        .current()
+        .and_then(|iface| {
+            iface
+                .config_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(str::to_owned)
+        })
+        .or_else(|| app.current().map(|iface| iface.name.clone()))
+        .unwrap_or_else(|| "vallum0".to_owned());
+    match run_privileged(&["enroll-off", &stem], None) {
+        Ok(_) => app.notify(format!(
+            "enrolment responder closed for `{stem}` (UDP 51821)"
+        )),
+        Err(error) => app.notify(error),
+    }
 }
 
 /// Best-effort clipboard copy. Returns the channels that accepted the text so

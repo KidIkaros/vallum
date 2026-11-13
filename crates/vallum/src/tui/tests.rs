@@ -1634,7 +1634,7 @@ fn the_first_screen_asks_what_the_machine_is_and_shows_both_commands() {
 }
 
 #[test]
-fn the_numbered_roles_hand_over_the_command_for_this_machine() {
+fn the_numbered_roles_open_the_setup_forms() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut app = App::new(Vec::new());
@@ -1642,11 +1642,12 @@ fn the_numbered_roles_hand_over_the_command_for_this_machine() {
         &mut app,
         KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
     );
-    let toast = app.toast.as_ref().expect("a toast says what happened");
     assert!(
-        toast.message.contains("setup --server"),
-        "{}",
-        toast.message
+        matches!(
+            app.form.as_ref().map(|f| f.kind),
+            Some(super::app::FormKind::SetupServer)
+        ),
+        "role 1 opens the server form"
     );
 
     let mut app = App::new(Vec::new());
@@ -1654,19 +1655,20 @@ fn the_numbered_roles_hand_over_the_command_for_this_machine() {
         &mut app,
         KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
     );
-    let toast = app.toast.as_ref().expect("a toast says what happened");
     assert!(
-        toast.message.contains("setup --remote") || toast.message.contains("setup --client"),
-        "{}",
-        toast.message
+        matches!(
+            app.form.as_ref().map(|f| f.kind),
+            Some(super::app::FormKind::JoinNetwork)
+        ),
+        "role 2 opens the join form"
     );
 }
 
 #[test]
 fn the_palette_offers_both_setup_roles() {
     let names: Vec<&str> = super::keymap::COMMANDS.iter().map(|c| c.name).collect();
-    assert!(names.iter().any(|name| name.contains("as a server")));
-    assert!(names.iter().any(|name| name.contains("as a client")));
+    assert!(names.iter().any(|name| name.contains("server")));
+    assert!(names.iter().any(|name| name.contains("join a network")));
     // Category badges must not collide with an existing one.
     let categories: Vec<&str> = super::keymap::COMMANDS.iter().map(|c| c.category).collect();
     assert!(categories.contains(&"SETUP"));
@@ -1675,10 +1677,11 @@ fn the_palette_offers_both_setup_roles() {
 #[test]
 fn invite_form_collects_name_ttl_and_optional_pin() {
     let form = Form::invite_peer();
-    assert_eq!(form.fields.len(), 3);
+    assert_eq!(form.fields.len(), 4);
     assert_eq!(form.field("name"), "");
     assert_eq!(form.field("TTL (minutes)"), "15");
     assert_eq!(form.field("pinned public line"), "");
+    assert_eq!(form.field("remote SSH (optional)"), "");
     // The pinned field must not be masked — it is a public line, not a secret.
     assert!(!form.fields[2].masked);
 }

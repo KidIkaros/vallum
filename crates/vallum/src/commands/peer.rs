@@ -787,27 +787,27 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     if let Some(line) = &expect {
         validate_public_line(&server, line)?;
     }
+    // Prove a responder could answer the ticket BEFORE minting it: an invite
+    // that names an unreachable endpoint or an unbindable port fails silently
+    // at `vallum join`, and auto-starting a responder for it opens a port
+    // nobody can use. Both are the shape of a client config — enrolment is a
+    // server feature.
+    let config = vallum_config::Config::load(&args.config)?;
+    let port = crate::commands::server::enroll_port(&config)?;
+    let (endpoint, endpoint_source) = bundle_endpoint(None, &server, &args.config)?;
+    if endpoint_source == EndpointSource::Detected && !publicly_dialable(&endpoint) {
+        return Err(Error::Usage(format!(
+            "this config has no `interface.public_endpoint`, and the only address \
+             detectable here ({endpoint}) is not one a device could dial from outside \
+             this machine — the shape of a client config, where the enrolment answer \
+             would be dead code. Mint the invite on the server instead; if this machine \
+             really serves, set `interface.public_endpoint` in {}",
+            args.config.display()
+        )));
+    }
     let (token, id, path) =
         crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60, expect)?;
     let server_fingerprint = fingerprint(&server.public_line);
-    let endpoint = bundle_endpoint(None, &server, &args.config)?.0;
-    // The responder's port is `[enroll].port`, defaulting to `listen + 1` —
-    // not necessarily the endpoint's port + 1 (the endpoint can name a
-    // different port than the one bound, e.g. behind NAT).
-    let config = vallum_config::Config::load(&args.config).ok();
-    let port = config
-        .as_ref()
-        .and_then(|cfg| cfg.enroll.port)
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|cfg| cfg.interface.listen.as_deref())
-                .or(Some(endpoint.as_str()))
-                .and_then(|addr| addr.rsplit_once(':'))
-                .and_then(|(_, port)| port.parse::<u16>().ok())
-                .map(|port| port.saturating_add(1))
-        })
-        .unwrap_or(51821);
     let host = endpoint
         .rsplit_once(':')
         .map(|(host, _)| host)
@@ -842,10 +842,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     // An invite that cannot be answered is dead code. When this operator is
     // root on a systemd host, the invite starts its own responder rather than
     // printing homework.
-    let enroll_enabled = config
-        .as_ref()
-        .map(|config| config.enroll.enabled)
-        .unwrap_or(false);
+    let enroll_enabled = config.enroll.enabled;
     let systemd = Path::new("/run/systemd/system").exists();
     let root = nix::unistd::geteuid().is_root();
     if root && systemd && !enroll_enabled {
@@ -2032,6 +2029,41 @@ enum EndpointSource {
     Detected,
 }
 
+/// Could a device that is not on this machine dial `endpoint`? A detected
+/// endpoint is the source route's own address — on a client that is private,
+/// loopback, link-local, carrier-grade NAT or similar, and an invite naming
+/// it can never be answered. A non-IP host is taken as a choice, not a guess.
+fn publicly_dialable(endpoint: &str) -> bool {
+    let host = endpoint
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(endpoint)
+        .trim_matches(['[', ']']);
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return true;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || octets[0] == 0
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
+                || octets[0] >= 240) // reserved 240.0.0.0/4
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80) // link-local fe80::/10
+        }
+    }
+}
+
 fn bundle_endpoint(
     explicit: Option<&str>,
     server: &Server,
@@ -2394,6 +2426,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("balanced, opening"), "{error}");
+    }
+
+    #[test]
+    fn a_detected_endpoint_on_a_client_address_is_not_dialable() {
+        // The incident this guards: a client machine detected 192.168.1.168 —
+        // reachable from nothing outside its LAN — and the invite named it.
+        for endpoint in [
+            "192.168.1.168:51821",
+            "10.0.0.5:51821",
+            "172.16.4.2:51821",
+            "100.64.7.9:51821", // carrier-grade NAT
+            "169.254.1.1:51821",
+            "127.0.0.1:51821",
+            "0.0.0.0:51821",
+            "[fd00::12]:51821",
+            "[fe80::44]:51821",
+            "[::1]:51821",
+        ] {
+            assert!(
+                !publicly_dialable(endpoint),
+                "{endpoint} must not be dialable"
+            );
+        }
+        for endpoint in [
+            "203.0.113.5:51821",
+            "8.8.8.8:51821",
+            "[2001:4860:4860::8888]:51821",
+            // A hostname is a choice, not a guess.
+            "vpn.example.com:51821",
+        ] {
+            assert!(publicly_dialable(endpoint), "{endpoint} should be dialable");
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ import {
   applyDevice,
   applyInterface,
   qrFrame,
+  closeEnrollment,
   editPeer,
   emptyPeer,
   exportBundle,
@@ -40,6 +41,7 @@ import {
   type QrFrame,
 } from "@/lib/actions"
 import type { Peer } from "@/types"
+import { preflight, type SshHost } from "@/lib/bridge"
 import { CopyButton } from "@/components/Copy"
 import { ResultPanel } from "@/components/Result"
 import { loadUserPrefs, suggestNextPeerIp } from "@/lib/userPrefs"
@@ -616,11 +618,15 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
   const [open, setOpen] = useState(false)
   const [result, setResult] = useState<Done | null>(null)
   const { busy, submit } = useGuardedSubmit()
-  const [fields, setFields] = useState<InviteFields>(() => ({
+  const [sshHosts, setSshHosts] = useState<SshHost[]>([])
+  const [closing, setClosing] = useState(false)
+  const blank = () => ({
     name: "",
     ttl_minutes: loadUserPrefs().defaultInviteTtl,
     pinned: "",
-  }))
+    ssh_target: "",
+  })
+  const [fields, setFields] = useState<InviteFields>(() => blank())
   const [touched, setTouched] = useState<Record<string, boolean>>({})
   const set = (key: keyof InviteFields) => (value: string) =>
     setFields((f) => ({ ...f, [key]: value }))
@@ -630,8 +636,13 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
     name: nameProblem(fields.name, true),
     ttl_minutes: ttlProblem(fields.ttl_minutes),
     pinned: fields.pinned.trim() === "" ? null : publicLineProblem(fields.pinned),
+    ssh_target:
+      fields.ssh_target.trim() !== "" && fields.ssh_target.trim().startsWith("-")
+        ? "SSH host must not start with -"
+        : null,
   }
-  const firstError = problems.name ?? problems.ttl_minutes ?? problems.pinned
+  const firstError =
+    problems.name ?? problems.ttl_minutes ?? problems.pinned ?? problems.ssh_target
   const show = (key: keyof typeof problems) =>
     touched[key] || touched.submit ? problems[key] : null
   const anyTouched =
@@ -643,17 +654,16 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
       onOpenChange={(next) => {
         setOpen(next)
         if (next) {
-          setFields({
-            name: "",
-            ttl_minutes: loadUserPrefs().defaultInviteTtl,
-            pinned: "",
-          })
+          setFields(blank())
           setTouched({})
+          preflight()
+            .then((facts) => setSshHosts(facts.ssh_hosts ?? []))
+            .catch(() => setSshHosts([]))
         } else {
           // The ticket is single-use and the animation carries it: closing clears
           // it rather than leaving it framed behind the dialog.
           setResult(null)
-          setFields({ name: "", ttl_minutes: loadUserPrefs().defaultInviteTtl, pinned: "" })
+          setFields(blank())
           setTouched({})
         }
       }}
@@ -687,6 +697,22 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
                 setOpen(false)
               }}
             />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={closing}
+              onClick={() => {
+                if (closing) return
+                setClosing(true)
+                closeEnrollment(fields.ssh_target)
+                  .then((done) => toast.success(done.message))
+                  .catch((error) => toast.error(formatError(error), { duration: 8000 }))
+                  .finally(() => setClosing(false))
+              }}
+            >
+              {closing ? "Closing enrolment…" : "Close enrolment port (UDP 51821)"}
+            </Button>
           </div>
         ) : (
         <form
@@ -777,6 +803,32 @@ export function InviteDialog({ blocked }: { blocked?: string }) {
               />
             </Field>
           </div>
+          <Field
+            label="remote server SSH (optional)"
+            hint="this machine is a client? mint the invite on your server over SSH — user@host or a saved alias"
+            error={show("ssh_target")}
+          >
+            <Input
+              id="invite-ssh-target"
+              value={fields.ssh_target}
+              onChange={(e) => set("ssh_target")(e.target.value)}
+              onBlur={mark("ssh_target")}
+              placeholder="empty = this machine is the server"
+              aria-invalid={show("ssh_target") !== null}
+            />
+            {sshHosts.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {sshHosts.map((host) => (
+                  <PresetChip
+                    key={host.alias}
+                    label={host.alias}
+                    active={fields.ssh_target === host.alias}
+                    onClick={() => set("ssh_target")(host.alias)}
+                  />
+                ))}
+              </div>
+            )}
+          </Field>
           <DialogFooter showCloseButton className="items-center gap-3">
             {anyTouched && firstError && (
               <span className="text-stale mr-auto font-mono text-[11px]">{firstError}</span>

@@ -42,6 +42,26 @@ pub struct InviteFields {
     pub name: String,
     pub ttl_minutes: String,
     pub pinned: String,
+    pub ssh_target: String,
+}
+
+/// The fields of the client network join form (ticket or SSH enrolment).
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct JoinFields {
+    pub mode: String,
+    pub ticket: String,
+    pub ssh_target: String,
+    pub name: String,
+}
+
+/// The fields of the server initialization wizard.
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct ServerSetupFields {
+    pub address: String,
+    pub listen: String,
+    pub public_endpoint: String,
 }
 
 /// The fields of the interface config form, as typed.
@@ -119,6 +139,165 @@ pub(crate) fn validate_peer_name(raw: &str) -> Result<&str, String> {
         );
     }
     Ok(name)
+}
+
+/// Validate an SSH destination (`user@host`, hostname, or `~/.ssh/config` alias)
+/// so it cannot inject flags (`-oProxyCommand=...`) into `ssh`.
+pub(crate) fn validate_ssh_target(raw: &str) -> Result<&str, String> {
+    let target = raw.trim();
+    if target.is_empty() {
+        return Err(
+            "SSH host is required (e.g. user@vpn.example.com or an ~/.ssh/config alias)".to_owned(),
+        );
+    }
+    if target.starts_with('-') {
+        return Err("SSH host must not start with `-`".to_owned());
+    }
+    if !target
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@' | ':'))
+    {
+        return Err(
+            "SSH host may only contain letters, digits, '.', '_', '-', '@', or ':'".to_owned(),
+        );
+    }
+    Ok(target)
+}
+
+/// Extract and validate a `vallum1-join:...` ticket from raw user input
+/// (tolerating a pasted `sudo vallum join vallum1-join:...` command).
+pub(crate) fn extract_join_ticket(raw: &str) -> Result<&str, String> {
+    let ticket = raw
+        .split_whitespace()
+        .find(|token| token.starts_with("vallum1-join:"))
+        .unwrap_or_else(|| raw.trim());
+    if ticket.is_empty() {
+        return Err("paste a `vallum1-join:...` invite ticket".to_owned());
+    }
+    if !ticket.starts_with("vallum1-join:") {
+        return Err("ticket must start with `vallum1-join:`".to_owned());
+    }
+    if ticket
+        .chars()
+        .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err("ticket must not contain spaces or control characters".to_owned());
+    }
+    let body = &ticket["vallum1-join:".len()..];
+    if body.split('/').count() < 5 {
+        return Err(
+            "incomplete invite ticket — expected `vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>`"
+                .to_owned(),
+        );
+    }
+    Ok(ticket)
+}
+
+/// Validate `ServerSetupFields` before invoking `vallum setup --server`.
+pub(crate) fn validate_server_setup_fields(fields: &ServerSetupFields) -> Result<(), String> {
+    let addr = fields.address.trim();
+    if addr.is_empty() {
+        return Err("server tunnel CIDR is required (e.g. 10.7.0.1/20)".to_owned());
+    }
+    for part in addr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !part.contains('/') {
+            return Err(format!(
+                "address `{part}` must include a prefix length (e.g. 10.7.0.1/20)"
+            ));
+        }
+        form::parse_prefixes(part).map_err(|error| format!("address: {error}"))?;
+    }
+    let listen = fields.listen.trim();
+    if !listen.is_empty() {
+        listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "listen address must be IP:port (e.g. 0.0.0.0:51820)".to_owned())?;
+    }
+    let endpoint = fields.public_endpoint.trim();
+    if !endpoint.is_empty() {
+        let Some((host, port_str)) = endpoint.rsplit_once(':') else {
+            return Err("public endpoint must be host:port (e.g. 203.0.113.5:51820)".to_owned());
+        };
+        if host.trim().is_empty() || port_str.parse::<u16>().is_err() {
+            return Err("public endpoint must be host:port (e.g. 203.0.113.5:51820)".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Mint an invite on a remote server over SSH (`sudo -n /usr/bin/vallum peer invite <name>`)
+/// so an operator running the console on a client laptop can onboard colleagues
+/// without opening a terminal.
+pub fn invite_remote(fields: &InviteFields) -> Result<Done, String> {
+    let target = validate_ssh_target(&fields.ssh_target)?;
+    let name = validate_peer_name(&fields.name)?;
+    const DEFAULT_TTL_MINUTES: u64 = 60;
+    let minutes: u64 = if fields.ttl_minutes.trim().is_empty() {
+        DEFAULT_TTL_MINUTES
+    } else {
+        fields
+            .ttl_minutes
+            .trim()
+            .parse()
+            .map_err(|_| "TTL must be a whole number of minutes".to_owned())?
+    };
+    if !(1..=10_080).contains(&minutes) {
+        return Err("TTL must be between 1 and 10080 minutes (7 days)".to_owned());
+    }
+    let pinned = match fields.pinned.trim() {
+        "" => None,
+        text => {
+            keys::decode_public(text).map_err(|error| format!("pinned public line: {error}"))?;
+            Some(text.to_owned())
+        }
+    };
+    let mut remote_cmd = format!("sudo -n /usr/bin/vallum peer invite '{name}' --ttl {minutes}");
+    if let Some(pin) = &pinned {
+        if !pin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '+' | '/' | '='))
+        {
+            return Err("invalid characters in pinned public key".to_owned());
+        }
+        remote_cmd.push_str(&format!(" --public-key '{pin}'"));
+    }
+    let output = std::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            target,
+            &remote_cmd,
+        ])
+        .output()
+        .map_err(|error| format!("cannot run ssh to {target}: {error}"))?;
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if !output.status.success() {
+        return Err(format!(
+            "remote invite on `{target}` failed: {}",
+            combined.trim()
+        ));
+    }
+    let ticket = combined
+        .split_whitespace()
+        .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
+        .ok_or_else(|| {
+            format!(
+                "remote server `{target}` did not return a `vallum1-join:` ticket: {}",
+                combined.trim()
+            )
+        })?;
+    Ok(Done {
+        message: format!(
+            "invite minted for `{name}` on `{target}` (UDP 51821 responder started on server)"
+        ),
+        command: Some(format!("sudo vallum join {ticket}")),
+    })
 }
 
 /// Add a peer to the running device.
@@ -502,20 +681,31 @@ pub struct KeyOut {
 }
 
 /// Mint a fresh identity in the device's suite. Read-only against the daemon
-/// plus local randomness: no write gate, no privilege question.
+/// plus local randomness: no write gate, no privilege question. With no daemon
+/// to ask (a fresh client before first join), the key is minted in the shipping
+/// suite `0x0003` — the only suite `vallum join` negotiates today.
 ///
 /// # Errors
 ///
 /// If the daemon cannot be read for its suite.
-pub fn generate_key(path: &Path) -> Result<KeyOut, String> {
-    let snap = snapshot::fetch(path)?;
-    let secret = vallum::keys::new_secret(snap.suite_id(), false, vallum::entropy::seed());
+pub fn generate_key(path: Option<&Path>) -> Result<KeyOut, String> {
+    let (suite_id, suite, interface) = match path {
+        Some(path) => {
+            let snap = snapshot::fetch(path)?;
+            (snap.suite_id(), snap.suite.clone(), snap.interface.clone())
+        }
+        None => (
+            0x0003,
+            "x25519+sntrup761+ml-kem-768".to_owned(),
+            "vallum0".to_owned(),
+        ),
+    };
+    let secret = vallum::keys::new_secret(suite_id, false, vallum::entropy::seed());
     Ok(KeyOut {
-        filename: format!("{}-client.key", snap.interface),
+        filename: format!("{interface}-client.key"),
         text: vallum::keys::render_secret(&secret),
         message: format!(
-            "fresh {} key minted — it exists only in this download until it is added to a peer",
-            snap.suite
+            "fresh {suite} key minted — it exists only in this download until it is added to a peer"
         ),
     })
 }
@@ -1068,6 +1258,7 @@ mod config_tests {
             name: "../bad name".to_owned(),
             ttl_minutes: "15".to_owned(),
             pinned: String::new(),
+            ssh_target: String::new(),
         };
         let err = invite("vallum0", None, None, "", &bad_name).expect_err("bad name rejected");
         assert!(err.contains("peer name"), "{err}");
@@ -1077,12 +1268,48 @@ mod config_tests {
                 name: "phone".to_owned(),
                 ttl_minutes: bad_ttl.to_owned(),
                 pinned: String::new(),
+                ssh_target: String::new(),
             };
             assert!(
                 invite("vallum0", None, None, "", &bad).is_err(),
                 "ttl {bad_ttl:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn join_and_server_setup_validation_rejects_bad_inputs() {
+        assert!(extract_join_ticket("").is_err());
+        assert!(extract_join_ticket("not-a-ticket").is_err());
+        assert!(extract_join_ticket("vallum1-join:short/a").is_err());
+        let valid_ticket = "vallum1-join:203.0.113.5:51821/alice/id123/tok456/fp789";
+        assert_eq!(
+            extract_join_ticket(&format!("sudo vallum join {valid_ticket}")).unwrap(),
+            valid_ticket
+        );
+
+        assert!(validate_ssh_target("").is_err());
+        assert!(validate_ssh_target("-oProxyCommand=evil").is_err());
+        assert!(validate_ssh_target("user@host;id").is_err());
+        assert_eq!(
+            validate_ssh_target("buffy@203.0.113.5").unwrap(),
+            "buffy@203.0.113.5"
+        );
+        assert_eq!(validate_ssh_target("wingman-vps").unwrap(), "wingman-vps");
+
+        assert!(validate_server_setup_fields(&ServerSetupFields::default()).is_err());
+        assert!(validate_server_setup_fields(&ServerSetupFields {
+            address: "10.7.0.1".to_owned(),
+            listen: String::new(),
+            public_endpoint: String::new(),
+        })
+        .is_err());
+        assert!(validate_server_setup_fields(&ServerSetupFields {
+            address: "10.7.0.1/20".to_owned(),
+            listen: "0.0.0.0:51820".to_owned(),
+            public_endpoint: "vpn.example.com:51820".to_owned(),
+        })
+        .is_ok());
     }
 
     #[test]

@@ -60,6 +60,7 @@ pub enum Action {
     Health,
     SetupServer,
     SetupClient,
+    CloseEnrollment,
     TrialPlan,
     TrialRevert,
 }
@@ -79,14 +80,20 @@ pub const COMMANDS: &[Command] = &[
     Command {
         action: Action::SetupServer,
         category: "SETUP",
-        name: "set this machine up as a server…",
-        keywords: "setup init server onboarding host install begin",
+        name: "host a vallum server…",
+        keywords: "setup init server onboarding host install begin subnet nat",
     },
     Command {
         action: Action::SetupClient,
         category: "SETUP",
-        name: "set this machine up as a client…",
-        keywords: "setup client bundle join onboarding connect import",
+        name: "join a network (ticket / ssh)…",
+        keywords: "setup client bundle join onboarding connect import enroll ticket ssh",
+    },
+    Command {
+        action: Action::CloseEnrollment,
+        category: "SETUP",
+        name: "close enrolment responder (UDP 51821)",
+        keywords: "enroll invite close responder port disable tidy",
     },
     Command {
         action: Action::ToggleService,

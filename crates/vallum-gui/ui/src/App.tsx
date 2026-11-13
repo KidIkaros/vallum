@@ -41,6 +41,7 @@ import { UserKeyCard, UserPreferencesPanel } from "@/components/UserIdentity"
 import { ROLE_META, useUserPrefs } from "@/lib/userPrefs"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun, SocketUnreadable } from "@/components/FirstRun"
+import { JoinNetworkDialog, SetupServerDialog } from "@/components/OnboardingDialogs"
 import { Button } from "@/components/ui/button"
 import { PacketPipelineFlow, TunnelFlowMap } from "@/components/DataFlow"
 import { TopTalkers, type PeerRate } from "@/components/TopTalkers"
@@ -1548,11 +1549,20 @@ export default function App() {
         interfaces.length === 0 ? (
         // Nothing installed: show what to run, not a start button for a unit
         // that does not exist.
-        <FirstRun
-          facts={facts}
-          onRetry={loadFacts}
-          onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
-        />
+        <>
+          <FirstRun
+            facts={facts}
+            onRetry={loadFacts}
+            onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+          />
+          {/* Trigger targets for the guide steps — the dialogs work before any
+              socket exists (ticket join, SSH enrol, server init, bundle import). */}
+          <div className="hidden" aria-hidden>
+            <JoinNetworkDialog />
+            <SetupServerDialog />
+            <ImportBundleDialog />
+          </div>
+        </>
       ) : service && service.active !== "active" && !live ? (
         // The unit being down is only the reason the cockpit is empty when the
         // daemon is also unreachable. A daemon can answer with no unit behind it
@@ -1575,11 +1585,18 @@ export default function App() {
             onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
           />
         ) : (
-          <FirstRun
-            facts={facts}
-            onRetry={loadFacts}
-            onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
-          />
+          <>
+            <FirstRun
+              facts={facts}
+              onRetry={loadFacts}
+              onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+            />
+            <div className="hidden" aria-hidden>
+              <JoinNetworkDialog />
+              <SetupServerDialog />
+              <ImportBundleDialog />
+            </div>
+          </>
         )
       ) : (
         <>
@@ -1686,6 +1703,8 @@ export default function App() {
                 ) : null}
               </h2>
               <div className="flex flex-wrap items-center gap-2">
+                <JoinNetworkDialog blocked={blocked} />
+                <SetupServerDialog blocked={blocked} />
                 <InviteDialog blocked={blocked} />
                 <ImportBundleDialog blocked={blocked} />
                 <AddPeerDialog

@@ -189,16 +189,19 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
         .name
         .clone()
         .unwrap_or_else(|| "vallum0".to_owned());
-    let listen = config
-        .interface
-        .listen
-        .as_deref()
-        .and_then(|listen| listen_port(listen).ok())
-        .unwrap_or(51820);
-    let port: u16 = config
-        .enroll
-        .port
-        .unwrap_or_else(|| listen.saturating_add(1));
+    // The responder's port must exist before the flag flips: enabling with an
+    // unbindable port writes `enabled = true`, crash-loops the unit, and mints
+    // invites that name a port nothing serves. Disabling never needs it —
+    // closing the firewall is best-effort anyway.
+    let port = match enroll_port(&config) {
+        Ok(port) => Some(port),
+        Err(error) => {
+            if args.enable {
+                return Err(error);
+            }
+            None
+        }
+    };
 
     let updated = set_enroll_flag(&text, args.enable);
     if args.dry_run {
@@ -211,10 +214,13 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
             "   would {} vallum-enroll@{interface}",
             if args.enable { "start" } else { "stop" }
         );
-        say!(
-            "   would {} UDP {port}",
-            if args.enable { "open" } else { "try to close" }
-        );
+        match port {
+            Some(port) => say!(
+                "   would {} UDP {port}",
+                if args.enable { "open" } else { "try to close" }
+            ),
+            None => say!("   would try to close the enrolment port"),
+        }
         return Ok(());
     }
     write_atomic(&args.config, &updated, 0o600)?;
@@ -222,7 +228,20 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
     vallum_config::Config::load(&args.config)?;
 
     if args.enable {
-        install_service(&interface, false)?;
+        // Already proven derivable above; re-derived rather than assumed.
+        let port = enroll_port(&config)?;
+        if Path::new("/etc/systemd/system/vallum@.service").exists()
+            && Path::new("/etc/systemd/system/vallum-enroll@.service").exists()
+        {
+            // The tunnel's units already run: opening the enrolment window
+            // must not bounce the tunnel it serves, so `start` the responder
+            // rather than the full install — which restarts vallum@ to pick
+            // up re-init state that did not change. Started, not enabled:
+            // ADR-0034.
+            systemctl(&["start", &format!("vallum-enroll@{interface}")])?;
+        } else {
+            install_service(&interface, false)?;
+        }
         let steps = hostnet::plan_port(&hostnet::inspect(), port);
         let _ = hostnet::apply(&steps, false)?;
         say!("token enrolment on for {interface}: UDP {port}");
@@ -232,45 +251,50 @@ pub fn enroll(args: &EnrollArgs) -> Result<(), Error> {
 
     let _ = systemctl(&["disable", "--now", &format!("vallum-enroll@{interface}")]);
     // Closing the port is best effort across three backends; say what ran.
-    let attempts: [(&str, Vec<&str>); 3] = [
-        ("ufw", vec!["delete", "allow", "PORT/udp"]),
-        (
-            "iptables",
-            vec![
-                "-D", "INPUT", "-p", "udp", "--dport", "PORT", "-j", "ACCEPT",
-            ],
-        ),
-        (
-            "firewall-cmd",
-            vec!["--permanent", "--remove-port=PORT/udp"],
-        ),
-    ];
-    let mut closed = Vec::new();
-    for (program, args) in attempts {
-        let port_text = port.to_string();
-        let rendered: Vec<String> = args
-            .iter()
-            .map(|arg| {
-                arg.replace("PORT/udp", &format!("{port}/udp"))
-                    .replace("PORT", &port_text)
-            })
-            .collect();
-        if Command::new(program)
-            .args(&rendered)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            closed.push(program);
+    // A config whose port cannot be derived (a client shape) never opened one.
+    if let Some(port) = port {
+        let attempts: [(&str, Vec<&str>); 3] = [
+            ("ufw", vec!["delete", "allow", "PORT/udp"]),
+            (
+                "iptables",
+                vec![
+                    "-D", "INPUT", "-p", "udp", "--dport", "PORT", "-j", "ACCEPT",
+                ],
+            ),
+            (
+                "firewall-cmd",
+                vec!["--permanent", "--remove-port=PORT/udp"],
+            ),
+        ];
+        let mut closed = Vec::new();
+        for (program, args) in attempts {
+            let port_text = port.to_string();
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|arg| {
+                    arg.replace("PORT/udp", &format!("{port}/udp"))
+                        .replace("PORT", &port_text)
+                })
+                .collect();
+            if Command::new(program)
+                .args(&rendered)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                closed.push(program);
+            }
         }
-    }
-    say!("token enrolment off for {interface}");
-    if closed.is_empty() {
-        say!("   the port rule was not found by ufw, iptables, or firewalld —");
-        say!("   check that UDP {port} is closed if you no longer want it open");
+        say!("token enrolment off for {interface}");
+        if closed.is_empty() {
+            say!("   the port rule was not found by ufw, iptables, or firewalld —");
+            say!("   check that UDP {port} is closed if you no longer want it open");
+        } else {
+            say!("   closed UDP {port} through {}", closed.join(", "));
+        }
     } else {
-        say!("   closed UDP {port} through {}", closed.join(", "));
+        say!("token enrolment off for {interface}");
     }
     Ok(())
 }
@@ -627,6 +651,48 @@ pub(crate) fn listen_port(listen: &str) -> Result<u16, Error> {
                 "`{listen}` is not an address and port (e.g. 0.0.0.0:51820)"
             ))
         })
+}
+
+/// The UDP port `vallum-enroll@` binds: `[enroll] port` when the config names
+/// one, else one above `interface.listen`.
+///
+/// Two inputs are refused rather than served, because both mint invitations
+/// that can never be answered:
+///
+/// - a port below 1024 — the responder runs without `CAP_NET_BIND_SERVICE`,
+///   so the unit crash-loops on bind; and
+/// - an ephemeral `interface.listen` (`:0`, the shape of a client config),
+///   where `listen + 1` is not a port the responder owns but port 1.
+pub(crate) fn enroll_port(config: &vallum_config::Config) -> Result<u16, Error> {
+    let port = match config.enroll.port {
+        Some(port) => port,
+        None => {
+            let listen = config
+                .interface
+                .listen
+                .as_deref()
+                .map(listen_port)
+                .transpose()?
+                .unwrap_or(51820);
+            if listen == 0 {
+                return Err(Error::Usage(
+                    "cannot derive the enrolment port: `interface.listen` is ephemeral \
+                     (`:0`), so `listen + 1` names nothing. That is the shape of a client \
+                     config — enrolment is a server feature; if this config really does \
+                     serve, set `enroll.port` (and `interface.public_endpoint`) explicitly"
+                        .to_owned(),
+                ));
+            }
+            listen.saturating_add(1)
+        }
+    };
+    if port < 1024 {
+        return Err(Error::Usage(format!(
+            "the enrolment port is {port}, below 1024 — vallum-enroll runs without \
+             CAP_NET_BIND_SERVICE and cannot bind it; choose a port ≥ 1024"
+        )));
+    }
+    Ok(port)
 }
 
 /// Read the key if it exists, or make one.
@@ -1028,6 +1094,41 @@ mod tests {
         assert_eq!(listen_port("[::]:51820").unwrap(), 51820);
         assert!(listen_port("0.0.0.0").is_err());
         assert!(listen_port("0.0.0.0:99999").is_err());
+    }
+
+    #[test]
+    fn the_enrolment_port_defaults_to_listen_plus_one() {
+        let config: vallum_config::Config = toml::from_str(
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k\"\nlisten = \"0.0.0.0:51820\"\n",
+        )
+        .unwrap();
+        assert_eq!(enroll_port(&config).unwrap(), 51821);
+    }
+
+    #[test]
+    fn the_enrolment_port_refuses_an_ephemeral_listen() {
+        // A client config binds `listen = "0.0.0.0:0"`; `listen + 1` on it
+        // minted invites and firewall holes for UDP 1 — a port the responder
+        // cannot bind and nobody could reach.
+        let config: vallum_config::Config = toml::from_str(
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k\"\nlisten = \"0.0.0.0:0\"\n",
+        )
+        .unwrap();
+        let error = enroll_port(&config).unwrap_err().to_string();
+        assert!(error.contains("ephemeral"), "{error}");
+    }
+
+    #[test]
+    fn the_enrolment_port_refuses_a_privileged_port() {
+        // The responder runs without CAP_NET_BIND_SERVICE: an explicit port
+        // below 1024 is a crash-loop, not a choice.
+        let config: vallum_config::Config = toml::from_str(
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k\"\nlisten = \"0.0.0.0:51820\"\n\
+             [enroll]\nport = 443\n",
+        )
+        .unwrap();
+        let error = enroll_port(&config).unwrap_err().to_string();
+        assert!(error.contains("below 1024"), "{error}");
     }
 
     #[test]

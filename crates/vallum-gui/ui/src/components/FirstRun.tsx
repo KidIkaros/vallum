@@ -138,21 +138,21 @@ function stepsFor(preflight: Preflight | null): Step[] {
     {
       id: "join",
       role: "client",
-      title: "Join a server by importing a bundle or invite",
-      detail: "Import a .vallum-bundle file from your host or enter the server's public key and endpoint in the Devices view.",
+      title: "Join a server by ticket, SSH, or bundle",
+      detail: "Paste an invite ticket or enrol over SSH — the key stays on this device. A .vallum-bundle file also works.",
       command: "sudo vallum join <ticket>",
-      actionLabel: "Import Bundle…",
-      triggerId: "import-bundle-btn",
+      actionLabel: "Join network…",
+      triggerId: "join-network-btn",
       done: preflight.config !== false,
     },
     {
       id: "server",
       role: "server",
       title: "Configure this machine as a host",
-      detail: "Set the local VPN subnet, Full vs Split tunnel egress, DNS, and invite remote devices via QR or ticket.",
+      detail: "Writes the server config, enables forwarding and NAT, and starts the daemon — then invite devices via QR or ticket.",
       command: "sudo vallum setup --server",
-      actionLabel: "Edit Network Settings…",
-      triggerId: "interface-form-btn",
+      actionLabel: "Initialize server…",
+      triggerId: "setup-server-btn",
       done: preflight.config !== false,
     },
     {
@@ -293,7 +293,7 @@ export function FirstRun({
         <ul className="flex flex-col gap-2">
           {visibleSteps.map((step) => {
             const triggerEl =
-              embedded && step.triggerId && typeof document !== "undefined"
+              step.triggerId && typeof document !== "undefined"
                 ? document.getElementById(step.triggerId)
                 : null
             return (

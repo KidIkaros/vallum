@@ -840,16 +840,9 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     // Already enrolled here? Then this run is about installing or starting it,
     // not about enrolling again: a second enrolment would present a new key and
     // the server would rightly refuse it.
-    let candidates = [
-        PathBuf::from(format!("/etc/vallum/{name}.toml")),
-        PathBuf::from(format!("{name}.toml")),
-    ];
-    if let Some(existing) = candidates
-        .iter()
-        .find(|path| path.is_file() && path.with_extension("key").is_file())
-    {
+    if let Some(existing) = existing_enrolment(&name, Path::new("/etc/vallum")) {
         say!("already enrolled: {}", existing.display());
-        return start_existing(existing, &name);
+        return start_existing(&existing, &name);
     }
 
     let seed = crate::entropy::seed();
@@ -872,7 +865,17 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
         "sudo vallum peer enroll {}{config_flag} --public-key-file /dev/stdin --json",
         shell_quote(&name)
     );
+    // `VALLUM_SSH_OPTS` is split on whitespace and passed as literal
+    // arguments, never through a shell. `vallum-ops` sets it so the enrolment
+    // it runs cannot prompt or hang; sudo/pkexec reset the caller's
+    // environment, so a user cannot inject flags into the privileged run.
+    let ssh_opts: Vec<String> = std::env::var("VALLUM_SSH_OPTS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
     let mut child = std::process::Command::new("ssh")
+        .args(&ssh_opts)
         // `--` ends ssh's options: a remote that starts with a dash is a
         // hostname, not an option.
         .arg("--")
@@ -1289,6 +1292,19 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     )
 }
 
+/// An already-enrolled config: `<name>.toml` whose `<name>.key` also exists,
+/// checked under the system config directory and the working directory.
+/// Either alone is not an enrolment — a config with a missing key would only
+/// have setup tried again anyway, and a bare key could be anything.
+fn existing_enrolment(name: &str, config_dir: &Path) -> Option<PathBuf> {
+    [
+        config_dir.join(format!("{name}.toml")),
+        PathBuf::from(format!("{name}.toml")),
+    ]
+    .into_iter()
+    .find(|path| path.is_file() && path.with_extension("key").is_file())
+}
+
 /// Finish a machine that is already enrolled: install the service, or say how
 /// to run it.
 fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
@@ -1445,6 +1461,28 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// An existing `<name>.toml` + `<name>.key` pair means "already enrolled":
+    /// `setup --remote` must not generate a second identity over the first —
+    /// the server still knows the first, and the new one is unknown_peer.
+    #[test]
+    fn an_enrolled_config_and_key_count_as_existing() {
+        let dir = std::env::temp_dir().join(format!("vallum-enrol-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("t-{}", std::process::id());
+        let toml = dir.join(format!("{name}.toml"));
+        let key = dir.join(format!("{name}.key"));
+        // Neither half alone is an enrolment.
+        assert!(existing_enrolment(&name, &dir).is_none());
+        std::fs::write(&toml, "[interface]\n").unwrap();
+        assert!(existing_enrolment(&name, &dir).is_none());
+        std::fs::write(&key, "seed").unwrap();
+        assert_eq!(existing_enrolment(&name, &dir), Some(toml));
+        std::fs::remove_file(&key).unwrap();
+        assert!(existing_enrolment(&name, &dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The bare `host:port` path has no fingerprint to check, and it used to
     /// say nothing about that.

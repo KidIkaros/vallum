@@ -30,7 +30,10 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
-use actions::{BundleOut, Done, InterfaceFields, InviteFields, KeyOut, PeerFields, QrFrame};
+use actions::{
+    BundleOut, Done, InterfaceFields, InviteFields, JoinFields, KeyOut, PeerFields, QrFrame,
+    ServerSetupFields,
+};
 use snapshot::Snapshot;
 
 /// Where the daemon's configs live, the same default the TUI uses.
@@ -279,6 +282,9 @@ fn finalize_at(socket: &std::path::Path, name: &str) -> Result<Done, String> {
 fn invite_at(socket: &std::path::Path, fields: &InviteFields) -> Result<Done, String> {
     // Both transports pass here; the gate lives with the write, not the route.
     crate::hostfacts::write_gate(socket)?;
+    if !fields.ssh_target.trim().is_empty() {
+        return actions::invite_remote(fields);
+    }
     let interface = socket
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -293,13 +299,154 @@ fn invite_at(socket: &std::path::Path, fields: &InviteFields) -> Result<Done, St
     let public_line = device
         .as_ref()
         .map_or_else(String::new, |snapshot| snapshot.public_line.clone());
-    actions::invite(
+    match actions::invite(
         &interface,
         config.as_deref(),
         listen.as_deref(),
         &public_line,
         fields,
-    )
+    ) {
+        Ok(done) => Ok(done),
+        Err(error) => {
+            // When running on a real host as an unprivileged user, `/etc/vallum/*.toml`
+            // is 0600 root so `config` is None and `actions::invite` cannot read
+            // `public_endpoint`. If `VALLUM_RUNTIME_DIR` is not overridden (i.e. not a
+            // synthetic test harness), try `vallum-ops invite`.
+            if config.is_none()
+                && std::env::var_os("VALLUM_RUNTIME_DIR").is_none()
+                && std::path::Path::new("/usr/local/sbin/vallum-ops").exists()
+            {
+                let name = actions::validate_peer_name(&fields.name)?;
+                let ttl = if fields.ttl_minutes.trim().is_empty() {
+                    "60"
+                } else {
+                    fields.ttl_minutes.trim()
+                };
+                let mut ops_args = vec!["invite", name, ttl, &interface];
+                if !fields.pinned.trim().is_empty() {
+                    ops_args.push(fields.pinned.trim());
+                }
+                if let Ok(out) = run_ops_with_stdin(&ops_args, None) {
+                    if let Some(ticket) = out
+                        .split_whitespace()
+                        .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
+                    {
+                        return Ok(Done {
+                            message: format!(
+                                "invite minted for `{name}` (UDP 51821 responder active)"
+                            ),
+                            command: Some(format!("sudo vallum join {ticket}")),
+                        });
+                    }
+                }
+            }
+            let has_remote_peer = device.as_ref().is_some_and(|snap| {
+                snap.peers
+                    .iter()
+                    .any(|p| !p.endpoint.is_empty() && p.endpoint != "(none)")
+            });
+            if has_remote_peer && error.contains("public_endpoint") {
+                Err(format!(
+                    "{error}\n\nThis machine is a client connected to a remote server. Enter your server's SSH host in 'Remote server SSH' above to mint the invite on the server."
+                ))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn join_network_at(console: &Arc<Console>, fields: &JoinFields) -> Result<Done, String> {
+    let mode = fields.mode.trim();
+    let output = if mode == "ssh"
+        || (fields.ticket.trim().is_empty() && !fields.ssh_target.trim().is_empty())
+    {
+        let target = actions::validate_ssh_target(&fields.ssh_target)?;
+        let mut args = vec!["setup-remote", target];
+        let name_trimmed = fields.name.trim();
+        if !name_trimmed.is_empty() {
+            let valid_name = actions::validate_peer_name(name_trimmed)?;
+            args.push(valid_name);
+        }
+        run_ops_with_stdin(&args, None)?
+    } else {
+        let ticket = actions::extract_join_ticket(&fields.ticket)?;
+        run_ops_with_stdin(&["join"], Some(ticket))?
+    };
+    if console.current_socket().is_none() {
+        if let Some(found) = discover_socket() {
+            select_path(console, found.display().to_string());
+        }
+    }
+    let summary = output
+        .lines()
+        .find(|line| line.contains("enrolled ") || line.contains("handshake with the server"))
+        .unwrap_or("joined network and started tunnel service")
+        .trim();
+    Ok(Done {
+        message: summary.to_owned(),
+        command: None,
+    })
+}
+
+fn setup_server_at(console: &Arc<Console>, fields: &ServerSetupFields) -> Result<Done, String> {
+    actions::validate_server_setup_fields(fields)?;
+    let addr = fields.address.trim();
+    let listen = fields.listen.trim();
+    let endpoint = fields.public_endpoint.trim();
+    let output = run_ops_with_stdin(&["setup-server", addr, listen, endpoint], None)?;
+    if console.current_socket().is_none() {
+        if let Some(found) = discover_socket() {
+            select_path(console, found.display().to_string());
+        }
+    }
+    let summary = output
+        .lines()
+        .find(|line| line.contains("server ready") || line.contains("vallum0"))
+        .unwrap_or("server initialized and service started")
+        .trim();
+    Ok(Done {
+        message: summary.to_owned(),
+        command: None,
+    })
+}
+
+fn close_enrollment_at(socket: Option<&std::path::Path>, ssh_target: &str) -> Result<Done, String> {
+    let target = ssh_target.trim();
+    if !target.is_empty() {
+        let valid_target = actions::validate_ssh_target(target)?;
+        let output = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                valid_target,
+                "sudo -n /usr/bin/vallum server enroll --disable",
+            ])
+            .output()
+            .map_err(|e| format!("cannot run ssh to {valid_target}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "closing enrollment on `{valid_target}` failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return Ok(Done {
+            message: format!("closed UDP 51821 enrollment responder on `{valid_target}`"),
+            command: None,
+        });
+    }
+    let iface = socket
+        .and_then(|s| s.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("vallum0");
+    let _ = actions::validate_peer_name(iface)?;
+    run_ops_with_stdin(&["enroll-off", iface], None)?;
+    Ok(Done {
+        message: format!("closed UDP 51821 enrollment responder for `{iface}`"),
+        command: None,
+    })
 }
 
 #[tauri::command]
@@ -322,6 +469,25 @@ fn finalize_peer(console: State<'_, Arc<Console>>, name: String) -> Result<Done,
 fn invite_peer(console: State<'_, Arc<Console>>, fields: InviteFields) -> Result<Done, String> {
     let socket = selected(&console)?;
     invite_at(&socket, &fields)
+}
+
+#[tauri::command]
+fn join_network(console: State<'_, Arc<Console>>, fields: JoinFields) -> Result<Done, String> {
+    join_network_at(&console, &fields)
+}
+
+#[tauri::command]
+fn setup_server(
+    console: State<'_, Arc<Console>>,
+    fields: ServerSetupFields,
+) -> Result<Done, String> {
+    setup_server_at(&console, &fields)
+}
+
+#[tauri::command]
+fn close_enrollment(console: State<'_, Arc<Console>>, ssh_target: String) -> Result<Done, String> {
+    let socket = console.current_socket();
+    close_enrollment_at(socket.as_deref(), &ssh_target)
 }
 
 /// A bundle export reads the snapshot and mints randomness; nothing is
@@ -428,8 +594,7 @@ fn save_runtime_at(socket: &std::path::Path) -> Result<Done, String> {
 
 #[tauri::command]
 fn generate_key(console: State<'_, Arc<Console>>) -> Result<KeyOut, String> {
-    let socket = selected(&console)?;
-    actions::generate_key(&socket)
+    actions::generate_key(console.current_socket().as_deref())
 }
 
 #[tauri::command]
@@ -622,11 +787,6 @@ pub(crate) fn dispatch(
     name: &str,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let socket = console
-        .current_socket()
-        .ok_or_else(|| "no interface selected".to_owned())?;
-    // Every arm answers JSON: `Done` for the writes, `BundleOut` for the
-    // export. The transports serialise the value untouched.
     // The Tauri commands take `fields: PeerFields` (a named argument, so the
     // IPC body is `{"fields": {...}}`); the HTTP body is the arguments object
     // itself. Unwrap once here so both transports feed the same functions.
@@ -641,6 +801,57 @@ pub(crate) fn dispatch(
             .ok_or_else(|| format!("missing `{key}`"))
     };
     let answer = |done: Done| serde_json::to_value(done).map_err(|error| error.to_string());
+
+    // Onboarding commands must work on a fresh host before any tunnel socket exists.
+    match name {
+        "join_network" => {
+            let fields: JoinFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
+            return answer(join_network_at(console, &fields)?);
+        }
+        "setup_server" => {
+            let fields: ServerSetupFields =
+                serde_json::from_value(body).map_err(|e| e.to_string())?;
+            return answer(setup_server_at(console, &fields)?);
+        }
+        "close_enrollment" => {
+            let ssh_target = text("sshTarget")?;
+            let socket = console.current_socket();
+            return answer(close_enrollment_at(socket.as_deref(), &ssh_target)?);
+        }
+        "qr_frame" => {
+            let index = body
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "missing `index`".to_owned())?;
+            return serde_json::to_value(actions::qr_frame(&text("text")?, index as usize)?)
+                .map_err(|error| error.to_string());
+        }
+        "import_bundle" => {
+            // `outDir` is optional: a missing key means "the interface's
+            // config directory", not a client error. `text` rejects absence,
+            // so the key is read directly here.
+            let out_dir = body
+                .get("outDir")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let socket = console
+                .current_socket()
+                .unwrap_or_else(|| PathBuf::from("/run/vallum/vallum0.sock"));
+            return answer(import_at(&socket, &text("bundlePath")?, &out_dir)?);
+        }
+        "generate_key" => {
+            return serde_json::to_value(actions::generate_key(
+                console.current_socket().as_deref(),
+            )?)
+            .map_err(|error| error.to_string());
+        }
+        _ => {}
+    }
+
+    let socket = console
+        .current_socket()
+        .ok_or_else(|| "no interface selected".to_owned())?;
     match name {
         "add_peer" => {
             let fields: PeerFields =
@@ -668,9 +879,6 @@ pub(crate) fn dispatch(
             let fields: InviteFields = serde_json::from_value(body).map_err(|e| e.to_string())?;
             answer(invite_at(&socket, &fields)?)
         }
-        "generate_key" => {
-            serde_json::to_value(actions::generate_key(&socket)?).map_err(|error| error.to_string())
-        }
         "read_config" => {
             serde_json::to_value(config_text_at(&socket)?).map_err(|error| error.to_string())
         }
@@ -690,25 +898,6 @@ pub(crate) fn dispatch(
             &text("endpoint")?,
         )?)
         .map_err(|error| error.to_string()),
-        "qr_frame" => {
-            let index = body
-                .get("index")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "missing `index`".to_owned())?;
-            serde_json::to_value(actions::qr_frame(&text("text")?, index as usize)?)
-                .map_err(|error| error.to_string())
-        }
-        "import_bundle" => {
-            // `outDir` is optional: a missing key means "the interface's
-            // config directory", not a client error. `text` rejects absence,
-            // so the key is read directly here.
-            let out_dir = body
-                .get("outDir")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_owned();
-            answer(import_at(&socket, &text("bundlePath")?, &out_dir)?)
-        }
         "apply_device" => answer(actions::apply_device(
             &socket,
             &text("listenPort")?,
@@ -846,6 +1035,13 @@ pub(crate) fn apply(confirm: &str) -> Result<String, String> {
                     String::from_utf8_lossy(&result.stdout),
                     String::from_utf8_lossy(&result.stderr)
                 );
+                if program == "sudo"
+                    && !result.status.success()
+                    && sudo_may_succeed_via_pkexec(&text)
+                {
+                    last = text.trim().to_owned();
+                    continue;
+                }
                 let verdict = if result.status.success() {
                     "ok"
                 } else {
@@ -911,6 +1107,13 @@ fn run_ops_revert() -> Result<String, String> {
                     String::from_utf8_lossy(&result.stdout),
                     String::from_utf8_lossy(&result.stderr)
                 );
+                if program == "sudo"
+                    && !result.status.success()
+                    && sudo_may_succeed_via_pkexec(&text)
+                {
+                    last = text.trim().to_owned();
+                    continue;
+                }
                 return if result.status.success() {
                     Ok(text.trim().to_owned())
                 } else {
@@ -1051,9 +1254,19 @@ pub(crate) fn service_action(socket: &std::path::Path, action: &str) -> Result<D
                 });
             }
             Ok(output) => {
-                last_error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                last_error = combined.trim().to_owned();
                 if last_error.is_empty() {
                     last_error = format!("{program} exited {}", output.status);
+                }
+                // Same rule as run_ops_with_stdin: pkexec is only worth it
+                // when sudo never reached ops.
+                if program != "sudo" || !sudo_may_succeed_via_pkexec(&combined) {
+                    return Err(format!("cannot {action} {unit}: {last_error}"));
                 }
             }
             Err(error) => last_error = format!("{program}: {error}"),
@@ -1087,6 +1300,82 @@ pub(crate) fn logs_tail(socket: &std::path::Path, lines: u32) -> serde_json::Val
         }),
         Err(error) => serde_json::json!({ "unit": unit, "error": error.to_string() }),
     }
+}
+
+/// sudo's own *authorization* refusals — the only failures where the pkexec
+/// fallback can still reach ops. Anything else is ops' own verdict (or a
+/// missing binary pkexec cannot fix either), and re-running it under pkexec
+/// fires the privileged command twice behind a desktop auth dialog.
+fn sudo_may_succeed_via_pkexec(output: &str) -> bool {
+    output.contains("password is required")
+        || output.contains("terminal is required")
+        || output.contains("not allowed to execute")
+        || output.contains("not in the sudoers")
+        || output.contains("sudoers sources")
+}
+
+/// Run a privileged `vallum-ops` subcommand (with optional stdin payload),
+/// trying direct execution when root, `sudo -n`, and `pkexec`.
+fn run_ops_with_stdin(ops_args: &[&str], stdin_data: Option<&str>) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut attempts: Vec<(&str, Vec<&str>)> = Vec::new();
+    if effective_uid() == 0 {
+        attempts.push(("/usr/local/sbin/vallum-ops", ops_args.to_vec()));
+    } else {
+        let mut sudo_args = vec!["-n", "/usr/local/sbin/vallum-ops"];
+        sudo_args.extend_from_slice(ops_args);
+        attempts.push(("sudo", sudo_args));
+
+        let mut pkexec_args = vec!["/usr/local/sbin/vallum-ops"];
+        pkexec_args.extend_from_slice(ops_args);
+        attempts.push(("pkexec", pkexec_args));
+    }
+
+    let mut last_error =
+        String::from("cannot run /usr/local/sbin/vallum-ops (is the ops sudoers rule installed?)");
+    for (program, args) in attempts {
+        let mut cmd = Command::new(program);
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if stdin_data.is_some() {
+            cmd.stdin(Stdio::piped());
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            continue;
+        };
+        if let Some(input) = stdin_data {
+            if let Some(mut child_stdin) = child.stdin.take() {
+                let _ = writeln!(child_stdin, "{input}");
+            }
+        }
+        if let Ok(output) = child.wait_with_output() {
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if output.status.success() {
+                return Ok(combined);
+            }
+            let trimmed = combined.trim();
+            if !trimmed.is_empty() {
+                last_error = trimmed.to_owned();
+            } else {
+                last_error = format!("{program} exited {}", output.status);
+            }
+            // Only sudo's authorization refusals justify the pkexec retry —
+            // it can still reach ops where the sudoers rule is missing. Any
+            // other failure IS ops' answer (or a missing binary pkexec cannot
+            // fix): returning it avoids a pointless dialog and a second run.
+            if program != "sudo" || !sudo_may_succeed_via_pkexec(&combined) {
+                return Err(last_error);
+            }
+        }
+    }
+    Err(last_error)
 }
 
 /// The effective uid, without pulling libc in for one number.
@@ -1240,6 +1529,9 @@ fn main() {
             read_interface_fields,
             apply_interface,
             save_runtime,
+            join_network,
+            setup_server,
+            close_enrollment,
             plan_command,
             apply_command,
             cancel_apply,
@@ -1319,6 +1611,9 @@ mod transport_parity_tests {
         "read_interface_fields",
         "apply_interface",
         "save_runtime",
+        "join_network",
+        "setup_server",
+        "close_enrollment",
     ];
 
     /// Every canonical command must reach a real arm on the HTTP transport.

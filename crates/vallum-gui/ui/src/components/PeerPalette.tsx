@@ -93,6 +93,25 @@ export function PeerPalette({
       <CommandInput placeholder="Type a command or find a peer…" />
       <CommandList>
         <CommandEmpty>No command or peer matches.</CommandEmpty>
+        <CommandGroup heading="Network">
+          <CommandItem
+            value="join network (ticket / ssh)…"
+            keywords={["join", "enroll", "ticket", "ssh", "connect", "onboard"]}
+            onSelect={() => fire("join-network-btn")}
+          >
+            <Tag label="JOIN" />
+            <span className="min-w-0 flex-1 truncate">join network (ticket / ssh)…</span>
+          </CommandItem>
+          <CommandItem
+            value="initialize this machine as server…"
+            keywords={["server", "host", "setup", "subnet", "nat", "init"]}
+            onSelect={() => fire("setup-server-btn")}
+          >
+            <Tag label="HOST" />
+            <span className="min-w-0 flex-1 truncate">initialize this machine as server…</span>
+          </CommandItem>
+        </CommandGroup>
+
         <CommandGroup heading="Peer">
           <CommandItem
             value="add peer…"

@@ -164,6 +164,12 @@ export function panicNow(): Promise<{ message: string }> {
   return http("/api/panic", { method: "POST" })
 }
 
+export interface SshHost {
+  alias: string
+  hostname: string
+  user?: string | null
+}
+
 export interface Preflight {
   vallum: boolean
   quick: boolean
@@ -175,6 +181,8 @@ export interface Preflight {
   runtime_dir: string
   runtime_mode: string
   sockets: number
+  /** Non-wildcard Host entries from ~/.ssh/config, for one-click SSH targets. */
+  ssh_hosts?: SshHost[]
 }
 
 /** What is on this host, read from disk and systemd. Changes nothing. */

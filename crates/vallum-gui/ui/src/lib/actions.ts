@@ -24,6 +24,8 @@ export interface InviteFields {
   name: string
   ttl_minutes: string
   pinned: string
+  /** Optional remote server SSH target; mints the invite on that server. */
+  ssh_target: string
 }
 
 /** What an export answers: the bundle as JSON text plus the file name the
@@ -51,6 +53,31 @@ export const rotatePeer = (name: string, newLine: string) =>
   command<Done>("rotate_peer", { name, newLine })
 export const finalizePeer = (name: string) => command<Done>("finalize_peer", { name })
 export const invitePeer = (fields: InviteFields) => command<Done>("invite_peer", { fields })
+
+/** Fields for the client onboarding flow: paste a join ticket, or SSH enrol. */
+export interface JoinFields {
+  mode: string
+  ticket: string
+  ssh_target: string
+  name: string
+}
+
+export const joinNetwork = (fields: JoinFields) =>
+  command<Done>("join_network", { fields })
+
+/** Fields for the "Host a Server" wizard. */
+export interface ServerSetupFields {
+  address: string
+  listen: string
+  public_endpoint: string
+}
+
+export const setupServer = (fields: ServerSetupFields) =>
+  command<Done>("setup_server", { fields })
+
+/** Close the temporary UDP 51821 enrolment responder (locally or over SSH). */
+export const closeEnrollment = (sshTarget: string) =>
+  command<Done>("close_enrollment", { sshTarget })
 
 export const exportBundle = (fingerprint: string, endpoint: string) =>
   command<BundleOut>("export_bundle", { fingerprint, endpoint })

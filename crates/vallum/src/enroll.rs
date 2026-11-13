@@ -810,17 +810,10 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             "[enroll] is not enabled in this config; set `enabled = true`".to_owned(),
         ));
     }
-    let listen = config
-        .interface
-        .listen
-        .as_deref()
-        .and_then(|listen| {
-            listen
-                .rsplit_once(':')
-                .and_then(|(_, port)| port.parse::<u16>().ok())
-        })
-        .unwrap_or(51820);
-    let port = enroll.port.unwrap_or_else(|| listen.saturating_add(1));
+    // The same derivation `server enroll` uses, so a config that would mint
+    // invites for an unbindable port (ephemeral listen, or a port below the
+    // responder's capabilities) fails here rather than crash-looping.
+    let port = crate::commands::server::enroll_port(&config)?;
     let interface = config
         .interface
         .name

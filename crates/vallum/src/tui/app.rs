@@ -454,6 +454,8 @@ pub enum FormKind {
     ExportBundle,
     ImportBundle,
     Interface,
+    JoinNetwork,
+    SetupServer,
 }
 
 #[derive(Debug, Clone)]
@@ -725,11 +727,78 @@ impl Form {
                     masked: false,
                     placeholder: "optional vallum1:... to bind token to one key",
                 },
+                Field {
+                    label: "remote SSH (optional)",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "user@host or ~/.ssh/config alias — mint on that server",
+                },
             ],
             focus: 0,
             cursor: 0,
             error: None,
             kind: FormKind::InvitePeer,
+        }
+    }
+
+    /// First-contact client onboarding: paste a `vallum1-join:` ticket, or an
+    /// SSH target (`user@host` / config alias) for zero-custody enrolment.
+    /// Both paths keep this device's private key on the device.
+    #[must_use]
+    pub fn join_network() -> Self {
+        Self {
+            title: "Join a network".to_owned(),
+            fields: vec![
+                Field {
+                    label: "ticket or user@host",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "vallum1-join:... ticket, or user@vpn.example.com",
+                },
+                Field {
+                    label: "device name (optional)",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "SSH enrolment only — empty picks hostname",
+                },
+            ],
+            focus: 0,
+            cursor: 0,
+            error: None,
+            kind: FormKind::JoinNetwork,
+        }
+    }
+
+    /// Initialise this machine as a server: writes the config, enables
+    /// forwarding and NAT, and starts the daemon — all through `vallum-ops`.
+    #[must_use]
+    pub fn setup_server() -> Self {
+        Self {
+            title: "Host a Vallum server".to_owned(),
+            fields: vec![
+                Field {
+                    label: "tunnel subnet",
+                    value: "10.7.0.1/20".to_owned(),
+                    masked: false,
+                    placeholder: "e.g. 10.7.0.1/20",
+                },
+                Field {
+                    label: "listen",
+                    value: "0.0.0.0:51820".to_owned(),
+                    masked: false,
+                    placeholder: "e.g. 0.0.0.0:51820",
+                },
+                Field {
+                    label: "public endpoint (optional)",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "vpn.example.com:51820 — empty auto-detects",
+                },
+            ],
+            focus: 0,
+            cursor: 0,
+            error: None,
+            kind: FormKind::SetupServer,
         }
     }
 
