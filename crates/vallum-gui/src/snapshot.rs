@@ -46,6 +46,14 @@ pub struct Counters {
     pub refusals: u64,
     pub reassembled: u64,
     pub fragments_dropped: u64,
+    pub dropped_malformed: u64,
+    pub dropped_unknown_index: u64,
+    pub fragments_rate_limited: u64,
+    pub handshake_dropped_no_mac: u64,
+    pub handshake_dropped_unidentifiable: u64,
+    pub handshake_dropped_unknown_peer: u64,
+    pub handshake_dropped_endpoint_conflict: u64,
+    pub handshake_dropped_stale: u64,
 }
 
 /// One peer, safe to serialise.
@@ -64,6 +72,16 @@ pub struct Peer {
     pub last_handshake_nsec: u32,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    pub window_sent: u64,
+    pub window_received: u64,
+    pub last_received_ms: Option<u64>,
+    pub last_sent_ms: Option<u64>,
+    pub dropped_no_session: u64,
+    pub dropped_replay: u64,
+    pub dropped_allowed_ips: u64,
+    pub dropped_after_auth: u64,
+    pub reinit_offered: u64,
+    pub last_rejected_source: Option<String>,
     pub epoch: u64,
     pub rotating: bool,
     pub valid_until: Option<u64>,
@@ -130,6 +148,35 @@ impl Snapshot {
                 refusals: number(&response.device, field::VALLUM_REFUSALS),
                 reassembled: number(&response.device, field::VALLUM_REASSEMBLED),
                 fragments_dropped: number(&response.device, field::VALLUM_FRAGMENTS_DROPPED),
+                dropped_malformed: number(&response.device, field::VALLUM_DROPPED_MALFORMED),
+                dropped_unknown_index: number(
+                    &response.device,
+                    field::VALLUM_DROPPED_UNKNOWN_INDEX,
+                ),
+                fragments_rate_limited: number(
+                    &response.device,
+                    field::VALLUM_FRAGMENTS_RATE_LIMITED,
+                ),
+                handshake_dropped_no_mac: number(
+                    &response.device,
+                    field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,
+                ),
+                handshake_dropped_unidentifiable: number(
+                    &response.device,
+                    field::VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE,
+                ),
+                handshake_dropped_unknown_peer: number(
+                    &response.device,
+                    field::VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER,
+                ),
+                handshake_dropped_endpoint_conflict: number(
+                    &response.device,
+                    field::VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT,
+                ),
+                handshake_dropped_stale: number(
+                    &response.device,
+                    field::VALLUM_HANDSHAKE_DROPPED_STALE,
+                ),
             },
             peers: response.peers.iter().map(|section| peer(section)).collect(),
         }
@@ -162,6 +209,18 @@ fn peer(section: &[(String, String)]) -> Peer {
             .unwrap_or(0),
         tx_bytes: number(section, field::TX_BYTES),
         rx_bytes: number(section, field::RX_BYTES),
+        window_sent: number(section, field::WINDOW_SENT),
+        window_received: number(section, field::WINDOW_RECEIVED),
+        last_received_ms: get(field::LAST_RECEIVED_MS).and_then(|value| value.parse().ok()),
+        last_sent_ms: get(field::LAST_SENT_MS).and_then(|value| value.parse().ok()),
+        dropped_no_session: number(section, field::DROPPED_NO_SESSION),
+        dropped_replay: number(section, field::DROPPED_REPLAY),
+        dropped_allowed_ips: number(section, field::DROPPED_ALLOWED_IPS),
+        dropped_after_auth: number(section, field::VALLUM_DROPPED_AFTER_AUTH),
+        reinit_offered: number(section, field::REINIT_OFFERED),
+        last_rejected_source: get(field::LAST_REJECTED_SOURCE)
+            .filter(|value| !value.is_empty() && *value != "-")
+            .map(str::to_owned),
         epoch: number(section, field::VALLUM_EPOCH),
         rotating: get(field::VALLUM_ROTATING) == Some("1"),
         valid_until: get(field::VALLUM_VALID_UNTIL).and_then(|value| value.parse().ok()),
@@ -220,6 +279,8 @@ mod tests {
                 "vallum_batching=0\n",
                 "vallum_datagrams_sent=42\n",
                 "vallum_handshakes_established=7\n",
+                "vallum_fragments_rate_limited=3\n",
+                "vallum_handshake_dropped_stale=2\n",
                 "errno=0\n",
                 "\n",
                 "public_key=peerpub==\n",
@@ -233,6 +294,11 @@ mod tests {
                 "last_handshake_time_nsec=5\n",
                 "tx_bytes=1024\n",
                 "rx_bytes=2048\n",
+                "vallum_window_sent=12\n",
+                "vallum_window_received=15\n",
+                "vallum_last_received_ms=450\n",
+                "vallum_dropped_after_auth=1\n",
+                "vallum_last_rejected_source=192.0.2.99\n",
                 "vallum_epoch=3\n",
                 "vallum_rotating=1\n",
                 "errno=0\n",
@@ -252,6 +318,8 @@ mod tests {
         assert!(!snapshot.batching);
         assert_eq!(snapshot.counters.datagrams_sent, 42);
         assert_eq!(snapshot.counters.established, 7);
+        assert_eq!(snapshot.counters.fragments_rate_limited, 3);
+        assert_eq!(snapshot.counters.handshake_dropped_stale, 2);
 
         let peer = &snapshot.peers[0];
         assert_eq!(peer.name, "laptop");
@@ -261,6 +329,11 @@ mod tests {
         assert_eq!(peer.last_handshake_nsec, 5);
         assert_eq!(peer.tx_bytes, 1024);
         assert_eq!(peer.rx_bytes, 2048);
+        assert_eq!(peer.window_sent, 12);
+        assert_eq!(peer.window_received, 15);
+        assert_eq!(peer.last_received_ms, Some(450));
+        assert_eq!(peer.dropped_after_auth, 1);
+        assert_eq!(peer.last_rejected_source.as_deref(), Some("192.0.2.99"));
         assert_eq!(peer.epoch, 3);
         assert!(peer.rotating);
     }

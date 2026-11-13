@@ -44,6 +44,21 @@ pub struct InviteFields {
     pub pinned: String,
 }
 
+/// The fields of the interface config form, as typed.
+///
+/// Mirrors the TUI's `FormKind::Interface`: `[interface]` (`listen`, `mtu`,
+/// `fwmark`, `addresses`) and `[quick]` (`dns`, `table`).
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct InterfaceFields {
+    pub listen: String,
+    pub mtu: String,
+    pub fwmark: String,
+    pub addresses: String,
+    pub dns: String,
+    pub table: String,
+}
+
 /// The fields of the peer form, as typed.
 ///
 /// `#[serde(default)]` throughout: an edit form sends the fields it has and
@@ -75,6 +90,35 @@ impl Done {
             command: None,
         }
     }
+}
+
+/// Validate a peer name before sending it to the daemon or minting an invite.
+///
+/// Linux network interface names (`vallum-<name>`) cap at 15 characters and
+/// enrollment configs only permit `[A-Za-z0-9._-]` starting with an alphanumeric
+/// character, so rejecting spaces, slashes, leading dots/hyphens, and
+/// over-long names here catches bugs identically across Tauri and HTTP.
+pub(crate) fn validate_peer_name(raw: &str) -> Result<&str, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("peer name is required".to_owned());
+    }
+    if name.len() > 15 {
+        return Err(format!(
+            "peer name must be 15 characters or fewer (got {}) — Linux interface names cap at 15 chars",
+            name.len()
+        ));
+    }
+    let mut chars = name.chars();
+    let valid_first = chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric());
+    let valid_rest = chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+    if !valid_first || !valid_rest {
+        return Err(
+            "peer name may only contain letters, digits, '.', '_', or '-', and must start with a letter or digit"
+                .to_owned(),
+        );
+    }
+    Ok(name)
 }
 
 /// Add a peer to the running device.
@@ -165,10 +209,20 @@ pub fn apply_device(path: &Path, listen_port: &str, fwmark: &str) -> Result<Done
     };
     let fwmark = match fwmark.trim() {
         "" => None,
-        text => Some(
-            text.parse::<u32>()
-                .map_err(|_| "fwmark is not a number".to_owned())?,
-        ),
+        text if text.eq_ignore_ascii_case("off") => Some(0),
+        text => {
+            let parsed =
+                if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16)
+                } else {
+                    text.parse::<u32>()
+                };
+            Some(
+                parsed.map_err(|_| {
+                    "fwmark must be 'off', decimal, or hex (e.g. 0xca6c)".to_owned()
+                })?,
+            )
+        }
     };
     if listen_port.is_none() && fwmark.is_none() {
         return Err("nothing to apply".to_owned());
@@ -258,10 +312,7 @@ pub fn invite(
     public_line: &str,
     fields: &InviteFields,
 ) -> Result<Done, String> {
-    let name = fields.name.trim();
-    if name.is_empty() {
-        return Err("peer name is required".to_owned());
-    }
+    let name = validate_peer_name(&fields.name)?;
     // A blank TTL is the common case — the operator wants "an invite, now".
     // The field says blank means the default, so blank must mean the default.
     const DEFAULT_TTL_MINUTES: u64 = 60;
@@ -274,8 +325,8 @@ pub fn invite(
             .parse()
             .map_err(|_| "TTL must be a whole number of minutes".to_owned())?
     };
-    if minutes == 0 {
-        return Err("TTL must be at least 1 minute".to_owned());
+    if !(1..=10_080).contains(&minutes) {
+        return Err("TTL must be between 1 and 10080 minutes (7 days)".to_owned());
     }
     let pinned = match fields.pinned.trim() {
         "" => None,
@@ -362,10 +413,14 @@ fn build(fields: &PeerFields, suite: u16, update_only: bool) -> Result<Peer, Str
     let endpoint = form::parse_endpoint(&fields.endpoint)?;
     let keepalive = form::parse_keepalive(&fields.keepalive)?;
     let preshared_key = form::parse_psk(&fields.preshared_key)?;
-    let name = fields.name.trim();
+    let name = if fields.name.trim().is_empty() {
+        None
+    } else {
+        Some(validate_peer_name(&fields.name)?.to_owned())
+    };
     Ok(Peer {
         public_key: Some(identity.kem().as_bytes().to_vec()),
-        name: (!name.is_empty()).then(|| name.to_owned()),
+        name,
         preshared_key: preshared_key.map(Some),
         endpoint: endpoint.map(Some),
         keepalive,
@@ -473,7 +528,16 @@ pub fn generate_key(path: &Path) -> Result<KeyOut, String> {
 ///
 /// No readable config names this socket, or it cannot be read.
 pub fn read_config(config: &Path) -> Result<String, String> {
-    std::fs::read_to_string(config).map_err(|error| format!("read {}: {error}", config.display()))
+    std::fs::read_to_string(config).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "permission denied reading {} (mode 0600 root) — edit from a root shell or run: sudo vallum tui",
+                config.display()
+            )
+        } else {
+            format!("read {}: {error}", config.display())
+        }
+    })
 }
 
 /// Write edited config text back, validated before it lands. The current file
@@ -605,15 +669,18 @@ pub fn qr_frame(text: &str, index: usize) -> Result<QrFrame, String> {
 pub fn import_bundle(bundle_path: &str, out_dir: &str) -> Result<Done, String> {
     let bundle =
         vallum::bundle::read(Path::new(bundle_path.trim())).map_err(|error| error.to_string())?;
-    match vallum::bundle::import(&bundle, Path::new(out_dir), false) {
+    // The operator explicitly invoked bundle import from the GUI (the one flow
+    // where a `.vallum-bundle` carries a shipped client key); keep hooks refused.
+    match vallum::bundle::import_with_policy(&bundle, Path::new(out_dir), false, false, false, true)
+    {
         Ok(imported) => Ok(Done::message(format!(
-            "imported `{}`: config {} (key {})",
+            "imported `{}`: config {} (key {}) — note: this key travelled in the bundle",
             bundle.name,
             imported.config.display(),
             imported.key.display()
         ))),
         Err(error) => Err(format!(
-            "{error}\n\nThis console could not write there. Run `sudo vallum import-bundle \"{bundle_path}\"` from a terminal for the same import."
+            "{error}\n\nThis console could not write there. Run `sudo vallum import-bundle --allow-shipped-key \"{bundle_path}\"` from a terminal for the same import."
         )),
     }
 }
@@ -622,6 +689,281 @@ fn invite_privileged(error: impl std::fmt::Display) -> String {
     format!(
         "{error}\n\nThe invite file lives in the daemon's runtime directory, which this console cannot write. Run the console as root, or run `sudo vallum peer invite --help` for the same change from a terminal."
     )
+}
+
+/// Read `[interface]` and `[quick]` fields from an interface config file for
+/// the structured interface form (matching TUI `Action::InterfaceForm`).
+///
+/// # Errors
+///
+/// If the config cannot be read or does not parse as TOML.
+pub fn read_interface_fields(config: &Path) -> Result<InterfaceFields, String> {
+    let text = read_config(config)?;
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("parse {}: {error}", config.display()))?;
+    let string = |key: &str| {
+        doc.get("interface")
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+    let integer = |key: &str| {
+        doc.get("interface")
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_integer())
+            .map_or_else(String::new, |value| value.to_string())
+    };
+    let list = |table_name: &str, key: &str| {
+        doc.get(table_name)
+            .and_then(|item| item.get(key))
+            .and_then(|item| item.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    Ok(InterfaceFields {
+        listen: string("listen"),
+        mtu: integer("mtu"),
+        fwmark: integer("fwmark"),
+        addresses: list("interface", "addresses"),
+        dns: list("quick", "dns"),
+        table: doc
+            .get("quick")
+            .and_then(|item| item.get("table"))
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_owned(),
+    })
+}
+
+fn validate_interface_fields(fields: &InterfaceFields) -> Result<(), String> {
+    let listen = fields.listen.trim();
+    if !listen.is_empty() {
+        listen.parse::<std::net::SocketAddr>().map_err(|_| {
+            "listen must be an IP:port (e.g. 0.0.0.0:51820 or [::]:51820)".to_owned()
+        })?;
+    }
+    let mtu = fields.mtu.trim();
+    if !mtu.is_empty() {
+        let parsed: u16 = mtu
+            .parse()
+            .map_err(|_| "mtu must be 576–65535 (or 0 for auto)".to_owned())?;
+        if parsed != 0 && parsed < 576 {
+            return Err("mtu must be 576–65535 (or 0 for auto)".to_owned());
+        }
+    }
+    let fwmark = fields.fwmark.trim();
+    if !fwmark.is_empty() {
+        let valid = if let Some(hex) = fwmark
+            .strip_prefix("0x")
+            .or_else(|| fwmark.strip_prefix("0X"))
+        {
+            u32::from_str_radix(hex, 16).is_ok()
+        } else {
+            fwmark.parse::<u32>().is_ok()
+        };
+        if !valid {
+            return Err("fwmark must be a decimal integer or 0x hex".to_owned());
+        }
+    }
+    let addresses = fields.addresses.trim();
+    if !addresses.is_empty() {
+        for raw in addresses
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !raw.contains('/') {
+                return Err(format!(
+                    "address `{raw}` must use CIDR notation (e.g. 10.7.0.1/24)"
+                ));
+            }
+            form::parse_prefixes(raw).map_err(|error| format!("addresses: {error}"))?;
+        }
+    }
+    let dns = fields.dns.trim();
+    if !dns.is_empty() {
+        for raw in dns.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            raw.parse::<std::net::IpAddr>()
+                .map_err(|_| format!("DNS entry `{raw}` is not a valid IP address"))?;
+        }
+    }
+    let table = fields.table.trim();
+    if !table.is_empty() && !matches!(table, "auto" | "off") && table.parse::<u32>().is_err() {
+        return Err("table must be `auto`, `off`, or a routing table number".to_owned());
+    }
+    Ok(())
+}
+
+/// Apply structured `[interface]` and `[quick]` settings to the config file
+/// with backup + parser validation (matching TUI `apply_interface_form`).
+///
+/// # Errors
+///
+/// Validation error, unreadable/unwritable config, or invalid resulting TOML.
+pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, String> {
+    validate_interface_fields(fields)?;
+    let text = read_config(config)?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("parse {}: {error}", config.display()))?;
+    if doc.get("interface").is_none() {
+        doc["interface"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let interface = doc["interface"]
+        .as_table_mut()
+        .ok_or_else(|| "config `[interface]` is not a TOML table".to_owned())?;
+
+    let set_string = |table: &mut toml_edit::Table, key: &str, value: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            table.remove(key);
+        } else {
+            table[key] = toml_edit::value(trimmed);
+        }
+    };
+    set_string(interface, "listen", &fields.listen);
+
+    let mtu = fields.mtu.trim();
+    if mtu.is_empty() {
+        interface.remove("mtu");
+    } else {
+        let parsed: i64 = mtu.parse().map_err(|_| "mtu is not a number".to_owned())?;
+        interface["mtu"] = toml_edit::value(parsed);
+    }
+
+    let fwmark = fields.fwmark.trim();
+    if fwmark.is_empty() {
+        interface.remove("fwmark");
+    } else {
+        let parsed = if let Some(hex) = fwmark
+            .strip_prefix("0x")
+            .or_else(|| fwmark.strip_prefix("0X"))
+        {
+            u32::from_str_radix(hex, 16).map_err(|_| "fwmark is not valid hex".to_owned())?
+        } else {
+            fwmark
+                .parse::<u32>()
+                .map_err(|_| "fwmark is not a number".to_owned())?
+        };
+        interface["fwmark"] = toml_edit::value(i64::from(parsed));
+    }
+
+    for (table_name, key, raw) in [
+        ("interface", "addresses", fields.addresses.as_str()),
+        ("quick", "dns", fields.dns.as_str()),
+    ] {
+        let entries: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if doc.get(table_name).is_none() {
+            if entries.is_empty() {
+                continue;
+            }
+            doc[table_name] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let table = doc[table_name]
+            .as_table_mut()
+            .ok_or_else(|| format!("config `[{table_name}]` is not a TOML table"))?;
+        if entries.is_empty() {
+            table.remove(key);
+        } else {
+            let mut array = toml_edit::Array::new();
+            for entry in entries {
+                array.push(entry);
+            }
+            table[key] = toml_edit::Item::Value(toml_edit::Value::Array(array));
+        }
+    }
+
+    if !fields.table.trim().is_empty() || doc.get("quick").is_some() {
+        if doc.get("quick").is_none() {
+            doc["quick"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(table) = doc["quick"].as_table_mut() {
+            set_string(table, "table", &fields.table);
+        }
+    }
+
+    let done = write_config(config, &doc.to_string())?;
+    Ok(Done::message(format!(
+        "interface config updated — {}",
+        done.message
+    )))
+}
+
+/// Snapshot the running daemon's peer table and persist it back to the
+/// interface's TOML config file (matching TUI `Action::SaveRuntime`).
+///
+/// # Errors
+///
+/// If the daemon socket cannot be read, or the config cannot be read/validated/written.
+pub fn save_runtime(path: &Path, config: &Path) -> Result<Done, String> {
+    let snap = snapshot::fetch(path)?;
+    let text = read_config(config)?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("parse {}: {error}", config.display()))?;
+
+    let mut peers_array = toml_edit::ArrayOfTables::new();
+    for peer in &snap.peers {
+        let mut table = toml_edit::Table::new();
+        if !peer.name.is_empty() {
+            table.insert(
+                "name",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.name.as_str())),
+            );
+        }
+        if !peer.public_line.is_empty() {
+            table.insert(
+                "public_key",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.public_line.as_str())),
+            );
+        }
+        if !peer.endpoint.is_empty() && peer.endpoint != "(none)" {
+            table.insert(
+                "endpoint",
+                toml_edit::Item::Value(toml_edit::Value::from(peer.endpoint.as_str())),
+            );
+        }
+        if !peer.allowed_ips.is_empty() {
+            let mut allowed_array = toml_edit::Array::new();
+            for ip in &peer.allowed_ips {
+                allowed_array.push(ip.as_str());
+            }
+            table.insert(
+                "allowed_ips",
+                toml_edit::Item::Value(toml_edit::Value::Array(allowed_array)),
+            );
+        }
+        if let Some(keepalive) = peer.keepalive {
+            if keepalive > 0 {
+                table.insert(
+                    "persistent_keepalive",
+                    toml_edit::Item::Value(toml_edit::Value::from(i64::from(keepalive))),
+                );
+            }
+        }
+        peers_array.push(table);
+    }
+    doc["peer"] = toml_edit::Item::ArrayOfTables(peers_array);
+
+    let done = write_config(config, &doc.to_string())?;
+    Ok(Done::message(format!(
+        "saved runtime configuration to {} ({} peers) — {}",
+        config.display(),
+        snap.peers.len(),
+        done.message
+    )))
 }
 
 #[cfg(test)]
@@ -695,5 +1037,125 @@ mod config_tests {
         assert!(frame.modules.contains(&1));
         let past = qr_frame(json, 1).expect_err("past the last frame");
         assert!(past.contains("frame 1"), "{past}");
+    }
+
+    #[test]
+    fn peer_name_validation_rejects_bad_names_and_allows_good_ones() {
+        for good in ["laptop", "node-01.wg", "a", "a_b-c.1", "123456789012345"] {
+            assert_eq!(validate_peer_name(good).unwrap(), good);
+        }
+        assert_eq!(validate_peer_name("  phone  ").unwrap(), "phone");
+        for bad in [
+            "",
+            "   ",
+            "-bad",
+            ".bad",
+            "../etc",
+            "my laptop",
+            "1234567890123456",
+            "node/1",
+        ] {
+            assert!(
+                validate_peer_name(bad).is_err(),
+                "{bad:?} must be rejected as an invalid peer name"
+            );
+        }
+    }
+
+    #[test]
+    fn invite_rejects_bad_peer_names_and_out_of_range_ttl() {
+        let bad_name = InviteFields {
+            name: "../bad name".to_owned(),
+            ttl_minutes: "15".to_owned(),
+            pinned: String::new(),
+        };
+        let err = invite("vallum0", None, None, "", &bad_name).expect_err("bad name rejected");
+        assert!(err.contains("peer name"), "{err}");
+
+        for bad_ttl in ["0", "10081", "abc"] {
+            let bad = InviteFields {
+                name: "phone".to_owned(),
+                ttl_minutes: bad_ttl.to_owned(),
+                pinned: String::new(),
+            };
+            assert!(
+                invite("vallum0", None, None, "", &bad).is_err(),
+                "ttl {bad_ttl:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn interface_fields_round_trip_and_validate() {
+        let dir = std::env::temp_dir().join(format!("vallum-gui-iface-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = config_file(&dir, "vallum0.toml");
+
+        let fields = read_interface_fields(&path).expect("read initial fields");
+        assert_eq!(fields.addresses, "10.7.0.1/32");
+        assert_eq!(fields.listen, "");
+
+        let updated = InterfaceFields {
+            listen: "0.0.0.0:51820".to_owned(),
+            mtu: "1420".to_owned(),
+            fwmark: "0xca6c".to_owned(),
+            addresses: "10.7.0.1/24, fd00:7::1/64".to_owned(),
+            dns: "1.1.1.1, 9.9.9.9".to_owned(),
+            table: "auto".to_owned(),
+        };
+        apply_interface(&path, &updated).expect("apply valid interface fields");
+
+        let reread = read_interface_fields(&path).expect("re-read updated fields");
+        assert_eq!(reread.listen, "0.0.0.0:51820");
+        assert_eq!(reread.mtu, "1420");
+        assert_eq!(reread.fwmark, "51820");
+        assert_eq!(reread.addresses, "10.7.0.1/24, fd00:7::1/64");
+        assert_eq!(reread.dns, "1.1.1.1, 9.9.9.9");
+        assert_eq!(reread.table, "auto");
+
+        let invalid = InterfaceFields {
+            mtu: "100".to_owned(),
+            ..updated
+        };
+        assert!(apply_interface(&path, &invalid).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_runtime_persists_live_peers_and_keeps_backup() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("vallum-gui-save-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let sock_path = dir.join("vallum0.sock");
+        let cfg_path = config_file(&dir, "vallum0.toml");
+
+        let listener = UnixListener::bind(&sock_path).expect("bind fake socket");
+        let peer_line = "vallum1:0003:aabbccdd:-";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf);
+            let reply = format!(
+                "vallum_interface=vallum0\nvallum_suite=0x0003\nerrno=0\n\n\
+                 public_key=aabbccdd\nvallum_name=phone\nvallum_public_line={peer_line}\n\
+                 endpoint=203.0.113.5:51820\nallowed_ip=10.7.0.2/32\npersistent_keepalive_interval=25\nerrno=0\n"
+            );
+            stream.write_all(reply.as_bytes()).expect("write reply");
+        });
+
+        let done = save_runtime(&sock_path, &cfg_path).expect("save runtime");
+        server.join().expect("server thread");
+        assert!(done.message.contains("1 peers"), "{}", done.message);
+        let written = std::fs::read_to_string(&cfg_path).expect("read config");
+        assert!(written.contains("name = \"phone\""), "{written}");
+        assert!(written.contains("10.7.0.2/32"), "{written}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   clearScreen: false,
@@ -22,5 +22,6 @@ export default defineConfig({
     target: "chrome110",
     minify: "esbuild",
     sourcemap: false,
+    chunkSizeWarningLimit: 650,
   },
 })

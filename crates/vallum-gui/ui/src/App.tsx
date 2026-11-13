@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ShieldOff } from "lucide-react"
+import {
+  Activity,
+  BookOpen,
+  KeyRound,
+  LayoutGrid,
+  ShieldCheck,
+  ShieldOff,
+  SlidersHorizontal,
+  User,
+  Users,
+} from "lucide-react"
 import { Toaster } from "@/components/ui/sonner"
 import {
   AddPeerDialog,
@@ -9,24 +19,34 @@ import {
   ExportBundleDialog,
   FinalizeButton,
   ImportBundleDialog,
+  InterfaceFormDialog,
   InviteDialog,
   KeygenButton,
   RemoveDialog,
   RotateDialog,
+  SaveRuntimeButton,
 } from "@/components/PeerDialogs"
-import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, watchWindowState, type Health, type PingResult, type Preflight } from "@/lib/bridge"
-import { LogsPanel, ServiceStrip, StoppedCard, useServiceState } from "@/components/Service"
-import { egressVerdict, HealthPanel } from "@/components/Health"
-import { verdictTone } from "@/lib/verdict"
+import { bytes, hasBridge, health, listInterfaces, onSnapshot, pingPeer, preflight, selectInterface, serviceState, watchWindowState, type Health, type PingResult, type Preflight, type ServiceStatus } from "@/lib/bridge"
+import { LogsPanel, ServiceStrip, StoppedCard } from "@/components/Service"
+import { HealthPanel } from "@/components/Health"
+import { egressVerdict, verdictTone } from "@/lib/verdict"
+import { formatError, suiteLabel } from "@/lib/validate"
+import { BoundaryGeometry, CryptoArchitecture, RampartSeal } from "@/components/BrandVisuals"
+import { DiagnosticCallout } from "@/components/DiagnosticCallout"
+import { DiagnosticsModal, type DiagnosticsTab } from "@/components/DiagnosticsModal"
 import { PeerPalette } from "@/components/PeerPalette"
+import { matchDiagnostic } from "@/lib/diagnostics"
 import { PlanPanel } from "@/components/Plan"
+import { UserKeyCard, UserPreferencesPanel } from "@/components/UserIdentity"
+import { ROLE_META, useUserPrefs } from "@/lib/userPrefs"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun, SocketUnreadable } from "@/components/FirstRun"
 import { Button } from "@/components/ui/button"
+import { PacketPipelineFlow, TunnelFlowMap } from "@/components/DataFlow"
 import { TopTalkers, type PeerRate } from "@/components/TopTalkers"
 import { TrafficChart } from "@/components/TrafficChart"
-import { Diamond, Panel, PanelTitle } from "@/components/ui/panel"
-import { TrafficHistory, freshness, freshnessLabel, loadHistory, rateLabel, saveHistory, type Sample } from "@/lib/traffic"
+import { Diamond, Panel } from "@/components/ui/panel"
+import { TrafficHistory, formatAgeSec, freshness, freshnessLabel, loadHistory, rateLabel, sampleRate, saveHistory, type Sample } from "@/lib/traffic"
 import type { InterfaceEntry, Peer, Snapshot, SnapshotPayload } from "@/types"
 
 // The console is the TUI's dashboard rendered in the webview: same vocabulary
@@ -57,8 +77,8 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
-type SortOrder = "handshake" | "name" | "epoch"
-const SORT_CYCLE: SortOrder[] = ["handshake", "name", "epoch"]
+type SortOrder = "handshake" | "transfer" | "name" | "epoch"
+const SORT_CYCLE: SortOrder[] = ["handshake", "transfer", "name", "epoch"]
 
 // The visible peer order, in one place: the list and the j/k handler share
 // it, so the keyboard moves through exactly what the eye sees.
@@ -68,20 +88,25 @@ function orderPeers(peers: Peer[], filter: string, sort: SortOrder): Peer[] {
     ? peers.filter(
         (peer) =>
           peer.name.toLowerCase().includes(needle) ||
-          peer.allowed_ips.some((ip) => ip.includes(needle)),
+          peer.allowed_ips.some((ip) => ip.toLowerCase().includes(needle)) ||
+          (peer.endpoint ?? "").toLowerCase().includes(needle) ||
+          peer.fingerprint.toLowerCase().includes(needle),
       )
     : peers
   const order = [...matching]
   if (sort === "name") order.sort((a, b) => a.name.localeCompare(b.name))
   else if (sort === "epoch") order.sort((a, b) => b.epoch - a.epoch)
-  else order.sort((a, b) => b.last_handshake_sec - a.last_handshake_sec)
+  else if (sort === "transfer") {
+    order.sort((a, b) => b.rx_bytes + b.tx_bytes - (a.rx_bytes + a.tx_bytes))
+  } else order.sort((a, b) => b.last_handshake_sec - a.last_handshake_sec)
   return order
 }
 /** Geek-free labels for the sort control: "epoch" is the daemon's key version. */
 const SORT_LABELS: Record<SortOrder, string> = {
-  handshake: "Last activity",
+  handshake: "Activity",
+  transfer: "Transfer",
   name: "Name",
-  epoch: "Key version",
+  epoch: "Key",
 }
 
 const freshnessTone: Record<string, string> = {
@@ -100,43 +125,51 @@ function anyPeerUp(data: Snapshot | null, now: number): boolean {
 }
 
 function useLiveClock(): number {
-  const [tick, setTick] = useState(0)
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
   useEffect(() => {
-    const timer = window.setInterval(() => setTick((t) => t + 1), 1000)
+    const timer = window.setInterval(
+      () => setNow(Math.floor(Date.now() / 1000)),
+      1000,
+    )
     return () => window.clearInterval(timer)
   }, [])
-  return useMemo(() => Math.floor(Date.now() / 1000), [tick])
+  return now
 }
 
 /** State, rate, and freshness at three sizes — the screen's focal point. */
 function Hero({
   data,
   now,
-  history,
   samples,
   health,
   live,
   seen,
+  booting,
   attempts,
   replyAge,
   socket,
   error,
+  onOpenCatalog,
+  onOpenUserKeys,
 }: {
   data: Snapshot | null
   now: number
-  history: TrafficHistory
   samples: Sample[]
   health: Health | null
   /** The daemon answered the most recent poll. */
   live: boolean
   /** A snapshot arrived at some point: an absent one is a disconnect, not a cold start. */
   seen: boolean
+  /** True before the first snapshot poll has landed. */
+  booting: boolean
   /** How many snapshots the console has asked for since the page opened. */
   attempts: number
   /** Seconds since the daemon last sent data — not since the last frame. */
   replyAge: number | null
   socket: string
   error: string | null
+  onOpenCatalog?: (code?: string) => void
+  onOpenUserKeys?: () => void
 }) {
   const up = anyPeerUp(data, now)
   // A socket in the runtime directory with nothing answering it is a stale file,
@@ -153,88 +186,118 @@ function Hero({
     .map((p) => p.last_handshake_sec)
     .filter((s) => s > 0)
     .sort((a, b) => b - a)[0]
-  const rx = history.rate("rx")
-  const tx = history.rate("tx")
+  const rx = sampleRate(samples, "rx")
+  const tx = sampleRate(samples, "tx")
   const last = samples.at(-1) ?? { rx: 0, tx: 0 }
   // One derivation per render: the headline, its tone and its tooltip all read
   // this value.
   const verdict = health ? egressVerdict(health) : null
   const tone = silent ? "text-fault" : verdictTone[verdict?.tone ?? "muted"]
+  const visibleError =
+    error && error !== "no interface selected" ? error : null
   // The one thing allowed to move forever: a live tunnel breathes. The dot
   // only renders while the daemon is answering with peers up, so a retained
   // snapshot never pulses in the live colour — and the reduced-motion guard
   // in index.css stills it for anyone who asks for less motion.
   const heartbeat = up && live && !silent
+  const peersUp =
+    data?.peers.filter((p) => p.last_handshake_sec > 0 && now - p.last_handshake_sec < FRESH_SEC).length ?? 0
+  const beam =
+    silent || verdict?.tone === "fault"
+      ? "hero-beam-fault"
+      : lost || verdict?.tone === "stale"
+        ? "hero-beam-stale"
+        : heartbeat || verdict?.tone === "live"
+          ? "hero-beam-live"
+          : ""
 
   return (
-    <section className="surface-raised animate-in fade-in slide-in-from-bottom-2 rounded-lg px-5 py-4 duration-500">
-      <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4">
-        <div className="flex flex-col gap-1">
-          {/* One glance must answer "am I protected?" — so the headline IS the
-              derived verdict, not a mechanism word the user has to combine
-              with a second badge. Usability spec: <=2 s, no scrolling. */}
-          <PanelTitle>PROTECTION</PanelTitle>
-          <div className="flex items-center gap-3">
-            {heartbeat && (
+    <section className={`surface-raised ${beam} animate-in fade-in slide-in-from-bottom-2 rounded-xl px-5 py-4 duration-500`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
+        <div className="flex min-w-[220px] flex-1 flex-col gap-1.5">
+          <span className="micro">Protection</span>
+          <div className="flex items-center gap-2.5">
+            {heartbeat ? (
               <span className="relative flex size-2.5 shrink-0" aria-hidden="true">
                 <span className="bg-live absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" />
                 <span className="bg-live relative inline-flex size-2.5 rounded-full" />
               </span>
+            ) : (
+              <Diamond />
             )}
-            {/* Keyed on the label, not the facts: a changed verdict replays
-                the fade, while second-by-second refreshes stay still. */}
             <span
-              key={silent ? "silent" : (verdict?.label ?? "…")}
-              className={`animate-in fade-in text-3xl leading-none font-semibold tracking-tight duration-300 ${tone}`}
-              title={silent ? `nothing answers ${socket || "the control socket"}` : verdict?.detail}
+              key={silent ? "silent" : (verdict?.label ?? (booting ? "connecting" : "…"))}
+              className={`animate-in fade-in text-2xl leading-none font-bold tracking-tight uppercase duration-300 ${tone}`}
+              title={silent ? `Nothing answers ${socket || "the control socket"}` : verdict?.detail}
             >
-              {silent ? "NO DAEMON" : verdict ? verdict.label : "…"}
+              {silent ? "Daemon unreachable" : verdict ? verdict.label : booting ? "Connecting…" : "…"}
             </span>
           </div>
-          <span className="text-muted-foreground text-xs">
-            {silent ? "the control socket has nothing behind it" : `tunnel ${up ? "up" : data ? "idle" : "…"}`}
-          </span>
           {!silent && (
-          <span className="text-muted-foreground mt-0.5 text-xs">
-            {data ? (
-              <>
-                {data.interface} · {data.addresses.join(" · ")} ·{" "}
-                {handshake ? `last handshake ${Math.max(0, now - handshake)}s ago` : "no session yet"}
-              </>
-            ) : seen ? (
-              "no snapshot since the disconnect"
-            ) : (
-              "waiting for the daemon's first snapshot"
-            )}
-            <span className={live ? "text-live" : "text-muted-foreground"}>
-              {" "}
-              · control {live ? "live" : seen ? "silent" : "—"}
+            <span className="text-muted-foreground text-xs">
+              {data ? (
+                <>
+                  {data.interface} · {data.addresses[0] ?? "no IP"} ·{" "}
+                  {handshake ? `last handshake ${formatAgeSec(now - handshake)} ago` : "no handshake yet"}
+                </>
+              ) : seen ? (
+                "Showing last snapshot — daemon silent"
+              ) : (
+                "Waiting for daemon snapshot"
+              )}
             </span>
-          </span>
           )}
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="border-border bg-secondary/70 text-foreground rounded border px-2 py-0.5 font-medium uppercase">
+              {data?.expected_egress === "full" || health?.expected_full ? "Full tunnel" : "Split tunnel"}
+            </span>
+            {data?.public_line && (
+              <CopyButton value={data.public_line} label="Copy Public Key" title="Copy this device's public key line" />
+            )}
+            {onOpenUserKeys && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5 px-2.5 text-xs"
+                onClick={onOpenUserKeys}
+                title="View this device's public key QR, operator profile, and preferences"
+              >
+                <KeyRound className="text-signal size-3.5" aria-hidden />
+                <span>User &amp; Keys</span>
+              </Button>
+            )}
+          </div>
         </div>
 
-        <div className="flex items-end gap-8">
+        <BoundaryGeometry
+          interfaceName={data?.interface ?? "vallum0"}
+          address={data?.addresses[0] ?? "—"}
+          suite={data?.suite ?? "0x0003"}
+          verdictLabel={silent ? "UNREACHABLE" : verdict?.label ?? "IDLE"}
+          tone={silent ? "fault" : (verdict?.tone ?? "muted")}
+          peersUp={peersUp}
+          totalPeers={data?.peers.length ?? 0}
+          live={live}
+        />
+
+        <div className="flex items-end gap-7">
           {(
             [
-              ["DOWNLOAD", rx, last.rx, "signal"] as const,
-              ["UPLOAD", tx, last.tx, "violet"] as const,
+              ["Download", rx, last.rx, "signal"] as const,
+              ["Upload", tx, last.tx, "violet"] as const,
             ]
-          ).map(([label, rate, total, tone]) => (
+          ).map(([label, rate, total, seriesTone]) => (
             <div key={label} className="flex flex-col gap-1">
-              <span className={`micro ${tone === "signal" ? "text-signal/80" : "text-violet/80"}`}>
-                <span aria-hidden>{tone === "signal" ? "▼ " : "▲ "}</span>
+              <span className={`micro ${seriesTone === "signal" ? "text-signal" : "text-violet"}`}>
+                <span aria-hidden>{seriesTone === "signal" ? "▼ " : "▲ "}</span>
                 {label}
               </span>
               <span
-                className={`text-2xl leading-none font-medium tracking-tight ${
-                  tone === "signal" ? "text-signal" : "text-violet"
+                className={`font-mono text-2xl leading-none font-bold tracking-tight ${
+                  seriesTone === "signal" ? "text-signal" : "text-violet"
                 }`}
               >
-                {/* A rate is a measurement of now: where there is no now — no
-                    snapshot yet, or a retained one — 0.0 B/s would be a number the
-                    console does not have. The totals beside it are the last ones
-                    the daemon sent, which the note above the panel explains. */}
                 {live ? rateLabel(rate) : "—"}
               </span>
               <span className="text-muted-foreground text-xs">
@@ -257,11 +320,21 @@ function Hero({
           with START above, or read its own log for why it is not running.
         </p>
       )}
-      {error && (
+      {visibleError && (
         <p className={`mt-1 text-xs ${live ? "text-fault" : "text-muted-foreground"}`}>
-          {live ? "daemon" : "last control error"}: {error}
+          {live ? "daemon" : "last control error"}: {visibleError}
         </p>
       )}
+      {(() => {
+        const diag = matchDiagnostic(visibleError || (silent ? "socket silent" : null))
+        return diag ? (
+          <DiagnosticCallout
+            entry={diag}
+            detail={visibleError || undefined}
+            onOpenCatalog={onOpenCatalog}
+          />
+        ) : null
+      })()}
     </section>
   )
 }
@@ -276,16 +349,13 @@ function peerState(peer: Peer, now: number) {
 // An idle tunnel goes quiet on its own — only the never and stale cases name
 // a next step, and the quiet ones say so.
 function peerVerdict(peer: Peer, now: number): string {
-  if (peer.rotating) return "rotation in progress — finalize once the far end uses the new key"
+  if (peer.rotating) return "Key rotation in progress"
   const age = Math.max(0, now - peer.last_handshake_sec)
-  if (peer.last_handshake_sec === 0) {
-    return peer.endpoint
-      ? "no handshake yet — check the far end is running and reachable at this endpoint"
-      : "no handshake yet — the far end has never connected; check it is running"
-  }
-  if (age < 5 * 60) return `live — last handshake ${age}s ago`
-  if (age < 60 * 60) return `quiet — last handshake ${age}s ago; idle tunnels go quiet, ping if it should be carrying traffic`
-  return `stale — last handshake ${age}s ago; check the far end is up, the endpoint is right${peer.keepalive === null ? ", and keepalive is set if it roams" : ""}`
+  if (peer.last_handshake_sec === 0) return "No handshake yet"
+  const ageText = formatAgeSec(age)
+  if (age < 5 * 60) return `Active · handshake ${ageText} ago`
+  if (age < 60 * 60) return `Idle · handshake ${ageText} ago`
+  return `Stale · handshake ${ageText} ago`
 }
 
 function PeersPanel({
@@ -317,19 +387,24 @@ function PeersPanel({
 }) {
   const shown = useMemo(() => orderPeers(peers, filter, sort), [peers, filter, sort])
   const unknown = !live && !stale
+  const maxTransfer = useMemo(
+    () => Math.max(1, ...shown.map((p) => p.rx_bytes + p.tx_bytes)),
+    [shown],
+  )
 
   return (
     <Panel
       title={
         <>
-          PEERS [<span className="text-foreground">{shown.length}</span>]
+          Devices (<span className="text-foreground font-mono">{shown.length}</span>
           {shown.length !== peers.length && (
-            <span className="text-muted-foreground">/{peers.length}</span>
+            <span className="text-muted-foreground font-mono">/{peers.length}</span>
           )}
+          )
           {stale && (
             <span
               className="text-stale"
-              title="the daemon is not answering — this is the last list it sent"
+              title="The daemon is not answering — this is the last list it sent"
             >
               {" "}
               · stale
@@ -337,90 +412,197 @@ function PeersPanel({
           )}
         </>
       }
-      right={
-        <span className="flex items-center gap-1.5">
-          <label className="micro flex items-center gap-1">
-            <span>sort</span>
-            <select
-              value={sort}
-              onChange={(event) => onSort(event.target.value as SortOrder)}
-              className="bg-background/40 border-border/70 text-foreground cursor-pointer rounded border px-1 py-0.5"
-              title="sort peers (o cycles the order)"
-              aria-label="sort peers"
-            >
-              {(Object.keys(SORT_LABELS) as SortOrder[]).map((key) => (
-                <option key={key} value={key}>
-                  {SORT_LABELS[key]}
-                </option>
-              ))}
-            </select>
-          </label>
-          {actions}
-        </span>
-      }
+      right={actions}
       className="min-w-0"
     >
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <label htmlFor="peer-filter" className="micro sr-only">
           Filter peers
         </label>
-        <input
-          id="peer-filter"
-          value={filter}
-          onChange={(event) => onFilter(event.target.value)}
-          placeholder="Filter peers by name or IP…"            className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 w-full rounded-md border px-2 py-1 text-xs"
-          aria-label="filter peers by name or IP"
-        />
+        <div className="relative min-w-[180px] flex-1">
+          <input
+            id="peer-filter"
+            value={filter}
+            onChange={(event) => onFilter(event.target.value)}
+            placeholder="Filter peers by name, IP, endpoint, or fingerprint…"
+            className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 w-full rounded-md border px-2 py-1 pr-7 text-xs"
+            aria-label="filter peers by name, IP, endpoint, or fingerprint"
+          />
+          {filter !== "" && (
+            <button
+              type="button"
+              onClick={() => {
+                onFilter("")
+                document.getElementById("peer-filter")?.focus()
+              }}
+              aria-label="Clear peer filter"
+              title="Clear filter (Esc)"
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-1.5 -translate-y-1/2 cursor-pointer px-1 text-xs leading-none"
+            >
+              ×
+            </button>
+          )}
+        </div>
+        <div
+          role="group"
+          aria-label="sort peers"
+          title="sort peers (o cycles the order)"
+          className="border-border/70 bg-background/40 inline-flex items-center rounded-md border p-0.5 text-[11px]"
+        >
+          {SORT_CYCLE.map((key) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onSort(key)}
+              aria-pressed={sort === key}
+              className={`min-h-0 rounded px-2 py-1 transition-colors ${
+                sort === key
+                  ? "bg-secondary text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {SORT_LABELS[key]}
+            </button>
+          ))}
+        </div>
       </div>
       {peers.length === 0 ? (
-        <p className="text-muted-foreground py-3 text-xs">
-          {unknown ? (
-            <>no peer list yet — nothing is answering the control socket.</>
-          ) : stale ? (
-            <>
-              no peer list to show — the daemon is not answering, and the last snapshot it sent had
-              none.
-            </>
-          ) : (
-            <>
-              no peers yet — <span className="text-foreground/80">+ add peer</span> above mints
-              the first one, or <span className="text-foreground/80">invite</span> hands a ticket to
-              a device.
-            </>
-          )}
-        </p>
+        unknown ? (
+          <p className="text-muted-foreground py-3 text-xs">
+            no peer list yet — nothing is answering the control socket.
+          </p>
+        ) : stale ? (
+          <p className="text-muted-foreground py-3 text-xs">
+            no peer list to show — the daemon is not answering, and the last snapshot it sent had none.
+          </p>
+        ) : (
+          <div className="border-border/60 bg-background/35 my-2 flex flex-col gap-3 rounded-lg border p-4 text-xs">
+            <div>
+              <p className="text-foreground text-sm font-medium">
+                Onboard your first device
+              </p>
+              <p className="text-muted-foreground mt-0.5">
+                This interface is ready. Choose how you want to add a device:
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="border-border/60 bg-card/70 flex flex-col justify-between gap-2 rounded-lg border p-3">
+                <div>
+                  <p className="text-foreground font-medium">Invite token &amp; QR</p>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    Create a short-lived join ticket for a laptop or phone.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => document.getElementById("invite-peer-btn")?.click()}
+                  className="w-full"
+                >
+                  Create invite…
+                </Button>
+              </div>
+              <div className="border-border/60 bg-card/70 flex flex-col justify-between gap-2 rounded-lg border p-3">
+                <div>
+                  <p className="text-foreground font-medium">Client bundle</p>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    Import an exported <code className="font-mono">.vallum-bundle</code> file.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => document.getElementById("import-bundle-btn")?.click()}
+                  className="w-full"
+                >
+                  Import bundle…
+                </Button>
+              </div>
+              <div className="border-border/60 bg-card/70 flex flex-col justify-between gap-2 rounded-lg border p-3">
+                <div>
+                  <p className="text-foreground font-medium">Public key</p>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    Add a peer manually using its <code className="font-mono">vallum1:...</code> public line.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => document.getElementById("add-peer-btn")?.click()}
+                  className="w-full"
+                >
+                  + Add by public key…
+                </Button>
+              </div>
+            </div>
+          </div>
+        )
       ) : shown.length === 0 ? (
-        <p className="text-muted-foreground py-3 text-xs">nothing matches “{filter}”</p>
+        <div className="flex flex-wrap items-center gap-2 py-3 text-xs">
+          <span className="text-muted-foreground">No devices match “{filter}”</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              onFilter("")
+              document.getElementById("peer-filter")?.focus()
+            }}
+          >
+            Clear filter
+          </Button>
+        </div>
       ) : (
-        <ul className="flex flex-col">
+        <ul className="flex flex-col gap-0.5">
           {shown.map((peer) => {
             const { f, tone } = peerState(peer, now)
             const isSelected = peer.fingerprint === selected
+            const total = peer.rx_bytes + peer.tx_bytes
+            const rxPct = total > 0 ? Math.min(100, (peer.rx_bytes / maxTransfer) * 100) : 0
+            const txPct = total > 0 ? Math.min(100 - rxPct, (peer.tx_bytes / maxTransfer) * 100) : 0
             return (
               <li key={peer.fingerprint}>
                 <button
                   onClick={() => onSelect(peer.fingerprint)}
                   aria-pressed={isSelected}
-                  className={`flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left transition-[background-color,color] duration-150 ${
-                    isSelected ? "bg-secondary text-foreground" : "hover:bg-secondary/50"
+                  className={`flex w-full cursor-pointer flex-col gap-1.5 rounded-lg px-2.5 py-2.5 text-left transition-[background-color,color] duration-150 ${
+                    isSelected
+                      ? "bg-secondary text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"
+                      : "hover:bg-secondary/50"
                   }`}
                 >
-                  <span aria-hidden className={isSelected ? "text-signal text-[8px]" : "text-transparent text-[8px]"}>
-                    ●
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">{peer.name}</span>
-                  {peer.rotating && (
-                    <span className="text-violet text-xs">rotating</span>
-                  )}
-                  <span className={`text-xs uppercase ${tone}`}>
-                    {freshnessLabel[f]}
-                    {peer.last_handshake_sec > 0 && (
-                      <span className="text-muted-foreground"> {Math.max(0, now - peer.last_handshake_sec)}s</span>
+                  <div className="flex w-full items-center gap-2">
+                    <span aria-hidden className={isSelected ? "text-signal text-[8px]" : "text-transparent text-[8px]"}>
+                      ●
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-medium">{peer.name}</span>
+                    {peer.rotating && (
+                      <span className="text-stale text-xs">Rotating</span>
                     )}
-                  </span>
-                  <span aria-hidden className="text-muted-foreground/60">
-                    ›
-                  </span>
+                    {total > 0 && (
+                      <span className="text-muted-foreground hidden font-mono text-xs sm:inline">
+                        <span className="text-signal">▼</span> {bytes(peer.rx_bytes)} ·{" "}
+                        <span className="text-subtext">▲</span> {bytes(peer.tx_bytes)}
+                      </span>
+                    )}
+                    <span className={`text-xs font-medium ${tone}`}>
+                      {freshnessLabel[f]}
+                      {peer.last_handshake_sec > 0 && (
+                        <span className="text-muted-foreground font-mono"> {formatAgeSec(now - peer.last_handshake_sec)}</span>
+                      )}
+                    </span>
+                    <span aria-hidden className="text-muted-foreground/60">
+                      ›
+                    </span>
+                  </div>
+                  {total > 0 && (
+                    <div className="bg-background/70 ml-4 flex h-1 w-[calc(100%-1rem)] overflow-hidden rounded-full">
+                      <span className="bg-signal/80 h-full" style={{ width: `${rxPct}%` }} />
+                      <span className="bg-subtext/55 h-full" style={{ width: `${txPct}%` }} />
+                    </div>
+                  )}
                 </button>
               </li>
             )
@@ -429,6 +611,12 @@ function PeersPanel({
       )}
     </Panel>
   )
+}
+
+function formatAgeMs(ms: number | null): string {
+  if (ms === null) return "never"
+  if (ms < 1000) return `${ms}ms ago`
+  return `${(ms / 1000).toFixed(1)}s ago`
 }
 
 function PeerDetail({
@@ -447,15 +635,14 @@ function PeerDetail({
   const [probing, setProbing] = useState(false)
   if (!peer) {
     return (
-      <Panel title="PEER DETAIL">
+      <Panel title="Device details">
         <p className="text-muted-foreground py-3 text-xs">
           {unknown ? (
-            "no peer data — the control socket has not answered yet."
+            "No device data — the control socket has not answered yet."
           ) : (
             <>
-              select a peer — <span className="text-foreground/80">j</span>/
-              <span className="text-foreground/80">k</span> steps through the list, or{" "}
-              <span className="text-foreground/80">:</span> runs any command by name.
+              Select a device — <kbd className="kbd-chip">j</kbd>/<kbd className="kbd-chip">k</kbd> steps through the list, or{" "}
+              <kbd className="kbd-chip">:</kbd> opens quick commands.
             </>
           )}
         </p>
@@ -466,19 +653,19 @@ function PeerDetail({
   return (
     <Panel
       title={
-        <span className="flex items-center gap-1.5">
+        <span className="flex items-center gap-2">
           <span
             aria-hidden
-            className={`inline-block size-1.5 rounded-full ${
+            className={`inline-block size-2 rounded-full ${
               f === "recent" ? "bg-live" : f === "aging" ? "bg-stale" : "bg-muted-foreground/40"
             }`}
           />
-          <span className="text-foreground/90">peer · {peer.name}</span>
+          <span className="text-foreground">{peer.name}</span>
         </span>
       }
       right={peer.has_preshared_key ? <span className="micro">PSK set</span> : undefined}
     >
-      {/* Actions first: they are what the panel is for. */}
+      {/* Actions first: everyday tasks stay on top, key rotation sits in Advanced below. */}
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {blocked && (
           <span className="micro text-stale" title={blocked}>
@@ -489,9 +676,9 @@ function PeerDetail({
           id="ping-peer-btn"
           size="sm"
           variant="outline"
-          className="h-7 px-2.5 text-xs uppercase"
+          className="h-8 px-3 text-xs font-medium"
           disabled={probing || peer.allowed_ips.length === 0}
-          title={`ping ${peer.allowed_ips[0] ?? "the peer"}`}
+          title={`Ping ${peer.allowed_ips[0] ?? "the device"}`}
           onClick={() => {
             // allowed_ips holds CIDRs; ping wants an address.
             const target = peer.allowed_ips[0]?.split("/")[0]
@@ -500,19 +687,16 @@ function PeerDetail({
             pingPeer(target)
               .then(setProbe)
               .catch((error: unknown) =>
-                setProbe({ address: target, error: String(error) }),
+                setProbe({ address: target, error: formatError(error) }),
               )
               .finally(() => setProbing(false))
           }}
         >
-          {probing ? "…" : "ping"}
+          {probing ? "Pinging…" : "Ping Device"}
         </Button>
-        <CopyButton id="copy-line-btn" value={peer.public_line} label="copy line" title="copy this peer's public line" />
-        <CopyButton id="copy-address-btn" value={peer.allowed_ips.join(", ") || peer.endpoint} label="copy address" title="copy this peer's address (allowed IPs, else its endpoint)" disabled={peer.allowed_ips.length === 0 && peer.endpoint === ""} />
+        <CopyButton id="copy-address-btn" value={peer.allowed_ips.join(", ") || peer.endpoint} label="Copy IP" title="Copy this device's VPN IP (else endpoint)" disabled={peer.allowed_ips.length === 0 && peer.endpoint === ""} />
         <ExportBundleDialog peer={peer} blocked={blocked} />
         <EditPeerDialog peer={peer} blocked={blocked} />
-        <RotateDialog peer={peer} blocked={blocked} />
-        {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
         <span className="border-border/60 mx-1 h-4 border-l" aria-hidden />
         <RemoveDialog peer={peer} blocked={blocked} />
       </div>
@@ -525,32 +709,109 @@ function PeerDetail({
               }`}
         </p>
       )}
-      <p className={`mb-1 text-xs ${tone}`}>{peerVerdict(peer, now)}</p>
-      <Row label="fingerprint">{peer.fingerprint}</Row>
-      <Row label="endpoint">{peer.endpoint || "roaming"}</Row>
-      <Row label="allowed IPs">{peer.allowed_ips.join(", ")}</Row>
-      <Row label="keepalive">{peer.keepalive !== null ? `${peer.keepalive}s` : "—"}</Row>
-      <Row label="transfer">
+      <p className={`mb-2 text-xs ${tone}`}>{peerVerdict(peer, now)}</p>
+      {peer.dropped_after_auth > 0 && (
+        <div className="border-fault/50 bg-fault/10 text-fault mb-2 rounded border px-2.5 py-1.5 text-xs">
+          {peer.dropped_after_auth.toLocaleString()} datagram(s) failed post-auth verification (VAL-E502) — peer or server key changed; re-enrol or rotate rather than chasing a firewall.
+        </div>
+      )}
+      <Row label="VPN IPs">{peer.allowed_ips.join(", ") || "—"}</Row>
+      <Row label="Remote Endpoint">{peer.endpoint || "Roaming (updates automatically)"}</Row>
+      <Row label="Data Transferred">
         {bytes(peer.rx_bytes)} received / {bytes(peer.tx_bytes)} sent
       </Row>
-      <Row label="handshake">
+      <Row label="Last handshake">
         <span className={tone}>{freshnessLabel[f]}</span>
-        <span className="text-muted-foreground">
+        <span className="text-muted-foreground font-mono">
           {" "}
           {peer.last_handshake_sec === 0
             ? "never"
-            : `${Math.max(0, now - peer.last_handshake_sec)}s ago`}
+            : `${formatAgeSec(Math.max(0, now - peer.last_handshake_sec))} ago`}
         </span>
       </Row>
-      <Row label="key version">{peer.epoch}</Row>
+      <Row label="Keepalive">{peer.keepalive !== null ? `${peer.keepalive}s` : "—"}</Row>
+      {peer.valid_until !== null && (
+        <Row label="Valid Until">
+          {(() => {
+            const remaining = peer.valid_until - now
+            const stamp = new Date(peer.valid_until * 1000)
+              .toISOString()
+              .replace("T", " ")
+              .slice(0, 19)
+            return (
+              <span className={remaining <= 0 ? "text-fault" : remaining < 86400 ? "text-stale" : ""}>
+                {stamp} UTC ·{" "}
+                {remaining <= 0
+                  ? "EXPIRED"
+                  : remaining >= 86400
+                    ? `${Math.floor(remaining / 86400)}d left`
+                    : `${Math.ceil(remaining / 3600)}h left`}
+              </span>
+            )
+          })()}
+        </Row>
+      )}
+      <details
+        className="border-border/50 bg-background/30 mt-3 rounded border px-2.5 py-2"
+        open={peer.rotating || peer.dropped_after_auth > 0 || peer.dropped_allowed_ips > 0}
+      >
+        <summary className="text-muted-foreground hover:text-foreground cursor-pointer text-xs font-medium select-none">
+          Advanced Key &amp; Wire Details
+        </summary>
+        <div className="mt-2.5 flex flex-col gap-1.5">
+          <div className="mb-1 flex flex-wrap items-center gap-1.5">
+            <CopyButton id="copy-line-btn" value={peer.public_line} label="Copy Public Line" title="Copy this peer's public config line" />
+            <RotateDialog peer={peer} blocked={blocked} />
+            {peer.rotating && <FinalizeButton peer={peer} blocked={blocked} />}
+          </div>
+          <Row label="Fingerprint">{peer.fingerprint}</Row>
+          <Row label="Key Version">{peer.epoch}</Row>
+          <Row label="Delivery Window">
+            {peer.window_received.toLocaleString()} rx / {peer.window_sent.toLocaleString()} tx pkts
+          </Row>
+          <Row label="Wire Age">
+            rx {formatAgeMs(peer.last_received_ms)} · tx {formatAgeMs(peer.last_sent_ms)}
+          </Row>
+          {peer.dropped_allowed_ips > 0 && (
+            <Row label="Allowed-IP Drops">
+              <span className="text-stale">
+                {peer.dropped_allowed_ips.toLocaleString()} · last source: {peer.last_rejected_source ?? "none"}
+              </span>
+            </Row>
+          )}
+          {peer.dropped_no_session + peer.dropped_replay + peer.reinit_offered > 0 && (
+            <Row label="Session Drops">
+              no-session {peer.dropped_no_session.toLocaleString()} · replay {peer.dropped_replay.toLocaleString()} · reinit {peer.reinit_offered.toLocaleString()}
+            </Row>
+          )}
+        </div>
+      </details>
     </Panel>
   )
 }
 
-function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
-  const c = payload?.data?.counters
+function InterfaceData({
+  payload,
+  onOpenMetrics,
+}: {
+  payload: SnapshotPayload | null
+  onOpenMetrics: () => void
+}) {
+  const snap = payload?.data
+  const c = snap?.counters
   const failures =
-    (c?.datagrams_failed ?? 0) + (c?.packets_failed ?? 0) + (c?.refusals ?? 0)
+    (c?.datagrams_failed ?? 0) +
+    (c?.packets_failed ?? 0) +
+    (c?.refusals ?? 0) +
+    (c?.fragments_dropped ?? 0) +
+    (c?.dropped_malformed ?? 0) +
+    (c?.dropped_unknown_index ?? 0) +
+    (c?.fragments_rate_limited ?? 0) +
+    (c?.handshake_dropped_no_mac ?? 0) +
+    (c?.handshake_dropped_unidentifiable ?? 0) +
+    (c?.handshake_dropped_unknown_peer ?? 0) +
+    (c?.handshake_dropped_endpoint_conflict ?? 0) +
+    (c?.handshake_dropped_stale ?? 0)
   // Healthy counters stay collapsed: the summary line keeps the totals
   // glanceable while the per-kind breakdown waits on demand. Failures flip
   // the key, remounting open so the problem cannot sit hidden; user toggles
@@ -567,16 +828,13 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
     <details
       key={attention ? "attention" : "healthy"}
       open={attention}
-      className="surface rounded-lg"
+      className="surface rounded-xl"
     >
-      <summary className="flex cursor-pointer items-center justify-between gap-2 px-4 pt-3 pb-1 select-none">
-        <span className="flex items-center gap-1.5">
-          <Diamond />
-          <span className="text-signal text-xs font-semibold tracking-wide">
-            INTERFACE DETAILS
-          </span>
+      <summary className="flex cursor-pointer items-center justify-between gap-2 px-5 pt-4 pb-3 select-none">
+        <span className="text-foreground text-sm font-medium tracking-tight">
+          Interface counters &amp; packet telemetry
         </span>
-        <span className="text-muted-foreground text-xs">
+        <span className="text-muted-foreground font-mono text-xs">
           {/* The counters' canonical nouns (CONTEXT.md): datagrams go out, packets
               come in, and the summary is allowed to shorten them only that far. */}
           {c ? (
@@ -590,30 +848,130 @@ function InterfaceData({ payload }: { payload: SnapshotPayload | null }) {
           )}
         </span>
       </summary>
-      <div className="px-4 pb-3.5">
-      <div className="grid grid-cols-1 gap-x-6 gap-y-2 pt-1 sm:grid-cols-3">
-        {metric(
-          "datagrams out",
-          `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
-          <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
-            failed {c?.datagrams_failed ?? "—"}
-          </span>,
+      <div className="px-5 pb-4">
+        {c && (
+          <div className="mb-3 grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2 lg:grid-cols-4">
+            {(
+              [
+                ["datagram delivery", c.datagrams_sent, c.datagrams_failed],
+                ["packet delivery", c.packets_delivered, c.packets_failed],
+                ["handshake admission", c.established, c.refusals],
+                ["fragment admission", c.reassembled, c.fragments_dropped + c.fragments_rate_limited],
+              ] as const
+            ).map(([label, ok, fail]) => {
+              const total = ok + fail
+              const pct = total > 0 ? Math.round((ok / total) * 1000) / 10 : 100
+              const degraded = fail > 0 && pct < 99
+              return (
+                <div
+                  key={label}
+                  className="border-border/50 bg-background/40 rounded border px-2.5 py-1.5 text-xs"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="micro">{label}</span>
+                    <span className={degraded ? "text-stale font-semibold" : "text-live font-semibold"}>
+                      {total > 0 ? `${pct}%` : "—"}
+                    </span>
+                  </div>
+                  <div className="bg-muted mt-1 h-1 w-full overflow-hidden rounded-full">
+                    <div
+                      className={degraded ? "bg-stale h-full transition-all duration-300" : "bg-live h-full transition-all duration-300"}
+                      style={{ width: `${total > 0 ? pct : 0}%` }}
+                    />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         )}
-        {metric(
-          "packets in",
-          `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
-          <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
-            failed {c?.packets_failed ?? "—"}
-          </span>,
+        <div className="grid grid-cols-1 gap-x-6 gap-y-2 pt-1 sm:grid-cols-2 lg:grid-cols-4">
+          {metric(
+            "datagrams out",
+            `sent ${c ? c.datagrams_sent.toLocaleString() : "—"}`,
+            <span className={c && c.datagrams_failed > 0 ? "text-fault" : ""}>
+              failed {c?.datagrams_failed ?? "—"}
+            </span>,
+          )}
+          {metric(
+            "packets in",
+            `delivered ${c ? c.packets_delivered.toLocaleString() : "—"}`,
+            <span className={c && c.packets_failed > 0 ? "text-fault" : ""}>
+              failed {c?.packets_failed ?? "—"}
+            </span>,
+          )}
+          {metric(
+            "handshakes",
+            `established ${c?.established ?? "—"}`,
+            <span className={c && c.refusals > 0 ? "text-fault" : ""}>
+              refused {c?.refusals ?? "—"}
+            </span>,
+          )}
+          {metric(
+            "fragments",
+            `reassembled ${c ? c.reassembled.toLocaleString() : "—"}`,
+            <span className={c && c.fragments_dropped > 0 ? "text-fault" : ""}>
+              dropped {c?.fragments_dropped ?? "—"}
+            </span>,
+          )}
+        </div>
+        {c && (
+          <div className="border-border/50 mt-3 grid grid-cols-1 gap-2 border-t pt-2.5 text-xs lg:grid-cols-2">
+            <div className="border-border/40 bg-background/35 rounded border px-2.5 py-1.5">
+              <p className="micro">WIRE &amp; FRAGMENT DROPS</p>
+              <p className="text-muted-foreground mt-0.5 font-mono text-[11px]">
+                malformed {c.dropped_malformed} · unknown index {c.dropped_unknown_index} · rate-limited{" "}
+                <span className={c.fragments_rate_limited > 0 ? "text-stale" : ""}>
+                  {c.fragments_rate_limited}
+                </span>
+              </p>
+            </div>
+            <div className="border-border/40 bg-background/35 rounded border px-2.5 py-1.5">
+              <p className="micro">HANDSHAKE DROP REASONS</p>
+              <p className="text-muted-foreground mt-0.5 font-mono text-[11px]">
+                no-mac {c.handshake_dropped_no_mac} · unidentifiable {c.handshake_dropped_unidentifiable} · unknown-peer{" "}
+                {c.handshake_dropped_unknown_peer} · conflict {c.handshake_dropped_endpoint_conflict} · stale{" "}
+                {c.handshake_dropped_stale}
+              </p>
+            </div>
+          </div>
         )}
-        {metric(
-          "handshakes",
-          `established ${c?.established ?? "—"}`,
-          <span className={c && c.refusals > 0 ? "text-fault" : ""}>
-            refused {c?.refusals ?? "—"}
-          </span>,
+        {snap && (
+          <div className="border-border/50 text-muted-foreground mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-2 text-xs">
+            <span>
+              offload{" "}
+              <span className={snap.offload ? "text-live" : "text-foreground/70"}>
+                {snap.offload ? "on" : "off"}
+              </span>
+            </span>
+            <span>
+              batching{" "}
+              <span className={snap.batching ? "text-live" : "text-foreground/70"}>
+                {snap.batching ? "on" : "off"}
+              </span>
+            </span>
+            <span>
+              fwmark{" "}
+              <span className="text-foreground/80">
+                {snap.fwmark !== null && snap.fwmark !== 0 ? snap.fwmark : "off"}
+              </span>
+            </span>
+            {snap.build && (
+              <span>
+                build <span className="text-foreground/80">{snap.build.slice(0, 12)}</span>
+              </span>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onOpenMetrics}
+              className="ml-auto"
+            >
+              Metrics &amp; Telemetry…
+            </Button>
+          </div>
         )}
-      </div>
+        {snap && <CryptoArchitecture suite={snap.suite} />}
       </div>
     </details>
   )
@@ -640,19 +998,78 @@ function NoBridge() {
 }
 
 
+/** Poll the unit's state. Shared by the header strip and the stopped card. */
+function useServiceState(enabled: boolean) {
+  const [service, setService] = useState<ServiceStatus | null>(null)
+  const refresh = useCallback(() => {
+    if (!enabled) return
+    serviceState()
+      .then(setService)
+      .catch(() => setService(null))
+  }, [enabled])
+  useEffect(() => {
+    refresh()
+    const timer = window.setInterval(refresh, 5000)
+    return () => window.clearInterval(timer)
+  }, [refresh])
+  return { service, refresh }
+}
+
+type CockpitSection = "overview" | "devices" | "settings" | "logs" | "setup" | "all"
+
+const SECTION_TABS: ReadonlyArray<{ id: CockpitSection; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "devices", label: "Devices" },
+  { id: "logs", label: "Monitoring" },
+  { id: "settings", label: "Settings" },
+]
+
+function SectionIcon({ kind }: { kind: CockpitSection }) {
+  const cls = "size-4 shrink-0 stroke-[1.5]"
+  switch (kind) {
+    case "overview":
+      return <ShieldCheck className={cls} aria-hidden />
+    case "devices":
+      return <Users className={cls} aria-hidden />
+    case "settings":
+      return <SlidersHorizontal className={cls} aria-hidden />
+    case "logs":
+      return <Activity className={cls} aria-hidden />
+    case "setup":
+      return <BookOpen className={cls} aria-hidden />
+    case "all":
+      return <LayoutGrid className={cls} aria-hidden />
+  }
+}
+
 export default function App() {
   const inApp = useMemo(() => hasBridge, [])
   const { service, refresh: refreshService } = useServiceState(inApp)
+  const [section, setSection] = useState<CockpitSection>("overview")
+  const [userPrefs, updateUserPrefs, resetUserPrefs] = useUserPrefs()
   const [hostHealth, setHostHealth] = useState<Health | null>(null)
   const [filter, setFilter] = useState("")
   const [sort, setSort] = useState<SortOrder>("handshake")
   const [shortcuts, setShortcuts] = useState(false)
   const [palette, setPalette] = useState(false)
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [diagnosticsTab, setDiagnosticsTab] = useState<DiagnosticsTab>("doctor")
+  const [diagnosticsCode, setDiagnosticsCode] = useState<string | undefined>(undefined)
+  const openDiagnostics = useCallback((tab: DiagnosticsTab | "onboarding" = "doctor", code?: string) => {
+    if (tab === "onboarding" && !code) {
+      setDiagnosticsOpen(false)
+      setSection("setup")
+      return
+    }
+    setDiagnosticsCode(code)
+    setDiagnosticsTab(code ? "codes" : tab === "onboarding" ? "doctor" : tab)
+    setDiagnosticsOpen(true)
+  }, [])
   const [comfortable, setComfortable] = useState(() => {
     try {
-      return window.localStorage.getItem("vallum.comfortable") === "1"
+      return window.localStorage.getItem("vallum.comfortable") !== "0"
     } catch {
-      return false
+      return true
     }
   })
   useEffect(() => {
@@ -711,6 +1128,149 @@ export default function App() {
     void loadFacts()
   }, [loadFacts])
 
+  // Health is measured on the host every 5 s: route, v6, DNS, guard, restarts.
+  const refreshHealth = useCallback(() => {
+    if (!inApp) return
+    health()
+      .then((value) => setHostHealth(value))
+      .catch(() => setHostHealth(null))
+  }, [inApp])
+
+  useEffect(() => {
+    if (!inApp) return
+    void refreshHealth()
+    const timer = window.setInterval(refreshHealth, 5000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [inApp, refreshHealth])
+
+  const refreshAfterChange = useCallback(() => {
+    setHostHealth(null)
+    refreshHealth()
+    refreshService()
+    loadFacts()
+  }, [loadFacts, refreshHealth, refreshService])
+
+  // One ingestion path for live snapshots and demo ones, so the demo renders
+  // exactly what a daemon would — and nothing else.
+  const ingest = useCallback((payload: SnapshotPayload) => {
+    setPayload(payload)
+    setAttempts((count) => count + 1)
+    if (payload.data) {
+      setRetained(payload)
+      setLastUpdate(Date.now() / 1000)
+      if (history.current.recent().length === 0 && payload.data.interface) {
+        const restored = loadHistory(payload.data.interface)
+        if (restored.length > 1) history.current.restore(restored)
+      }
+      const at = Date.now()
+      const rx = payload.data.peers.reduce((sum, p) => sum + p.rx_bytes, 0)
+      const tx = payload.data.peers.reduce((sum, p) => sum + p.tx_bytes, 0)
+      history.current.push(rx, tx, at, payload.data.counters.established)
+      setSamples([...history.current.recent()])
+      if (payload.data.interface) saveHistory(payload.data.interface, history.current.recent())
+      const peers = payload.data.peers
+      setSelectedPeer((cur) =>
+        cur && peers.some((p) => p.fingerprint === cur)
+          ? cur
+          : (peers[0]?.fingerprint ?? null),
+      )
+      // Per-peer rates need two snapshots; the first visit only seeds the baseline.
+      const rates: PeerRate[] = []
+      const next = new Map<string, { rx: number; tx: number; at: number }>()
+      for (const peer of peers) {
+        next.set(peer.fingerprint, { rx: peer.rx_bytes, tx: peer.tx_bytes, at })
+        const prev = prevPeers.current.get(peer.fingerprint)
+        if (!prev) continue
+        const dt = (at - prev.at) / 1000
+        if (dt <= 0) continue
+        const peerRx = Math.max(0, peer.rx_bytes - prev.rx) / dt
+        const peerTx = Math.max(0, peer.tx_bytes - prev.tx) / dt
+        if (peerRx > 0 || peerTx > 0) rates.push({ name: peer.name, rx: peerRx, tx: peerTx })
+      }
+      prevPeers.current = next
+      rates.sort((a, b) => b.rx + b.tx - (a.rx + a.tx))
+      setPeerRates(rates)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!inApp) return
+    let cancelled = false
+    let bound = false
+    const scan = () =>
+      listInterfaces().then((entries) => {
+        if (cancelled) return
+        setInterfaces(entries)
+        // The first socket is the daemon the operator most likely means; picking
+        // it saves a click without hiding the others.
+        if (!bound && entries.length > 0) {
+          bound = true
+          void selectInterface(entries[0].path)
+        }
+      })
+    void scan()
+    const timer = window.setInterval(scan, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [inApp])
+
+  useEffect(() => {
+    if (!inApp) return
+    let unlisten: (() => void) | undefined
+    void onSnapshot(ingest).then((fn) => {
+      unlisten = fn
+    })
+    return () => unlisten?.()
+  }, [inApp, ingest])
+
+  const live = payload?.ok === true
+  const booting = attempts === 0 && payload === null && retained === null
+  // Data has arrived at some point: a failure frame with no data behind it is a
+  // daemon that never answered, not one that stopped.
+  const seen = retained !== null
+  // What the daemon last said, when it is no longer saying anything: the panels
+  // keep their content and the labels say which it is.
+  const data = payload?.data ?? retained?.data ?? null
+  const currentName = data?.interface ?? interfaces[0]?.name ?? ""
+  const currentIndex = Math.max(
+    0,
+    interfaces.findIndex((entry) => entry.name === currentName),
+  )
+  const switchInterface = useCallback(
+    (delta = 1) => {
+      if (interfaces.length < 2) return
+      const nextIndex = (currentIndex + delta + interfaces.length) % interfaces.length
+      const next = interfaces[nextIndex]
+      setSelectedPeer(null)
+      setPayload(null)
+      setRetained(null)
+      void selectInterface(next.path)
+    },
+    [interfaces, currentIndex],
+  )
+  const orderedPeers = useMemo(
+    () => orderPeers(data?.peers ?? [], filter, sort),
+    [data?.peers, filter, sort],
+  )
+  const stepPeer = useCallback(
+    (delta: 1 | -1) => {
+      if (orderedPeers.length === 0) return
+      const idx = orderedPeers.findIndex((p) => p.fingerprint === selectedPeer)
+      const nextIndex =
+        idx === -1
+          ? delta > 0
+            ? 0
+            : orderedPeers.length - 1
+          : (idx + delta + orderedPeers.length) % orderedPeers.length
+      setSelectedPeer(orderedPeers[nextIndex].fingerprint)
+    },
+    [orderedPeers, selectedPeer],
+  )
+
   // The TUI's keys, as far as the console has actions for them. Deliberately
   // suppressed while a field has focus or a dialog is open: a shortcut that
   // fires mid-typing is worse than no shortcut.
@@ -748,26 +1308,86 @@ export default function App() {
         return
       }
       if (dialogOpen()) return
-      // Single letters never fire here. A global letter is a loaded key: it
-      // can trigger from anywhere the guard misses, and a destructive verb on
-      // one is a disaster waiting to happen. Letters live in the palette,
-      // which is modal, explicit, and closes on Esc — the only globals are
-      // punctuation and navigation, which cannot collide with typing.
+      // Safe navigation and modal-opening keys: never fire while typing or inside
+      // another dialog, and destructive mutations stay inside confirmed dialogs.
       switch (event.key) {
+        case "1":
+          event.preventDefault()
+          setSection("overview")
+          break
+        case "2":
+          event.preventDefault()
+          setSection("devices")
+          break
+        case "3":
+          event.preventDefault()
+          setSection("logs")
+          break
+        case "4":
+          event.preventDefault()
+          setSection("settings")
+          break
+        case "5":
+          event.preventDefault()
+          setSection("setup")
+          break
+        case "6":
+          event.preventDefault()
+          setSection("all")
+          break
         case "/":
           event.preventDefault()
           document.getElementById("peer-filter")?.focus()
           break
         case ":":
-          // The TUI's dispatch key: `:` opens the command palette, like the
-          // brandkit's `: commands` pill. Typing and dialogs are guarded
-          // above, so this never fires mid-typing.
           event.preventDefault()
           setPalette(true)
           break
         case "Tab":
           event.preventDefault()
-          switchRef.current()
+          switchInterface(1)
+          break
+        case "[":
+          event.preventDefault()
+          switchInterface(-1)
+          break
+        case "]":
+          event.preventDefault()
+          switchInterface(1)
+          break
+        case "j":
+        case "ArrowDown":
+          event.preventDefault()
+          stepPeer(1)
+          break
+        case "k":
+        case "ArrowUp":
+          event.preventDefault()
+          stepPeer(-1)
+          break
+        case "o":
+          event.preventDefault()
+          setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
+          break
+        case "r":
+          event.preventDefault()
+          refreshAfterChange()
+          break
+        case "i":
+          event.preventDefault()
+          document.getElementById("interface-form-btn")?.click()
+          break
+        case "E":
+          event.preventDefault()
+          document.getElementById("config-editor-btn")?.click()
+          break
+        case "W":
+          event.preventDefault()
+          document.getElementById("save-runtime-btn")?.click()
+          break
+        case "d":
+          event.preventDefault()
+          openDiagnostics("doctor")
           break
         default:
           break
@@ -776,127 +1396,9 @@ export default function App() {
     // Re-registered when the overlay opens or closes, so Escape can see it.
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [shortcuts])
+  }, [shortcuts, openDiagnostics, switchInterface, stepPeer, refreshAfterChange])
 
-  // Health is measured on the host every 5 s: route, v6, DNS, guard, restarts.
-  useEffect(() => {
-    if (!inApp) return
-    let cancelled = false
-    const load = () =>
-      health()
-        .then((value) => !cancelled && setHostHealth(value))
-        .catch(() => !cancelled && setHostHealth(null))
-    void load()
-    const timer = window.setInterval(load, 5000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [inApp])
-
-  // One ingestion path for live snapshots and demo ones, so the demo renders
-  // exactly what a daemon would — and nothing else.
-  const ingestRef = useRef((payload: SnapshotPayload) => {
-    setPayload(payload)
-    setAttempts((count) => count + 1)
-    if (payload.data) {
-      setRetained(payload)
-      setLastUpdate(Date.now() / 1000)
-    }
-    if (payload.data) {
-      const at = Date.now()
-      const rx = payload.data.peers.reduce((sum, p) => sum + p.rx_bytes, 0)
-      const tx = payload.data.peers.reduce((sum, p) => sum + p.tx_bytes, 0)
-      history.current.push(rx, tx, at, payload.data.counters.established)
-      setSamples([...history.current.recent()])
-      if (payload.data?.interface) saveHistory(payload.data.interface, history.current.recent())
-      // Per-peer rates need two snapshots; the first visit only seeds the baseline.
-      const rates: PeerRate[] = []
-      const next = new Map<string, { rx: number; tx: number; at: number }>()
-      for (const peer of payload.data.peers) {
-        next.set(peer.fingerprint, { rx: peer.rx_bytes, tx: peer.tx_bytes, at })
-        const prev = prevPeers.current.get(peer.fingerprint)
-        if (!prev) continue
-        const dt = (at - prev.at) / 1000
-        if (dt <= 0) continue
-        const peerRx = Math.max(0, peer.rx_bytes - prev.rx) / dt
-        const peerTx = Math.max(0, peer.tx_bytes - prev.tx) / dt
-        if (peerRx > 0 || peerTx > 0) rates.push({ name: peer.name, rx: peerRx, tx: peerTx })
-      }
-      prevPeers.current = next
-      rates.sort((a, b) => b.rx + b.tx - (a.rx + a.tx))
-      setPeerRates(rates)
-    }
-  })
-  const ingest = ingestRef.current
-
-  useEffect(() => {
-    if (!inApp) return
-    let cancelled = false
-    let bound = false
-    const scan = () =>
-      listInterfaces().then((entries) => {
-        if (cancelled) return
-        setInterfaces(entries)
-        // The first socket is the daemon the operator most likely means; picking
-        // it saves a click without hiding the others.
-        if (!bound && entries.length > 0) {
-          bound = true
-          void selectInterface(entries[0].path)
-        }
-      })
-    void scan()
-    const timer = window.setInterval(scan, 5000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!inApp) return
-    let unlisten: (() => void) | undefined
-    void onSnapshot(ingest).then((fn) => {
-      unlisten = fn
-    })
-    return () => unlisten?.()
-  }, [])
-
-  const live = payload?.ok === true
-  // Data has arrived at some point: a failure frame with no data behind it is a
-  // daemon that never answered, not one that stopped.
-  const seen = retained !== null
-  // What the daemon last said, when it is no longer saying anything: the panels
-  // keep their content and the labels say which it is.
-  const data = payload?.data ?? retained?.data ?? null
-  if (data?.interface && samples.length === 0) {
-    const restored = loadHistory(data.interface)
-    if (restored.length > 1) {
-      history.current.restore(restored)
-      setSamples([...history.current.recent()])
-    }
-  }
-  const currentName = data?.interface ?? interfaces[0]?.name ?? ""
-  const currentIndex = Math.max(
-    0,
-    interfaces.findIndex((entry) => entry.name === currentName),
-  )
-  const switchInterface = () => {
-    if (interfaces.length < 2) return
-    const next = interfaces[(currentIndex + 1) % interfaces.length]
-    setSelectedPeer(null)
-    setPayload(null)
-    setRetained(null)
-    void selectInterface(next.path)
-  }
-  // The key handler is registered once; this keeps it pointed at the latest
-  // interface list without re-binding on every snapshot.
-  const switchRef = useRef(switchInterface)
-  switchRef.current = switchInterface
-  if (data && data.peers.length > 0 && selectedPeer === null) {
-    setSelectedPeer(data.peers[0].fingerprint)
-  }
-  const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? null
+  const detail = data?.peers.find((p) => p.fingerprint === selectedPeer) ?? data?.peers[0] ?? null
   // Retained data cannot be written to: the daemon is not there to write to, and
   // a form that opens over a dead socket fails only after the operator has typed
   // into it.
@@ -908,79 +1410,134 @@ export default function App() {
   const replyAge = lastUpdate !== null ? Math.max(0, now - Math.floor(lastUpdate)) : null
   const lastReply = replyAge === null ? "—" : replyAge < 1 ? "live" : `${replyAge}s ago`
 
+  useEffect(() => {
+    const iface = currentName || "vallum0"
+    if (live && hostHealth) {
+      const verdict = egressVerdict(hostHealth)
+      document.title = `${verdict.label} · ${iface} — Vallum`
+    } else if (!live && service && service.active !== "active") {
+      document.title = `${service.active} · ${iface} — Vallum`
+    } else if (live) {
+      document.title = `Active · ${iface} — Vallum`
+    } else {
+      document.title = "Vallum — Post-Quantum VPN"
+    }
+  }, [live, hostHealth, service, currentName])
+
   return (
-    <div className={`mx-auto flex min-h-svh max-w-6xl flex-col gap-3 p-4 ${comfortable ? "comfortable" : ""}`}>
+    <div className={`mx-auto flex min-h-svh max-w-7xl flex-col gap-4 p-4 sm:p-6 ${comfortable ? "comfortable" : ""}`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
-        <PanelTitle>
-          <span className="text-foreground">Vallum ❯ </span>TUNNEL CONTROL
-        </PanelTitle>
-        {interfaces.length > 0 &&
-          (interfaces.length === 1 ? (
-            <span className="text-subtext text-xs">[1/1] {currentName}</span>
+        <div className="flex items-center gap-3">
+          <RampartSeal />
+          <div className="leading-tight">
+            <div className="flex items-center gap-2 text-xs font-semibold tracking-[0.08em] uppercase">
+              <span className="text-foreground font-bold">Vallum</span>
+              <span className="text-signal">{"// Tunnel control"}</span>
+            </div>
+            <div className="text-muted-foreground hidden text-[10px] tracking-[0.14em] uppercase sm:block">
+              Every boundary under watch
+            </div>
+          </div>
+        </div>
+        <div className="border-signal/45 bg-signal/10 text-signal inline-flex h-8 items-center gap-2 rounded-md border px-2.5 text-xs font-semibold">
+          <Diamond />
+          {interfaces.length > 1 ? (
+            <select
+              value={currentName}
+              onChange={(event) => {
+                const next = interfaces.find((entry) => entry.name === event.target.value)
+                if (!next || next.name === currentName) return
+                setSelectedPeer(null)
+                setPayload(null)
+                setRetained(null)
+                void selectInterface(next.path)
+              }}
+              className="text-signal cursor-pointer bg-transparent font-mono font-semibold outline-none"
+              title="Switch interface (Tab cycles)"
+              aria-label="Switch interface"
+            >
+              {interfaces.map((entry) => (
+                <option key={entry.path} value={entry.name} className="bg-popover text-foreground">
+                  {entry.name}
+                </option>
+              ))}
+            </select>
           ) : (
-            <label className="text-subtext flex items-center gap-1 text-xs">
-              <span aria-hidden>
-                [{currentIndex + 1}/{interfaces.length}]
-              </span>
-              <select
-                value={currentName}
-                onChange={(event) => {
-                  const next = interfaces.find((entry) => entry.name === event.target.value)
-                  if (!next || next.name === currentName) return
-                  setSelectedPeer(null)
-                  setPayload(null)
-                  setRetained(null)
-                  void selectInterface(next.path)
-                }}
-                className="bg-background/40 border-border/70 text-foreground h-7 cursor-pointer rounded border px-1"
-                title="switch interface (tab cycles)"
-                aria-label="switch interface"
-              >
-                {interfaces.map((entry) => (
-                  <option key={entry.path} value={entry.name}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-        <span className="micro" title="the control socket answered">
-          daemon{" "}
-          <span className={payload?.ok ? "text-live" : "text-muted-foreground"}>
-            {payload?.ok ? "attached" : "silent"}
-          </span>
+            <span className="font-mono">{currentName || "vallum0"}</span>
+          )}
+        </div>
+        <span
+          className={
+            payload?.ok
+              ? "border-[#3fb950]/50 bg-[#3fb950]/12 text-[#3fb950] inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold tracking-wider uppercase"
+              : "border-border bg-secondary/50 text-muted-foreground inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold tracking-wider uppercase"
+          }
+        >
+          <span
+            aria-hidden
+            className={
+              payload?.ok
+                ? "size-1.5 rounded-full bg-[#3fb950]"
+                : booting
+                  ? "size-1.5 rounded-full bg-[#d29922]"
+                  : "bg-muted-foreground size-1.5 rounded-full"
+            }
+          />
+          {payload?.ok ? "Running" : booting ? "Connecting" : "Offline"}
         </span>
-        <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <button
+          type="button"
+          onClick={() => setSection("settings")}
+          title={`User identity, keys & preferences (${ROLE_META[userPrefs.role].label}${data?.fingerprint ? ` · ${data.fingerprint}` : ""})`}
+          className="border-border/70 bg-secondary/45 hover:border-signal/50 hover:bg-secondary/80 text-foreground inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors"
+        >
+          <User className="text-signal size-3.5" aria-hidden />
+          <span className="max-w-[120px] truncate font-medium">
+            {userPrefs.alias.trim() || currentName || "vallum0"}
+          </span>
+          <span className="text-muted-foreground hidden font-mono text-[10px] uppercase sm:inline">
+            {ROLE_META[userPrefs.role].badge}
+          </span>
+        </button>
+        <div className="ml-auto flex flex-wrap items-center gap-2 text-xs">
           {facts?.unit === false ? (
-            <span className="micro" title="nothing is installed on this host yet">
-              not installed
+            <span className="text-muted-foreground" title="Nothing is installed on this host yet">
+              Not installed
             </span>
           ) : (
             <ServiceStrip service={service} onChanged={refreshService} attached={Boolean(payload?.ok)} />
           )}
-          <DeviceDialog
-            listenPort={data?.listen_port ?? null}
-            fwmark={data?.fwmark ?? null}
-            blocked={blocked}
-          />
-          <ConfigDialog blocked={blocked} />
-          {data && (
-            <>
-              <span className="text-muted-foreground" title={`suite ${data.suite} · fwmark ${data.fwmark ?? 0}`}>
-                listen{" "}
-                <span className="text-foreground/80">
-                  {data.listen_port !== null ? `:${data.listen_port}` : "—"}
-                </span>
-                <span className="text-muted-foreground"> · {data.suite}</span>
-              </span>
-              <span className="text-muted-foreground">
-                id <span className="text-foreground/80">{data.fingerprint.slice(0, 16)}</span>
-                <span className="ml-1.5 inline-block">
-                  <CopyButton value={data.public_line} label="copy" title="copy this device's public line" />
-                </span>
-              </span>
-            </>
+          {((data?.peers.length ?? 0) === 0 || section === "setup") && (
+            <Button
+              size="sm"
+              variant={section === "setup" ? "default" : "outline"}
+              className="h-8 gap-1.5 px-3 text-xs font-medium"
+              onClick={() => setSection("setup")}
+              title="Guided setup workflow"
+            >
+              <SectionIcon kind="setup" />
+              <span>Setup</span>
+            </Button>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 gap-2 px-3 text-xs font-medium"
+            onClick={() => setPalette(true)}
+            title="Command palette: search devices and actions (: opens it, ⌘K works too)"
+          >
+            <span>Search &amp; commands</span>
+            <kbd className="kbd-chip">:</kbd>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 px-3 text-xs font-medium"
+            onClick={() => openDiagnostics("doctor")}
+            title="Host readiness doctor, VAL-E* error catalog, and sanitized diagnostic JSON (shortcut: d)"
+          >
+            Diagnostics
+          </Button>
         </div>
       </header>
 
@@ -991,60 +1548,155 @@ export default function App() {
         interfaces.length === 0 ? (
         // Nothing installed: show what to run, not a start button for a unit
         // that does not exist.
-        <FirstRun facts={facts} onRetry={loadFacts} />
+        <FirstRun
+          facts={facts}
+          onRetry={loadFacts}
+          onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+        />
       ) : service && service.active !== "active" && !live ? (
         // The unit being down is only the reason the cockpit is empty when the
         // daemon is also unreachable. A daemon can answer with no unit behind it
         // (a lab, a hand-run process), and hiding a live tunnel because systemd
         // has never heard of it is the console lying in the wrong direction.
-        <StoppedCard service={service} onChanged={refreshService} />
+        <StoppedCard
+          service={service}
+          health={hostHealth}
+          onChanged={refreshService}
+          onOpenDiagnostics={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+        />
       ) : interfaces.length === 0 ? (
         // A socket the installer created and this user cannot open is the other
         // reason for an empty list, and it is not the bare machine FirstRun
         // describes: there the steps are the news, here they are a misdiagnosis.
         facts && facts.sockets > 0 ? (
-          <SocketUnreadable facts={facts} onRetry={loadFacts} />
+          <SocketUnreadable
+            facts={facts}
+            onRetry={loadFacts}
+            onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+          />
         ) : (
-          <FirstRun facts={facts} onRetry={loadFacts} />
+          <FirstRun
+            facts={facts}
+            onRetry={loadFacts}
+            onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+          />
         )
       ) : (
         <>
-          <Hero
-            data={data}
-            now={now}
-            history={history.current}
-            samples={samples}
-            health={hostHealth}
-            live={live}
-            seen={seen}
-            attempts={attempts}
-            replyAge={replyAge}
-            socket={interfaces[currentIndex]?.path ?? ""}
-            error={payload?.error ?? null}
-          />
-          {/* Task grouping, not tabs: overview first, then zoom/filter, then
-              details on demand. Status answers "am I protected?" at a glance;
-              peers are the workbench (list + detail stay together so nothing
-              must be held in memory across the screen); system holds the rare,
-              dangerous changes. No tab hides another task's state. */}
-          <section aria-label="Status" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <p className="micro px-1 pt-1 pb-1">STATUS — IS TRAFFIC PROTECTED?</p>
-            <div className="flex flex-col gap-3 lg:flex-row">
-              <div className="min-w-0 flex-[3]">
-                <Panel title="THROUGHPUT">
+          <nav
+            aria-label="Primary sections"
+            role="tablist"
+            className="surface flex flex-wrap items-center gap-1 rounded-xl p-1"
+          >
+            {SECTION_TABS.map((tab) => {
+              const active = section === tab.id
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setSection(tab.id)}
+                  className={
+                    active
+                      ? "border-signal/45 bg-signal/14 text-signal inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border px-3.5 py-1.5 text-xs font-semibold tracking-wider uppercase shadow-[0_0_12px_rgba(57,197,207,0.12)] transition-colors"
+                      : "text-muted-foreground hover:text-foreground hover:bg-secondary/50 inline-flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border border-transparent px-3.5 py-1.5 text-xs font-medium tracking-wider uppercase transition-colors"
+                  }
+                >
+                  <SectionIcon kind={tab.id} />
+                  <span>{tab.label}</span>
+                  {tab.id === "devices" && data && (
+                    <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-mono text-[11px]">
+                      {data.peers.length}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </nav>
+
+          {/* All sections stay mounted and use CSS `hidden` when inactive so
+              keyboard shortcuts and the command palette (`:`) can trigger any
+              dialog or button ID from any tab without losing state. */}
+          <div className={section === "overview" || section === "all" ? "flex flex-col gap-4" : "hidden"}>
+            <Hero
+              data={data}
+              now={now}
+              samples={samples}
+              health={hostHealth}
+              live={live}
+              seen={seen}
+              booting={booting}
+              attempts={attempts}
+              replyAge={replyAge}
+              socket={interfaces[currentIndex]?.path ?? ""}
+              error={payload?.error ?? null}
+              onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+              onOpenUserKeys={() => setSection("settings")}
+            />
+            <TunnelFlowMap
+              data={data}
+              health={hostHealth}
+              rates={peerRates}
+              rxRate={sampleRate(samples, "rx")}
+              txRate={sampleRate(samples, "tx")}
+              now={now}
+              live={live}
+              onSelectPeer={(fp) => {
+                setSelectedPeer(fp)
+                setSection("devices")
+              }}
+            />
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+              <div className="min-w-0 lg:col-span-5">
+                <HealthPanel
+                  health={hostHealth}
+                  stale={!live}
+                  onChanged={refreshAfterChange}
+                  onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+                />
+              </div>
+              <div className="flex min-w-0 flex-col gap-4 lg:col-span-7">
+                <Panel title="Throughput">
                   <TrafficChart samples={samples} />
-                  <TopTalkers rates={peerRates} />
+                  <TopTalkers rates={peerRates} peers={data?.peers ?? []} />
+                </Panel>
+                <Panel
+                  title={`Cryptographic Architecture — Suite ${suiteLabel(data?.suite ?? "0x0003")}`}
+                >
+                  <CryptoArchitecture suite={data?.suite ?? "0x0003"} />
                 </Panel>
               </div>
-              <div className="min-w-0 flex-[2]">
-                <HealthPanel health={hostHealth} stale={!live} />
+            </div>
+          </div>
+
+          <section
+            aria-label="Peers"
+            className={
+              section === "devices" || section === "all"
+                ? "animate-in fade-in slide-in-from-bottom-2 duration-300"
+                : "hidden"
+            }
+          >
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1 pt-1">
+              <h2 className="text-foreground text-sm font-medium">
+                Connected devices
+                {data ? (
+                  <span className="text-muted-foreground ml-2 font-mono text-xs">{data.peers.length}</span>
+                ) : null}
+              </h2>
+              <div className="flex flex-wrap items-center gap-2">
+                <InviteDialog blocked={blocked} />
+                <ImportBundleDialog blocked={blocked} />
+                <AddPeerDialog
+                  blocked={blocked}
+                  peers={data?.peers ?? []}
+                  interfaceAddresses={data?.addresses ?? []}
+                />
               </div>
             </div>
-          </section>
-          <section aria-label="Peers" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <p className="micro px-1 pt-1 pb-1">PEERS — WHO CAN CONNECT</p>
-            <div className="flex flex-col gap-3 md:flex-row">
-              <div className="min-w-0 flex-1">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+              <div className="min-w-0 lg:col-span-7">
                 <PeersPanel
                   peers={data?.peers ?? []}
                   now={now}
@@ -1056,60 +1708,189 @@ export default function App() {
                   onSort={setSort}
                   stale={seen && !live}
                   live={live}
-                  actions={
-                    <span className="flex gap-1.5">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="micro uppercase"
-                        onClick={() => setPalette(true)}
-                        title="command palette: verbs and peers in one box (: opens it, ⌘K works too)"
-                      >
-                        : commands
-                      </Button>
-                      <InviteDialog blocked={blocked} />
-                      <ImportBundleDialog blocked={blocked} />
-                      <KeygenButton blocked={blocked} />
-                      <AddPeerDialog blocked={blocked} peers={data?.peers ?? []} />
-                    </span>
-                  }
                 />
               </div>
-              <div className="flex flex-col gap-3 md:w-[320px] md:shrink-0">
+              <div className="min-w-0 lg:col-span-5">
                 <PeerDetail peer={detail} now={now} blocked={blocked} unknown={!seen} />
               </div>
             </div>
           </section>
-          <section aria-label="System" className="animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <p className="micro px-1 pt-1 pb-1">SYSTEM — RARELY CHANGED</p>
-            <div className="flex flex-col gap-3">
-              <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                <InterfaceData payload={payload} />
-                <PlanPanel onChanged={() => setHostHealth(null)} />
+
+          <section
+            aria-label="Settings and Routing"
+            className={
+              section === "settings" || section === "all"
+                ? "animate-in fade-in slide-in-from-bottom-2 duration-300"
+                : "hidden"
+            }
+          >
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+              <div className="flex min-w-0 flex-col gap-4 lg:col-span-6">
+                <UserKeyCard
+                  data={data}
+                  interfaceName={currentName || "vallum0"}
+                  blocked={blocked}
+                  prefs={userPrefs}
+                  renderKeygen={(onGenerated) => (
+                    <KeygenButton blocked={blocked} onGenerated={onGenerated} />
+                  )}
+                />
+                <UserPreferencesPanel
+                  prefs={userPrefs}
+                  onUpdate={updateUserPrefs}
+                  onReset={resetUserPrefs}
+                  comfortable={comfortable}
+                  onToggleComfortable={() => setComfortable((c) => !c)}
+                  interfaceName={currentName || "vallum0"}
+                  blocked={blocked}
+                />
               </div>
-              <LogsPanel />
+              <div className="flex min-w-0 flex-col gap-4 lg:col-span-6">
+                <Panel title="Daemon & Network Configuration">
+                  <div className="divide-border/50 flex flex-col divide-y">
+                    <div className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-1">
+                      <div className="min-w-0">
+                        <div className="text-foreground text-xs font-medium">Network &amp; routing</div>
+                        <div className="text-muted-foreground font-mono text-[11px]">
+                          {data?.addresses.join(", ") || "—"} ·{" "}
+                          {data?.expected_egress === "full" ? "Full tunnel" : "Split tunnel"}
+                        </div>
+                      </div>
+                      <InterfaceFormDialog blocked={blocked} />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                      <div className="min-w-0">
+                        <div className="text-foreground text-xs font-medium">Persist live peers</div>
+                        <div className="text-muted-foreground text-[11px]">
+                          Write runtime additions and rotations to disk
+                        </div>
+                      </div>
+                      <SaveRuntimeButton blocked={blocked} />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+                      <div className="min-w-0">
+                        <div className="text-foreground text-xs font-medium">Listen port &amp; cryptography</div>
+                        <div className="text-muted-foreground font-mono text-[11px]">
+                          {data?.listen_port !== null && data?.listen_port !== undefined
+                            ? `UDP :${data.listen_port}`
+                            : "Auto port"}{" "}
+                          · {suiteLabel(data?.suite)}
+                        </div>
+                      </div>
+                      <DeviceDialog
+                        listenPort={data?.listen_port ?? null}
+                        fwmark={data?.fwmark ?? null}
+                        blocked={blocked}
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 py-3 last:pb-1">
+                      <div className="min-w-0">
+                        <div className="text-foreground text-xs font-medium">Raw TOML configuration</div>
+                        <div className="text-muted-foreground text-[11px]">
+                          Config editor with line diff preview and validation
+                        </div>
+                      </div>
+                      <ConfigDialog blocked={blocked} interfaceName={currentName || "vallum0"} />
+                    </div>
+                  </div>
+                </Panel>
+                <PlanPanel onChanged={refreshAfterChange} />
+              </div>
             </div>
           </section>
-          <footer className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
-            <span>{lastReply === "live" ? "snapshot live" : lastReply === "—" ? "waiting for snapshot" : `snapshot updated ${lastReply}`}</span>
+
+          <section
+            aria-label="Monitoring and Logs"
+            className={
+              section === "logs" || section === "all"
+                ? "animate-in fade-in slide-in-from-bottom-2 duration-300"
+                : "hidden"
+            }
+          >
+            <div className="flex flex-col gap-4">
+              <PacketPipelineFlow data={data} onOpenMetrics={() => openDiagnostics("metrics")} />
+              <InterfaceData payload={payload} onOpenMetrics={() => openDiagnostics("metrics")} />
+              <LogsPanel
+                onOpenDiagnostics={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+              />
+            </div>
+          </section>
+
+          <section
+            aria-label="Setup Guide"
+            className={
+              section === "setup"
+                ? "animate-in fade-in slide-in-from-bottom-2 duration-300"
+                : "hidden"
+            }
+          >
+            <FirstRun
+              facts={facts}
+              onRetry={loadFacts}
+              embedded
+              onOpenCatalog={(code) => openDiagnostics(code ? "codes" : "doctor", code)}
+            />
+          </section>
+
+          <footer className="text-muted-foreground flex flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-white/8 px-1 pt-3 text-xs">
+            <span>
+              {lastReply === "live"
+                ? "Snapshot live"
+                : lastReply === "—"
+                  ? "Waiting for snapshot"
+                  : `Snapshot updated ${lastReply}`}
+            </span>
             <span>·</span>
-            <span>snapshot stream</span>
+            <button
+              onClick={() => openDiagnostics("doctor")}
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
+              title="Open host readiness checks, VAL-E* error reference, and sanitized JSON export (d)"
+            >
+              Diagnostics
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => openDiagnostics("metrics")}
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
+              title="Inspect live telemetry counters and Prometheus exposition"
+            >
+              Telemetry
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => setSection("setup")}
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
+              title="Open the guided setup workflow"
+            >
+              Setup guide
+            </button>
+            <span>·</span>
+            <button
+              onClick={() => setSection(section === "all" ? "overview" : "all")}
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
+              title="Toggle single-page view of all panels (shortcut: 6)"
+            >
+              {section === "all" ? "Tabbed view" : "All panels"}
+            </button>
             <span>·</span>
             <button
               onClick={() => setComfortable((c) => !c)}
-              className="hover:text-foreground cursor-pointer rounded uppercase"
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
               title="Text size: comfortable raises controls and text above minimum touch targets"
             >
-              text size: {comfortable ? "comfortable" : "compact"}
+              Text size: {comfortable ? "comfortable" : "compact"}
             </button>
             <span>·</span>
             <button
               onClick={() => setShortcuts(true)}
-              className="hover:text-foreground cursor-pointer rounded uppercase"
-              title="Keyboard shortcuts (?) — experts keep their speed without forcing novices to memorize"
+              className="hover:text-foreground cursor-pointer rounded transition-colors"
+              title="Keyboard shortcuts (?)"
             >
-              shortcuts
+              Shortcuts
             </button>
+            <span className="text-muted-foreground/70 ml-auto font-mono text-[11px]">
+              v1.6.4 · Ikaros Digital × AtomGuard
+            </span>
           </footer>
         </>
       )}
@@ -1125,38 +1906,76 @@ export default function App() {
         onCycleSort={() =>
           setSort((current) => SORT_CYCLE[(SORT_CYCLE.indexOf(current) + 1) % SORT_CYCLE.length])
         }
+        sortLabel={SORT_LABELS[sort]}
+        hasFilter={filter.trim() !== ""}
+        onClearFilter={() => setFilter("")}
+        onRefresh={refreshAfterChange}
+        onPrevPeer={() => stepPeer(-1)}
+        onNextPeer={() => stepPeer(1)}
+        onSwitchInterface={() => switchInterface(1)}
+        interfaceCount={interfaces.length}
+        onToggleDensity={() => setComfortable((c) => !c)}
+        comfortable={comfortable}
+        onOpenShortcuts={() => setShortcuts(true)}
+        onOpenDiagnostics={() => openDiagnostics("doctor")}
+        onOpenMetrics={() => openDiagnostics("metrics")}
+        onOpenOnboarding={() => openDiagnostics("onboarding")}
+      />
+
+      <DiagnosticsModal
+        key={`${diagnosticsTab}-${diagnosticsCode ?? ""}`}
+        open={diagnosticsOpen}
+        onOpenChange={setDiagnosticsOpen}
+        facts={facts}
+        health={hostHealth}
+        service={service}
+        snapshot={data}
+        error={payload?.error ?? null}
+        initialTab={diagnosticsTab}
+        highlightCode={diagnosticsCode}
       />
 
       {shortcuts && (
         <div
           role="dialog"
-          aria-label="keyboard shortcuts"
+          aria-label="Keyboard shortcuts"
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
           onClick={() => setShortcuts(false)}
-        >            <div
-              className="surface-raised w-full max-w-sm rounded-xl p-5"
-              onClick={(event) => event.stopPropagation()}
-            >
-            <p className="text-signal mb-3 text-xs font-semibold tracking-wide uppercase">
-              keyboard
+        >
+          <div
+            className="surface-raised w-full max-w-md rounded-xl p-5"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <p className="text-foreground mb-3 text-sm font-medium">
+              Keyboard shortcuts
             </p>
-            <dl className="grid grid-cols-[3rem_1fr] gap-x-3 gap-y-1.5 text-xs">
+            <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5 text-xs">
               {[
-                ["/", "filter peers"],
-                [":", "command palette — every action lives here"],
-                ["⌘K", "command palette (alias)"],
-                ["Tab", "next interface"],
-                ["esc", "close this list · clear the peer filter"],
-                ["?", "open / close this list"],
+                ["1 – 6", "Switch section (Overview / Devices / Monitoring / Settings / Setup / All)"],
+                ["j / ↓", "Next peer"],
+                ["k / ↑", "Previous peer"],
+                ["/", "Filter peers"],
+                ["o", "Cycle peer sort (activity / transfer / name / key)"],
+                ["r", "Refresh health & service telemetry"],
+                ["d", "Open Diagnostics & VAL-E* error reference"],
+                ["i", "Open interface settings form"],
+                ["E", "Open raw TOML configuration editor"],
+                ["W", "Save live runtime peers to configuration"],
+                [": / ⌘K", "Command palette — all actions & peers"],
+                ["Tab / [ / ]", "Switch interface"],
+                ["Esc", "Close dialog · clear peer filter"],
+                ["?", "Open / close this list"],
               ].map(([key, meaning]) => (
                 <div key={key} className="contents">
-                  <dt className="text-foreground/80 font-mono">{key}</dt>
+                  <dt>
+                    <kbd className="kbd-chip">{key}</kbd>
+                  </dt>
                   <dd className="text-muted-foreground">{meaning}</dd>
                 </div>
               ))}
             </dl>
             <p className="text-muted-foreground mt-3 text-xs">
-              Peer, service, and device actions live in the palette — press : and type.
+              All peer, bundle, and service actions also live in the command palette (<kbd className="kbd-chip">:</kbd>).
             </p>
           </div>
         </div>

@@ -13,9 +13,9 @@ export function Diamond() {
 
 export function PanelTitle({ children }: { children: ReactNode }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-2">
       <Diamond />
-      <span className="text-signal text-xs font-semibold tracking-wide">{children}</span>
+      <span className="text-signal text-xs font-semibold tracking-[0.08em] uppercase">{children}</span>
     </div>
   )
 }
@@ -32,12 +32,12 @@ export function Panel({
   className?: string
 }) {
   return (
-    <section className={`surface rounded-lg ${className}`}>
-      <div className="flex items-center justify-between px-4 pt-3 pb-1.5">
+    <section className={`surface rounded-xl ${className}`}>
+      <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-2">
         <PanelTitle>{title}</PanelTitle>
         {right}
       </div>
-      <div className="px-4 pb-3">{children}</div>
+      <div className="px-5 pb-4">{children}</div>
     </section>
   )
 }

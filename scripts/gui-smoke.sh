@@ -123,17 +123,31 @@ done
 VALLUM_RUNTIME_DIR="$RUNTIME" "$GUI" --serve "$PORT" >"$WORK/serve.log" 2>&1 &
 pids+=($!)
 
+COOKIES="$WORK/cookies.txt"
+
 api() {
-    curl -sf -m 20 -X POST "http://127.0.0.1:$PORT$1" \
+    curl -sf -m 20 -b "$COOKIES" -X POST "http://127.0.0.1:$PORT$1" \
         -H "content-type: application/json" -d "${2:-{\}}"
 }
 
 # For the refusals: the body is the evidence, so the status must still fail the
 # call without throwing the body away (`-f` would).
 api_any() {
-    curl -s -m 20 -X POST "http://127.0.0.1:$PORT$1" \
+    curl -s -m 20 -b "$COOKIES" -X POST "http://127.0.0.1:$PORT$1" \
         -H "content-type: application/json" -d "${2:-{\}}"
 }
+
+TOKEN=""
+for _ in $(seq 1 50); do
+    TOKEN=$(sed -n 's/.*token=\([0-9a-fA-F]\{16,\}\).*/\1/p' "$WORK/serve.log" | head -1)
+    if [ -n "$TOKEN" ]; then
+        if curl -sf -m 5 -c "$COOKIES" "http://127.0.0.1:$PORT/?token=$TOKEN" >/dev/null 2>&1; then
+            break
+        fi
+    fi
+    sleep 0.2
+done
+[ -n "$TOKEN" ] || fail "the console did not print a session token $(tail -2 "$WORK/serve.log")"
 
 for _ in $(seq 1 50); do
     api /api/select "{\"path\":\"$SOCK\"}" >/dev/null 2>&1 && break
@@ -206,6 +220,17 @@ NEW_KEY_NAME=$(field filename <"$WORK/key.out")
 [ -n "$(field text <"$WORK/key.out")" ] || fail "keygen returned an empty key"
 [ -e "$WORK/$NEW_KEY_NAME" ] && fail "keygen wrote the key to the working directory"
 echo "   $NEW_KEY_NAME"
+
+echo "== invite: invalid peer name rejected server-side"
+if api /api/cmd/invite_peer '{"name":"../bad name","ttl_minutes":"15","pinned":""}' \
+    >/dev/null 2>&1; then
+    fail "an invalid peer name was accepted by /api/cmd/invite_peer"
+fi
+api_any /api/cmd/invite_peer '{"name":"../bad name","ttl_minutes":"15","pinned":""}' \
+    >"$WORK/invite-bad.out"
+grep -q "peer name" "$WORK/invite-bad.out" ||
+    fail "the bad-name refusal does not mention peer name: $(cat "$WORK/invite-bad.out")"
+echo "   ok"
 
 echo "== invite: refused while the config has no public endpoint"
 if api /api/cmd/invite_peer '{"name":"phone","ttl_minutes":"","pinned":""}' \

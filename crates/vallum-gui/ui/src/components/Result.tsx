@@ -33,17 +33,17 @@ export function ResultPanel({
             {command}
           </pre>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" className="uppercase" onClick={() => void copy()}>
-              {copied ? "copied" : "copy command"}
+            <Button size="sm" variant="outline" onClick={() => void copy()}>
+              {copied ? "Copied" : "Copy command"}
             </Button>
             <span className="text-muted-foreground text-xs">
-              run it on the other device
+              Run on the other device
             </span>
           </div>
         </>
       )}
-      <Button size="sm" className="self-end uppercase" onClick={onDone}>
-        done
+      <Button size="sm" className="self-end" onClick={onDone}>
+        Done
       </Button>
     </div>
   )

@@ -126,9 +126,9 @@ Guides: [quickstart](docs/quickstart.md) ·
 [security model](docs/security-model.md) ·
 [roadmap](docs/roadmap.md).
 
-## TUI (`vallum tui`)
+## Operations Cockpit (`vallum tui` & `vallum-gui`)
 
-`vallum tui` is the terminal operations cockpit: live interface and dataplane counters (`datagrams`, `packets`, `handshakes`, `fragments`), shared-scale RX/TX sparklines, one-time token invite QR generation (`v`), zero-downtime key rotation (`K` / `f`), peer ping probes (`p`), TOML diff audit (`E`), and journald log streaming (`l`).
+`vallum tui` is the terminal operations cockpit, and `vallum-gui` provides the matching desktop (Tauri) and browser (`vallum-gui --serve 7317`) operations cockpit with full feature parity: live interface and dataplane counters (`datagrams`, `packets`, `handshakes`, `fragments`), spline RX/TX throughput charts, Brandkit §02/§08 boundary & crypto schematics, one-time token invite QR generation (`v`), zero-downtime key rotation (`K` / `f`), peer ping probes (`p`), TOML diff audit (`E`), journald log streaming (`l`), and `VAL-E*` doctor/error diagnostics (`d`).
 
 <p align="center">
   <img src="assets/vallum-cockpit.png" alt="Vallum Cockpit Dashboard" width="100%">
@@ -146,7 +146,7 @@ Guides: [quickstart](docs/quickstart.md) ·
   <img src="assets/vallum-brandkit.png" alt="Vallum Brand & Interface System" width="100%">
 </p>
 
-See [`docs/tui.md`](docs/tui.md) for the full key map and configuration overrides.
+See [`docs/tui.md`](docs/tui.md) for the TUI key map and configuration overrides, and [`docs/gui.md`](docs/gui.md) for the desktop & localhost browser cockpit guide (`--serve`, shortcuts, and `VAL-E*` diagnostics).
 
 ## Layout
 
@@ -160,6 +160,7 @@ crates/
   vallum-config/                  TOML configuration parser & validation
   vallum-quick/                   routes, policy routing (fwmark), DNS, firewall hooks
   vallum/                         daemon, CLI, enrolment v2 responder, UAPI control socket, TUI
+  vallum-gui/                     desktop GUI (Tauri) & localhost HTTP/SSE web console
 docs/
   adr/                            0001..0016 architectural decision records
   deployment/                     server, client, site-to-site, automation, troubleshooting

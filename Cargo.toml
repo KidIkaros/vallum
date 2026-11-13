@@ -20,7 +20,6 @@ rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Ikaros Digital", "Atomguard", "Vallum contributors"]
 repository = "https://github.com/KidIkaros/vallum"
-homepage = "https://github.com/KidIkaros/vallum"
 
 [workspace.dependencies]
 vallum-crypto = { path = "crates/vallum-crypto" }

@@ -21,6 +21,16 @@ pub struct PeerView {
     pub last_handshake: Option<(u64, u32)>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    pub window_sent: u64,
+    pub window_received: u64,
+    pub last_received_ms: Option<u64>,
+    pub last_sent_ms: Option<u64>,
+    pub dropped_no_session: u64,
+    pub dropped_replay: u64,
+    pub dropped_allowed_ips: u64,
+    pub dropped_after_auth: u64,
+    pub reinit_offered: u64,
+    pub last_rejected_source: Option<String>,
     pub epoch: u64,
     pub preshared_key: bool,
     /// Unix second the peer's identity expires, when it is a document.
@@ -50,7 +60,7 @@ pub struct DeviceView {
     pub peers: Vec<PeerView>,
 }
 
-/// The eight dataplane counters, for the detail pane.
+/// The dataplane counters, for the detail pane.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LoopStatsView {
     pub datagrams_sent: u64,
@@ -61,12 +71,26 @@ pub struct LoopStatsView {
     pub refusals: u64,
     pub reassembled: u64,
     pub fragments_dropped: u64,
+    pub dropped_malformed: u64,
+    pub dropped_unknown_index: u64,
+    pub fragments_rate_limited: u64,
+    pub handshake_dropped_no_mac: u64,
+    pub handshake_dropped_unidentifiable: u64,
+    pub handshake_dropped_unknown_peer: u64,
+    pub handshake_dropped_endpoint_conflict: u64,
+    pub handshake_dropped_stale: u64,
 }
 
 impl LoopStatsView {
     fn from_response(response: &Response) -> Option<Self> {
         // Honest-missing: only a fully populated block counts as telemetry.
         let counter = |key: &str| response.field(key)?.parse::<u64>().ok();
+        let opt = |key: &str| {
+            response
+                .field(key)
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
         Some(Self {
             datagrams_sent: counter(field::VALLUM_DATAGRAMS_SENT)?,
             datagrams_failed: counter(field::VALLUM_DATAGRAMS_FAILED)?,
@@ -76,6 +100,16 @@ impl LoopStatsView {
             refusals: counter(field::VALLUM_REFUSALS)?,
             reassembled: counter(field::VALLUM_REASSEMBLED)?,
             fragments_dropped: counter(field::VALLUM_FRAGMENTS_DROPPED)?,
+            dropped_malformed: opt(field::VALLUM_DROPPED_MALFORMED),
+            dropped_unknown_index: opt(field::VALLUM_DROPPED_UNKNOWN_INDEX),
+            fragments_rate_limited: opt(field::VALLUM_FRAGMENTS_RATE_LIMITED),
+            handshake_dropped_no_mac: opt(field::VALLUM_HANDSHAKE_DROPPED_NO_MAC),
+            handshake_dropped_unidentifiable: opt(field::VALLUM_HANDSHAKE_DROPPED_UNIDENTIFIABLE),
+            handshake_dropped_unknown_peer: opt(field::VALLUM_HANDSHAKE_DROPPED_UNKNOWN_PEER),
+            handshake_dropped_endpoint_conflict: opt(
+                field::VALLUM_HANDSHAKE_DROPPED_ENDPOINT_CONFLICT,
+            ),
+            handshake_dropped_stale: opt(field::VALLUM_HANDSHAKE_DROPPED_STALE),
         })
     }
 }
@@ -119,6 +153,7 @@ impl DeviceView {
                         fingerprint = extracted.to_owned();
                     }
                 }
+                let last_rejected_raw = peer_field(field::LAST_REJECTED_SOURCE);
                 PeerView {
                     name: peer_field(field::VALLUM_NAME),
                     fingerprint,
@@ -136,6 +171,26 @@ impl DeviceView {
                     last_handshake: last,
                     tx_bytes: peer_field(field::TX_BYTES).parse().unwrap_or(0),
                     rx_bytes: peer_field(field::RX_BYTES).parse().unwrap_or(0),
+                    window_sent: peer_field(field::WINDOW_SENT).parse().unwrap_or(0),
+                    window_received: peer_field(field::WINDOW_RECEIVED).parse().unwrap_or(0),
+                    last_received_ms: peer_field(field::LAST_RECEIVED_MS).parse().ok(),
+                    last_sent_ms: peer_field(field::LAST_SENT_MS).parse().ok(),
+                    dropped_no_session: peer_field(field::DROPPED_NO_SESSION).parse().unwrap_or(0),
+                    dropped_replay: peer_field(field::DROPPED_REPLAY).parse().unwrap_or(0),
+                    dropped_allowed_ips: peer_field(field::DROPPED_ALLOWED_IPS)
+                        .parse()
+                        .unwrap_or(0),
+                    dropped_after_auth: peer_field(field::VALLUM_DROPPED_AFTER_AUTH)
+                        .parse()
+                        .unwrap_or(0),
+                    reinit_offered: peer_field(field::REINIT_OFFERED).parse().unwrap_or(0),
+                    last_rejected_source: if last_rejected_raw.is_empty()
+                        || last_rejected_raw == "-"
+                    {
+                        None
+                    } else {
+                        Some(last_rejected_raw)
+                    },
                     epoch: peer_field(field::VALLUM_EPOCH).parse().unwrap_or(0),
                     preshared_key: !peer_field(field::PRESHARED_KEY).is_empty(),
                     valid_until: peer_field(field::VALLUM_VALID_UNTIL).parse().ok(),

@@ -87,6 +87,20 @@ export const readConfig = () => command<string>("read_config", {})
 
 export const writeConfig = (text: string) => command<Done>("write_config", { text })
 
+export interface InterfaceFields {
+  listen: string
+  mtu: string
+  fwmark: string
+  addresses: string
+  dns: string
+  table: string
+}
+
+export const readInterfaceFields = () => command<InterfaceFields>("read_interface_fields", {})
+export const applyInterface = (fields: InterfaceFields) =>
+  command<Done>("apply_interface", { fields })
+export const saveRuntime = () => command<Done>("save_runtime", {})
+
 /** Change the device's listen port and firewall mark through the daemon. */
 export const applyDevice = (listenPort: string, fwmark: string) =>
   command<Done>("apply_device", { listenPort, fwmark })

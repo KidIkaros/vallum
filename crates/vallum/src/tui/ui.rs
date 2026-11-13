@@ -815,6 +815,44 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled(tx_bar, t.tx_bar()),
         ]));
         lines.push(detail_kv("epoch", peer.epoch.to_string(), t.subtext()));
+        if peer.window_received + peer.window_sent > 0 {
+            lines.push(detail_kv(
+                "window",
+                format!("rx {} / tx {} pkts", peer.window_received, peer.window_sent),
+                t.subtext(),
+            ));
+        }
+        if peer.dropped_after_auth > 0 {
+            lines.push(detail_kv(
+                "auth drop",
+                format!(
+                    "{} rejected after auth — peer key changed; re-enrol",
+                    peer.dropped_after_auth
+                ),
+                t.danger_bold(),
+            ));
+        }
+        if peer.dropped_allowed_ips > 0 {
+            let source = peer.last_rejected_source.as_deref().unwrap_or("none");
+            lines.push(detail_kv(
+                "allowlist",
+                format!(
+                    "{} dropped (last inner source: {source})",
+                    peer.dropped_allowed_ips
+                ),
+                t.warn_bold(),
+            ));
+        }
+        if peer.dropped_no_session + peer.dropped_replay + peer.reinit_offered > 0 {
+            lines.push(detail_kv(
+                "peer drops",
+                format!(
+                    "no-session {} · replay {} · reinit {}",
+                    peer.dropped_no_session, peer.dropped_replay, peer.reinit_offered
+                ),
+                t.subtext(),
+            ));
+        }
         // An expiring credential is the one thing a peer detail can show that
         // the operator must act on, so it is never silent.
         if let Some(valid_until) = peer.valid_until {
@@ -901,6 +939,42 @@ fn draw_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
                         Span::styled("  ·  ", t.muted()),
                         Span::styled(format!("{fail_label} {failed}"), fail_style),
                     ]));
+                }
+                if stats.dropped_malformed
+                    + stats.dropped_unknown_index
+                    + stats.fragments_rate_limited
+                    > 0
+                {
+                    lines.push(detail_kv(
+                        "wire drops",
+                        format!(
+                            "malformed {} · unknown-idx {} · frag-limit {}",
+                            stats.dropped_malformed,
+                            stats.dropped_unknown_index,
+                            stats.fragments_rate_limited
+                        ),
+                        t.danger(),
+                    ));
+                }
+                if stats.handshake_dropped_no_mac
+                    + stats.handshake_dropped_unidentifiable
+                    + stats.handshake_dropped_unknown_peer
+                    + stats.handshake_dropped_endpoint_conflict
+                    + stats.handshake_dropped_stale
+                    > 0
+                {
+                    lines.push(detail_kv(
+                        "hs drops",
+                        format!(
+                            "no-mac {} · unid {} · unknown {} · conflict {} · stale {}",
+                            stats.handshake_dropped_no_mac,
+                            stats.handshake_dropped_unidentifiable,
+                            stats.handshake_dropped_unknown_peer,
+                            stats.handshake_dropped_endpoint_conflict,
+                            stats.handshake_dropped_stale
+                        ),
+                        t.warn(),
+                    ));
                 }
             }
             lines.push(detail_kv(

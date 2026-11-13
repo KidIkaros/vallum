@@ -799,8 +799,11 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
         .as_ref()
         .and_then(|cfg| cfg.enroll.port)
         .or_else(|| {
-            endpoint
-                .rsplit_once(':')
+            config
+                .as_ref()
+                .and_then(|cfg| cfg.interface.listen.as_deref())
+                .or(Some(endpoint.as_str()))
+                .and_then(|addr| addr.rsplit_once(':'))
                 .and_then(|(_, port)| port.parse::<u16>().ok())
                 .map(|port| port.saturating_add(1))
         })

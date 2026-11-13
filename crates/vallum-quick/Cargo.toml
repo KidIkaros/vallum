@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 publish = false
 
 # This is the admin tool, not the daemon: it is allowed to run `ip`, `resolvconf`

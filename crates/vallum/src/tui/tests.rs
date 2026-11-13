@@ -19,6 +19,16 @@ fn a_device_view_parses_the_get_response() {
             ),
             ("vallum_address".to_owned(), "10.7.0.1/24".to_owned()),
             ("vallum_batching".to_owned(), "true".to_owned()),
+            ("vallum_datagrams_sent".to_owned(), "10".to_owned()),
+            ("vallum_datagrams_failed".to_owned(), "0".to_owned()),
+            ("vallum_packets_delivered".to_owned(), "9".to_owned()),
+            ("vallum_packets_failed".to_owned(), "0".to_owned()),
+            ("vallum_handshakes_established".to_owned(), "1".to_owned()),
+            ("vallum_handshakes_refused".to_owned(), "0".to_owned()),
+            ("vallum_reassembled".to_owned(), "4".to_owned()),
+            ("vallum_fragments_dropped".to_owned(), "0".to_owned()),
+            ("vallum_fragments_rate_limited".to_owned(), "2".to_owned()),
+            ("vallum_handshake_dropped_stale".to_owned(), "1".to_owned()),
         ],
         peers: vec![vec![
             ("vallum_name".to_owned(), "laptop".to_owned()),
@@ -29,6 +39,14 @@ fn a_device_view_parses_the_get_response() {
             ("allowed_ip".to_owned(), "10.7.0.2/32".to_owned()),
             ("tx_bytes".to_owned(), "100".to_owned()),
             ("rx_bytes".to_owned(), "200".to_owned()),
+            ("vallum_window_sent".to_owned(), "12".to_owned()),
+            ("vallum_window_received".to_owned(), "14".to_owned()),
+            ("vallum_last_received_ms".to_owned(), "350".to_owned()),
+            ("vallum_dropped_after_auth".to_owned(), "1".to_owned()),
+            (
+                "vallum_last_rejected_source".to_owned(),
+                "192.0.2.9".to_owned(),
+            ),
             ("vallum_epoch".to_owned(), "3".to_owned()),
         ]],
     };
@@ -36,8 +54,22 @@ fn a_device_view_parses_the_get_response() {
     assert_eq!(device.interface, "vallum0");
     assert_eq!(device.suite_id, 3);
     assert!(device.batching);
+    assert_eq!(
+        device
+            .stats
+            .map(|s| (s.fragments_rate_limited, s.handshake_dropped_stale)),
+        Some((2, 1))
+    );
     assert_eq!(device.peers[0].name, "laptop");
     assert_eq!(device.peers[0].allowed_ips, vec!["10.7.0.2/32"]);
+    assert_eq!(device.peers[0].window_sent, 12);
+    assert_eq!(device.peers[0].window_received, 14);
+    assert_eq!(device.peers[0].last_received_ms, Some(350));
+    assert_eq!(device.peers[0].dropped_after_auth, 1);
+    assert_eq!(
+        device.peers[0].last_rejected_source.as_deref(),
+        Some("192.0.2.9")
+    );
     assert_eq!(device.peers[0].epoch, 3);
 }
 

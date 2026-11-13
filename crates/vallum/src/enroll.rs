@@ -637,6 +637,7 @@ pub fn join_target(config: Option<&crate::config::Config>, listen: Option<&str>)
         .and_then(|config| config.enroll.port)
         .unwrap_or_else(|| {
             listen
+                .or_else(|| config.and_then(|config| config.interface.listen.as_deref()))
                 .and_then(|listen| listen.rsplit_once(':'))
                 .and_then(|(_, port)| port.parse::<u16>().ok())
                 .unwrap_or(51820)
@@ -1531,5 +1532,31 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name(""));
         assert!(valid_name("laptop-1.home"));
+    }
+
+    #[test]
+    fn join_target_uses_listen_port_plus_one_when_public_endpoint_port_differs() {
+        let path =
+            std::env::temp_dir().join(format!("vallum-join-target-{}.toml", std::process::id()));
+        let load = |body: &str| {
+            std::fs::write(&path, body).unwrap();
+            crate::config::Config::load(&path).unwrap()
+        };
+        let config = load(
+            "[interface]\nprivate_key = \"test.key\"\npublic_endpoint = \"vpn.example.com:51900\"\nlisten = \"0.0.0.0:52000\"\n",
+        );
+        assert_eq!(join_target(Some(&config), None), "vpn.example.com:52001");
+        assert_eq!(
+            join_target(Some(&config), Some("0.0.0.0:53000")),
+            "vpn.example.com:53001"
+        );
+        let pinned = load(
+            "[interface]\nprivate_key = \"test.key\"\npublic_endpoint = \"vpn.example.com:51900\"\nlisten = \"0.0.0.0:52000\"\n[enroll]\nport = 60000\n",
+        );
+        assert_eq!(
+            join_target(Some(&pinned), Some("0.0.0.0:53000")),
+            "vpn.example.com:60000"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

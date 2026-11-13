@@ -15,6 +15,14 @@ export interface Counters {
   refusals: number
   reassembled: number
   fragments_dropped: number
+  dropped_malformed: number
+  dropped_unknown_index: number
+  fragments_rate_limited: number
+  handshake_dropped_no_mac: number
+  handshake_dropped_unidentifiable: number
+  handshake_dropped_unknown_peer: number
+  handshake_dropped_endpoint_conflict: number
+  handshake_dropped_stale: number
 }
 
 export interface Peer {
@@ -28,6 +36,16 @@ export interface Peer {
   last_handshake_nsec: number
   tx_bytes: number
   rx_bytes: number
+  window_sent: number
+  window_received: number
+  last_received_ms: number | null
+  last_sent_ms: number | null
+  dropped_no_session: number
+  dropped_replay: number
+  dropped_allowed_ips: number
+  dropped_after_auth: number
+  reinit_offered: number
+  last_rejected_source: string | null
   epoch: number
   rotating: boolean
   valid_until: number | null
@@ -45,6 +63,8 @@ export interface Snapshot {
   offload: boolean
   batching: boolean
   counters: Counters
+  expected_egress?: string
+  build?: string
   peers: Peer[]
 }
 

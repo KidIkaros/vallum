@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 import { applyPlan, cancelApply, getPlan, revertPlan, type PlanData } from "@/lib/bridge"
 import { Button } from "@/components/ui/button"
-import { Panel } from "@/components/ui/panel"
+import { formatError } from "@/lib/validate"
 
 // Plan-before-apply: the panel shows exactly what the full tunnel will change
 // on this host and the one command that undoes it, and the apply button stays
@@ -37,7 +37,6 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
     if (!busy) return
-    setElapsed(0)
     const timer = window.setInterval(() => setElapsed((s) => s + 1), 1000)
     return () => window.clearInterval(timer)
   }, [busy])
@@ -59,6 +58,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
     running.current = true
     stopWaiting.current = false
     setBusy(true)
+    setElapsed(0)
     setBackgrounded(false)
     setConfirmCancel(false)
     setError(null)
@@ -74,7 +74,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
       })
       .catch((e) => {
         if (runId.current !== id) return
-        const message = e instanceof Error ? e.message : String(e)
+        const message = formatError(e)
         if (stopWaiting.current) {
           toast.error(message, { duration: 8000 })
         } else {
@@ -111,7 +111,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
         onChanged?.()
       })
       .catch((e) => {
-        const message = e instanceof Error ? e.message : String(e)
+        const message = formatError(e)
         setError(message)
         toast.error(message, { duration: 8000 })
       })
@@ -151,7 +151,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
         toast.success("Full tunnel reverted — back on the split tunnel.")
       })
       .catch((e) => {
-        setError(e instanceof Error ? e.message : String(e))
+        setError(formatError(e))
       })
       .finally(() => {
         running.current = false
@@ -163,39 +163,37 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
 
   if (plan.already_full) {
     return (
-      <details className="surface rounded-lg">
-        <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-4 py-2.5 text-xs select-none">
-          <span className="text-signal text-xs font-semibold tracking-wide">FULL TUNNEL</span>
-          <span>already applied — open to revert to the split tunnel</span>
+      <details className="surface rounded-xl">
+        <summary className="text-muted-foreground flex cursor-pointer items-center gap-2 px-5 py-3 text-xs select-none">
+          <span className="text-foreground text-sm font-medium">Full tunnel</span>
+          <span>Already active — open to revert to Split Tunnel</span>
         </summary>
-        <div className="px-4 pb-3">
+        <div className="px-5 pb-4">
           <p className="text-muted-foreground mb-2 text-xs leading-snug">
-            undo it all: {render_undo(plan.undo)} — or revert from here. The
-            revert restarts the tunnel, so it arms the same way the apply did.
+            Reverting restarts the tunnel back into Split Tunnel mode. Type <code className="font-mono">REVERT</code> to confirm.
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <input
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
-              placeholder="type REVERT to arm"
+              placeholder="Type REVERT"
               disabled={busy}
-              className="border-border/60 bg-background/40 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70"
+              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground/70"
               spellCheck={false}
             />
             <Button
               size="sm"
               variant="outline"
-              className="uppercase"
               disabled={!revertArmed || busy}
               onClick={() => revert()}
               title="Restore the split config and restart the tunnel"
             >
-              {busy ? `reverting… ${elapsed}s` : "revert to split"}
+              {busy ? `Reverting… ${elapsed}s` : "Revert to split tunnel"}
             </Button>
           </div>
           {error && <p className="text-fault mt-2 text-xs">{error}</p>}
           {output && (
-            <pre className="border-border bg-canvas text-muted-foreground mt-2 max-h-48 overflow-auto rounded border p-2 font-mono text-xs leading-snug whitespace-pre-wrap">
+            <pre className="border-border bg-canvas text-muted-foreground mt-2 max-h-48 overflow-auto rounded-md border p-2 font-mono text-xs leading-snug whitespace-pre-wrap">
               {output}
             </pre>
           )}
@@ -205,36 +203,45 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
   }
 
   return (
-    <Panel title="FULL TUNNEL — PLAN BEFORE APPLY">
-        <>
+    <details className="surface rounded-xl" open={busy || backgrounded || Boolean(output) || Boolean(error)}>
+      <summary className="text-muted-foreground flex cursor-pointer items-center justify-between gap-2 px-5 py-3 text-xs select-none">
+        <span className="flex items-center gap-2">
+          <span className="text-foreground text-sm font-medium">Full-tunnel rollout</span>
+          <span>Preview &amp; apply host routing changes</span>
+        </span>
+        <span className="text-muted-foreground/80 text-[11px]">Expand</span>
+      </summary>
+      <div className="px-5 pb-4 pt-1">
           <ul className="mb-2 flex flex-col gap-1">
             {plan.steps.map((step) => (
               <li key={step.step} className="text-xs leading-snug">
-                <span className="text-foreground">{step.step}</span>
+                <span className="text-foreground font-medium">{step.step}</span>
                 <span className="text-muted-foreground"> — {step.change}</span>
               </li>
             ))}
           </ul>
-          <p className="text-muted-foreground mb-2 text-xs leading-snug">
-            undo it all: {render_undo(plan.undo)}
-          </p>
+          <details className="text-muted-foreground mb-2 text-xs">
+            <summary className="hover:text-foreground cursor-pointer select-none">
+              Manual terminal undo command
+            </summary>
+            <div className="mt-1">{render_undo(plan.undo)}</div>
+          </details>
           <div className="flex flex-wrap items-center gap-2">
             <input
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
-              placeholder="type APPLY to arm"
+              placeholder="Type APPLY to arm"
               disabled={busy}
-              className="border-border/60 bg-background/40 h-8 w-40 rounded border px-2 font-mono text-xs placeholder:text-muted-foreground/70"
+              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground/70"
               spellCheck={false}
             />
             <Button
               size="sm"
-              className="uppercase"
               disabled={!armed || busy}
               onClick={() => run()}
               title="Arms the trial: revert timer first, then the routes. Any failed check reverts automatically."
             >
-              {busy ? `running the trial… ${elapsed}s (usually 2–3 min)` : "apply full tunnel"}
+              {busy ? `Running trial… ${elapsed}s (2–3 min)` : "Apply full tunnel"}
             </Button>
             {(busy || backgrounded) && (
               <Button
@@ -247,18 +254,18 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
                     ? "Click again: panic, restore the split config, restart the unit"
                     : "Stop the trial now and converge back on the split tunnel"
                 }
-                className={confirmCancel ? "border-fault/60 text-fault uppercase" : "uppercase"}
+                className={confirmCancel ? "border-fault/60 text-fault" : ""}
               >
-                {cancelling ? "reverting…" : confirmCancel ? "confirm: stop and revert?" : "stop and revert"}
+                {cancelling ? "Reverting…" : confirmCancel ? "Confirm: stop and revert?" : "Stop and revert"}
               </Button>
             )}
             {busy && !backgrounded && (
               <button
                 onClick={stop}
-                className="text-muted-foreground hover:text-foreground cursor-pointer rounded text-xs uppercase underline-offset-2 hover:underline"
+                className="text-muted-foreground hover:text-foreground cursor-pointer rounded text-xs underline-offset-2 hover:underline"
                 title="Hide this wait — the trial keeps running with its own revert timer; the output lands here when it finishes."
               >
-                hide this wait
+                Hide wait
               </button>
             )}
           </div>
@@ -273,8 +280,8 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               {output}
             </pre>
           )}
-        </>
-    </Panel>
+      </div>
+    </details>
   )
 }
 

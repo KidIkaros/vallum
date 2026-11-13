@@ -20,6 +20,7 @@ if [ -d /run/systemd/system ]; then
     fi
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf
     systemctl daemon-reload 2>/dev/null || true
+    systemctl try-restart 'vallum@*' 'vallum-quick@*' 'vallum-quick-watch@*' 2>/dev/null || true
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
     fi

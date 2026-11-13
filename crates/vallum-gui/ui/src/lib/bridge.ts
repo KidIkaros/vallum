@@ -14,17 +14,32 @@ const OVER_HTTP =
 /** True when the console can actually reach a daemon, by either transport. */
 export const hasBridge = IN_TAURI || OVER_HTTP
 
+/** Active UI transport for telemetry context without leaking host details. */
+export const transportKind: "tauri" | "http-serve" | "none" = IN_TAURI
+  ? "tauri"
+  : OVER_HTTP
+    ? "http-serve"
+    : "none"
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init)
   if (!response.ok) {
-    let detail = response.statusText
-    try {
-      const body = (await response.json()) as { error?: string }
-      if (body.error) detail = body.error
-    } catch {
-      /* a non-JSON error body keeps the status text */
+    const text = await response.text().catch(() => "")
+    let detail = ""
+    if (text.trim()) {
+      try {
+        const body = JSON.parse(text) as { error?: string }
+        if (typeof body.error === "string" && body.error.trim()) {
+          detail = body.error.trim()
+        }
+      } catch {
+        // Non-JSON responses (such as 403 text/plain token refusal) should
+        // surface their message instead of collapsing into an empty Error("").
+        const trimmed = text.trim()
+        if (!trimmed.startsWith("<")) detail = trimmed
+      }
     }
-    throw new Error(detail)
+    throw new Error(detail || response.statusText || `HTTP ${response.status}`)
   }
   return (await response.json()) as T
 }
@@ -196,13 +211,13 @@ export interface LogTail {
 
 /** Whether the tunnel's systemd unit is up — read unprivileged. */
 export function serviceState(): Promise<ServiceStatus> {
-  if (IN_TAURI) return invoke<ServiceStatus>("service_state")
+  if (IN_TAURI) return invoke<ServiceStatus>("service_state_command")
   return http<ServiceStatus>("/api/service")
 }
 
 /** Start/stop through polkit; the desktop asks, the console never sees a password. */
 export function serviceAction(action: "start" | "stop" | "restart"): Promise<{ message: string }> {
-  if (IN_TAURI) return invoke("service_action", { action })
+  if (IN_TAURI) return invoke("service_action_command", { action })
   return http("/api/service", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -212,7 +227,7 @@ export function serviceAction(action: "start" | "stop" | "restart"): Promise<{ m
 
 /** The unit's last log lines, as journald gives them to this user. */
 export function logsTail(lines = 200): Promise<LogTail> {
-  if (IN_TAURI) return invoke<LogTail>("logs_tail", { lines })
+  if (IN_TAURI) return invoke<LogTail>("logs_tail_command", { lines })
   return http<LogTail>(`/api/logs?lines=${lines}`)
 }
 

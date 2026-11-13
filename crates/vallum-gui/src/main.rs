@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{Emitter, State};
 
-use actions::{BundleOut, Done, InviteFields, KeyOut, PeerFields, QrFrame};
+use actions::{BundleOut, Done, InterfaceFields, InviteFields, KeyOut, PeerFields, QrFrame};
 use snapshot::Snapshot;
 
 /// Where the daemon's configs live, the same default the TUI uses.
@@ -82,10 +82,14 @@ pub(crate) struct Console {
 
 impl Console {
     fn new() -> Self {
+        let initial = interfaces()
+            .into_iter()
+            .next()
+            .map(|entry| PathBuf::from(entry.path));
         Self {
             inner: Mutex::new(Inner {
-                socket: None,
-                last_socket: None,
+                socket: initial.clone(),
+                last_socket: initial,
                 // Assume focused until the front-end says otherwise; a window
                 // that just opened is the case where a fresh snapshot is wanted.
                 focused: true,
@@ -98,7 +102,20 @@ impl Console {
     }
 
     pub(crate) fn current_socket(&self) -> Option<PathBuf> {
-        self.lock().socket.clone()
+        let current = self.lock().socket.clone();
+        if current.is_some() {
+            return current;
+        }
+        let discovered = interfaces()
+            .into_iter()
+            .next()
+            .map(|entry| PathBuf::from(entry.path));
+        if let Some(ref path) = discovered {
+            let mut inner = self.lock();
+            inner.socket = Some(path.clone());
+            inner.last_socket = Some(path.clone());
+        }
+        discovered
     }
 
     /// The socket this console is about, even when the daemon behind it has
@@ -192,9 +209,7 @@ pub(crate) fn select_path(console: &Console, path: String) {
 /// The socket the console is pointed at.
 fn selected(console: &Console) -> Result<PathBuf, String> {
     console
-        .lock()
-        .socket
-        .clone()
+        .current_socket()
         .ok_or_else(|| "no interface selected".to_owned())
 }
 
@@ -384,6 +399,33 @@ fn config_write_at(socket: &std::path::Path, text: &str) -> Result<Done, String>
     actions::write_config(&config, text)
 }
 
+fn interface_fields_at(socket: &std::path::Path) -> Result<InterfaceFields, String> {
+    let config = config_of(socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to edit it"
+        )
+    })?;
+    actions::read_interface_fields(&config)
+}
+
+fn apply_interface_at(socket: &std::path::Path, fields: &InterfaceFields) -> Result<Done, String> {
+    let config = config_of(socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to edit it"
+        )
+    })?;
+    actions::apply_interface(&config, fields)
+}
+
+fn save_runtime_at(socket: &std::path::Path) -> Result<Done, String> {
+    let config = config_of(socket).ok_or_else(|| {
+        format!(
+            "no readable config under {CONFIG_DIR} names this socket — run the console as root to save runtime config"
+        )
+    })?;
+    actions::save_runtime(socket, &config)
+}
+
 #[tauri::command]
 fn generate_key(console: State<'_, Arc<Console>>) -> Result<KeyOut, String> {
     let socket = selected(&console)?;
@@ -400,6 +442,27 @@ fn read_config(console: State<'_, Arc<Console>>) -> Result<String, String> {
 fn write_config(console: State<'_, Arc<Console>>, text: String) -> Result<Done, String> {
     let socket = selected(&console)?;
     config_write_at(&socket, &text)
+}
+
+#[tauri::command]
+fn read_interface_fields(console: State<'_, Arc<Console>>) -> Result<InterfaceFields, String> {
+    let socket = selected(&console)?;
+    interface_fields_at(&socket)
+}
+
+#[tauri::command]
+fn apply_interface(
+    console: State<'_, Arc<Console>>,
+    fields: InterfaceFields,
+) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    apply_interface_at(&socket, &fields)
+}
+
+#[tauri::command]
+fn save_runtime(console: State<'_, Arc<Console>>) -> Result<Done, String> {
+    let socket = selected(&console)?;
+    save_runtime_at(&socket)
 }
 
 #[tauri::command]
@@ -612,6 +675,15 @@ pub(crate) fn dispatch(
             serde_json::to_value(config_text_at(&socket)?).map_err(|error| error.to_string())
         }
         "write_config" => answer(config_write_at(&socket, &text("text")?)?),
+        "read_interface_fields" => {
+            serde_json::to_value(interface_fields_at(&socket)?).map_err(|error| error.to_string())
+        }
+        "apply_interface" => {
+            let fields: InterfaceFields =
+                serde_json::from_value(body).map_err(|e| e.to_string())?;
+            answer(apply_interface_at(&socket, &fields)?)
+        }
+        "save_runtime" => answer(save_runtime_at(&socket)?),
         "export_bundle" => serde_json::to_value(export_at(
             &socket,
             &text("fingerprint")?,
@@ -1120,7 +1192,13 @@ fn main() {
             .and_then(|at| args.get(at + 1))
             .cloned()
             .or_else(|| std::env::var("VALLUM_UI_DIR").ok())
-            .unwrap_or_else(|| "crates/vallum-gui/ui/dist".to_owned());
+            .unwrap_or_else(|| {
+                if std::path::Path::new("crates/vallum-gui/ui/dist").is_dir() {
+                    "crates/vallum-gui/ui/dist".to_owned()
+                } else {
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist").to_owned()
+                }
+            });
         let console = Arc::new(Console::new());
         if let Err(error) = serve::serve(port, PathBuf::from(ui), console) {
             eprintln!("vallum-gui: {error}");
@@ -1159,6 +1237,9 @@ fn main() {
             generate_key,
             read_config,
             write_config,
+            read_interface_fields,
+            apply_interface,
+            save_runtime,
             plan_command,
             apply_command,
             cancel_apply,
@@ -1235,6 +1316,9 @@ mod transport_parity_tests {
         "generate_key",
         "read_config",
         "write_config",
+        "read_interface_fields",
+        "apply_interface",
+        "save_runtime",
     ];
 
     /// Every canonical command must reach a real arm on the HTTP transport.
@@ -1302,5 +1386,99 @@ mod transport_parity_tests {
         let error = dispatch(&console, "reboot_everything", serde_json::Value::Null)
             .expect_err("unknown names must fail");
         assert!(error.starts_with("unknown command"));
+    }
+
+    /// Mechanical transport parity check: every command in `bridge.ts` and
+    /// `actions.ts` must exist in `tauri::generate_handler!`, and every HTTP
+    /// endpoint in `bridge.ts` must have a handler in `serve.rs`.
+    #[test]
+    fn frontend_bridge_matches_both_backends() {
+        let main_src = include_str!("main.rs");
+        let serve_src = include_str!("serve.rs");
+        let bridge_src = include_str!("../ui/src/lib/bridge.ts");
+        let actions_src = include_str!("../ui/src/lib/actions.ts");
+
+        let tauri_direct = [
+            "list_interfaces",
+            "select",
+            "plan_command",
+            "apply_command",
+            "cancel_apply",
+            "revert_command",
+            "window_state",
+            "health_state",
+            "panic_command",
+            "preflight_state",
+            "ping_peer",
+            "service_state_command",
+            "service_action_command",
+            "logs_tail_command",
+        ];
+        for name in COMMAND_NAMES.iter().chain(tauri_direct.iter()) {
+            assert!(
+                main_src.contains(name),
+                "command `{name}` missing from main.rs invoke_handler"
+            );
+        }
+        for name in tauri_direct {
+            if name != "window_state" {
+                assert!(
+                    bridge_src.contains(&format!("\"{name}\"")),
+                    "Tauri command `{name}` not invoked in bridge.ts"
+                );
+            }
+        }
+        for name in COMMAND_NAMES {
+            assert!(
+                actions_src.contains(&format!("\"{name}\"")),
+                "command `{name}` missing from actions.ts"
+            );
+        }
+        for key in [
+            "publicLine",
+            "newLine",
+            "fingerprint",
+            "endpoint",
+            "index",
+            "text",
+            "outDir",
+            "bundlePath",
+            "listenPort",
+            "fwmark",
+        ] {
+            assert!(
+                main_src.contains(&format!("\"{key}\"")),
+                "dispatch parameter `{key}` missing from main.rs"
+            );
+            assert!(
+                actions_src.contains(key),
+                "dispatch parameter `{key}` missing from actions.ts"
+            );
+        }
+        for route in [
+            "/api/interfaces",
+            "/api/select",
+            "/api/plan",
+            "/api/apply",
+            "/api/apply/cancel",
+            "/api/revert",
+            "/api/health",
+            "/api/panic",
+            "/api/preflight",
+            "/api/ping",
+            "/api/service",
+            "/api/logs",
+            "/api/stream",
+            "/api/cmd/",
+        ] {
+            assert!(
+                serve_src.contains(route),
+                "HTTP route `{route}` missing from serve.rs"
+            );
+            assert!(
+                bridge_src.contains(route),
+                "HTTP route `{route}` missing from bridge.ts"
+            );
+        }
     }
 }

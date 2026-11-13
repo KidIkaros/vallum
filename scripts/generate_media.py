@@ -5,6 +5,7 @@ Generates high-fidelity screenshots, vector SVGs, animated GIF and MP4
 media showcasing Vallum in operational dogfooding.
 """
 
+import math
 import os
 import re
 import socket
@@ -474,16 +475,16 @@ def generate_brandkit_board():
     presentation grid, strong gutters, geometric construction, and sparse
     high-hierarchy typography.
     """
-    W, H = 1800, 1260
+    W, H = 1800, 1660
     GUTTER = 24
     MARGIN_X = 36
     MARGIN_TOP = 64
     MARGIN_BOT = 36
 
     grid_w = W - MARGIN_X * 2 - GUTTER * 2
-    grid_h = H - MARGIN_TOP - MARGIN_BOT - GUTTER * 2
+    grid_h = H - MARGIN_TOP - MARGIN_BOT - GUTTER * 3
     cw = grid_w // 3
-    ch = grid_h // 3
+    ch = grid_h // 4
 
     img = Image.new("RGBA", (W, H), color="#07090d")
     draw = ImageDraw.Draw(img)
@@ -698,9 +699,311 @@ def generate_brandkit_board():
     draw.text((x0 + 34, y1 - 47), "▸", font=f_sub, fill="#0d1117")
     draw.text((x0 + 68, y1 - 46), "ping 10.7.0.3: reply in 18.2 ms", font=f_body, fill="#e3b341")
 
+    # 10 / EGRESS VERDICT & LEAK MATRIX
+    x0, y0, x1, y1 = draw_card(0, 3, "10", "EGRESS VERDICT & LEAK MATRIX")
+    draw.rounded_rectangle([(x0 + 24, y0 + 54), (x0 + 216, y0 + 82)], radius=6, fill="#2ea043")
+    draw.text((x0 + 38, y0 + 61), "●  TUNNEL PROTECTED", font=f_label, fill="#0d1117")
+    draw.text((x0 + 234, y0 + 61), "0.0.0.0/0 + ::/0 VIA vallum0", font=f_small, fill="#8b949e")
+
+    matrix_rows = [
+        ("IPV4 DEFAULT", "VIA VALLUM0", "#3fb950"),
+        ("IPV6 ROUTE", "ENCAPSULATED", "#3fb950"),
+        ("DNS RESOLVER", "10.7.0.1 PINNED", "#3fb950"),
+        ("KILL-SWITCH", "FWMARK 0x7661", "#39c5cf"),
+    ]
+    ry = y0 + 98
+    for metric, state_txt, state_col in matrix_rows:
+        draw.rounded_rectangle([(x0 + 24, ry), (x1 - 24, ry + 36)], radius=6, fill="#161b22", outline="#21262d")
+        draw.text((x0 + 38, ry + 11), metric, font=f_label, fill="#8b949e")
+        draw.text((x0 + 280, ry + 10), state_txt, font=f_small, fill=state_col)
+        ry += 44
+
+    # Verdict state strip
+    verdict_pills = [
+        ("PROTECTED", "#2ea043", "#0d1117"),
+        ("DEGRADED", "#d29922", "#0d1117"),
+        ("LEAK RISK", "#f85149", "#0d1117"),
+    ]
+    vx = x0 + 24
+    for v_lbl, v_bg, v_fg in verdict_pills:
+        pw = 156
+        draw.rounded_rectangle([(vx, y1 - 62), (vx + pw, y1 - 30)], radius=5, fill=v_bg)
+        draw.text((vx + 22, y1 - 52), v_lbl, font=f_label, fill=v_fg)
+        vx += pw + 18
+
+    # 11 / DEAD-MAN'S TRIAL & SAFETY SWITCH
+    x0, y0, x1, y1 = draw_card(1, 3, "11", "DEAD-MAN'S TRIAL & SAFETY SWITCH")
+    draw.text((x0 + 24, y0 + 56), "REVERT COUNTDOWN", font=f_label, fill="#e3b341")
+    draw.text((x1 - 150, y0 + 54), "43s / 60s", font=f_sub, fill="#f0f6fc")
+    draw.rounded_rectangle([(x0 + 24, y0 + 84), (x1 - 24, y0 + 100)], radius=5, fill="#161b22", outline="#30363d")
+    draw.rounded_rectangle([(x0 + 26, y0 + 86), (x0 + 388, y0 + 98)], radius=4, fill="#d29922")
+
+    stages = [
+        ("1. STAGE", "SNAPSHOT SAVED", "#30363d", "#8b949e"),
+        ("2. ARM 60s", "NEW CONFIG LIVE", "#d29922", "#e3b341"),
+        ("3. CONFIRM", "OR AUTO-REVERT", "#39c5cf", "#39c5cf"),
+    ]
+    sx = x0 + 24
+    sw = 160
+    for st_title, st_sub, st_border, st_col in stages:
+        draw.rounded_rectangle([(sx, y0 + 120), (sx + sw, y0 + 206)], radius=8, fill="#161b22", outline=st_border, width=2)
+        draw.text((sx + 14, y0 + 136), st_title, font=f_label, fill=st_col)
+        draw.text((sx + 14, y0 + 164), st_sub, font=f_small, fill="#c9d1d9")
+        sx += sw + 16
+
+    draw.rounded_rectangle([(x0 + 24, y0 + 232), (x0 + 258, y0 + 272)], radius=6, fill="#2ea043")
+    draw.text((x0 + 52, y0 + 245), "KEEP NEW CONFIG", font=f_label, fill="#0d1117")
+    draw.rounded_rectangle([(x0 + 274, y0 + 232), (x1 - 24, y0 + 272)], radius=6, fill="#161b22", outline="#f85149")
+    draw.text((x0 + 298, y0 + 245), "ROLLBACK NOW", font=f_label, fill="#f85149")
+    draw.text((x0 + 24, y1 - 40), "UNCONFIRMED APPLY RESTORES PRIOR KERNEL STATE", font=f_small, fill="#6e7681")
+
+    # 12 / KEY ROTATION & CONFIG DIFF
+    x0, y0, x1, y1 = draw_card(2, 3, "12", "KEY ROTATION & CONFIG DIFF")
+    draw.rounded_rectangle([(x0 + 24, y0 + 54), (x0 + 266, y0 + 124)], radius=8, fill="#161b22", outline="#30363d")
+    draw.text((x0 + 38, y0 + 66), "SLOT A · PREV", font=f_label, fill="#8b949e")
+    draw.text((x0 + 38, y0 + 92), "vg8k...2m9Q", font=f_body, fill="#c9d1d9")
+    draw.rounded_rectangle([(x0 + 188, y0 + 64), (x0 + 254, y0 + 84)], radius=4, fill="#d29922")
+    draw.text((x0 + 198, y0 + 68), "GRACE", font=f_label, fill="#0d1117")
+
+    draw.rounded_rectangle([(x0 + 282, y0 + 54), (x1 - 24, y0 + 124)], radius=8, fill="#161b22", outline="#39c5cf", width=2)
+    draw.text((x0 + 296, y0 + 66), "SLOT B · NEXT", font=f_label, fill="#39c5cf")
+    draw.text((x0 + 296, y0 + 92), "pX4r...7wL1", font=f_body, fill="#f0f6fc")
+    draw.rounded_rectangle([(x0 + 448, y0 + 64), (x1 - 36, y0 + 84)], radius=4, fill="#2ea043")
+    draw.text((x0 + 457, y0 + 68), "ACTIVE", font=f_label, fill="#0d1117")
+
+    draw.rounded_rectangle([(x0 + 24, y0 + 142), (x1 - 24, y0 + 296)], radius=8, fill="#090d13", outline="#21262d")
+    draw.text((x0 + 38, y0 + 154), "vallum0.toml   [LIVE <-> DISK]", font=f_label, fill="#6e7681")
+    draw.text((x0 + 38, y0 + 184), '- endpoint = "198.51.100.4:51820"', font=f_small, fill="#f85149")
+    draw.text((x0 + 38, y0 + 214), '+ endpoint = "203.0.113.19:51820"', font=f_small, fill="#3fb950")
+    draw.text((x0 + 38, y0 + 244), '+ pq_suite = "0x0003 tri-hybrid"', font=f_small, fill="#3fb950")
+    draw.text((x0 + 24, y1 - 40), "ZERO-DROP OVERLAP UNTIL HANDSHAKE MIGRATES", font=f_small, fill="#6e7681")
+
     brandkit_png = os.path.join(ASSETS_DIR, "vallum-brandkit.png")
     img.convert("RGB").save(brandkit_png)
-    print(f"  Generated 3x3 Brandkit board -> {brandkit_png}")
+    print(f"  Generated 3x4 Brandkit board -> {brandkit_png}")
+
+
+def generate_app_icons():
+    """Generate the multi-resolution Rampart Gate desktop icon set in crates/vallum-gui/icons/."""
+    S = 512
+    img = Image.new("RGBA", (S, S), color=(0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # Obsidian rounded squircle
+    draw.rounded_rectangle([(16, 16), (S - 16, S - 16)], radius=104, fill="#0d1117", outline="#30363d", width=6)
+
+    # Subtle 1:1 Brandkit coordinate grid clipped safely inside the squircle
+    for step in range(96, S - 64, 64):
+        draw.line([(step, 64), (step, S - 64)], fill="#161b22", width=2)
+        draw.line([(64, step), (S - 64, step)], fill="#161b22", width=2)
+
+    cx = cy = S // 2
+    # Vertical rampart axis
+    draw.line([(cx, 72), (cx, S - 72)], fill="#30363d", width=4)
+    # Horizontal boundary line: ──●──◆──●──
+    draw.line([(78, cy), (S - 78, cy)], fill="#39c5cf", width=10)
+
+    # Initiator & Responder nodes
+    for nx in (112, S - 112):
+        draw.ellipse([(nx - 24, cy - 24), (nx + 24, cy + 24)], fill="#0d1117", outline="#39c5cf", width=8)
+
+    # Central Rampart Gate diamond (outer plate + inner core)
+    r_out = 96
+    draw.polygon([(cx, cy - r_out), (cx + r_out, cy), (cx, cy + r_out), (cx - r_out, cy)], fill="#161b22", outline="#39c5cf", width=8)
+    r_in = 46
+    draw.polygon([(cx, cy - r_in), (cx + r_in, cy), (cx, cy + r_in), (cx - r_in, cy)], fill="#39c5cf")
+
+    icons_dir = os.path.join(ROOT_DIR, "crates", "vallum-gui", "icons")
+    os.makedirs(icons_dir, exist_ok=True)
+    icon_path = os.path.join(icons_dir, "icon.png")
+    img.save(icon_path)
+    for size, filename in [(32, "32x32.png"), (128, "128x128.png"), (256, "128x128@2x.png")]:
+        resized = img.resize((size, size), Image.Resampling.LANCZOS)
+        resized.save(os.path.join(icons_dir, filename))
+    img.save(os.path.join(icons_dir, "icon.ico"), sizes=[(32, 32), (128, 128), (256, 256)])
+    img.save(os.path.join(icons_dir, "icon.icns"))
+    print(f"  Generated multi-resolution Brandkit desktop icons -> {icons_dir}")
+
+
+def generate_gui_cockpit():
+    """Generate a high-resolution preview card of the vallum-gui desktop cockpit."""
+    W, H = 1600, 960
+    img = Image.new("RGBA", (W, H), color="#0d1117")
+    draw = ImageDraw.Draw(img)
+
+    f_hero = ImageFont.truetype(FONT_BOLD, 34)
+    f_metric = ImageFont.truetype(FONT_BOLD, 28)
+    f_title = ImageFont.truetype(FONT_BOLD, 16)
+    f_body = ImageFont.truetype(FONT_REGULAR, 14)
+    f_bold = ImageFont.truetype(FONT_BOLD, 14)
+    f_small = ImageFont.truetype(FONT_REGULAR, 12)
+    f_micro = ImageFont.truetype(FONT_BOLD, 11)
+
+    # Window titlebar
+    draw.rectangle([(0, 0), (W, 42)], fill="#161b22")
+    draw.line([(0, 42), (W, 42)], fill="#30363d", width=1)
+    for i, col in enumerate(["#ff5f56", "#ffbd2e", "#27c93f"]):
+        draw.ellipse([(20 + i * 22, 14), (32 + i * 22, 26)], fill=col)
+    draw.text((W // 2 - 140, 13), "◆ PROTECTED · vallum0 — Vallum", font=f_body, fill="#8b949e")
+
+    # App header bar
+    draw.polygon([(58, 66), (68, 76), (58, 86), (48, 76)], fill="#161b22", outline="#39c5cf", width=2)
+    draw.polygon([(58, 71), (63, 76), (58, 81), (53, 76)], fill="#39c5cf")
+    draw.text((80, 67), "Vallum ❯", font=f_title, fill="#f0f6fc")
+    draw.text((168, 67), "TUNNEL CONTROL", font=f_title, fill="#8b949e")
+    draw.rounded_rectangle([(336, 62), (434, 88)], radius=6, fill="#161b22", outline="#39c5cf", width=1)
+    draw.text((349, 68), "◆ vallum0", font=f_small, fill="#39c5cf")
+    draw.rounded_rectangle([(446, 62), (530, 88)], radius=6, fill="#12261e", outline="#2ea043", width=1)
+    draw.text((462, 68), "RUNNING", font=f_micro, fill="#3fb950")
+
+    right_chips = [("RESTART", "#21262d", "#c9d1d9"), ("STOP", "#21262d", "#c9d1d9"), ("INVITE QR", "#102830", "#39c5cf"), ("ROTATE", "#21262d", "#c9d1d9"), ("DOCTOR", "#21262d", "#c9d1d9")]
+    rx = W - 48
+    for label, bg, fg in reversed(right_chips):
+        cw = len(label) * 9 + 24
+        rx -= cw
+        draw.rounded_rectangle([(rx, 61), (rx + cw, 89)], radius=6, fill=bg, outline="#30363d", width=1)
+        draw.text((rx + 12, 68), label, font=f_micro, fill=fg)
+        rx -= 10
+
+    # Hero surface card
+    draw.rounded_rectangle([(48, 106), (W - 48, 286)], radius=10, fill="#131922", outline="#30363d", width=1)
+    draw.line([(58, 107), (W - 58, 107)], fill="#3fb950", width=2)
+    draw.text((76, 124), "PROTECTION", font=f_micro, fill="#8b949e")
+    draw.ellipse([(76, 160), (88, 172)], fill="#3fb950")
+    draw.text((100, 146), "PROTECTED", font=f_hero, fill="#3fb950")
+    draw.text((76, 196), "default route via vallum0 (10.66.0.1) · PQ tri-hybrid 0x0003 enforced", font=f_body, fill="#c9d1d9")
+    draw.text((76, 224), "tunnel up", font=f_small, fill="#8b949e")
+    draw.text((76, 248), "vallum0 · 10.66.0.2/24 · last handshake 6s ago · ", font=f_small, fill="#8b949e")
+    draw.text((442, 248), "control live", font=f_small, fill="#3fb950")
+
+    # Center Brandkit §02 BoundaryGeometry card inside Hero
+    draw.rounded_rectangle([(690, 126), (1054, 266)], radius=8, fill="#0d1117", outline="#21262d", width=1)
+    draw.text((708, 138), "TUNNEL BOUNDARY", font=f_micro, fill="#6e7681")
+    draw.text((972, 138), "3/3 PEERS UP", font=f_micro, fill="#3fb950")
+    by = 192
+    draw.line([(724, by), (1020, by)], fill="#39c5cf", width=2)
+    for nx in (756, 988):
+        draw.ellipse([(nx - 8, by - 8), (nx + 8, by + 8)], fill="#0d1117", outline="#39c5cf", width=2)
+    draw.polygon([(872, by - 20), (892, by), (872, by + 20), (852, by)], fill="#161b22", outline="#39c5cf", width=2)
+    draw.polygon([(872, by - 9), (881, by), (872, by + 9), (863, by)], fill="#39c5cf")
+    draw.text((708, 236), "vallum0  ·  10.66.0.2/24", font=f_small, fill="#8b949e")
+    draw.text((956, 236), "0x0003 PQ", font=f_micro, fill="#39c5cf")
+
+    # Right Hero Download / Upload rates
+    draw.text((1120, 146), "▼ DOWNLOAD", font=f_micro, fill="#39c5cf")
+    draw.text((1120, 170), "18.4 MB/s", font=f_metric, fill="#39c5cf")
+    draw.text((1120, 212), "total 4.82 GiB", font=f_small, fill="#8b949e")
+
+    draw.text((1340, 146), "▲ UPLOAD", font=f_micro, fill="#bc8cff")
+    draw.text((1340, 170), "4.2 MB/s", font=f_metric, fill="#bc8cff")
+    draw.text((1340, 212), "total 1.19 GiB", font=f_small, fill="#8b949e")
+
+    # Status section label
+    draw.text((48, 304), "STATUS — IS TRAFFIC PROTECTED?", font=f_micro, fill="#6e7681")
+
+    # Left: HOST HEALTH panel
+    draw.rounded_rectangle([(48, 326), (664, 626)], radius=10, fill="#11161f", outline="#21262d", width=1)
+    draw.text((68, 344), "HOST HEALTH", font=f_micro, fill="#8b949e")
+    health_rows = [
+        ("EGRESS ROUTE", "ok", "default via vallum0 (10.66.0.1)", "#3fb950"),
+        ("IPV6 ROUTE", "ok", "blocked by kill-switch policy", "#3fb950"),
+        ("DNS RESOLVER", "ok", "10.66.0.1 routed inside tunnel", "#3fb950"),
+        ("GUARD & WATCH", "ok", "vallum-guard active (0 restarts)", "#3fb950"),
+        ("KERNEL MTU", "ok", "1380 bytes · cookie gate idle", "#39c5cf"),
+    ]
+    hy = 382
+    for label, word, desc, col in health_rows:
+        draw.text((68, hy), label, font=f_micro, fill="#6e7681")
+        draw.text((210, hy), word.upper(), font=f_micro, fill=col)
+        draw.text((246, hy - 1), desc, font=f_small, fill="#c9d1d9")
+        draw.line([(68, hy + 28), (644, hy + 28)], fill="#1b222c", width=1)
+        hy += 46
+
+    # Right top: THROUGHPUT SPLINE panel
+    draw.rounded_rectangle([(684, 326), (W - 48, 492)], radius=10, fill="#11161f", outline="#21262d", width=1)
+    draw.text((704, 342), "THROUGHPUT — SHARED PEAK", font=f_micro, fill="#8b949e")
+    draw.text((W - 220, 342), "RX 18.4  ·  TX 4.2 MB/s", font=f_micro, fill="#39c5cf")
+    cx0, cy0, cx1, cy1 = 704, 372, W - 72, 474
+    for g in range(1, 4):
+        gy = cy0 + (cy1 - cy0) * g // 4
+        draw.line([(cx0, gy), (cx1, gy)], fill="#1b222c", width=1)
+    # Key rotation marker line
+    mx = cx0 + int((cx1 - cx0) * 0.64)
+    draw.line([(mx, cy0), (mx, cy1)], fill="#2ea043", width=1)
+    draw.text((mx + 6, cy0 + 2), "EPOCH 04", font=f_micro, fill="#3fb950")
+    rx_pts, tx_pts = [], []
+    steps = 60
+    for i in range(steps + 1):
+        t = i / steps
+        px = cx0 + int(t * (cx1 - cx0))
+        rx_v = 0.55 + 0.25 * math.sin(t * 9.5) + 0.12 * math.cos(t * 21.0)
+        tx_v = 0.22 + 0.14 * math.sin(t * 8.0 + 1.1) + 0.06 * math.cos(t * 17.0)
+        rx_pts.append((px, cy1 - int(rx_v * (cy1 - cy0))))
+        tx_pts.append((px, cy1 - int(tx_v * (cy1 - cy0))))
+    chart_fill = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    c_draw = ImageDraw.Draw(chart_fill)
+    c_draw.polygon([(cx0, cy1)] + rx_pts + [(cx1, cy1)], fill=(57, 197, 207, 42))
+    c_draw.polygon([(cx0, cy1)] + tx_pts + [(cx1, cy1)], fill=(188, 140, 255, 34))
+    img = Image.alpha_composite(img, chart_fill)
+    draw = ImageDraw.Draw(img)
+    draw.line(rx_pts, fill="#39c5cf", width=2)
+    draw.line(tx_pts, fill="#bc8cff", width=2)
+
+    # Right bottom: Brandkit §08 CryptoArchitecture card
+    draw.rounded_rectangle([(684, 508), (W - 48, 626)], radius=10, fill="#11161f", outline="#21262d", width=1)
+    draw.text((704, 524), "CRYPTOGRAPHIC ARCHITECTURE  —  SUITE 0x0003 TRI-HYBRID", font=f_micro, fill="#8b949e")
+    boxes = [("X25519\nECDHE", 704, "#39c5cf"), ("sntrup761\nPQ KEM", 856, "#39c5cf"), ("ML-KEM-768\nNIST 203", 1008, "#bc8cff"), ("Blake2s + HKDF\n32-byte key", 1168, "#d29922"), ("XChaCha20-Poly1305\nAEAD Tunnel", 1344, "#3fb950")]
+    for title_txt, bx, col in boxes:
+        bw = 148 if "AEAD" in title_txt or "Blake" in title_txt else 128
+        draw.rounded_rectangle([(bx, 554), (bx + bw, 608)], radius=6, fill="#0d1117", outline=col, width=1)
+        lines = title_txt.split("\n")
+        draw.text((bx + 10, 562), lines[0], font=f_small, fill="#f0f6fc")
+        draw.text((bx + 10, 582), lines[1], font=f_micro, fill=col)
+
+    # Peers workbench section
+    draw.text((48, 646), "PEERS  (3 CONFIGURED · 3 ACTIVE)", font=f_micro, fill="#6e7681")
+    draw.rounded_rectangle([(48, 668), (976, 898)], radius=10, fill="#11161f", outline="#21262d", width=1)
+    draw.rounded_rectangle([(68, 684), (420, 712)], radius=6, fill="#0d1117", outline="#30363d", width=1)
+    draw.text((80, 691), "Filter peers by name, IP, endpoint… (/)", font=f_small, fill="#6e7681")
+    draw.text((820, 691), "SORT: ACTIVITY (o)", font=f_micro, fill="#8b949e")
+
+    peers_rows = [
+        ("charlie-macbook", "RECENT · 6s", "10.66.0.10/32", "198.51.100.42:51820", "18.4 MB/s", True),
+        ("build-runner-nyc", "RECENT · 19s", "10.66.0.14/32", "203.0.113.19:51820", "2.1 MB/s", False),
+        ("mobile-ios-edge", "RECENT · 44s", "10.66.0.22/32", "192.0.2.88:49102", "124 KB/s", False),
+    ]
+    py = 730
+    for pname, pfresh, pip, pep, prate, selected in peers_rows:
+        bg = "#17202b" if selected else "#11161f"
+        outline = "#39c5cf" if selected else "#1b222c"
+        draw.rounded_rectangle([(68, py), (956, py + 44)], radius=6, fill=bg, outline=outline, width=1)
+        draw.text((84, py + 14), pname, font=f_bold, fill="#f0f6fc")
+        draw.text((280, py + 15), pfresh, font=f_micro, fill="#3fb950")
+        draw.text((430, py + 14), pip, font=f_small, fill="#c9d1d9")
+        draw.text((610, py + 14), pep, font=f_small, fill="#8b949e")
+        draw.text((850, py + 14), prate, font=f_small, fill="#39c5cf")
+        py += 54
+
+    # Peer detail drawer
+    draw.rounded_rectangle([(996, 668), (W - 48, 898)], radius=10, fill="#11161f", outline="#21262d", width=1)
+    draw.text((1016, 684), "PEER DETAIL  ·  charlie-macbook", font=f_micro, fill="#8b949e")
+    draw.text((1016, 712), "FINGERPRINT: sha256:9f3a81e4…c204", font=f_small, fill="#c9d1d9")
+    draw.text((1016, 738), "ENDPOINT:    198.51.100.42:51820", font=f_small, fill="#c9d1d9")
+    draw.text((1016, 764), "KEY EPOCH:   04  ·  0x0003 tri-hybrid + PSK", font=f_small, fill="#39c5cf")
+    draw.text((1016, 790), "LAST PING:   14.2 ms RTT via vallum0", font=f_small, fill="#3fb950")
+    for idx, act in enumerate(["PING (p)", "EDIT", "INVITE QR", "EXPORT BUNDLE"]):
+        ax = 1016 + idx * 124
+        aw = 114 if idx < 3 else 132
+        draw.rounded_rectangle([(ax, 842), (ax + aw, 874)], radius=6, fill="#161b22", outline="#30363d", width=1)
+        draw.text((ax + 12, 851), act, font=f_micro, fill="#f0f6fc")
+
+    # Footer bar
+    draw.text((48, 922), "snapshot live · snapshot stream · doctor & dx · start guide · text size: compact · shortcuts", font=f_small, fill="#6e7681")
+    draw.text((W - 310, 922), "v1.6.4 · IKAROS DIGITAL × ATOMGUARD", font=f_micro, fill="#8b949e")
+
+    gui_png = os.path.join(ASSETS_DIR, "vallum-gui-cockpit.png")
+    img.convert("RGB").save(gui_png)
+    print(f"  Generated GUI cockpit preview -> {gui_png}")
 
 
 
@@ -753,6 +1056,8 @@ def main():
     stop_event.set()
 
     generate_brandkit_board()
+    generate_app_icons()
+    generate_gui_cockpit()
 
     # Generate Animated GIF
     gif_path = os.path.join(ASSETS_DIR, "vallum-demo.gif")

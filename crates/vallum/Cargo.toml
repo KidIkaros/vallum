@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 
 [lints]
 workspace = true
@@ -181,6 +180,7 @@ if [ -d /run/systemd/system ]; then
     # ReadWritePaths to it, and a missing path is 226/NAMESPACE. See ADR-0017.
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/vallum-tmpfiles.conf 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
+    systemctl try-restart 'vallum@*' 'vallum-quick@*' 'vallum-quick-watch@*' 2>/dev/null || true
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
     fi
@@ -196,7 +196,7 @@ fi
 exit 0
 """
 preun = """
-if [ -d /run/systemd/system ]; then
+if [ "${1:-0}" -eq 0 ] && [ -d /run/systemd/system ]; then
     systemctl list-units --all --plain --no-legend 'vallum*@*' 2>/dev/null \
         | awk '{print $1}' | sed 's/\\.service$//;s/\\.timer$//' \
         | while read -r unit; do systemctl disable --now "$unit" 2>/dev/null || true; done

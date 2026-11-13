@@ -7,7 +7,7 @@ const buttonVariants = cva(
   // Press feedback at 0.96 and no larger: a control that shrinks harder than
   // that reads as broken rather than pressed. Named properties only — `all` on
   // every button in the panel also animates layout changes nobody asked for.
-  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,scale] duration-150 active:scale-[0.96] disabled:pointer-events-none disabled:opacity-60 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,scale] duration-150 active:scale-[0.96] disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:bg-muted disabled:text-muted-foreground disabled:border-border disabled:shadow-none aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
@@ -63,4 +63,4 @@ function Button({
   )
 }
 
-export { Button, buttonVariants }
+export { Button }

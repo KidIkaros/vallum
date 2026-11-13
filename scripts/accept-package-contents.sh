@@ -162,10 +162,52 @@ check_tarball() {
     rm -rf "$stage"
 }
 
+check_maintainer_scripts() {
+    local tmp
+    tmp=$(mktemp -d)
+    mkdir -p "$tmp/bin" "$tmp/systemd"
+    cat > "$tmp/bin/systemctl" << 'EOF'
+#!/bin/sh
+if [ "$1" = "list-units" ]; then
+    printf 'vallum@vallum0.service loaded active running\n'
+    printf 'vallum-guard@vallum0.service loaded active exited\n'
+    exit 0
+fi
+printf '%s\n' "$*" >> "$VALLUM_SYSTEMCTL_LOG"
+exit 0
+EOF
+    chmod +x "$tmp/bin/systemctl"
+
+    : > "$tmp/upgrade.log"
+    PATH="$tmp/bin:$PATH" VALLUM_SYSTEMD_DIR="$tmp/systemd" VALLUM_SYSTEMCTL_LOG="$tmp/upgrade.log" \
+        sh packaging/debian/prerm upgrade 1.6.4
+    if grep -qE 'disable|stop' "$tmp/upgrade.log"; then
+        echo "FAIL: prerm upgrade stopped or disabled units:" >&2
+        cat "$tmp/upgrade.log" >&2
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "  ok: prerm upgrade preserves units and guard"
+    fi
+
+    : > "$tmp/remove.log"
+    PATH="$tmp/bin:$PATH" VALLUM_SYSTEMD_DIR="$tmp/systemd" VALLUM_SYSTEMCTL_LOG="$tmp/remove.log" \
+        sh packaging/debian/prerm remove
+    if grep -qx 'disable --now vallum-guard@vallum0' "$tmp/remove.log"; then
+        echo "  ok: prerm remove disables vallum-guard@vallum0"
+    else
+        echo "FAIL: prerm remove did not disable vallum-guard@vallum0" >&2
+        cat "$tmp/remove.log" >&2
+        FAILURES=$((FAILURES + 1))
+    fi
+    rm -rf "$tmp"
+}
+
 echo "== the deb"
 check_deb
 echo "== the release tarball"
 check_tarball
+echo "== maintainer scripts"
+check_maintainer_scripts
 
 echo
 if [ "$FAILURES" -gt 0 ]; then

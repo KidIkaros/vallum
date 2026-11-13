@@ -10,47 +10,43 @@
    the console is a dark surface; there is no light theme. */
 
 :root {
-  /* Controls 4-6, rows/inputs 6, cards 8, dialogs 12. Nested: inner = outer
-     minus the padding between them, never below 4. */
-  --radius: 0.375rem;
-  /* The console's typography is the TUI's: JetBrains Mono everywhere,
-     tabular numerals, zero jitter (brandkit §06). */
+  --radius: 0.45rem;
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
   --font-mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, "SF Mono",
     Menlo, Consolas, monospace;
+  /* Brandkit §05 Semantic Signal Palette */
   --background: #0d1117;
-  --foreground: #c9d1d9;
-  --card: #161b22;
-  --card-foreground: #c9d1d9;
-  --popover: #161b22;
-  --popover-foreground: #c9d1d9;
+  --foreground: #e6edf3;
+  --card: #131922;
+  --card-foreground: #e6edf3;
+  --popover: #161d28;
+  --popover-foreground: #e6edf3;
   --primary: #39c5cf;
   --primary-foreground: #0d1117;
-  --secondary: #182a3a;
-  --secondary-foreground: #c9d1d9;
-  --muted: #182a3a;
-  /* WCAG AA, measured: #6e7681 was 4.12:1 on the page, 3.77:1 on a card and
-     3.19:1 on a raised row — under 4.5 for every label on the screen. #8b949e
-     is 6.15 / 5.62 / 4.77, so the label role passes on the worst surface. */
-  --muted-foreground: #8b949e;
-  --accent: #182a3a;
-  --accent-foreground: #c9d1d9;
-  --destructive: #e4573d;
-  --destructive-foreground: #c9d1d9;
-  --border: #30363d;
-  --input: #30363d;
+  --secondary: #1b2330;
+  --secondary-foreground: #e6edf3;
+  --muted: #171e29;
+  --muted-foreground: #7d8590;
+  --accent: #1b2330;
+  --accent-foreground: #e6edf3;
+  --destructive: #ff7b72;
+  --destructive-foreground: #0d1117;
+  --border: #2a323d;
+  --input: #2a323d;
   --ring: #39c5cf;
-  /* Semantic signal palette, brandkit §05, rendered values. */
+  /* Semantic telemetry colors */
   --signal: #39c5cf;
   --live: #3fb950;
   --stale: #d29922;
-  --fault: #e4573d;
+  --fault: #ff7b72;
   --violet: #bc8cff;
-  --subtext: #9aa4b0;
+  --subtext: #8b949e;
 }
 
 @theme inline {
   --font-mono: var(--font-mono);
-  --font-sans: var(--font-mono);
+  --font-sans: var(--font-sans);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -90,15 +86,23 @@
     @apply bg-background text-foreground;
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    /* Crisper glyphs on macOS; a no-op elsewhere. Monospace at 14px is where
-       the difference is most visible. */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    /* Three sizes on this screen: 14 body, 12 meta, 12 label. 11px failed as a
-       minimum — it misses WCAG-size readability on real displays, so 12px is
-       the floor and `comfortable` raises from there. */
-    font-size: 14px;
-    line-height: 1.55;
+    font-size: 13.5px;
+    line-height: 1.5;
+    background-image:
+      radial-gradient(60% 42% at 50% 0%, rgb(57 197 207 / 0.08), transparent 72%),
+      radial-gradient(40% 35% at 85% 10%, rgb(188 140 255 / 0.05), transparent 70%),
+      linear-gradient(to right, rgb(48 54 61 / 0.14) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(48 54 61 / 0.14) 1px, transparent 1px);
+    background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+  }
+  code,
+  pre,
+  kbd,
+  .font-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -159,38 +163,95 @@
      "daemon attached") is read, not scanned. Caps are reserved for panel
      titles and one-word states. */
   .micro {
-    @apply text-muted-foreground text-xs;
-    letter-spacing: 0.01em;
+    @apply text-muted-foreground text-[11px] font-medium uppercase;
+    letter-spacing: 0.08em;
   }
 
-  /* Depth without a drawn frame: a hairline of light on the top edge and two
-     soft shadows underneath, so a surface sits on the canvas instead of being
-     outlined on it. Values stay low — this is a terminal, not a card game —
-     and the border moves from a hard line to a tinted edge. */
+  /* Technical cyberpunk HUD panel surface */
   .surface {
-    background-color: color-mix(in oklab, var(--card) 72%, transparent);
-    border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+    background-color: color-mix(in oklab, var(--card) 92%, transparent);
+    border: 1px solid color-mix(in oklab, var(--border) 95%, transparent);
     box-shadow:
-      inset 0 1px 0 color-mix(in oklab, #ffffff 4%, transparent),
-      0 1px 1px rgb(0 0 0 / 0.25),
-      0 10px 24px -18px rgb(0 0 0 / 0.8);
+      inset 0 1px 0 color-mix(in oklab, var(--signal) 10%, transparent),
+      0 2px 10px -4px rgb(0 0 0 / 0.55);
   }
 
-  /* The one surface that is a focal point rather than a container: the hero
-     and anything modal. A vertical tint plus a deeper shadow lifts it off the
-     page, which is what tells the eye "start here". */
+  /* Focal HUD surface for Hero and dialogs */
   .surface-raised {
-    background-color: var(--card);
-    background-image: linear-gradient(
-      to bottom,
-      color-mix(in oklab, var(--card) 100%, transparent),
-      color-mix(in oklab, var(--card) 70%, var(--background))
-    );
-    border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+    background-color: var(--popover);
+    border: 1px solid color-mix(in oklab, var(--signal) 22%, var(--border));
     box-shadow:
-      inset 0 1px 0 color-mix(in oklab, #ffffff 6%, transparent),
-      0 1px 2px rgb(0 0 0 / 0.3),
+      inset 0 1px 0 color-mix(in oklab, var(--signal) 14%, transparent),
+      0 14px 36px -18px rgb(0 0 0 / 0.9);
+  }
+
+  /* Subtle 1:1 tactical grid helper */
+  .cyber-grid {
+    background-image:
+      linear-gradient(to right, rgb(57 197 207 / 0.055) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(57 197 207 / 0.055) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+
+  /* Legacy hook kept as a static class without decorative spotlight glow. */
+  .spotlight-card {
+    position: relative;
+  }
+
+  /* Laser status beam: 2px top-edge semantic accent on the Hero card. */
+  .hero-beam-live {
+    box-shadow:
+      inset 0 2px 0 color-mix(in oklab, var(--live) 85%, transparent),
+      0 0 24px -12px rgb(63 185 80 / 0.35),
       0 18px 40px -28px rgb(0 0 0 / 0.9);
+  }
+  .hero-beam-stale {
+    box-shadow:
+      inset 0 2px 0 color-mix(in oklab, var(--stale) 85%, transparent),
+      0 0 24px -12px rgb(210 153 34 / 0.35),
+      0 18px 40px -28px rgb(0 0 0 / 0.9);
+  }
+  .hero-beam-fault {
+    box-shadow:
+      inset 0 2px 0 color-mix(in oklab, var(--fault) 90%, transparent),
+      0 0 24px -12px rgb(255 123 114 / 0.4),
+      0 18px 40px -28px rgb(0 0 0 / 0.9);
+  }
+
+  /* Crisp keycap badge matching brandkit §09 / UIverse tactile pills. */
+  .kbd-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    border: 1px solid color-mix(in oklab, var(--border) 90%, transparent);
+    background-color: color-mix(in oklab, var(--background) 65%, transparent);
+    padding: 0 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--muted-foreground);
+  }
+
+  /* 4s stop confirmation / dead-man countdown bar animation */
+  .animate-countdown {
+    transform-origin: left center;
+    animation: vallum-countdown 4s linear forwards;
+  }
+}
+
+@keyframes vallum-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spotlight-card::before {
+    display: none;
   }
 }
 

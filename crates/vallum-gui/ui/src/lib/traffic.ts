@@ -49,6 +49,18 @@ export function saveHistory(interfaceName: string, samples: Sample[]): void {
   }
 }
 
+/** Bytes per second over the last completed interval. */
+export function sampleRate(samples: Sample[], kind: "rx" | "tx"): number {
+  const n = samples.length
+  if (n < 2) return 0
+  const a = samples[n - 2]
+  const b = samples[n - 1]
+  const seconds = (b.at - a.at) / 1000
+  if (seconds <= 0) return 0
+  const delta = Math.max(0, b[kind] - a[kind])
+  return delta / seconds
+}
+
 export class TrafficHistory {
   private samples: Sample[] = []
 
@@ -70,14 +82,7 @@ export class TrafficHistory {
 
   /** Bytes per second over the last completed interval. */
   rate(kind: "rx" | "tx"): number {
-    const n = this.samples.length
-    if (n < 2) return 0
-    const a = this.samples[n - 2]
-    const b = this.samples[n - 1]
-    const seconds = (b.at - a.at) / 1000
-    if (seconds <= 0) return 0
-    const delta = Math.max(0, b[kind] - a[kind])
-    return delta / seconds
+    return sampleRate(this.samples, kind)
   }
 
   peak(kind: "rx" | "tx"): number {
@@ -113,10 +118,24 @@ export function freshness(lastHandshakeSec: number, nowSec: number = Date.now() 
 }
 
 export const freshnessLabel: Record<Freshness, string> = {
-  never: "NEVER",
-  recent: "RECENT",
-  aging: "AGING",
-  old: "OLD",
+  never: "Never",
+  recent: "Active",
+  aging: "Idle",
+  old: "Stale",
+}
+
+export function formatAgeSec(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const remS = s % 60
+  if (s < 3600) return remS > 0 ? `${m}m ${remS}s` : `${m}m`
+  const h = Math.floor(s / 3600)
+  const remM = Math.floor((s % 3600) / 60)
+  if (s < 86400) return remM > 0 ? `${h}h ${remM}m` : `${h}h`
+  const d = Math.floor(s / 86400)
+  const remH = Math.floor((s % 86400) / 3600)
+  return remH > 0 ? `${d}d ${remH}h` : `${d}d`
 }
 
 export function sparklinePoints(

@@ -4,7 +4,7 @@ import { useState } from "react"
 // join ticket. Silent on failure would be a lie, so the label reports it.
 export function CopyButton({
   value,
-  label = "copy",
+  label = "Copy",
   title,
   className = "",
   id,
@@ -49,12 +49,13 @@ export function CopyButton({
   return (
     <button
       id={id}
+      type="button"
       disabled={disabled}
       onClick={() => void copy()}
-      title={title ?? "copy to clipboard"}
-      className={`micro hover:text-foreground border-border/60 hover:border-border cursor-pointer rounded border px-1.5 py-0.5 uppercase ${className}`}
+      title={title ?? "Copy to clipboard"}
+      className={`inline-flex h-8 cursor-pointer items-center justify-center rounded-md border border-border bg-secondary/50 px-3 text-xs font-medium text-foreground transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-45 ${className}`}
     >
-      {state === "copied" ? "copied" : state === "failed" ? "copy failed" : label}
+      {state === "copied" ? "Copied" : state === "failed" ? "Copy failed" : label}
     </button>
   )
 }
