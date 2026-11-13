@@ -1181,16 +1181,15 @@ pub(crate) fn suggestions(socket: Option<&Path>) -> serde_json::Value {
         .map(|s| {
             s.peers
                 .iter()
-                .map(|p| PeerFact {
-                    name: if p.name.is_empty() {
-                        p.fingerprint.clone()
-                    } else {
-                        p.name.clone()
-                    },
-                    has_endpoint: !p.endpoint.is_empty() && p.endpoint != "(roaming)",
-                    handshake_age_secs: (p.last_handshake_sec > 0)
-                        .then(|| now.saturating_sub(p.last_handshake_sec)),
-                    rotating: p.rotating,
+                .map(|p| {
+                    PeerFact::from_observation(
+                        &p.name,
+                        &p.fingerprint,
+                        &p.endpoint,
+                        (p.last_handshake_sec > 0)
+                            .then(|| now.saturating_sub(p.last_handshake_sec)),
+                        p.rotating,
+                    )
                 })
                 .collect()
         })
@@ -1198,17 +1197,19 @@ pub(crate) fn suggestions(socket: Option<&Path>) -> serde_json::Value {
 
     let facts = Facts {
         config_present: crate::hostfacts::any_config_present().unwrap_or_else(|| snap.is_some()),
-        role: guidance::infer_role(&peers),
-        unit_active: crate::hostfacts::any_unit_active("vallum@*"),
-        unit_enabled: stem.as_deref().and_then(crate::hostfacts::unit_enabled),
+        role: vallum::probes::config_path(stem.as_deref())
+            .and_then(|p| guidance::role_from_config(&p))
+            .unwrap_or_else(|| guidance::infer_role(&peers)),
+        unit_active: vallum::probes::any_unit_active("vallum@*"),
+        unit_enabled: stem.as_deref().and_then(vallum::probes::unit_enabled),
         daemon_reachable: Some(snap.is_some()),
         interface_present: Some(snap.is_some()),
         peers,
-        enrolment_open: crate::hostfacts::any_unit_active("vallum-enroll@*"),
-        trial_armed: crate::hostfacts::any_unit_active("vallum-guard@*"),
-        unit_restarts: stem.as_deref().and_then(crate::hostfacts::unit_restarts),
+        enrolment_open: vallum::probes::any_unit_active("vallum-enroll@*"),
+        trial_armed: vallum::probes::any_unit_active("vallum-guard@*"),
+        unit_restarts: stem.as_deref().and_then(vallum::probes::unit_restarts),
         sync_stale: sync_stale_cached(),
-        ssh_hosts: crate::hostfacts::ssh_host_count(),
+        ssh_hosts: vallum::probes::ssh_host_count(),
     };
 
     serde_json::json!({ "suggestions": guidance::suggest(&facts) })
@@ -1242,16 +1243,6 @@ fn sync_stale_cached() -> Option<bool> {
 static SYNC_CHECK_CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
     std::sync::Mutex::new(None);
 
-/// The verdict line of a `vallum-ops sync*` run. stderr is merged into the
-/// captured output, so a naive last-line read can land on the untrusted-source
-/// warning's tail — the script's own lines all carry the `sync` prefix.
-fn sync_verdict(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .rfind(|line| line.starts_with("sync"))
-        .unwrap_or("sync complete")
-}
-
 /// `vallum-ops sync`: make the host match the build under test.
 pub(crate) fn sync_host() -> Result<Done, String> {
     let text = crate::run_ops_with_stdin(&["sync"], None)?;
@@ -1259,14 +1250,14 @@ pub(crate) fn sync_host() -> Result<Done, String> {
     if let Ok(mut cache) = SYNC_CHECK_CACHE.lock() {
         *cache = Some((std::time::Instant::now(), false));
     }
-    Ok(Done::message(sync_verdict(&text)))
+    Ok(Done::message(vallum::probes::sync_verdict(&text)))
 }
 
 /// `vallum-ops sync --check` on demand — the "check for updates" button, not
 /// the cached value the suggestion strip uses.
 pub(crate) fn sync_check() -> Result<Done, String> {
     let text = crate::run_ops_with_stdin(&["sync", "--check"], None)?;
-    Ok(Done::message(sync_verdict(&text)))
+    Ok(Done::message(vallum::probes::sync_verdict(&text)))
 }
 
 /// `vallum-ops enable|disable <stem>` — boot persistence for the unit set.

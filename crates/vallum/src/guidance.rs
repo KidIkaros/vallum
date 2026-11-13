@@ -90,6 +90,32 @@ pub struct PeerFact {
     pub rotating: bool,
 }
 
+impl PeerFact {
+    /// The snapshot fields every surface reduces a peer to. This constructor
+    /// owns the two judgements the surfaces used to repeat: a `(roaming)`
+    /// endpoint is no endpoint at all, and an unnamed peer is addressed by
+    /// its fingerprint.
+    #[must_use]
+    pub fn from_observation(
+        name: &str,
+        fingerprint: &str,
+        endpoint: &str,
+        handshake_age_secs: Option<u64>,
+        rotating: bool,
+    ) -> Self {
+        Self {
+            name: if name.is_empty() {
+                fingerprint.to_owned()
+            } else {
+                name.to_owned()
+            },
+            has_endpoint: !endpoint.is_empty() && endpoint != "(roaming)",
+            handshake_age_secs,
+            rotating,
+        }
+    }
+}
+
 /// Everything a surface knows about the machine, gathered however it gathers
 /// it. Fields are optional where a surface cannot see them — guidance works
 /// with partial facts and simply skips rules it cannot evaluate.
@@ -132,6 +158,21 @@ pub fn infer_role(peers: &[PeerFact]) -> Role {
     } else {
         Role::Server
     }
+}
+
+/// The config's own answer to "what kind of machine is this", when readable.
+/// A declared public endpoint or an enrolment section makes it a server —
+/// the judgement peer-table inference can only guess at.
+#[must_use]
+pub fn role_from_config(path: &std::path::Path) -> Option<Role> {
+    let config = crate::config::Config::load(path).ok()?;
+    Some(
+        if config.interface.public_endpoint.is_some() || config.enroll.enabled {
+            Role::Server
+        } else {
+            Role::Client
+        },
+    )
 }
 
 /// How many suggestions a surface is asked to show at once.

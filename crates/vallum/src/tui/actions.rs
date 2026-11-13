@@ -10,6 +10,7 @@ use std::process::Command;
 use crate::control;
 use crate::entropy;
 use crate::keys;
+use crate::probes::unit_state;
 use crate::uapi::{self, Peer, Set};
 
 use super::app::{App, ConfirmAction, FormError, FormKind, ServiceState, View};
@@ -46,16 +47,6 @@ pub fn refresh(app: &mut App) {
 
 fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {
     unit_state(config.file_stem()?.to_str()?, "vallum@")
-}
-
-/// The state of `prefix{stem}.service` for an interface name.
-fn unit_state(stem: &str, prefix: &str) -> Option<ServiceState> {
-    let unit = format!("{prefix}{stem}.service");
-    let output = Command::new("systemctl")
-        .args(["--no-ask-password", "is-active", &unit])
-        .output()
-        .ok()?;
-    ServiceState::parse(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn refresh_service_state(app: &mut App) {
@@ -687,11 +678,7 @@ fn restart_service_inner(app: &mut App) {
         app.notify("no config path to restart");
         return;
     };
-    let stem = config
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0");
-    let unit = format!("vallum@{stem}.service");
+    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
     if Command::new("systemctl")
         .args(["--no-ask-password", "cat", &unit])
         .status()
@@ -1130,11 +1117,7 @@ pub fn service_plan(
     systemd: bool,
     root: bool,
 ) -> ServicePlan {
-    let stem = config
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0");
-    let unit = format!("vallum@{stem}.service");
+    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
     let action = if running { "stop" } else { "start" };
     let quick = if running { "down" } else { "up" };
     if systemd && root {
@@ -1186,11 +1169,7 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
         app.notify("no config path; use systemctl or vallum-quick directly");
         return;
     };
-    let stem = config
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0");
-    let unit = format!("vallum@{stem}.service");
+    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
     // The *template* unit exists on any host that installed Vallum, so
     // `systemctl cat` succeeds for instance names that were never created. A
     // unit only ever reads /etc/vallum/<instance>.toml, so the config's own
@@ -1268,11 +1247,7 @@ pub fn load_logs(app: &mut App) {
         app.notify("no config path for journald");
         return;
     };
-    let stem = config
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0");
-    let unit = format!("vallum@{stem}.service");
+    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
     match Command::new("journalctl")
         .args(["-u", &unit, "-n", "200", "--no-pager", "-o", "cat"])
         .output()
@@ -1724,17 +1699,15 @@ fn facts(app: &App) -> crate::guidance::Facts {
             device
                 .peers
                 .iter()
-                .map(|peer| PeerFact {
-                    name: if peer.name.is_empty() {
-                        peer.fingerprint.clone()
-                    } else {
-                        peer.name.clone()
-                    },
-                    has_endpoint: !peer.endpoint.is_empty() && peer.endpoint != "(roaming)",
-                    handshake_age_secs: peer
-                        .last_handshake
-                        .map(|(sec, _)| app.now.saturating_sub(sec)),
-                    rotating: peer.rotating,
+                .map(|peer| {
+                    PeerFact::from_observation(
+                        &peer.name,
+                        &peer.fingerprint,
+                        &peer.endpoint,
+                        peer.last_handshake
+                            .map(|(sec, _)| app.now.saturating_sub(sec)),
+                        peer.rotating,
+                    )
                 })
                 .collect()
         })
@@ -1742,7 +1715,7 @@ fn facts(app: &App) -> crate::guidance::Facts {
 
     let role = current
         .and_then(|iface| iface.config_path.as_deref())
-        .and_then(role_from_config)
+        .and_then(crate::guidance::role_from_config)
         .unwrap_or_else(|| crate::guidance::infer_role(&peers));
 
     Facts {
@@ -1757,7 +1730,7 @@ fn facts(app: &App) -> crate::guidance::Facts {
         unit_active: current
             .and_then(|iface| iface.service_state)
             .map(|state| state == ServiceState::Active),
-        unit_enabled: stem.as_deref().and_then(unit_enabled_state),
+        unit_enabled: stem.as_deref().and_then(crate::probes::unit_enabled),
         daemon_reachable: current.map(|iface| iface.device.is_some() && iface.error.is_none()),
         interface_present: current.map(|iface| iface.device.is_some()),
         peers,
@@ -1768,80 +1741,10 @@ fn facts(app: &App) -> crate::guidance::Facts {
         trial_armed: current
             .and_then(|iface| iface.guard_state)
             .map(|state| state == ServiceState::Active),
-        unit_restarts: stem.as_deref().and_then(unit_restart_count),
+        unit_restarts: stem.as_deref().and_then(crate::probes::unit_restarts),
         sync_stale: app.sync_stale,
-        ssh_hosts: ssh_host_count(),
+        ssh_hosts: crate::probes::ssh_host_count(),
     }
-}
-
-/// Whether `vallum@{stem}.service` starts at boot.
-fn unit_enabled_state(stem: &str) -> Option<bool> {
-    let unit = format!("vallum@{stem}.service");
-    let output = Command::new("systemctl")
-        .args(["--no-ask-password", "is-enabled", &unit])
-        .output()
-        .ok()?;
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "enabled" => Some(true),
-        "disabled" | "masked" | "static" | "indirect" => Some(false),
-        _ => None,
-    }
-}
-
-/// systemd's restart counter for `vallum@{stem}.service`.
-fn unit_restart_count(stem: &str) -> Option<u64> {
-    let unit = format!("vallum@{stem}.service");
-    let output = Command::new("systemctl")
-        .args([
-            "--no-ask-password",
-            "show",
-            "-p",
-            "NRestarts",
-            "--value",
-            &unit,
-        ])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-}
-
-/// The config's own answer to "what kind of machine is this", when readable.
-fn role_from_config(path: &std::path::Path) -> Option<crate::guidance::Role> {
-    use crate::guidance::Role;
-    let config = crate::config::Config::load(path).ok()?;
-    Some(
-        if config.interface.public_endpoint.is_some() || config.enroll.enabled {
-            Role::Server
-        } else {
-            Role::Client
-        },
-    )
-}
-
-/// `Host` entries in the operator's own ssh config — used only to make hints
-/// concrete, never for a connection the operator did not ask for.
-fn ssh_host_count() -> usize {
-    let Ok(text) = std::fs::read_to_string(
-        std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_default()
-            .join(".ssh/config"),
-    ) else {
-        return 0;
-    };
-    text.lines()
-        .filter(|line| {
-            line.split_whitespace()
-                .next()
-                .is_some_and(|tok| tok.eq_ignore_ascii_case("host"))
-        })
-        .map(|line| {
-            line.split_whitespace()
-                .skip(1)
-                .filter(|name| *name != "*")
-                .count()
-        })
-        .sum()
 }
 
 /// `vallum-ops sync --check`: a read — reports whether the host is behind the
@@ -1870,14 +1773,7 @@ pub fn sync_host(app: &mut App) {
     match run_privileged(&["sync"], None) {
         Ok(text) => {
             app.sync_stale = Some(false);
-            // stderr rides along in the capture — the script's own verdict
-            // lines all carry the `sync` prefix, the warnings do not.
-            let last = text
-                .lines()
-                .map(str::trim)
-                .rfind(|line| line.starts_with("sync"))
-                .unwrap_or("sync complete");
-            app.notify(last.to_owned());
+            app.notify(crate::probes::sync_verdict(&text).to_owned());
             refresh(app);
         }
         Err(error) => app.notify(format!("sync: {error}")),

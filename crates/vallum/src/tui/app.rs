@@ -222,39 +222,7 @@ impl DeviceView {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceState {
-    Active,
-    Inactive,
-    Failed,
-    Activating,
-    Deactivating,
-}
-
-impl ServiceState {
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "active" => Some(Self::Active),
-            "inactive" => Some(Self::Inactive),
-            "failed" => Some(Self::Failed),
-            "activating" => Some(Self::Activating),
-            "deactivating" => Some(Self::Deactivating),
-            _ => None,
-        }
-    }
-
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Inactive => "inactive",
-            Self::Failed => "failed",
-            Self::Activating => "starting",
-            Self::Deactivating => "stopping",
-        }
-    }
-}
+pub use crate::probes::ServiceState;
 
 /// One discovered interface.
 #[derive(Debug, Clone)]

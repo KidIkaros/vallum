@@ -292,7 +292,7 @@ pub(crate) fn preflight() -> serde_json::Value {
         "runtime_mode": mode,
         "runtime_group": group,
         "sockets": sockets,
-        "ssh_hosts": ssh_hosts(),
+        "ssh_hosts": vallum::probes::ssh_hosts(),
     })
 }
 
@@ -311,131 +311,6 @@ pub(crate) fn any_config_present() -> Option<bool> {
             })
             .or(other),
     }
-}
-
-/// `systemctl is-active` on every unit matching a glob — true when at least
-/// one is running. Used for the unit families an interface stem cannot name:
-/// the responder (`vallum-enroll@*`) and the egress guard (`vallum-guard@*`).
-pub(crate) fn any_unit_active(pattern: &str) -> Option<bool> {
-    let output = std::process::Command::new("systemctl")
-        .args([
-            "--no-ask-password",
-            "list-units",
-            pattern,
-            "--state=active",
-            "--no-legend",
-        ])
-        .output()
-        .ok()?;
-    Some(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
-}
-
-/// `systemctl is-enabled` on `vallum@{stem}.service`.
-pub(crate) fn unit_enabled(stem: &str) -> Option<bool> {
-    let output = std::process::Command::new("systemctl")
-        .args([
-            "--no-ask-password",
-            "is-enabled",
-            &format!("vallum@{stem}.service"),
-        ])
-        .output()
-        .ok()?;
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "enabled" => Some(true),
-        "disabled" | "masked" | "static" | "indirect" => Some(false),
-        _ => None,
-    }
-}
-
-/// systemd's restart counter for `vallum@{stem}.service`.
-pub(crate) fn unit_restarts(stem: &str) -> Option<u64> {
-    let output = std::process::Command::new("systemctl")
-        .args([
-            "--no-ask-password",
-            "show",
-            "-p",
-            "NRestarts",
-            "--value",
-            &format!("vallum@{stem}.service"),
-        ])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-}
-
-/// How many non-wildcard SSH targets the operator's config knows.
-pub(crate) fn ssh_host_count() -> usize {
-    ssh_hosts().len()
-}
-
-/// Discover non-wildcard SSH host entries from the current user's `~/.ssh/config`
-/// so the console can offer one-click SSH targets and auto-match a client's
-/// tunnel peer endpoint to its SSH alias without hardcoding any host.
-fn ssh_hosts() -> Vec<serde_json::Value> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    let path = std::path::Path::new(&home).join(".ssh/config");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    parse_ssh_config(&text)
-}
-
-pub(crate) fn parse_ssh_config(text: &str) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
-    let mut current_alias: Option<String> = None;
-    let mut hostname: Option<String> = None;
-    let mut user: Option<String> = None;
-    let flush = |out: &mut Vec<serde_json::Value>,
-                 alias: &mut Option<String>,
-                 hostname: &mut Option<String>,
-                 user: &mut Option<String>| {
-        if let Some(a) = alias.take() {
-            let h = hostname.take().unwrap_or_else(|| a.clone());
-            let u = user.take();
-            out.push(serde_json::json!({
-                "alias": a,
-                "hostname": h,
-                "user": u,
-            }));
-        } else {
-            *hostname = None;
-            *user = None;
-        }
-    };
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, rest)) = line.split_once(|c: char| c.is_ascii_whitespace() || c == '=')
-        else {
-            continue;
-        };
-        let value = rest
-            .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '=')
-            .trim();
-        if key.eq_ignore_ascii_case("host") {
-            flush(&mut out, &mut current_alias, &mut hostname, &mut user);
-            let first = value.split_whitespace().next().unwrap_or("");
-            if !first.is_empty()
-                && !first.contains('*')
-                && !first.contains('?')
-                && !first.starts_with('!')
-            {
-                current_alias = Some(first.to_owned());
-            }
-        } else if current_alias.is_some() {
-            if key.eq_ignore_ascii_case("hostname") && !value.is_empty() {
-                hostname = Some(value.to_owned());
-            } else if key.eq_ignore_ascii_case("user") && !value.is_empty() {
-                user = Some(value.to_owned());
-            }
-        }
-    }
-    flush(&mut out, &mut current_alias, &mut hostname, &mut user);
-    out
 }
 
 /// Bound to the interface on purpose: the host's routing table may prefer a
