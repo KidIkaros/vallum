@@ -523,7 +523,14 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
             StaticIdentity::generate(&*context.suite, &seed)
         };
         match identity {
-            Ok(identity) => device.set_identity(identity),
+            Ok(identity) => {
+                device.set_identity(identity);
+                // The context carries the seed that `get` reports, and it was
+                // never updated: the device got the new identity and the
+                // report kept answering with the old seed, so `show --field
+                // private-key` handed the operator a key that was not in use.
+                context.private_key = SharedSecret::new(seed);
+            }
             Err(_) => return Err(EINVAL),
         }
     }
@@ -545,10 +552,30 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
             Err(error) => return Err(errno_for(&error)),
         }
     }
-    if set.replace_peers {
-        device.remove_all_peers();
-    }
     let expected_key_len = context.suite.sizes().kem_pk;
+    if set.replace_peers {
+        // The old set is snapshotted first. The table used to be wiped and
+        // then filled, and the FIRST refusal returned - so one bad peer left
+        // the daemon with no peers at all, and the reply said "failed" while
+        // the tunnel had lost every peer it had.
+        let previous: Vec<vallum_tunnel::PeerConfig> =
+            device.peers().map(|(_, config)| config.clone()).collect();
+        device.remove_all_peers();
+        for peer in set.peers {
+            if let Err(errno) = apply_peer(device, peer, expected_key_len) {
+                // Put the old set back. The sessions are gone - they
+                // re-handshake - but the peers are there, which is the
+                // difference between a tunnel that recovers and one that has
+                // silently lost everybody.
+                device.remove_all_peers();
+                for config in previous {
+                    let _ = device.add_peer(config);
+                }
+                return Err(errno);
+            }
+        }
+        return Ok(());
+    }
     for peer in set.peers {
         apply_peer(device, peer, expected_key_len)?;
     }
@@ -724,6 +751,76 @@ mod tests {
         let reply = handle(&mut device, &mut context, Request::Get);
         assert!(reply.contains("allowed_ip=10.7.0.2/32"));
         assert!(reply.contains("vallum_epoch=0"));
+    }
+
+    #[test]
+    fn a_refused_peer_does_not_take_the_others_with_it() {
+        // The bug: `replace_peers` wiped the table and then filled it, and
+        // the first refusal returned - so one bad peer left the daemon with
+        // NO peers, while the reply said the set had failed.
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x01; 32]).expect("identity");
+        let peer = StaticIdentity::generate(&*suite, &[0x02; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite);
+
+        // One good peer.
+        let body = format!(
+            "set=1\npublic_key={}\nallowed_ip=10.7.0.2/32\n",
+            crate::keys::hex_encode(peer.public().as_bytes())
+        );
+        let request = uapi::parse(&body).expect("a legal set");
+        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+
+        // Now replace the set with one peer whose key is the wrong length.
+        // It parses - the length is the device's business - and the device
+        // refuses it.
+        let body =
+            "set=1\nreplace_peers=true\npublic_key=00112233445566778899\nallowed_ip=10.7.0.3/32\n";
+        let request = uapi::parse(body).expect("the request parses");
+        let reply = handle(&mut device, &mut context, request);
+        assert!(
+            !reply.contains("errno=0"),
+            "the bad peer must be refused: {reply}"
+        );
+
+        // The peer that was there is still there.
+        let reply = handle(&mut device, &mut context, Request::Get);
+        assert!(
+            reply.contains("allowed_ip=10.7.0.2/32"),
+            "a refused peer must not take the others with it: {reply}"
+        );
+    }
+
+    #[test]
+    fn a_runtime_key_change_is_reported_as_the_key_in_use() {
+        // The bug: the device got the new identity and the context kept the
+        // old seed, so `get` answered with a key that was not in use.
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x01; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite);
+
+        let body = format!(
+            "set=1\nprivate_key={}\n",
+            crate::keys::hex_encode(&[0x07; 32])
+        );
+        let request = uapi::parse(&body).expect("a legal set");
+        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+
+        let reply = handle(&mut device, &mut context, Request::Get);
+        assert!(
+            reply.contains(&crate::keys::hex_encode(&[0x07; 32])),
+            "the reported key must be the key in use: {reply}"
+        );
+        assert!(
+            !reply.contains(&crate::keys::hex_encode(&[9u8; 32])),
+            "the old seed must not still be reported: {reply}"
+        );
     }
 
     #[test]

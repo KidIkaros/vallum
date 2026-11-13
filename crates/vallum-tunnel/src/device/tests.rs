@@ -44,6 +44,39 @@ impl Randomness for ZeroRng {
     }
 }
 
+/// A removed peer must not block the next one.
+///
+/// `replace_peers` wipes the table by marking the rows removed and keeping
+/// their slots. Adding a peer then compared the new peer against those dead
+/// rows and refused it: the same peer as a duplicate, the same allowed
+/// address as an overlap. So after any replacement the tunnel could not
+/// accept a peer again - exactly when it needs to.
+#[test]
+fn a_removed_peer_does_not_block_the_next_one() {
+    let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+    let me = StaticIdentity::generate(&*suite, &[0x01; 32]).expect("our identity");
+    let peer = StaticIdentity::generate(&*suite, &[0x02; 32]).expect("the peer's identity");
+
+    let mut device = Device::new(
+        Arc::clone(&suite),
+        me,
+        vec![PeerConfig::new("laptop", peer.to_peer())],
+        &mut ZeroRng,
+        0,
+    )
+    .expect("device");
+
+    device.remove_all_peers();
+    assert_eq!(device.peer_count(), 0, "no live peers remain");
+
+    // The same peer, added again. Before the fix this was refused as a
+    // duplicate of the removed row.
+    device
+        .add_peer(PeerConfig::new("laptop", peer.to_peer()))
+        .expect("a removed peer must not block the next one");
+    assert_eq!(device.peer_count(), 1);
+}
+
 /// A rotation moves the peer's *current* hint, not only its window.
 ///
 /// Measured on the real link: `peer rotate` + `peer finalize` left the daemon

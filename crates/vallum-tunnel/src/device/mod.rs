@@ -438,6 +438,16 @@ impl Device {
     /// [`ConfigError`] as [`Device::new`].
     pub fn add_peer(&mut self, config: PeerConfig) -> Result<PeerId, ConfigError> {
         for existing in &self.peers {
+            // A REMOVED peer is not a peer. `remove_all_peers` marks the rows
+            // removed and keeps their slots, and this loop used to count
+            // them: after any `replace_peers`, adding a peer was refused as a
+            // duplicate of a peer that was no longer there, and the same
+            // allowed address was refused as an overlap. The tunnel could not
+            // accept a peer again after a replacement - which is exactly when
+            // it needs to.
+            if existing.removed {
+                continue;
+            }
             // The wire identity is the KEM key. The PSK and the signing
             // expectation are policy attached to that identity, not part of
             // it: two entries with the same KEM key are the same peer. A key
