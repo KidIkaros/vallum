@@ -101,7 +101,10 @@ pub struct SetupArgs {
     /// Enrol with a single-use token, for machines that cannot SSH to the
     /// server. Takes the `vallum1-join:…` ticket `vallum peer invite` prints,
     /// or a bare `host:port` together with --invite-id and --token.
-    #[arg(long, value_name = "TICKET|HOST:PORT", conflicts_with_all = ["server", "client", "remote"])]
+    ///
+    /// `-` reads the ticket from stdin, which keeps the token it carries out
+    /// of `ps` and out of the shell's history.
+    #[arg(long, value_name = "TICKET|HOST:PORT|-", conflicts_with_all = ["server", "client", "remote"])]
     pub join: Option<String>,
 
     /// The single-use token from `vallum peer invite`, or `-` to read it from
@@ -164,7 +167,8 @@ pub fn setup(args: &SetupArgs) -> Result<(), Error> {
         return as_client_config(config, args);
     }
     if let Some(join) = &args.join {
-        return as_join(join, args);
+        let ticket = read_ticket_arg(join, std::io::stdin().lock())?;
+        return as_join(&ticket, args);
     }
     if !std::io::stdin().is_terminal() {
         return guidance();
@@ -1102,6 +1106,27 @@ fn handshake_seen(response: &str) -> bool {
     })
 }
 
+/// The join ticket to enrol with.
+///
+/// `-` reads it from stdin, which keeps the single-use token inside it out of
+/// argv and out of the shell's history. The recommended command used to put
+/// the ticket on the command line, where `ps` shows it to every user on the
+/// host - and the ticket is the one thing that must not be shared.
+fn read_ticket_arg(arg: &str, stdin: impl std::io::BufRead) -> Result<String, Error> {
+    if arg != "-" {
+        say!("note: a ticket passed as an argument is visible in `ps` and stays in");
+        say!("      shell history; `--join -` reads it from stdin instead");
+        return Ok(arg.to_owned());
+    }
+    let ticket = read_token_arg(Some("-"), stdin)?;
+    if ticket.is_empty() {
+        return Err(Error::Usage(
+            "no ticket on stdin: paste the `vallum1-join:…` line".to_owned(),
+        ));
+    }
+    Ok(ticket)
+}
+
 /// Resolve `--token`: `-` reads a line from `stdin` so the token stays out of
 /// shell history and `ps`; a literal token warns and returns it.
 fn read_token_arg(arg: Option<&str>, mut stdin: impl std::io::BufRead) -> Result<String, Error> {
@@ -1395,6 +1420,35 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The ticket carries the single-use token, so it must be able to arrive
+    /// on stdin instead of on the command line.
+    #[test]
+    fn a_ticket_can_come_from_stdin() {
+        let ticket = "vallum1-join:192.168.1.1:51821/laptop/abc123/fingerprint";
+        let mut cursor = std::io::Cursor::new(format!("{ticket}\n"));
+        assert_eq!(
+            read_ticket_arg("-", &mut cursor).unwrap(),
+            ticket,
+            "the ticket must be read from stdin"
+        );
+    }
+
+    #[test]
+    fn an_empty_stdin_is_a_clear_error() {
+        let mut cursor = std::io::Cursor::new("\n");
+        let error = read_ticket_arg("-", &mut cursor).expect_err("an empty stdin is an error");
+        assert!(error.to_string().contains("no ticket on stdin"), "{error}");
+    }
+
+    /// A ticket in argv is still accepted - it is the only way on some
+    /// systems - but the operator is told what it costs.
+    #[test]
+    fn a_ticket_in_argv_is_accepted_with_a_warning() {
+        let ticket = "vallum1-join:192.168.1.1:51821/laptop/abc123/fingerprint";
+        let mut cursor = std::io::Cursor::new("");
+        assert_eq!(read_ticket_arg(ticket, &mut cursor).unwrap(), ticket);
+    }
 
     /// A name is shell input, not an argument: it reaches the remote's
     /// shell through ssh.

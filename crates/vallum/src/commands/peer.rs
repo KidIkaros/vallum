@@ -872,7 +872,10 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     );
     say!();
     say!("   on the client:");
-    say!("      sudo vallum join {ticket}");
+    say!("      sudo vallum join -");
+    say!("      (paste the ticket below - it stays out of `ps` and out of the shell's history)");
+    say!();
+    say!("   {ticket}");
     say!();
     if root && systemd {
         say!();
