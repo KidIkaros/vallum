@@ -60,13 +60,28 @@ const FLAG_COOKIE: u8 = 0x01;
 const MAX_DATAGRAM: usize = 16384;
 const MAX_NAME: usize = 32;
 /// Requests per source IP per second; beyond that the source is dropped.
+///
+/// Counted only for sources that have passed the cookie gate. A datagram
+/// that carries no valid cookie is not from the address it claims to be
+/// from, so charging it to that address let a flood of spoofed sources lock
+/// out the real client behind them: eight junk datagrams a second were
+/// enough.
 const RATE_PER_SECOND: u32 = 8;
+/// Datagrams this server will answer per second, whoever they are from.
+///
+/// This one is global, because the source address of a UDP datagram is the
+/// sender's claim and not a fact: a per-source budget cannot be trusted to
+/// bound the work. The total work still has to be bounded, and the cookie
+/// gate - a constant-time MAC check - is what decides which datagrams are
+/// worth the rest of the work.
+const RATE_REPLIES_PER_SECOND: u32 = 512;
 /// Distinct source IPs tracked inside one window.
 ///
-/// The limiter runs *before* the cookie gate, so it sees spoofed sources too;
-/// without a bound an attacker rotating source IPs would grow the map a line
-/// per packet. Past the cap a new source is not admitted this window — which
-/// is also the honest behaviour, since we could not answer it anyway.
+/// Only authenticated sources are tracked, so this bounds the map's growth
+/// without giving an attacker a way to fill it. Past the cap the window's
+/// table is cleared rather than a new source refused: refusing turned a
+/// full table into a lockout, because the legitimate client was refused for
+/// not being in a table the attacker had filled.
 const RATE_LIMIT_SOURCES: usize = 4096;
 /// How long an invite lives. One sitting: enough to walk to the other machine.
 pub const INVITE_TTL_SECS: u64 = 15 * 60;
@@ -718,11 +733,24 @@ pub fn revoke_invite(interface: &str, name: &str) -> usize {
     removed
 }
 
-/// Per-source-IP admission: the cookie already stops spoofing, but a real
-/// source should not get unlimited work either.
+/// Admission control, in two parts, because the two questions are different.
+///
+/// The first is the *reply* budget: how many datagrams this server answers
+/// per second, whoever they are from. It is global. The source address of a
+/// UDP datagram is the sender's claim and not a fact, so a per-source budget
+/// cannot be trusted to bound the work - but the total work still has to be
+/// bounded, and it is bounded here.
+///
+/// The second is the *per-source* budget: how many requests one address may
+/// make per second. It is applied AFTER the cookie gate, because the cookie
+/// is an authenticated tag bound to the client's address: a request that
+/// carries one really is from the address it claims to be from. Charging a
+/// datagram to an address before that was proven charged it to a claim, and
+/// a flood of claims could spend the budget of a real client.
 struct RateLimit {
     window_start: Instant,
     counts: std::collections::HashMap<IpAddr, u32>,
+    total: u32,
 }
 
 impl RateLimit {
@@ -730,16 +758,36 @@ impl RateLimit {
         Self {
             window_start: Instant::now(),
             counts: std::collections::HashMap::new(),
+            total: 0,
         }
     }
 
-    fn admit(&mut self, source: IpAddr) -> bool {
+    /// Start a new window if the last one has passed.
+    fn roll(&mut self) {
         if self.window_start.elapsed() >= Duration::from_secs(1) {
             self.counts.clear();
+            self.total = 0;
             self.window_start = Instant::now();
         }
+    }
+
+    /// Whether the server may answer another datagram at all.
+    fn admit_reply(&mut self) -> bool {
+        self.roll();
+        self.total += 1;
+        self.total <= RATE_REPLIES_PER_SECOND
+    }
+
+    /// Whether this authenticated source may make another request.
+    fn admit_source(&mut self, source: IpAddr) -> bool {
+        self.roll();
+        // A full table must not turn every new address away. It used to, and
+        // that is how a flood of spoofed sources locked out a legitimate
+        // client: the table was full of claims, and the real client was
+        // refused for not being one of them. The window is a second long, so
+        // clearing the table costs one second of budgets.
         if !self.counts.contains_key(&source) && self.counts.len() >= RATE_LIMIT_SOURCES {
-            return false;
+            self.counts.clear();
         }
         let count = self.counts.entry(source).or_insert(0);
         *count += 1;
@@ -802,7 +850,9 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
         let Ok((size, source)) = socket.recv_from(&mut buf) else {
             continue; // timeout: rotate and listen again
         };
-        if !limit.admit(source.ip()) {
+        // The global reply budget, before anything else: it bounds the work
+        // this server does for anyone.
+        if !limit.admit_reply() {
             continue;
         }
         let Some(hello) = parse_hello(&buf[..size]) else {
@@ -832,6 +882,11 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             if let Ok(fresh) = cookies.cookie(&suite(), &client_addr) {
                 let _ = socket.send_to(&encode_cookie(&fresh), source);
             }
+            continue;
+        }
+        // Only now is the source known to be the address it claims to be, so
+        // only now can a budget be charged to it.
+        if !limit.admit_source(source.ip()) {
             continue;
         }
         let Some(invite) = load_invite(&interface, &hello.id) else {
@@ -1158,25 +1213,68 @@ mod tests {
     #[test]
     fn the_rate_limiter_bounds_tracked_sources_and_repeats() {
         let mut limit = RateLimit::new();
-        // The cap, not the flood, is what a spoofed-source spray hits first:
-        // each unique address costs one map entry, so the map must stop
-        // growing at the bound rather than at memory exhaustion.
+        // The cap, not the flood, is what a source spray hits first: each
+        // unique address costs one map entry, so the map must stop growing at
+        // the bound rather than at memory exhaustion.
         for last_octet in 0..=u8::MAX {
             for third in 0..=u8::MAX {
                 let ip = IpAddr::V4(Ipv4Addr::new(10, 0, third, last_octet));
-                let _ = limit.admit(ip);
+                let _ = limit.admit_source(ip);
             }
         }
         assert_eq!(limit.counts.len(), RATE_LIMIT_SOURCES);
-        // A brand-new source is refused while the map is at the cap; a source
-        // already inside the window is still counted (and throttled at 8/s).
+        // A brand-new source is still admitted when the map is at the cap.
+        // It used to be REFUSED, and that was the lockout: the map was full
+        // of claims, and the legitimate client was turned away for not being
+        // one of them.
+        assert!(
+            limit.admit_source(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+            "a full table must not refuse a new address"
+        );
+        // A source inside the window is still counted, and throttled at 8/s.
         let known = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
-        assert!(limit.admit(known));
-        assert!(!limit.admit(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
         for _ in 0..RATE_PER_SECOND {
-            let _ = limit.admit(known);
+            let _ = limit.admit_source(known);
         }
-        assert!(!limit.admit(known));
+        assert!(!limit.admit_source(known));
+    }
+
+    /// The reply budget is global, because the source of a UDP datagram is a
+    /// claim. It bounds the server's work for anyone.
+    #[test]
+    fn the_reply_budget_is_global() {
+        let mut limit = RateLimit::new();
+        for _ in 0..RATE_REPLIES_PER_SECOND {
+            assert!(limit.admit_reply());
+        }
+        assert!(
+            !limit.admit_reply(),
+            "the server must stop answering datagrams it cannot afford to answer"
+        );
+    }
+
+    /// The source budget is charged only after the cookie gate, so a flood of
+    /// junk that never passes it cannot spend a real client's budget.
+    #[test]
+    fn a_junk_flood_cannot_spend_a_real_clients_budget() {
+        let mut limit = RateLimit::new();
+        let real = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        // Junk from a claim that never passes the cookie gate: it is answered
+        // with a cookie, but it is never charged to the address it claims.
+        for _ in 0..100 {
+            limit.admit_reply();
+        }
+        // The real client's own budget is untouched by that flood.
+        for _ in 0..RATE_PER_SECOND {
+            assert!(
+                limit.admit_source(real),
+                "the junk must not have spent the real client's budget"
+            );
+        }
+        assert!(
+            !limit.admit_source(real),
+            "and the real client is still bounded"
+        );
     }
 
     #[test]
