@@ -94,14 +94,23 @@ impl Notify {
 /// Connect to `$NOTIFY_SOCKET`. An `@` prefix names an abstract socket: the
 /// name passed to `from_abstract_name` excludes that marker byte.
 fn connect(path: PathBuf) -> Option<UnixDatagram> {
+    #[cfg(target_os = "linux")]
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::SocketAddr;
-    let bytes = path.as_os_str().as_bytes();
-    let addr = if bytes.first() == Some(&b'@') {
-        <SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(&bytes[1..]).ok()?
-    } else {
-        SocketAddr::from_pathname(&path).ok()?
-    };
+    // Abstract names are a Linux namespace: off Linux a path is all a socket
+    // address can be, so an `@` name simply fails to parse there.
+    #[cfg(target_os = "linux")]
+    if path.as_os_str().as_bytes().first() == Some(&b'@') {
+        return <SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(
+            &path.as_os_str().as_bytes()[1..],
+        )
+        .ok()
+        .and_then(|addr| {
+            let socket = UnixDatagram::unbound().ok()?;
+            socket.connect_addr(&addr).ok().map(|_| socket)
+        });
+    }
+    let addr = SocketAddr::from_pathname(&path).ok()?;
     let socket = UnixDatagram::unbound().ok()?;
     socket.connect_addr(&addr).ok().map(|_| socket)
 }

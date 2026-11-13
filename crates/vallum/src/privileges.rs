@@ -162,6 +162,7 @@ pub fn lock_memory() -> Result<(), String> {
     Err("mlockall is only implemented for Linux".to_owned())
 }
 
+#[cfg(target_os = "linux")]
 pub fn drop_to(privileges: &Privileges) -> Result<(), Error> {
     use nix::unistd::{getegid, geteuid, setgid, setgroups, setuid, Gid, Uid};
 

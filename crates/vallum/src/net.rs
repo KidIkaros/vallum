@@ -124,6 +124,10 @@ impl UdpTransport {
         // A short read timeout is what lets the reader notice a rebind: it
         // wakes, checks the shared socket's generation, and switches.
         socket.set_read_timeout(Some(Duration::from_millis(250)))?;
+        // SO_MARK is a Linux routing hook; off Linux the mark is simply not
+        // applied — policy routing there belongs to a different mechanism.
+        #[cfg(not(target_os = "linux"))]
+        let _ = fwmark;
         #[cfg(target_os = "linux")]
         if fwmark != 0 {
             nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &fwmark)
@@ -1043,6 +1047,10 @@ pub fn local_addresses() -> Vec<String> {
         .collect()
 }
 
+/// The route's MTU as the kernel reports it. `IP_MTU`/`IPV6_MTU` are Linux
+/// sockopts; off Linux the callers' `Option`/`io::Result` handling already
+/// treats an unsupported probe as "unknown" rather than wrong.
+#[cfg(target_os = "linux")]
 pub fn path_mtu(endpoint: SocketAddr) -> io::Result<u16> {
     let any = SocketAddr::new(
         if endpoint.is_ipv4() {
@@ -1061,6 +1069,34 @@ pub fn path_mtu(endpoint: SocketAddr) -> io::Result<u16> {
     }
     .map_err(|e| io::Error::other(format!("path MTU: {e}")))?;
     u16::try_from(mtu).map_err(|_| io::Error::other(format!("path MTU {mtu} does not fit in u16")))
+}
+
+/// As [`path_mtu`], for a build whose kernel does not report route MTUs.
+#[cfg(not(target_os = "linux"))]
+pub fn path_mtu(_endpoint: SocketAddr) -> io::Result<u16> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "route MTU discovery is only implemented for Linux",
+    ))
+}
+
+/// Every IP address this host holds. `getifaddrs` is the portable Unix answer;
+/// the Linux version above shells out to `ip` only because it predates this.
+#[cfg(not(target_os = "linux"))]
+pub fn local_addresses() -> Vec<String> {
+    nix::ifaddrs::getifaddrs()
+        .map(|addrs| {
+            addrs
+                .filter_map(|a| a.address)
+                .filter_map(|a| {
+                    a.as_sockaddr_in()
+                        .map(|s| IpAddr::V4(s.ip()))
+                        .or_else(|| a.as_sockaddr_in6().map(|s| IpAddr::V6(s.ip())))
+                })
+                .map(|ip| ip.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The largest ICMP payload that crosses the path, by bisection.
