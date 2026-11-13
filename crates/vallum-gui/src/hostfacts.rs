@@ -296,6 +296,16 @@ pub(crate) fn preflight() -> serde_json::Value {
 /// different tunnel (or the physical link), and a probe that answers from
 /// somewhere else is worse than no probe.
 pub(crate) fn ping(socket: &std::path::Path, address: &str, count: u32) -> serde_json::Value {
+    // The address is an argv entry, and argv entries that begin with `-` are
+    // options: `-f` is a flood. The console pings tunnel peers, which have IP
+    // addresses, so anything that does not parse as one is refused here
+    // rather than handed to ping to interpret.
+    let Ok(_) = address.parse::<std::net::IpAddr>() else {
+        return serde_json::json!({
+            "address": address,
+            "error": "not an IP address - the console pings addresses, not names"
+        });
+    };
     let interface = socket
         .file_stem()
         .and_then(|stem| stem.to_str())

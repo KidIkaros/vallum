@@ -24,6 +24,48 @@ const CONTENT_TYPES: &[(&str, &str)] = &[
     ("ico", "image/x-icon"),
 ];
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// A request body is capped before it is allocated: the cap used to come
+    /// after, so a request's own Content-Length ordered the allocation.
+    #[test]
+    fn a_body_past_the_cap_is_not_read() {
+        let stream = format!(
+            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        let mut stream = std::io::Cursor::new(stream);
+        assert!(
+            read_request(&mut stream).is_none(),
+            "a body past the cap must not be allocated"
+        );
+    }
+
+    #[test]
+    fn a_normal_body_is_read() {
+        let body = br#"[1,2,3]"#;
+        let mut stream = format!(
+            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.push_str(std::str::from_utf8(body).unwrap());
+        let mut stream = std::io::Cursor::new(stream);
+        let request = read_request(&mut stream).expect("a normal request parses");
+        assert_eq!(request.body, body.to_vec());
+        assert_eq!(request.path, "/api/ping");
+    }
+}
+
+/// The largest request body the console will read.
+///
+/// The console's own bodies are a few hundred bytes of JSON. The cap exists
+/// so that a request's own Content-Length cannot order an allocation before
+/// anything has been authenticated.
+const MAX_BODY: usize = 64 * 1024;
+
 /// The cookie the console's session is carried in.
 const COOKIE: &str = "vallum-console";
 
@@ -133,8 +175,8 @@ impl Request {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
+fn read_request<R: std::io::Read>(stream: &mut R) -> Option<Request> {
+    let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
@@ -158,6 +200,14 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
                 content_length = value.trim().parse().unwrap_or(0);
             }
         }
+    }
+    // The cap comes BEFORE the allocation. The body used to be sized straight
+    // from the request's own Content-Length, so one header pre-authenticating
+    // nothing - the token exchange happens later - ordered a four-gigabyte
+    // buffer. The console's bodies are a few hundred bytes of JSON; 64 KiB is
+    // generous, and anything past it is dropped rather than read.
+    if content_length > MAX_BODY {
+        return None;
     }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
