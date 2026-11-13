@@ -24,41 +24,6 @@ const CONTENT_TYPES: &[(&str, &str)] = &[
     ("ico", "image/x-icon"),
 ];
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    /// A request body is capped before it is allocated: the cap used to come
-    /// after, so a request's own Content-Length ordered the allocation.
-    #[test]
-    fn a_body_past_the_cap_is_not_read() {
-        let stream = format!(
-            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
-            MAX_BODY + 1
-        );
-        let mut stream = std::io::Cursor::new(stream);
-        assert!(
-            read_request(&mut stream).is_none(),
-            "a body past the cap must not be allocated"
-        );
-    }
-
-    #[test]
-    fn a_normal_body_is_read() {
-        let body = br#"[1,2,3]"#;
-        let mut stream = format!(
-            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
-        stream.push_str(std::str::from_utf8(body).unwrap());
-        let mut stream = std::io::Cursor::new(stream);
-        let request = read_request(&mut stream).expect("a normal request parses");
-        assert_eq!(request.body, body.to_vec());
-        assert_eq!(request.path, "/api/ping");
-    }
-}
-
 /// The largest request body the console will read.
 ///
 /// The console's own bodies are a few hundred bytes of JSON. The cap exists
@@ -629,4 +594,39 @@ fn handle(
         Err(_) => respond(&mut stream, "404 Not Found", "text/plain", b"not found"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// A request body is capped before it is allocated: the cap used to come
+    /// after, so a request's own Content-Length ordered the allocation.
+    #[test]
+    fn a_body_past_the_cap_is_not_read() {
+        let stream = format!(
+            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        let mut stream = std::io::Cursor::new(stream);
+        assert!(
+            read_request(&mut stream).is_none(),
+            "a body past the cap must not be allocated"
+        );
+    }
+
+    #[test]
+    fn a_normal_body_is_read() {
+        let body = br#"[1,2,3]"#;
+        let mut stream = format!(
+            "POST /api/ping HTTP/1.1\r\nHost: 127.0.0.1:7321\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.push_str(std::str::from_utf8(body).unwrap());
+        let mut stream = std::io::Cursor::new(stream);
+        let request = read_request(&mut stream).expect("a normal request parses");
+        assert_eq!(request.body, body.to_vec());
+        assert_eq!(request.path, "/api/ping");
+    }
 }
