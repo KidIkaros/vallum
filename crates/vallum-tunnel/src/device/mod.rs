@@ -108,7 +108,7 @@ use vallum_core::handshake::{
     responder_identify, responder_process_conf, verify_resp_tag, ResponderState, SessionKeys,
     RESP_TAG_SIZE,
 };
-use vallum_core::identity::StaticIdentity;
+use vallum_core::identity::{StaticIdentity, Validity};
 use vallum_core::keys::{Role, COUNTER_SIZE, NONCE_SIZE};
 use vallum_core::session::Session;
 use vallum_core::shaping::{Action as ShapingAction, Effect, Event as ShapingEvent, Shaper};
@@ -345,6 +345,16 @@ pub struct HandshakeDrops {
     pub stale: u64,
 }
 
+/// How long a runtime rotation's replaced identity stays accepted.
+///
+/// 15 minutes, the same "one sitting" bound an invite carries. A rotation
+/// window exists for handshakes in flight and devices that have not caught
+/// up, not as a permanent second identity; past it the replaced key is
+/// refused at the next handshake, by the check that already runs there.
+/// An operator who needs longer re-runs `peer rotate`; an operator who
+/// wants the replaced key dead sooner runs `peer finalize`.
+pub const ROTATION_WINDOW_SECS: u64 = 15 * 60;
+
 pub struct Device {
     suite: Arc<dyn CryptoSuite>,
     identity: StaticIdentity,
@@ -534,7 +544,8 @@ impl Device {
     }
 
     /// Rotate a peer onto a new identity, keeping the replaced one accepted
-    /// until [`Self::finalize_identity`].
+    /// until it is retired - by [`Self::finalize_identity`], or by its own
+    /// window, which a runtime rotation bounds at [`ROTATION_WINDOW_SECS`].
     ///
     /// The live session is untouched: its transport keys predate the swap, and
     /// the replaced identity answers handshakes until the peer adopts its own
@@ -547,7 +558,13 @@ impl Device {
         if peer.removed {
             return false;
         }
-        if !peer.config.rotate_identity(identity) {
+        // The replaced identity gets a window when it asserts none of its
+        // own: the handshake path already refuses identities past their
+        // `not_after` at every handshake, so a runtime rotation now expires
+        // by itself instead of living until an explicit `finalize`.
+        let now_unix = self.now_ms / 1000;
+        let window = Validity::new(now_unix, now_unix.saturating_add(ROTATION_WINDOW_SECS));
+        if !peer.config.rotate_identity(identity, Some(window)) {
             return false;
         }
         // The hint table is a projection of the accepted identities, built

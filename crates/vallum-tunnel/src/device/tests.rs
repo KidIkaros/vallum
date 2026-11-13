@@ -128,3 +128,49 @@ fn a_finalized_rotation_resolves_the_new_key_and_forgets_the_old() {
         "the retired key must stop resolving when the window closes"
     );
 }
+
+/// A runtime rotation's replaced key expires on its own.
+///
+/// `peer rotate` used to open a window with no `not_after`, so the
+/// replaced key stayed accepted until an explicit `peer finalize` - and
+/// nothing prompted one. The expiry is the refusal the handshake path
+/// already consults; the window just asserts a bound now.
+#[test]
+fn a_runtime_rotation_window_expires() {
+    let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+    let me = StaticIdentity::generate(&*suite, &[0x01; 32]).expect("our identity");
+    let old = StaticIdentity::generate(&*suite, &[0x02; 32]).expect("the replaced identity");
+    let new = StaticIdentity::generate(&*suite, &[0x03; 32]).expect("the rotated identity");
+    let hint_of = |identity: &StaticIdentity| peer_hint(&*suite, identity.public());
+
+    let mut device = Device::new(
+        Arc::clone(&suite),
+        me,
+        vec![PeerConfig::new("laptop", old.to_peer())],
+        &mut ZeroRng,
+        0,
+    )
+    .expect("device");
+    let id = device.peers().next().expect("one peer").0;
+
+    assert!(device.rotate_identity(id, new.to_peer()));
+    // Inside the window both keys resolve.
+    assert_eq!(device.peer_with_hint(&hint_of(&new)), Some((0, 0)));
+    assert_eq!(device.peer_with_hint(&hint_of(&old)), Some((0, 1)));
+
+    // Halfway through the window the replaced key is still admitted.
+    assert_eq!(
+        device.validity_refusal(0, 1, ROTATION_WINDOW_SECS / 2),
+        None
+    );
+    // Past it, the refusal the handshake path acts on is expiry.
+    assert_eq!(
+        device.validity_refusal(0, 1, ROTATION_WINDOW_SECS + 1),
+        Some(Refusal::IdentityExpired)
+    );
+    // The new key asserted no window of its own and is never refused.
+    assert_eq!(
+        device.validity_refusal(0, 0, ROTATION_WINDOW_SECS + 1),
+        None
+    );
+}

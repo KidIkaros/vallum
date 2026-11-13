@@ -150,7 +150,11 @@ impl PeerConfig {
     /// Idempotent both ways: rotating onto the identity already in place does
     /// nothing, and a window that already holds an identity is not duplicated.
     /// Returns whether the configuration changed.
-    pub(crate) fn rotate_identity(&mut self, identity: PeerIdentity) -> bool {
+    pub(crate) fn rotate_identity(
+        &mut self,
+        identity: PeerIdentity,
+        window: Option<Validity>,
+    ) -> bool {
         let replaced = std::mem::replace(&mut self.identity, identity);
         if replaced.kem().as_bytes() == self.identity.kem().as_bytes() {
             return false;
@@ -164,7 +168,11 @@ impl PeerConfig {
         }
         self.previous.push(AcceptedIdentity {
             identity: replaced,
-            validity: self.validity,
+            // A document-asserted window stands. A runtime rotation asserts
+            // none, so it gets the default window from the caller - without
+            // one, the replaced key was accepted until somebody remembered
+            // to run `peer finalize`, which nothing prompted.
+            validity: self.validity.or(window),
         });
         true
     }
