@@ -92,6 +92,19 @@ export function BoundaryGeometry({
           strokeDasharray={live ? undefined : "4 3"}
           strokeOpacity={live ? 0.92 : 0.45}
         />
+        {live && (
+          <line
+            x1="28"
+            y1="31"
+            x2="292"
+            y2="31"
+            stroke="var(--color-foreground)"
+            strokeWidth="1.8"
+            strokeOpacity="0.65"
+            strokeLinecap="round"
+            className="svg-packet-flow"
+          />
+        )}
         {/* Vertical rampart axis */}
         <line
           x1="160"
@@ -111,6 +124,17 @@ export function BoundaryGeometry({
           strokeWidth="1.8"
         />
         {/* Responder node */}
+        {live && peersUp > 0 && (
+          <circle
+            cx="258"
+            cy="31"
+            r="7"
+            fill="none"
+            stroke="var(--color-live)"
+            strokeWidth="1.4"
+            className="beacon-pulse"
+          />
+        )}
         <circle
           cx="258"
           cy="31"
@@ -120,6 +144,17 @@ export function BoundaryGeometry({
           strokeWidth="1.8"
         />
         {/* Central Rampart Gate concentric diamonds */}
+        {live && peersUp > 0 && (
+          <circle
+            cx="160"
+            cy="31"
+            r="10"
+            fill="none"
+            stroke="var(--color-signal)"
+            strokeWidth="1.2"
+            className="beacon-pulse"
+          />
+        )}
         <polygon
           points="160,12 179,31 160,50 141,31"
           fill="var(--color-card)"

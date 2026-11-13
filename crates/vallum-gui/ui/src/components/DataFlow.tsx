@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react"
 import { ArrowRight, Laptop, Server, ShieldAlert, ShieldCheck } from "lucide-react"
 import type { PeerRate } from "@/components/TopTalkers"
 import { Button } from "@/components/ui/button"
@@ -22,13 +23,19 @@ function FlowLane({
   via,
   dest,
   state,
+  live,
+  fast,
 }: {
   label: string
   via: string
   dest: string
   state: LaneState
+  live: boolean
+  fast: boolean
 }) {
   const tone = LANE_STYLE[state]
+  const activeTunnel = live && state === "tunnel"
+  const streamClass = activeTunnel ? (fast ? "flow-stream-fast" : "flow-stream-slow") : ""
   return (
     <div className="grid grid-cols-[3.2rem_1fr_auto] items-center gap-2.5 text-xs">
       <span className="text-muted-foreground font-medium">{label}</span>
@@ -37,9 +44,12 @@ function FlowLane({
           {via}
         </span>
         <div className="bg-muted relative h-1.5 min-w-[2.5rem] flex-1 overflow-hidden rounded-full">
-          <div className={`h-full w-full rounded-full transition-colors duration-300 ${tone.bar}`} />
+          <div className={`h-full w-full rounded-full transition-colors duration-300 ${tone.bar} ${streamClass}`} />
         </div>
-        <ArrowRight className="text-muted-foreground/70 size-3 shrink-0" aria-hidden />
+        <ArrowRight
+          className={`size-3 shrink-0 transition-colors ${activeTunnel && fast ? "text-signal" : "text-muted-foreground/70"}`}
+          aria-hidden
+        />
       </div>
       <span className={`rounded border px-1.5 py-0.5 text-[11px] font-medium ${tone.badge}`}>
         {dest}
@@ -158,10 +168,14 @@ export function TunnelFlowMap({
                 </div>
               </div>
             </div>
-            <span
-              className={`size-2 shrink-0 rounded-full ${live ? "bg-live" : "bg-muted-foreground/50"}`}
-              aria-hidden
-            />
+            <span className="relative flex size-2.5 shrink-0 items-center justify-center" aria-hidden>
+              {live && totalRate > 0 && (
+                <span className="bg-live absolute inline-flex h-full w-full animate-ping rounded-full opacity-65" />
+              )}
+              <span
+                className={`relative inline-flex size-2 rounded-full ${live ? "bg-live" : "bg-muted-foreground/50"}`}
+              />
+            </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
             <span className="border-border bg-secondary/70 text-foreground rounded border px-1.5 py-0.5 font-medium">
@@ -194,7 +208,7 @@ export function TunnelFlowMap({
           <span className="micro text-signal/90 text-[10px]">02 · Egress lanes</span>
           <div className="flex flex-col gap-2">
             {lanes.map((lane) => (
-              <FlowLane key={lane.label} {...lane} />
+              <FlowLane key={lane.label} {...lane} live={live} fast={totalRate >= 4096} />
             ))}
           </div>
           <div className="border-border/50 flex flex-col gap-1 border-t pt-2 text-[11px]">
@@ -205,11 +219,11 @@ export function TunnelFlowMap({
             </div>
             <div className="bg-muted flex h-1.5 w-full overflow-hidden rounded-full">
               <span
-                className="bg-signal h-full transition-all duration-300"
+                className={`bg-signal h-full transition-all duration-300 ${live && rxRate > 0 ? "pipe-shimmer-rx" : ""}`}
                 style={{ width: `${totalRate > 0 ? rxPct : 0}%` }}
               />
               <span
-                className="bg-violet h-full transition-all duration-300"
+                className={`bg-violet h-full transition-all duration-300 ${live && txRate > 0 ? "pipe-shimmer-tx" : ""}`}
                 style={{ width: `${totalRate > 0 ? 100 - rxPct : 0}%` }}
               />
             </div>
@@ -235,6 +249,7 @@ export function TunnelFlowMap({
                 const f = freshness(peer.last_handshake_sec, now)
                 const rate = rateByName.get(peer.name)
                 const peerRate = rate ? rate.rx + rate.tx : 0
+                const peerFlowing = live && peerRate > 0
                 const total = peer.rx_bytes + peer.tx_bytes
                 const rxShare = total > 0 ? Math.min(100, (peer.rx_bytes / maxPeerTotal) * 100) : 0
                 const txShare = total > 0 ? Math.min(100 - rxShare, (peer.tx_bytes / maxPeerTotal) * 100) : 0
@@ -249,7 +264,9 @@ export function TunnelFlowMap({
                     key={peer.fingerprint}
                     type="button"
                     onClick={() => onSelectPeer?.(peer.fingerprint)}
-                    className="border-border/40 bg-card/60 hover:border-border hover:bg-secondary/60 flex cursor-pointer flex-col gap-1 rounded-md border px-2.5 py-1.5 text-left transition-colors"
+                    className={`bg-card/60 hover:border-border hover:bg-secondary/60 flex cursor-pointer flex-col gap-1 rounded-md border px-2.5 py-1.5 text-left transition-colors ${
+                      peerFlowing ? "border-signal/40" : "border-border/40"
+                    }`}
                     title={
                       peer.last_handshake_sec > 0
                         ? `Last handshake ${formatAgeSec(Math.max(0, now - peer.last_handshake_sec))} ago`
@@ -258,7 +275,12 @@ export function TunnelFlowMap({
                   >
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span className={`size-1.5 shrink-0 rounded-full ${dot}`} aria-hidden />
+                        <span className="relative flex size-2 shrink-0 items-center justify-center" aria-hidden>
+                          {peerFlowing && (
+                            <span className="bg-live absolute inline-flex h-full w-full animate-ping rounded-full opacity-70" />
+                          )}
+                          <span className={`relative inline-flex size-1.5 rounded-full ${dot}`} />
+                        </span>
                         <span className="text-foreground truncate font-medium">{peer.name}</span>
                         <span className="text-muted-foreground hidden truncate font-mono text-[11px] sm:inline">
                           {peer.allowed_ips[0] ?? ""}
@@ -269,8 +291,14 @@ export function TunnelFlowMap({
                       </span>
                     </div>
                     <div className="bg-muted flex h-1 w-full overflow-hidden rounded-full">
-                      <span className="bg-signal h-full" style={{ width: `${rxShare}%` }} />
-                      <span className="bg-violet h-full" style={{ width: `${txShare}%` }} />
+                      <span
+                        className={`bg-signal h-full ${live && (rate?.rx ?? 0) > 0 ? "pipe-shimmer-rx" : ""}`}
+                        style={{ width: `${rxShare}%` }}
+                      />
+                      <span
+                        className={`bg-violet h-full ${live && (rate?.tx ?? 0) > 0 ? "pipe-shimmer-tx" : ""}`}
+                        style={{ width: `${txShare}%` }}
+                      />
                     </div>
                   </button>
                 )
@@ -356,6 +384,36 @@ export function PacketPipelineFlow({
       ]
     : []
 
+  const prevStageOkRef = useRef<Record<string, number>>({})
+  const [pulsingSteps, setPulsingSteps] = useState<Record<string, boolean>>({})
+
+  useEffect(() => {
+    if (!c) return
+    const current: Record<string, number> = {
+      "1. Wire ingress": c.reassembled,
+      "2. Handshake gate": c.established,
+      "3. Tunnel delivery": c.packets_delivered,
+      "4. Wire egress": c.datagrams_sent,
+    }
+    const prev = prevStageOkRef.current
+    const bumped: Record<string, boolean> = {}
+    let any = false
+    for (const [step, value] of Object.entries(current)) {
+      if (prev[step] !== undefined && value > prev[step]) {
+        bumped[step] = true
+        any = true
+      }
+    }
+    prevStageOkRef.current = current
+    if (!any) return
+    const fire = window.setTimeout(() => setPulsingSteps(bumped), 0)
+    const clear = window.setTimeout(() => setPulsingSteps({}), 850)
+    return () => {
+      window.clearTimeout(fire)
+      window.clearTimeout(clear)
+    }
+  }, [c])
+
   return (
     <Panel
       title="Packet pipeline & volume share"
@@ -433,17 +491,34 @@ export function PacketPipelineFlow({
         {/* 4-stage packet pipeline */}
         {stages.length > 0 && (
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-            {stages.map((stage) => {
+            {stages.map((stage, idx) => {
               const sum = stage.ok + stage.drop
               const passPct = sum > 0 ? Math.round((stage.ok / sum) * 1000) / 10 : 100
               const hasDrops = stage.drop > 0
+              const activePulse = pulsingSteps[stage.step] === true
               return (
                 <div
                   key={stage.step}
-                  className="border-border/60 bg-background/40 flex flex-col gap-1.5 rounded-lg border p-3 text-xs"
+                  className={`bg-background/40 flex flex-col gap-1.5 rounded-lg border p-3 text-xs transition-colors ${
+                    activePulse ? "border-signal/55" : "border-border/60"
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-muted-foreground font-medium">{stage.step}</span>
+                    <span className="text-muted-foreground flex items-center gap-1.5 font-medium">
+                      {activePulse && (
+                        <span className="relative flex size-2 shrink-0" aria-hidden>
+                          <span className="bg-signal absolute inline-flex h-full w-full animate-ping rounded-full opacity-75" />
+                          <span className="bg-signal relative inline-flex size-2 rounded-full" />
+                        </span>
+                      )}
+                      <span>{stage.step}</span>
+                      {idx < stages.length - 1 && (
+                        <ArrowRight
+                          className={`hidden size-3 lg:inline ${activePulse ? "text-signal" : "text-muted-foreground/45"}`}
+                          aria-hidden
+                        />
+                      )}
+                    </span>
                     <span className={`font-mono text-[11px] font-medium ${hasDrops ? "text-stale" : "text-live"}`}>
                       {sum > 0 ? `${passPct}%` : "—"}
                     </span>
@@ -456,7 +531,9 @@ export function PacketPipelineFlow({
                   </div>
                   <div className="bg-muted h-1 w-full overflow-hidden rounded-full">
                     <div
-                      className={`h-full transition-all duration-300 ${hasDrops && passPct < 99 ? "bg-stale" : "bg-live"}`}
+                      className={`h-full transition-all duration-300 ${
+                        hasDrops && passPct < 99 ? "bg-stale" : "bg-live"
+                      } ${activePulse ? "flow-stream-fast" : ""}`}
                       style={{ width: `${sum > 0 ? passPct : 0}%` }}
                     />
                   </div>

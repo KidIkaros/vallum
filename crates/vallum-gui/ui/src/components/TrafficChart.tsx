@@ -63,7 +63,7 @@ function smoothArea(values: number[], peak: number, width: number): string {
 
 export function TrafficChart({ samples }: { samples: Sample[] }) {
   const [hover, setHover] = useState<number | null>(null)
-  const { rx, tx, peak, rxPeak, txPeak, rxAvg, txAvg, rxCur, txCur, handshakes } = useMemo(() => {
+  const { rx, tx, peak, rxPeak, txPeak, rxAvg, txAvg, rxCur, txCur, rxLast, txLast, handshakes } = useMemo(() => {
     const rxSeries = series(samples, "rx")
     const txSeries = series(samples, "tx")
     const top = Math.max(1, ...rxSeries, ...txSeries)
@@ -76,6 +76,8 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       const after = samples[i].established
       if (before !== undefined && after !== undefined && after > before) marks.push(i)
     }
+    const rxPts = toPoints(rxSeries, top, W)
+    const txPts = toPoints(txSeries, top, W)
     return {
       rx: rxSeries,
       tx: txSeries,
@@ -86,6 +88,8 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
       txAvg: avg(txSeries),
       rxCur: rxSeries.at(-1) ?? 0,
       txCur: txSeries.at(-1) ?? 0,
+      rxLast: rxPts.at(-1) ?? null,
+      txLast: txPts.at(-1) ?? null,
       handshakes: marks,
     }
   }, [samples])
@@ -210,6 +214,48 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
                   strokeWidth="1.75"
                   filter="url(#cyber-glow)"
                 />
+                {txLast && txCur > 0 && (
+                  <g aria-hidden="true">
+                    <circle
+                      cx={txLast.x}
+                      cy={clampY(txLast.y)}
+                      r="4"
+                      fill="none"
+                      stroke="var(--color-violet)"
+                      strokeWidth="1.4"
+                      className="beacon-pulse"
+                    />
+                    <circle
+                      cx={txLast.x}
+                      cy={clampY(txLast.y)}
+                      r="3"
+                      fill="var(--color-violet)"
+                      stroke="var(--color-background)"
+                      strokeWidth="1.2"
+                    />
+                  </g>
+                )}
+                {rxLast && rxCur > 0 && (
+                  <g aria-hidden="true">
+                    <circle
+                      cx={rxLast.x}
+                      cy={clampY(rxLast.y)}
+                      r="4"
+                      fill="none"
+                      stroke="var(--color-signal)"
+                      strokeWidth="1.4"
+                      className="beacon-pulse"
+                    />
+                    <circle
+                      cx={rxLast.x}
+                      cy={clampY(rxLast.y)}
+                      r="3"
+                      fill="var(--color-signal)"
+                      stroke="var(--color-background)"
+                      strokeWidth="1.2"
+                    />
+                  </g>
+                )}
               </>
             )}
 
@@ -217,15 +263,22 @@ export function TrafficChart({ samples }: { samples: Sample[] }) {
             {handshakes.map((index) => {
               const x = xAt(index - 1)
               return (
-                <line
-                  key={index}
-                  x1={x}
-                  y1={peakY}
-                  x2={x}
-                  y2={peakY + 8}
-                  stroke="var(--color-live)"
-                  strokeWidth="1.75"
-                />
+                <g key={index}>
+                  <line
+                    x1={x}
+                    y1={peakY}
+                    x2={x}
+                    y2={peakY + 8}
+                    stroke="var(--color-live)"
+                    strokeWidth="1.75"
+                  />
+                  <circle
+                    cx={x}
+                    cy={peakY + 2}
+                    r="2"
+                    fill="var(--color-live)"
+                  />
+                </g>
               )
             })}
 

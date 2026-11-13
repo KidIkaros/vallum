@@ -238,6 +238,70 @@
     transform-origin: left center;
     animation: vallum-countdown 4s linear forwards;
   }
+
+  /* Live telemetry flow & packet-stream animations */
+  .flow-stream-slow,
+  .flow-stream-fast,
+  .pipe-shimmer-rx,
+  .pipe-shimmer-tx {
+    position: relative;
+    overflow: hidden;
+  }
+  .flow-stream-slow::after,
+  .flow-stream-fast::after,
+  .pipe-shimmer-rx::after,
+  .pipe-shimmer-tx::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 45%;
+    pointer-events: none;
+  }
+  .flow-stream-slow::after {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(255 255 255 / 0.28),
+      transparent
+    );
+    animation: vallum-lane-stream 2.2s linear infinite;
+  }
+  .flow-stream-fast::after {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(255 255 255 / 0.48),
+      transparent
+    );
+    animation: vallum-lane-stream 0.95s linear infinite;
+  }
+  .pipe-shimmer-rx::after {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(230 237 243 / 0.5),
+      transparent
+    );
+    animation: vallum-lane-stream 1.15s linear infinite;
+  }
+  .pipe-shimmer-tx::after {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(230 237 243 / 0.5),
+      transparent
+    );
+    animation: vallum-lane-stream 1.15s linear infinite;
+  }
+  .svg-packet-flow {
+    stroke-dasharray: 6 18;
+    animation: vallum-svg-dash 1.2s linear infinite;
+  }
+  .beacon-pulse {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: vallum-beacon-pulse 1.8s ease-out infinite;
+  }
 }
 
 @keyframes vallum-countdown {
@@ -246,6 +310,39 @@
   }
   to {
     transform: scaleX(0);
+  }
+}
+
+@keyframes vallum-lane-stream {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+@keyframes vallum-svg-dash {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes vallum-beacon-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  70% {
+    transform: scale(1.75);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
   }
 }
 
