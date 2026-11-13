@@ -118,17 +118,35 @@ const ALLOWED: &[(&str, i64)] = {
         ("listen", c::SYS_listen),
         ("accept4", c::SYS_accept4),
         ("linkat", c::SYS_linkat),
+        // The old non-`at` calls exist only on x86_64: aarch64's syscall table
+        // dropped them, and its libc reaches the same operations through the
+        // `*at` variants — `unlink` and `rmdir` both arrive as `unlinkat`.
+        #[cfg(target_arch = "x86_64")]
         ("unlink", c::SYS_unlink),
         ("unlinkat", c::SYS_unlinkat),
+        #[cfg(target_arch = "x86_64")]
         ("mkdir", c::SYS_mkdir),
+        #[cfg(target_arch = "aarch64")]
+        ("mkdirat", c::SYS_mkdirat),
+        #[cfg(target_arch = "x86_64")]
         ("rmdir", c::SYS_rmdir),
+        #[cfg(target_arch = "x86_64")]
         ("rename", c::SYS_rename),
+        #[cfg(target_arch = "aarch64")]
+        ("renameat", c::SYS_renameat),
+        #[cfg(target_arch = "x86_64")]
         ("chmod", c::SYS_chmod),
+        #[cfg(target_arch = "aarch64")]
+        ("fchmodat", c::SYS_fchmodat),
         ("fchmod", c::SYS_fchmod),
         ("getdents64", c::SYS_getdents64),
+        #[cfg(target_arch = "x86_64")]
         ("readlink", c::SYS_readlink),
         ("readlinkat", c::SYS_readlinkat),
+        #[cfg(target_arch = "x86_64")]
         ("access", c::SYS_access),
+        #[cfg(target_arch = "aarch64")]
+        ("faccessat", c::SYS_faccessat),
         ("faccessat2", c::SYS_faccessat2),
         // Statistics on what is already open, and on the socket path.
         ("fstat", c::SYS_fstat),
@@ -146,7 +164,9 @@ const ALLOWED: &[(&str, i64)] = {
         ("sched_yield", c::SYS_sched_yield),
         ("gettid", c::SYS_gettid),
         ("set_tid_address", c::SYS_set_tid_address),
-        // Waiting. The loop sleeps on the clock; the stream carrier polls.
+        // Waiting. The loop sleeps on the clock; the stream carrier polls —
+        // `poll` exists only on x86_64, aarch64 has `ppoll` alone.
+        #[cfg(target_arch = "x86_64")]
         ("poll", c::SYS_poll),
         ("ppoll", c::SYS_ppoll),
         ("clock_nanosleep", c::SYS_clock_nanosleep),
@@ -178,11 +198,16 @@ const ALLOWED: &[(&str, i64)] = {
         ("getcwd", c::SYS_getcwd),
         ("prctl", c::SYS_prctl),
         ("prlimit64", c::SYS_prlimit64),
+        // `arch_prctl` is x86_64 TLS setup; aarch64 has no equivalent call.
+        #[cfg(target_arch = "x86_64")]
         ("arch_prctl", c::SYS_arch_prctl),
         ("capget", c::SYS_capget),
         ("fcntl", c::SYS_fcntl),
         ("ioctl", c::SYS_ioctl),
+        #[cfg(target_arch = "x86_64")]
         ("dup2", c::SYS_dup2),
+        #[cfg(target_arch = "aarch64")]
+        ("dup3", c::SYS_dup3),
         ("pipe2", c::SYS_pipe2),
         // Shutdown.
         ("exit", c::SYS_exit),
