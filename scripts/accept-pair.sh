@@ -23,6 +23,11 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-pair "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
 ASSERTIONS=0
 
+# Used from the first build check on: a helper is defined before its caller,
+# and the namespace branch exits before the docker block ever declares one.
+say() { echo "[pair] $*"; }
+die() { echo "[pair] FAIL: $*" >&2; exit 1; }
+
 say "building the release binaries"
 cargo build --release -p vallum -p vallum-quick >/dev/null 2>&1 \
     || die "cargo build --release -p vallum -p vallum-quick failed"
@@ -91,8 +96,6 @@ WORK=$(mktemp -d -t vallum-pair.XXXXXX)
 ASSERTIONS=0
 FAILED=""
 
-say() { echo "[pair] $*"; }
-die() { echo "[pair] FAIL: $*" >&2; exit 1; }
 ex()  { docker exec "$1" bash -c "$2"; }
 
 cleanup() {
