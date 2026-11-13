@@ -769,6 +769,16 @@ fn as_client_config(path: &Path, args: &SetupArgs) -> Result<(), Error> {
 /// that wants a password, a `vallum` that is not installed, and an ssh
 /// connection that failed are three different problems, and the user can only
 /// fix the one they are actually having.
+/// Quote a value for a POSIX shell.
+///
+/// ssh passes the remote command to the remote's shell, so a value that is
+/// interpolated into that command is shell input. Single quotes make
+/// everything inside literal; the only thing that cannot appear inside them
+/// is a single quote, so one is closed, escaped and reopened.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn ssh_failure(code: Option<i32>, stderr: &str, remote: &str, name: &str) -> String {
     let text = stderr.to_ascii_lowercase();
     let (reason, remedy) = if code == Some(127) || text.contains("command not found") {
@@ -846,12 +856,22 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("generated a key here; the private half does not leave this machine");
 
     let config_flag = match &args.remote_config {
-        Some(path) => format!(" --config {}", path.display()),
+        Some(path) => format!(" --config {}", shell_quote(&path.display().to_string())),
         None => String::new(),
     };
-    let remote_command =
-        format!("sudo vallum peer enroll {name}{config_flag} --public-key-file /dev/stdin --json");
+    // ssh runs the remote command through the REMOTE'S SHELL, so every value
+    // that goes into it is shell input, not an argument. An unquoted name -
+    // which comes from `--name`, and can be anything - was an injection into
+    // the host being enrolled: `x; id` ran a second command there, and the
+    // config path was the same.
+    let remote_command = format!(
+        "sudo vallum peer enroll {}{config_flag} --public-key-file /dev/stdin --json",
+        shell_quote(&name)
+    );
     let mut child = std::process::Command::new("ssh")
+        // `--` ends ssh's options: a remote that starts with a dash is a
+        // hostname, not an option.
+        .arg("--")
         .arg(remote)
         .arg(&remote_command)
         .stdin(std::process::Stdio::piped())
@@ -1375,6 +1395,35 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A name is shell input, not an argument: it reaches the remote's
+    /// shell through ssh.
+    #[test]
+    fn a_name_is_quoted_for_the_remote_shell() {
+        assert_eq!(shell_quote("laptop"), "'laptop'");
+        assert_eq!(shell_quote("x; id"), "'x; id'");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        // A single quote is the one character that cannot be inside single
+        // quotes, so it is closed, escaped and reopened.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote("$(id)"), "'$(id)'");
+        assert_eq!(shell_quote("`id`"), "'`id`'");
+    }
+
+    /// The whole command line, as ssh would receive it.
+    #[test]
+    fn the_enrol_command_cannot_carry_a_second_command() {
+        let name = "laptop; rm -rf /tmp/x";
+        let config = format!(" --config {}", shell_quote("/etc/vallum/a b.toml"));
+        let command = format!(
+            "sudo vallum peer enroll {}{config} --public-key-file /dev/stdin --json",
+            shell_quote(name)
+        );
+        // Every value that could end the command is inside single quotes, so
+        // the remote shell sees one command and no more.
+        assert!(command.contains("'laptop; rm -rf /tmp/x'"), "{command}");
+        assert!(command.contains("'/etc/vallum/a b.toml'"), "{command}");
+    }
 
     /// A client config carries the server's public line, and that line is the
     /// trust anchor the operator can check against the server itself.
