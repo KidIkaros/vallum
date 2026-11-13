@@ -53,6 +53,7 @@ pub mod entropy;
 pub mod error;
 pub mod form;
 pub mod guidance;
+pub mod host;
 pub mod hostnet;
 pub mod keys;
 pub mod logging;
@@ -60,7 +61,6 @@ pub mod net;
 pub mod notify;
 pub mod policy;
 pub mod privileges;
-pub mod probes;
 #[cfg(feature = "qr")]
 pub mod qr_frames;
 pub mod run;

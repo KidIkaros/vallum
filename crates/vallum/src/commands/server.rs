@@ -52,7 +52,7 @@ pub enum ServerCommand {
 #[derive(Debug, Args)]
 pub struct TeardownArgs {
     /// The server configuration file to tear down.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Also delete the config file and keys in `/etc/vallum`. Without this,
@@ -151,7 +151,7 @@ pub fn teardown(args: &TeardownArgs) -> Result<(), Error> {
 #[derive(Debug, Args)]
 pub struct EnrollArgs {
     /// The configuration file to change.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Allow devices to enrol with a one-time token.
@@ -341,7 +341,7 @@ fn set_enroll_flag(text: &str, enabled: bool) -> String {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// The configuration file to write.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// The kernel interface name. Defaults to the config file's stem.
@@ -1015,10 +1015,11 @@ pub(crate) fn install_service(instance: &str, dry_run: bool) -> Result<String, E
         systemctl(&["enable", &unit])?;
         systemctl(&["restart", &unit])?;
     }
-    let enroll_enabled =
-        vallum_config::Config::load(&PathBuf::from(format!("/etc/vallum/{instance}.toml")))
-            .map(|config| config.enroll.enabled)
-            .unwrap_or(false);
+    let enroll_enabled = vallum_config::Config::load(
+        &crate::host::paths::config_dir().join(format!("{instance}.toml")),
+    )
+    .map(|config| config.enroll.enabled)
+    .unwrap_or(false);
     if enroll_enabled {
         // The responder is started, not armed. `[enroll] enabled = true` says
         // "the responder may serve" - it does not say "the responder should be

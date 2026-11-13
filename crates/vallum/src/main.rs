@@ -138,7 +138,7 @@ struct JoinArgs {
 #[derive(Debug, Args)]
 struct EnrollServeArgs {
     /// The configuration file whose `[enroll]` section governs the responder.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = vallum::host::paths::DEFAULT_CONFIG)]
     config: std::path::PathBuf,
 }
 

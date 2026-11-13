@@ -53,7 +53,7 @@ pub struct ImportArgs {
 pub fn import(args: &ImportArgs) -> Result<(), Error> {
     let directory = args.output_dir.clone().unwrap_or_else(|| {
         if args.install {
-            PathBuf::from("/etc/vallum")
+            crate::host::paths::config_dir().to_path_buf()
         } else {
             PathBuf::from(".")
         }
@@ -103,7 +103,10 @@ pub fn import(args: &ImportArgs) -> Result<(), Error> {
         // run directly, and saying otherwise sends the operator to a command
         // that cannot work.
         let config = imported.config.display().to_string();
-        if config.starts_with("/etc/vallum/") {
+        if imported
+            .config
+            .starts_with(crate::host::paths::config_dir())
+        {
             say!(
                 "   sudo systemctl enable --now vallum@{}",
                 instance_of(&imported.config)

@@ -58,7 +58,7 @@ pub fn teardown(args: &TeardownArgs) -> Result<(), Error> {
     }
     let config_path = match (&args.config, &args.name) {
         (Some(path), None) => path.clone(),
-        (None, Some(name)) => PathBuf::from(format!("/etc/vallum/{name}.toml")),
+        (None, Some(name)) => crate::host::paths::config_dir().join(format!("{name}.toml")),
         (None, None) => {
             return Err(Error::Usage(
                 "say which client: --name <name> or --config <file>".to_owned(),
@@ -179,7 +179,7 @@ mod tests {
         // `client teardown --name laptop` must aim at the path `setup` wrote,
         // which is how an operator refers to a tunnel they enrolled by name.
         let name = "laptop";
-        let path = PathBuf::from(format!("/etc/vallum/{name}.toml"));
+        let path = crate::host::paths::config_dir().join(format!("{name}.toml"));
         assert_eq!(path.file_stem().unwrap(), "laptop");
     }
 }

@@ -7,7 +7,6 @@
 //! answer from "down". A console that cannot tell must not claim a state —
 //! the guidance rules above these probes suppress themselves on `None`.
 
-use std::path::PathBuf;
 use std::process::Command;
 
 /// systemd's `ActiveState`, in the spellings a tunnel unit takes.
@@ -199,42 +198,6 @@ fn parse_ssh_config(text: &str) -> Vec<SshHost> {
     }
     flush(&mut out, &mut aliases, &mut hostname, &mut user);
     out
-}
-
-/// The config an interface stem names; without a stem, the config only when
-/// the host has exactly one — several configs and no stem is ambiguous, and
-/// `/etc/vallum` is root-only on most installs anyway, so `None` is always
-/// "cannot tell", never "no config".
-#[must_use]
-pub fn config_path(stem: Option<&str>) -> Option<PathBuf> {
-    if let Some(stem) = stem {
-        let exact = PathBuf::from(format!("/etc/vallum/{stem}.toml"));
-        if exact.is_file() {
-            return Some(exact);
-        }
-    }
-    let mut configs: Vec<PathBuf> = std::fs::read_dir("/etc/vallum")
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("toml"))
-        .collect();
-    configs.sort();
-    if configs.len() == 1 {
-        configs.pop()
-    } else {
-        None
-    }
-}
-
-/// The interface a config path names — `vallum0`, Vallum's conventional
-/// default, when the filename isn't UTF-8 legible. Every caller used to
-/// re-derive this fallback on its own.
-#[must_use]
-pub fn config_stem(path: &std::path::Path) -> &str {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("vallum0")
 }
 
 /// The verdict line of a `vallum-ops sync*` run. stderr is merged into the

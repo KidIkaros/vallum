@@ -46,7 +46,6 @@ const COMPLETIONS: [&str; 3] = [
 ];
 
 const SYSCTL: &str = "/etc/sysctl.d/90-vallum.conf";
-const CONFIG_DIR: &str = "/etc/vallum";
 /// The tmpfiles entry that creates the runtime directory. Both locations are
 /// removed: the package channels install to `/usr/lib`, `install.sh` to
 /// `/etc`, and tmpfiles.d merges them, so either may be present.
@@ -178,9 +177,12 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
 
     // ── secrets: kept unless purged ──
     if args.purge {
-        remove_dir(dry, Path::new(CONFIG_DIR));
+        remove_dir(dry, crate::host::paths::config_dir());
     } else {
-        say!("   kept  {CONFIG_DIR} (pass --purge to remove configs and keys)");
+        say!(
+            "   kept  {} (pass --purge to remove configs and keys)",
+            crate::host::paths::config_dir().display()
+        );
     }
 
     // ── binaries last: a running process can unlink itself safely ──
@@ -276,7 +278,7 @@ fn teardown_plan(
 
 /// Every config on this host, as the uninstaller sees them.
 fn configs() -> Vec<std::path::PathBuf> {
-    std::fs::read_dir(CONFIG_DIR)
+    std::fs::read_dir(crate::host::paths::config_dir())
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
@@ -298,7 +300,7 @@ fn orphan_plans() -> Vec<std::path::PathBuf> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "quick"))
         .filter(|path| {
             let interface = path.file_stem().unwrap_or_default();
-            !Path::new(CONFIG_DIR)
+            !crate::host::paths::config_dir()
                 .join(interface)
                 .with_extension("toml")
                 .exists()
@@ -346,7 +348,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_needs_no_root_and_removes_nothing() {
-        let etc = Path::new("/etc/vallum");
+        let etc = crate::host::paths::config_dir();
         let had_etc = etc.exists();
         uninstall(&UninstallArgs {
             purge: false,

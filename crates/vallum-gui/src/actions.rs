@@ -1197,19 +1197,21 @@ pub(crate) fn suggestions(socket: Option<&Path>) -> serde_json::Value {
 
     let facts = Facts {
         config_present: crate::hostfacts::any_config_present().unwrap_or_else(|| snap.is_some()),
-        role: vallum::probes::config_path(stem.as_deref())
+        role: vallum::host::paths::config_path(stem.as_deref())
             .and_then(|p| guidance::role_from_config(&p))
             .unwrap_or_else(|| guidance::infer_role(&peers)),
-        unit_active: vallum::probes::any_unit_active("vallum@*"),
-        unit_enabled: stem.as_deref().and_then(vallum::probes::unit_enabled),
+        unit_active: vallum::host::probes::any_unit_active("vallum@*"),
+        unit_enabled: stem.as_deref().and_then(vallum::host::probes::unit_enabled),
         daemon_reachable: Some(snap.is_some()),
         interface_present: Some(snap.is_some()),
         peers,
-        enrolment_open: vallum::probes::any_unit_active("vallum-enroll@*"),
-        trial_armed: vallum::probes::any_unit_active("vallum-guard@*"),
-        unit_restarts: stem.as_deref().and_then(vallum::probes::unit_restarts),
+        enrolment_open: vallum::host::probes::any_unit_active("vallum-enroll@*"),
+        trial_armed: vallum::host::probes::any_unit_active("vallum-guard@*"),
+        unit_restarts: stem
+            .as_deref()
+            .and_then(vallum::host::probes::unit_restarts),
         sync_stale: sync_stale_cached(),
-        ssh_hosts: vallum::probes::ssh_host_count(),
+        ssh_hosts: vallum::host::probes::ssh_host_count(),
     };
 
     serde_json::json!({ "suggestions": guidance::suggest(&facts) })
@@ -1250,14 +1252,14 @@ pub(crate) fn sync_host() -> Result<Done, String> {
     if let Ok(mut cache) = SYNC_CHECK_CACHE.lock() {
         *cache = Some((std::time::Instant::now(), false));
     }
-    Ok(Done::message(vallum::probes::sync_verdict(&text)))
+    Ok(Done::message(vallum::host::probes::sync_verdict(&text)))
 }
 
 /// `vallum-ops sync --check` on demand — the "check for updates" button, not
 /// the cached value the suggestion strip uses.
 pub(crate) fn sync_check() -> Result<Done, String> {
     let text = crate::run_ops_with_stdin(&["sync", "--check"], None)?;
-    Ok(Done::message(vallum::probes::sync_verdict(&text)))
+    Ok(Done::message(vallum::host::probes::sync_verdict(&text)))
 }
 
 /// `vallum-ops enable|disable <stem>` — boot persistence for the unit set.

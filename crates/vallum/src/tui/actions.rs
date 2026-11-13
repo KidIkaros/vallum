@@ -9,8 +9,8 @@ use std::process::Command;
 
 use crate::control;
 use crate::entropy;
+use crate::host::probes::unit_state;
 use crate::keys;
-use crate::probes::unit_state;
 use crate::uapi::{self, Peer, Set};
 
 use super::app::{App, ConfirmAction, FormError, FormKind, ServiceState, View};
@@ -678,7 +678,7 @@ fn restart_service_inner(app: &mut App) {
         app.notify("no config path to restart");
         return;
     };
-    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
+    let unit = format!("vallum@{}.service", crate::host::paths::config_stem(config));
     if Command::new("systemctl")
         .args(["--no-ask-password", "cat", &unit])
         .status()
@@ -961,7 +961,7 @@ pub fn import_bundle(app: &mut App) {
         .and_then(|i| i.config_path.as_ref())
         .and_then(|p| p.parent())
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/etc/vallum".to_owned());
+        .unwrap_or_else(|| crate::host::paths::config_dir().display().to_string());
     app.form = Some(super::app::Form::import_bundle(&default_dir));
 }
 
@@ -979,7 +979,7 @@ fn finish_import_bundle(app: &mut App, form: &super::app::Form) -> FormResult {
 
     let out_dir_str = form.field("output dir").trim();
     let out_dir = if out_dir_str.is_empty() {
-        std::path::Path::new("/etc/vallum")
+        crate::host::paths::config_dir()
     } else {
         std::path::Path::new(out_dir_str)
     };
@@ -1117,7 +1117,7 @@ pub fn service_plan(
     systemd: bool,
     root: bool,
 ) -> ServicePlan {
-    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
+    let unit = format!("vallum@{}.service", crate::host::paths::config_stem(config));
     let action = if running { "stop" } else { "start" };
     let quick = if running { "down" } else { "up" };
     if systemd && root {
@@ -1169,12 +1169,12 @@ fn toggle_service_with(app: &mut App, runner: &impl ServiceRunner) {
         app.notify("no config path; use systemctl or vallum-quick directly");
         return;
     };
-    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
+    let unit = format!("vallum@{}.service", crate::host::paths::config_stem(config));
     // The *template* unit exists on any host that installed Vallum, so
     // `systemctl cat` succeeds for instance names that were never created. A
     // unit only ever reads /etc/vallum/<instance>.toml, so the config's own
     // location is what decides whether systemd owns this interface.
-    let under_etc = config.starts_with("/etc/vallum");
+    let under_etc = config.starts_with(crate::host::paths::config_dir());
     let systemd = under_etc
         && runner
             .run("systemctl", &["cat".to_owned(), unit.clone()])
@@ -1247,7 +1247,7 @@ pub fn load_logs(app: &mut App) {
         app.notify("no config path for journald");
         return;
     };
-    let unit = format!("vallum@{}.service", crate::probes::config_stem(config));
+    let unit = format!("vallum@{}.service", crate::host::paths::config_stem(config));
     match Command::new("journalctl")
         .args(["-u", &unit, "-n", "200", "--no-pager", "-o", "cat"])
         .output()
@@ -1730,7 +1730,7 @@ fn facts(app: &App) -> crate::guidance::Facts {
         unit_active: current
             .and_then(|iface| iface.service_state)
             .map(|state| state == ServiceState::Active),
-        unit_enabled: stem.as_deref().and_then(crate::probes::unit_enabled),
+        unit_enabled: stem.as_deref().and_then(crate::host::probes::unit_enabled),
         daemon_reachable: current.map(|iface| iface.device.is_some() && iface.error.is_none()),
         interface_present: current.map(|iface| iface.device.is_some()),
         peers,
@@ -1741,9 +1741,9 @@ fn facts(app: &App) -> crate::guidance::Facts {
         trial_armed: current
             .and_then(|iface| iface.guard_state)
             .map(|state| state == ServiceState::Active),
-        unit_restarts: stem.as_deref().and_then(crate::probes::unit_restarts),
+        unit_restarts: stem.as_deref().and_then(crate::host::probes::unit_restarts),
         sync_stale: app.sync_stale,
-        ssh_hosts: crate::probes::ssh_host_count(),
+        ssh_hosts: crate::host::probes::ssh_host_count(),
     }
 }
 
@@ -1773,7 +1773,7 @@ pub fn sync_host(app: &mut App) {
     match run_privileged(&["sync"], None) {
         Ok(text) => {
             app.sync_stale = Some(false);
-            app.notify(crate::probes::sync_verdict(&text).to_owned());
+            app.notify(crate::host::probes::sync_verdict(&text).to_owned());
             refresh(app);
         }
         Err(error) => app.notify(format!("sync: {error}")),

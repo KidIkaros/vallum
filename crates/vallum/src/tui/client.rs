@@ -2,7 +2,7 @@
 
 //! Interface discovery and the control-socket read path.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::commands::tui::TuiArgs;
 use crate::config::{self, Config};
@@ -37,7 +37,7 @@ pub fn discover(args: &TuiArgs) -> Vec<Interface> {
     let directory = args
         .config_dir
         .clone()
-        .unwrap_or_else(|| PathBuf::from("/etc/vallum"));
+        .unwrap_or_else(|| crate::host::paths::config_dir().to_path_buf());
     if let Ok(entries) = std::fs::read_dir(&directory) {
         for entry in entries.flatten() {
             let path = entry.path();

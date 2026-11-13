@@ -326,7 +326,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
 
     let instance = args.name.clone().unwrap_or_else(|| "vallum0".to_owned());
     let init = InitArgs {
-        config: PathBuf::from(format!("/etc/vallum/{instance}.toml")),
+        config: crate::host::paths::config_dir().join(format!("{instance}.toml")),
         name: Some(instance.clone()),
         addresses: vec![address.clone()],
         listen: args.listen.clone(),
@@ -695,7 +695,7 @@ fn as_client_config(path: &Path, args: &SetupArgs) -> Result<(), Error> {
     }
 
     if root {
-        let directory = PathBuf::from("/etc/vallum");
+        let directory = crate::host::paths::config_dir().to_path_buf();
         std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
             action: "create",
             path: directory.clone(),
@@ -840,7 +840,7 @@ fn as_remote(remote: &str, args: &SetupArgs) -> Result<(), Error> {
     // Already enrolled here? Then this run is about installing or starting it,
     // not about enrolling again: a second enrolment would present a new key and
     // the server would rightly refuse it.
-    if let Some(existing) = existing_enrolment(&name, Path::new("/etc/vallum")) {
+    if let Some(existing) = existing_enrolment(&name, crate::host::paths::config_dir()) {
         say!("already enrolled: {}", existing.display());
         return start_existing(&existing, &name);
     }
@@ -987,7 +987,7 @@ fn place_config(
 ) -> Result<(), Error> {
     let root = nix::unistd::Uid::effective().is_root();
     let directory = if root {
-        PathBuf::from("/etc/vallum")
+        crate::host::paths::config_dir().to_path_buf()
     } else {
         PathBuf::from(".")
     };
@@ -1020,7 +1020,7 @@ fn place_config(
     say!("enrolled `{name}` — {address}, through {endpoint}");
     say!("   config     {}", config_path.display());
     say!("   key        {} (this machine only)", key_path.display());
-    if root && config_path.starts_with("/etc/vallum") {
+    if root && config_path.starts_with(crate::host::paths::config_dir()) {
         crate::commands::server::install_service(name, false)?;
         prove_tunnel(name, &config_path, server_address);
         say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
@@ -1309,7 +1309,7 @@ fn existing_enrolment(name: &str, config_dir: &Path) -> Option<PathBuf> {
 /// to run it.
 fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
     let root = nix::unistd::Uid::effective().is_root();
-    let in_etc = config.starts_with("/etc/vallum");
+    let in_etc = config.starts_with(crate::host::paths::config_dir());
     if root && in_etc {
         crate::commands::server::install_service(name, false)?;
         say!("Check it with `vallum doctor`, then watch it with `vallum tui`.");
@@ -1317,9 +1317,9 @@ fn start_existing(config: &std::path::Path, name: &str) -> Result<(), Error> {
     }
     if root && !in_etc {
         // The unit reads /etc/vallum/<name>.toml, so move it there.
-        let target = PathBuf::from(format!("/etc/vallum/{name}.toml"));
+        let target = crate::host::paths::config_dir().join(format!("{name}.toml"));
         let key = config.with_extension("key");
-        let key_target = PathBuf::from(format!("/etc/vallum/{name}.key"));
+        let key_target = crate::host::paths::config_dir().join(format!("{name}.key"));
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| Error::IoPath {
                 action: "create",

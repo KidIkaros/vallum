@@ -273,14 +273,7 @@ impl Invite {
 /// Where invites live. Runtime state, not config: they die with the machine,
 /// which is the right behaviour for a 15-minute credential.
 fn run_dir() -> PathBuf {
-    // `VALLUM_RUN_DIR` and `VALLUM_RUNTIME_DIR` are the same directory under two
-    // names: the console overrides the socket location with the second, so an
-    // invite written by that console has to land where its daemon looks. One
-    // override, honoured by both, is the only version that cannot disagree.
-    std::env::var("VALLUM_RUN_DIR")
-        .or_else(|_| std::env::var("VALLUM_RUNTIME_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| vallum_config::runtime_dir().to_path_buf())
+    crate::host::paths::runtime_dir()
 }
 
 pub fn invite_path(interface: &str, id: &str) -> PathBuf {

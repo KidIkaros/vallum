@@ -536,7 +536,7 @@ pub fn issuer_signing_key(
 /// Where the daemon expects a key file when the config names none.
 #[must_use]
 pub fn default_secret_path(interface: &str) -> PathBuf {
-    PathBuf::from(format!("/etc/vallum/{interface}.key"))
+    crate::host::paths::config_dir().join(format!("{interface}.key"))
 }
 
 /// A short, comparable fingerprint of a public line.

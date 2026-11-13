@@ -292,7 +292,7 @@ pub(crate) fn preflight() -> serde_json::Value {
         "runtime_mode": mode,
         "runtime_group": group,
         "sockets": sockets,
-        "ssh_hosts": vallum::probes::ssh_hosts(),
+        "ssh_hosts": vallum::host::probes::ssh_hosts(),
     })
 }
 

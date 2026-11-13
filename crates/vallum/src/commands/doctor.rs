@@ -1218,7 +1218,7 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
 /// value they had. This check answers the question the graph cannot — when was
 /// the file last written.
 fn check_metrics() -> Check {
-    let path = Path::new("/run/vallum/metrics.prom");
+    let path = crate::host::paths::runtime_dir().join("metrics.prom");
     let Ok(meta) = std::fs::metadata(path) else {
         return Check::new(
             "metrics",
@@ -1292,7 +1292,7 @@ fn check_config_mode(config: Option<&Path>) -> Check {
     // config moved in from a user's directory keeps its owner and then fails
     // to load with "permission denied" — as root.
     let owned_by_root = std::os::unix::fs::MetadataExt::uid(&metadata) == 0;
-    if path.starts_with("/etc/vallum") && !owned_by_root {
+    if path.starts_with(crate::host::paths::config_dir()) && !owned_by_root {
         return Check::new(
             "config owner",
             Status::Warn,

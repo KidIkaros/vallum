@@ -222,7 +222,7 @@ impl DeviceView {
     }
 }
 
-pub use crate::probes::ServiceState;
+pub use crate::host::probes::ServiceState;
 
 /// One discovered interface.
 #[derive(Debug, Clone)]

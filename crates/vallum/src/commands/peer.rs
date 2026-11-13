@@ -68,7 +68,7 @@ pub struct AddArgs {
     pub name: String,
 
     /// The configuration file to edit.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// The peer's public line (the device generated its own key).
@@ -177,7 +177,7 @@ pub struct RotateArgs {
     pub name: String,
 
     /// The configuration file to edit.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// The peer's new public line.
@@ -233,7 +233,7 @@ pub struct FinalizeArgs {
     pub name: String,
 
     /// The configuration file to edit.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Write the config but do not tell a running daemon.
@@ -248,7 +248,7 @@ pub struct FinalizeArgs {
 #[derive(Debug, Args)]
 pub struct ListArgs {
     /// The configuration file to read.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Include the full public line, not just its fingerprint.
@@ -267,7 +267,7 @@ pub struct ShowArgs {
     pub name: String,
 
     /// The configuration file to read.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Print the full public line.
@@ -286,7 +286,7 @@ pub struct RemoveArgs {
     pub name: String,
 
     /// The configuration file to edit.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Write the config but do not tell a running daemon.
@@ -525,7 +525,7 @@ pub struct EnrollArgs {
     pub name: String,
 
     /// The configuration file to edit.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// The device's public line, generated on the device itself.
@@ -723,7 +723,7 @@ pub struct InviteArgs {
     pub name: String,
 
     /// The configuration file this invite is for.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Bind the invite to the device's public line: a stolen token then
@@ -921,7 +921,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
 #[derive(Debug, Args)]
 pub struct InvitesArgs {
     /// The configuration file whose interface to inspect.
-    #[arg(long, value_name = "FILE", default_value = "/etc/vallum/vallum0.toml")]
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
     pub config: PathBuf,
 
     /// Emit JSON instead of a table (tokens are never printed here).
