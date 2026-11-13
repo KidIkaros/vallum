@@ -56,6 +56,34 @@ resolve_conf() {
     fi
 }
 
+# The unit stem a name maps to. An explicit name with no config IS the stem —
+# stopping or retiring a leftover unit (vallum@owtest0, config deleted) is
+# exactly the case where resolve_conf's first-config fallback would aim the
+# operation at the live tunnel instead. The default name keeps the fallback.
+stem_or_self() {
+    local req=$1
+    if [ "$req" != "$IFACE" ] \
+        && [ ! -f "/etc/vallum/${req}.toml" ] \
+        && [ ! -f "/etc/vallum/${req#vallum-}.toml" ]; then
+        printf '%s' "$req"
+    else
+        basename "$(resolve_conf "$req")" .toml
+    fi
+}
+
+# The config an operation resolves to. Same rule: an explicit wrong name
+# refuses rather than falling back onto a tunnel nobody asked for.
+conf_or_fail() {
+    local req=$1
+    if [ "$req" != "$IFACE" ] \
+        && [ ! -f "/etc/vallum/${req}.toml" ] \
+        && [ ! -f "/etc/vallum/${req#vallum-}.toml" ]; then
+        echo "vallum-ops: no config for '$req' in /etc/vallum" >&2
+        return 1   # callers run this in $(...) — exit would only kill the subshell
+    fi
+    resolve_conf "$req"
+}
+
 # A verb that installs from a working tree must not exec code from a directory
 # its owner can rewrite: under a NOPASSWD sudoers rule that is password-less
 # root for that user (ADR-0029). Root-owned sources pass; a single-user dev host
@@ -151,7 +179,7 @@ invite)
     case "$ttl" in
         ""|*[!0-9]*) echo "vallum-ops: invalid TTL '$ttl'" >&2; exit 2 ;;
     esac
-    target_conf=$(resolve_conf "$req_iface")
+    target_conf=$(conf_or_fail "$req_iface") || exit 1
     if [ -n "$pinned" ]; then
         exec /usr/bin/vallum peer invite "$peer_name" --ttl "$ttl" --config "$target_conf" --public-key "$pinned"
     else
@@ -162,7 +190,7 @@ enroll-off)
     # Close the temporary UDP 51821 enrolment responder and firewall port.
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
-    target_conf=$(resolve_conf "$req_iface")
+    target_conf=$(conf_or_fail "$req_iface") || exit 1
     exec /usr/bin/vallum server enroll --disable --config "$target_conf"
     ;;
 service)
@@ -178,7 +206,7 @@ service)
     action=${2:-start}
     iface=${3:-$IFACE}
     require_iface "$iface"
-    stem=$(basename "$(resolve_conf "$iface")" .toml)
+    stem=$(stem_or_self "$iface")
     case "$action" in
         start|stop|restart) ;;
         *)
@@ -207,7 +235,10 @@ enable)
     # Optional second argument names another interface (a second tunnel).
     iface=${2:-$IFACE}
     require_iface "$iface"
-    stem=$(basename "$(resolve_conf "$iface")" .toml)
+    # Enabling a stem with no config makes a unit that fails at every boot,
+    # so the strict resolution refuses rather than guessing.
+    target_conf=$(conf_or_fail "$iface") || exit 1
+    stem=$(basename "$target_conf" .toml)
     systemctl enable "vallum@$stem" "vallum-quick@$stem" "vallum-quick-watch@$stem"
     systemctl is-enabled "vallum@$stem"
     ;;
@@ -220,7 +251,9 @@ disable)
     # through this dispatcher rather than a shell that needs a password.
     iface=${2:-$IFACE}
     require_iface "$iface"
-    stem=$(basename "$(resolve_conf "$iface")" .toml)
+    # A leftover unit is exactly the case resolve_conf's fallback gets wrong:
+    # the config is gone, so a verbatim stem is what the name must mean.
+    stem=$(stem_or_self "$iface")
     systemctl disable "vallum@$stem" "vallum-quick@$stem" "vallum-guard@$stem" \
         "vallum-quick-watch@$stem" "vallum-enroll@$stem" 2>/dev/null || true
     systemctl reset-failed "vallum@$stem" 2>/dev/null || true
@@ -239,7 +272,7 @@ trace)
     # Optional second argument names another interface's config stem.
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
-    trace_stem=$(basename "$(resolve_conf "$req_iface")" .toml)
+    trace_stem=$(stem_or_self "$req_iface")
     pid=$(systemctl show -p MainPID --value "vallum@$trace_stem")
     [ -n "$pid" ] && [ "$pid" != "0" ] || { echo "daemon not running" >&2; exit 1; }
     echo "tracing openat on pid $pid for 60 s under load..."
@@ -302,7 +335,7 @@ self-update)
 revert)
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
-    target_conf=$(resolve_conf "$req_iface")
+    target_conf=$(conf_or_fail "$req_iface") || exit 1
     stem=$(basename "$target_conf" .toml)
     target_unit="vallum@$stem"
     /usr/local/sbin/vallum-panic
@@ -319,7 +352,7 @@ revert)
 status)
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
-    stem=$(basename "$(resolve_conf "$req_iface")" .toml)
+    stem=$(stem_or_self "$req_iface")
     echo "unit:      $(systemctl is-active "vallum@$stem") ($(systemctl is-enabled "vallum@$stem" 2>&1))"
     echo "guard:     $(systemctl is-active "vallum-guard@$stem" 2>&1)"
     echo "quick:     $(systemctl is-active "vallum-quick@$stem" 2>&1)"
