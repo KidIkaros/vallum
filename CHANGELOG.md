@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.5 — 2026-11-13
 
 - **The console's composition root stops implementing its own use cases.**
   `main.rs` held the Tauri commands *and* the bodies they call. `preflight()` and
@@ -79,6 +79,38 @@
   `applied no — no control socket at …` and the twelve tests pass on a
   deployed machine. No product code changed: `--control` already did the right
   thing; the test was the thing that assumed a global path.
+
+- **The machine says what it needs next.** ADR-0040: one facts-driven guidance
+  engine (`vallum::guidance::suggest`) rendered by both consoles — the TUI as a
+  footer strip with key/palette hints, the GUI as the NextSteps card with
+  buttons. Bare machine, stopped service, silent daemon, open enrolment,
+  staged rotation, peerless server, stale handshake and stale checkout each
+  produce one actionable suggestion; facts are optional, so a console that
+  cannot see a unit says nothing rather than guessing. Both palettes learned
+  the full lifecycle vocabulary: join, setup, invite, enrolment close,
+  start/stop/restart, enable/disable, sync, update-check — no normal
+  operation requires a terminal.
+- **The alpha install is proven on a machine that is not the author's.**
+  `accept-install` runs the colleague story in a clean systemd container:
+  `install.sh` from shipped media, zero author paths in installed artifacts,
+  a ticket minted on the production server, `vallum join`, both units active,
+  0% ICMP loss across the tunnel — then the server forgets the peer.
+- **OS knowledge has one home.** ADR-0041: `host/` is where "which OS is
+  this" is allowed to live — `host::probes` owns the systemd/SSH/sync
+  questions both consoles used to answer separately (with copies that had
+  already drifted into different bugs), `host::paths` owns `/etc/vallum` and
+  the `VALLUM_RUN_DIR|VALLUM_RUNTIME_DIR` override. The crate type-checks
+  for `aarch64-apple-darwin`; `tun::open` stays honestly `Unsupported`
+  off-Linux until hardware verifies it.
+- **The fingerprint a human sees is the one `peer show` prints.** GUI, TUI
+  and uapi dumps all show the 12-char line-hash; the 16-char uapi hint is
+  tooling's, not yours.
+- **`vallum-ops` hardening.** An explicit interface name with no config no
+  longer falls back to the first config — `service restart typo` cannot hit
+  the live tunnel, and `disable` can retire orphan units verbatim. `enable`
+  restores the full unit set `disable` strips. `sync --check` reports
+  staleness without mutating; the verdict parser picks the `sync`-prefixed
+  line, not whatever stderr last emitted.
 
 - **The syscall filter enforces by default.** ADR-0028's plan was two stages:
   derive the list from a trace, ship it in `log` mode, empty the log over a real
