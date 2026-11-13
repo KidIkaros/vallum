@@ -52,6 +52,7 @@ pub mod enroll;
 pub mod entropy;
 pub mod error;
 pub mod form;
+pub mod guidance;
 pub mod hostnet;
 pub mod keys;
 pub mod logging;

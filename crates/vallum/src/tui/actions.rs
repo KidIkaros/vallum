@@ -32,12 +32,13 @@ pub fn refresh(app: &mut App) {
             // The unit name needs only the interface name: the config may be
             // root-only and unreadable to the operator, but the guard's state
             // is not a secret.
-            let guard = unit_state(&interface.name, "vallum-guard");
+            let guard = unit_state(&interface.name, "vallum-guard@");
             interface.set_guard_state(guard);
         }
     }
     app.last_refresh = std::time::Instant::now();
     app.now = super::app::wall_now();
+    recompute_suggestions(app);
 }
 
 fn systemd_service_state(config: &std::path::Path) -> Option<ServiceState> {
@@ -490,6 +491,15 @@ pub fn confirm(app: &mut App) {
             restart_service(app);
             refresh(app);
         }
+        ConfirmAction::DisableUnits { stem } => match run_privileged(&["disable", &stem], None) {
+            Ok(_) => {
+                app.notify(format!(
+                    "units for `{stem}` disabled — the tunnel stays off after reboot"
+                ));
+                refresh(app);
+            }
+            Err(error) => app.notify(format!("disable: {error}")),
+        },
     }
 }
 
@@ -663,10 +673,10 @@ fn build_diff(old: &str, new: &str) -> Vec<super::app::DiffRow> {
 pub fn apply_config(app: &mut App) {
     app.diff = None;
     app.view = super::app::View::Dashboard;
-    restart_service(app);
+    restart_service_inner(app);
 }
 
-fn restart_service(app: &mut App) {
+fn restart_service_inner(app: &mut App) {
     let Some(interface) = app.current() else {
         return;
     };
@@ -1664,8 +1674,18 @@ fn setup_server(_app: &mut App, form: &super::app::Form) -> FormResult {
 /// Close the temporary UDP 51821 enrolment responder on the selected
 /// interface — the one-click tidy-up after a device joins.
 pub fn close_enrollment(app: &mut App) {
-    let stem = app
-        .current()
+    match run_privileged(&["enroll-off", &current_stem(app)], None) {
+        Ok(_) => app.notify(format!(
+            "enrolment responder closed for `{}` (UDP 51821)",
+            current_stem(app)
+        )),
+        Err(error) => app.notify(error),
+    }
+}
+
+/// The config stem the privileged verbs address, e.g. `vallum0`.
+fn current_stem(app: &App) -> String {
+    app.current()
         .and_then(|iface| {
             iface
                 .config_path
@@ -1675,13 +1695,239 @@ pub fn close_enrollment(app: &mut App) {
                 .map(str::to_owned)
         })
         .or_else(|| app.current().map(|iface| iface.name.clone()))
-        .unwrap_or_else(|| "vallum0".to_owned());
-    match run_privileged(&["enroll-off", &stem], None) {
-        Ok(_) => app.notify(format!(
-            "enrolment responder closed for `{stem}` (UDP 51821)"
-        )),
-        Err(error) => app.notify(error),
+        .unwrap_or_else(|| "vallum0".to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Guidance: the machine says what it needs next
+// ---------------------------------------------------------------------------
+
+/// Recompute the suggestion strip from everything the app already knows plus
+/// a few cheap systemd reads. Runs on the refresh cadence — never per frame.
+pub fn recompute_suggestions(app: &mut App) {
+    app.suggestions = crate::guidance::suggest(&facts(app));
+}
+
+/// The facts guidance reasons over, as this surface can see them.
+fn facts(app: &App) -> crate::guidance::Facts {
+    use crate::guidance::{Facts, PeerFact};
+
+    let current = app.current();
+    let stem = current.map(|_| current_stem(app));
+
+    let peers: Vec<PeerFact> = current
+        .and_then(|iface| iface.device.as_ref())
+        .map(|device| {
+            device
+                .peers
+                .iter()
+                .map(|peer| PeerFact {
+                    name: if peer.name.is_empty() {
+                        peer.fingerprint.clone()
+                    } else {
+                        peer.name.clone()
+                    },
+                    has_endpoint: !peer.endpoint.is_empty() && peer.endpoint != "(roaming)",
+                    handshake_age_secs: peer
+                        .last_handshake
+                        .map(|(sec, _)| app.now.saturating_sub(sec)),
+                    rotating: peer.rotating,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let role = current
+        .and_then(|iface| iface.config_path.as_deref())
+        .and_then(role_from_config)
+        .unwrap_or_else(|| crate::guidance::infer_role(&peers));
+
+    Facts {
+        config_present: app
+            .interfaces
+            .iter()
+            .any(|iface| iface.config_path.is_some()),
+        role,
+        unit_active: current
+            .and_then(|iface| iface.service_state)
+            .map(|state| state == ServiceState::Active),
+        unit_enabled: stem.as_deref().and_then(unit_enabled_state),
+        daemon_reachable: current.map(|iface| iface.device.is_some() && iface.error.is_none()),
+        interface_present: current.map(|iface| iface.device.is_some()),
+        peers,
+        enrolment_open: stem
+            .as_deref()
+            .and_then(|s| unit_state(s, "vallum-enroll@"))
+            .map(|state| state == ServiceState::Active),
+        trial_armed: current
+            .and_then(|iface| iface.guard_state)
+            .map(|state| state == ServiceState::Active),
+        unit_restarts: stem.as_deref().and_then(unit_restart_count),
+        sync_stale: app.sync_stale,
+        ssh_hosts: ssh_host_count(),
     }
+}
+
+/// Whether `vallum@{stem}.service` starts at boot.
+fn unit_enabled_state(stem: &str) -> Option<bool> {
+    let unit = format!("vallum@{stem}.service");
+    let output = Command::new("systemctl")
+        .args(["--no-ask-password", "is-enabled", &unit])
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "enabled" => Some(true),
+        "disabled" | "masked" | "static" | "indirect" => Some(false),
+        _ => None,
+    }
+}
+
+/// systemd's restart counter for `vallum@{stem}.service`.
+fn unit_restart_count(stem: &str) -> Option<u64> {
+    let unit = format!("vallum@{stem}.service");
+    let output = Command::new("systemctl")
+        .args([
+            "--no-ask-password",
+            "show",
+            "-p",
+            "NRestarts",
+            "--value",
+            &unit,
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// The config's own answer to "what kind of machine is this", when readable.
+fn role_from_config(path: &std::path::Path) -> Option<crate::guidance::Role> {
+    use crate::guidance::Role;
+    let config = crate::config::Config::load(path).ok()?;
+    Some(
+        if config.interface.public_endpoint.is_some() || config.enroll.enabled {
+            Role::Server
+        } else {
+            Role::Client
+        },
+    )
+}
+
+/// `Host` entries in the operator's own ssh config — used only to make hints
+/// concrete, never for a connection the operator did not ask for.
+fn ssh_host_count() -> usize {
+    let Ok(text) = std::fs::read_to_string(
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+            .join(".ssh/config"),
+    ) else {
+        return 0;
+    };
+    text.lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|tok| tok.eq_ignore_ascii_case("host"))
+        })
+        .map(|line| {
+            line.split_whitespace()
+                .skip(1)
+                .filter(|name| *name != "*")
+                .count()
+        })
+        .sum()
+}
+
+/// `vallum-ops sync --check`: a read — reports whether the host is behind the
+/// checkout without changing it. Caches the verdict for the suggestion strip.
+pub fn check_updates(app: &mut App) {
+    match run_privileged(&["sync", "--check"], None) {
+        Ok(text) => {
+            let stale = text.contains("stale files found");
+            app.sync_stale = Some(stale);
+            recompute_suggestions(app);
+            app.notify(if stale {
+                "updates available — :sync host applies them".to_owned()
+            } else {
+                "host matches the checkout".to_owned()
+            });
+        }
+        Err(error) => {
+            app.sync_stale = None;
+            app.notify(format!("sync check: {error}"));
+        }
+    }
+}
+
+/// `vallum-ops sync`: make the host match the build under test.
+pub fn sync_host(app: &mut App) {
+    match run_privileged(&["sync"], None) {
+        Ok(text) => {
+            app.sync_stale = Some(false);
+            // stderr rides along in the capture — the script's own verdict
+            // lines all carry the `sync` prefix, the warnings do not.
+            let last = text
+                .lines()
+                .map(str::trim)
+                .rfind(|line| line.starts_with("sync"))
+                .unwrap_or("sync complete");
+            app.notify(last.to_owned());
+            refresh(app);
+        }
+        Err(error) => app.notify(format!("sync: {error}")),
+    }
+}
+
+/// `vallum-ops enable <stem>`: the interface rejoins at every boot.
+pub fn enable_units(app: &mut App) {
+    if app.current().is_none() {
+        app.notify("no interface to enable");
+        return;
+    }
+    let stem = current_stem(app);
+    match run_privileged(&["enable", &stem], None) {
+        Ok(_) => {
+            app.notify(format!("`{stem}` starts at boot"));
+            refresh(app);
+        }
+        Err(error) => app.notify(format!("enable: {error}")),
+    }
+}
+
+/// `vallum-ops service restart <stem>`: the daemon-silent fix — bounce the
+/// unit when systemd says up but the socket says nothing. Preferring the ops
+/// dispatcher means an unprivileged console escalates through the narrow
+/// door instead of printing a sudo command; configs systemd does not own
+/// fall back to the in-process path.
+pub fn restart_service(app: &mut App) {
+    if app.current().is_none() {
+        app.notify("no interface to restart");
+        return;
+    }
+    let stem = current_stem(app);
+    if run_privileged(&["service", "restart", &stem], None).is_ok() {
+        app.notify(format!("restarting `{stem}`"));
+        refresh_service_state(app);
+        refresh(app);
+        return;
+    }
+    restart_service_inner(app);
+}
+
+/// `vallum-ops disable <stem>` retires every unit for the interface — the
+/// machine keeps its config but stops running the tunnel at boot. Confirmed
+/// first: it is the "stop being a VPN node" button.
+pub fn disable_units(app: &mut App) {
+    if app.current().is_none() {
+        app.notify("no interface to disable");
+        return;
+    }
+    app.confirm = Some(super::app::Confirm {
+        action: ConfirmAction::DisableUnits {
+            stem: current_stem(app),
+        },
+        config: String::new(),
+    });
 }
 
 /// Best-effort clipboard copy. Returns the channels that accepted the text so

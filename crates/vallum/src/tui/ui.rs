@@ -28,10 +28,13 @@ fn draw_dashboard(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
     let compact = area.width < 130;
     let header_height = if app.interfaces.is_empty() { 3 } else { 6 };
+    // The footer grows by one row per shown suggestion (at most two) so the
+    // strip sits against the key hints it points at.
+    let suggestion_rows = u16::try_from(app.suggestions.len().min(2)).unwrap_or(0);
     let chunks = Layout::vertical([
         Constraint::Length(header_height),
         Constraint::Min(6),
-        Constraint::Length(2),
+        Constraint::Length(2 + suggestion_rows),
     ])
     .split(area);
 
@@ -1077,6 +1080,31 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.qr.is_some() || app.form.is_some() || app.confirm.is_some() || app.palette.is_some() {
         return;
     }
+    let mut suggestion_lines: Vec<Line<'_>> = app
+        .suggestions
+        .iter()
+        .take(2)
+        .map(|suggestion| {
+            let (badge, style) = match suggestion.tone {
+                crate::guidance::Tone::Act => (" NEXT ", t.pill_accent()),
+                crate::guidance::Tone::Warn => (" WARN ", t.pill_warn()),
+                crate::guidance::Tone::Info => (" NOTE ", t.pill_muted()),
+            };
+            let mut spans = vec![
+                Span::styled(badge, style),
+                Span::raw(" "),
+                Span::styled(&suggestion.title, t.text_bold()),
+                Span::styled(format!("  ·  {}", suggestion.detail), t.muted()),
+            ];
+            // The harness' promise: every suggestion names the key or palette
+            // verb that resolves it — the footer teaches the map.
+            if let Some(action) = &suggestion.action {
+                spans.push(Span::styled("   →  ", t.muted()));
+                spans.push(Span::styled(suggestion_hint(action), t.signal()));
+            }
+            Line::from(spans)
+        })
+        .collect();
     if app.filtering {
         let filter_line = Line::from(vec![
             Span::styled(" FILTER ", t.pill_accent()),
@@ -1152,8 +1180,33 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(act_spans)
     };
 
-    let hint = vec![Line::from(nav_spans), second_line];
-    frame.render_widget(Paragraph::new(hint), area);
+    suggestion_lines.push(Line::from(nav_spans));
+    suggestion_lines.push(second_line);
+    frame.render_widget(Paragraph::new(suggestion_lines), area);
+}
+
+/// The key or palette verb that resolves a suggestion's action — the learning
+/// curve made concrete: the machine says what it needs *and* which button does
+/// it, so an operator who has never read the manual can still act.
+fn suggestion_hint(action: &crate::guidance::Action) -> &'static str {
+    use crate::guidance::Action;
+    match action {
+        Action::JoinNetwork => "2 join a network",
+        Action::SetupServer => "1 host a server",
+        Action::StartService => "Space start",
+        Action::EnableService => ": enable units",
+        Action::RestartService => ": restart service",
+        Action::DisableUnits => ": disable units",
+        Action::InvitePeer => "v invite",
+        Action::CloseEnrolment => ": close enrolment",
+        Action::FinalizePeer(_) => "f finalize (select peer)",
+        Action::PingPeer => "p ping",
+        Action::SyncHost => ": sync host",
+        Action::OpenLogs => "l logs",
+        Action::HealthCheck => "H health",
+        Action::EditConfig => "E edit config",
+        Action::CopyPublicLine => "y copy",
+    }
 }
 
 fn help_row(keys: &'static str, desc: &'static str) -> Line<'static> {
@@ -1793,6 +1846,24 @@ fn draw_confirm(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     Span::raw(" retires old key  ·  "),
                     Span::styled("Esc", theme().muted()),
                     Span::raw(" keeps rotation open"),
+                ]));
+            }
+            super::app::ConfirmAction::DisableUnits { stem } => {
+                lines.push(Line::from(Span::styled(
+                    format!("Disable all units for '{stem}'?"),
+                    theme().warn_bold(),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(
+                    "The tunnel stops now and stays off after reboot. The config \
+                     and keys stay — enabling brings them back.",
+                ));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Enter", theme().accent()),
+                    Span::raw(" disables units  ·  "),
+                    Span::styled("Esc", theme().muted()),
+                    Span::raw(" cancels"),
                 ]));
             }
             super::app::ConfirmAction::ApplyConfig => {

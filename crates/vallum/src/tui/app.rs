@@ -945,9 +945,19 @@ impl Form {
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    RemovePeer { index: usize, label: String },
-    FinalizePeer { name: String },
+    RemovePeer {
+        index: usize,
+        label: String,
+    },
+    FinalizePeer {
+        name: String,
+    },
     ApplyConfig,
+    /// `vallum-ops disable` retires every unit for the interface: main,
+    /// quick, guard, watch and the responder.
+    DisableUnits {
+        stem: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1011,6 +1021,13 @@ pub struct App {
     pub filtering: bool,
     pub sort_mode: SortMode,
     pub status_bar: StatusBar,
+    /// Cached `vallum-ops sync --check` verdict: `Some(true)` when the
+    /// installed build is behind the source tree. Refreshed only when the
+    /// operator asks — a privileged probe must not run every tick.
+    pub sync_stale: Option<bool>,
+    /// The machine's current next steps per [`crate::guidance`], recomputed on
+    /// snapshot refreshes so the render path never spawns a probe.
+    pub suggestions: Vec<crate::guidance::Suggestion>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,6 +1092,8 @@ impl App {
             sort_mode: SortMode::Natural,
             refresh_rate: 1000,
             status_bar: StatusBar::Filter,
+            sync_stale: None,
+            suggestions: Vec::new(),
         }
     }
 

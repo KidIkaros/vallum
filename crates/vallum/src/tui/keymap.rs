@@ -61,6 +61,11 @@ pub enum Action {
     SetupServer,
     SetupClient,
     CloseEnrollment,
+    SyncCheck,
+    SyncHost,
+    EnableUnits,
+    DisableUnits,
+    RestartService,
     TrialPlan,
     TrialRevert,
 }
@@ -94,6 +99,36 @@ pub const COMMANDS: &[Command] = &[
         category: "SETUP",
         name: "close enrolment responder (UDP 51821)",
         keywords: "enroll invite close responder port disable tidy",
+    },
+    Command {
+        action: Action::SyncCheck,
+        category: "SETUP",
+        name: "check for updates",
+        keywords: "update upgrade check stale version sync check",
+    },
+    Command {
+        action: Action::SyncHost,
+        category: "SETUP",
+        name: "sync host with checkout",
+        keywords: "update upgrade install deploy sync apply binary units",
+    },
+    Command {
+        action: Action::EnableUnits,
+        category: "SERVICE",
+        name: "enable tunnel units (start at boot)",
+        keywords: "enable boot persistence persist start units systemd",
+    },
+    Command {
+        action: Action::DisableUnits,
+        category: "SERVICE",
+        name: "disable tunnel units…",
+        keywords: "disable uninstall retire off boot persistence remove units",
+    },
+    Command {
+        action: Action::RestartService,
+        category: "SERVICE",
+        name: "restart tunnel service",
+        keywords: "restart bounce reload daemon unresponsive silent",
     },
     Command {
         action: Action::ToggleService,
