@@ -82,6 +82,12 @@ The key is generated here and only the public line crosses. The server must
 have `vallum` installed and passwordless sudo for that user; the error names
 which of those is missing.
 
+**The trust anchor here is the SSH host key.** The enrolment runs over the
+SSH connection, so the server you enrol with is the one you connected to —
+the one whose host key ssh already checked against your `known_hosts`. There
+is no second fingerprint to check here and none to check it against, which
+is why `--expect` belongs to the ticket path and not to this one.
+
 ## Path C — a one-time ticket
 
 For a device that cannot reach the server over SSH. The server mints a ticket
