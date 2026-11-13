@@ -113,6 +113,9 @@ impl Snapshot {
     pub fn from_reply(text: &str) -> Self {
         let response = uapi::parse_response(text);
         let device = |key: &str| response.field(key);
+        let public_line = device(field::VALLUM_PUBLIC_LINE)
+            .unwrap_or_default()
+            .to_owned();
         Self {
             interface: device(field::VALLUM_INTERFACE)
                 .unwrap_or_default()
@@ -123,12 +126,13 @@ impl Snapshot {
             listen_port: device(field::LISTEN_PORT).and_then(|value| value.parse().ok()),
             suite: device(field::VALLUM_SUITE).unwrap_or_default().to_owned(),
             fwmark: device(field::FWMARK).and_then(|value| value.parse().ok()),
-            fingerprint: device(field::VALLUM_FINGERPRINT)
-                .unwrap_or_default()
-                .to_owned(),
-            public_line: device(field::VALLUM_PUBLIC_LINE)
-                .unwrap_or_default()
-                .to_owned(),
+            // The peer show fingerprint (a hash of the public line), not the
+            // uapi's shorter peer hint — one key, one fingerprint everywhere.
+            fingerprint: vallum::keys::display_fingerprint(
+                &public_line,
+                device(field::VALLUM_FINGERPRINT).unwrap_or_default(),
+            ),
+            public_line,
             offload: device(field::VALLUM_OFFLOAD) == Some("1"),
             batching: device(field::VALLUM_BATCHING) == Some("1"),
             build: device(field::VALLUM_BUILD)
@@ -190,14 +194,16 @@ fn peer(section: &[(String, String)]) -> Peer {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
     };
+    let public_line = get(field::VALLUM_PUBLIC_LINE)
+        .unwrap_or_default()
+        .to_owned();
     Peer {
         name: get(field::VALLUM_NAME).unwrap_or_default().to_owned(),
-        fingerprint: get(field::VALLUM_FINGERPRINT)
-            .unwrap_or_default()
-            .to_owned(),
-        public_line: get(field::VALLUM_PUBLIC_LINE)
-            .unwrap_or_default()
-            .to_owned(),
+        fingerprint: vallum::keys::display_fingerprint(
+            &public_line,
+            get(field::VALLUM_FINGERPRINT).unwrap_or_default(),
+        ),
+        public_line,
         endpoint: get(field::ENDPOINT).unwrap_or_default().to_owned(),
         allowed_ips: values(section, field::ALLOWED_IP)
             .map(str::to_owned)
@@ -353,6 +359,25 @@ mod tests {
         assert!(!json.contains("\"preshared_key\""));
         // Presence is still reported, because the UI says "PSK set".
         assert!(json.contains("\"has_preshared_key\":true"));
+    }
+
+    /// The console's peer fingerprint must be the same string `vallum peer
+    /// show` prints server-side — the line hash — not the uapi's 16-char peer
+    /// hint, which is a different hash of the same key and read as a mismatch
+    /// during a real identity verification.
+    #[test]
+    fn the_fingerprint_is_the_line_hash_peer_show_prints() {
+        let line = "vallum1:0003:ab:-";
+        let reply = format!(
+            "vallum_interface=vallum0\nvallum_public_line={line}\n\
+             vallum_fingerprint=0011223344556677\nerrno=0\n\n\
+             public_key=x\nvallum_public_line={line}\n\
+             vallum_fingerprint=8899aabbccddeeff\nerrno=0\n"
+        );
+        let snapshot = Snapshot::from_reply(&reply);
+        let want = vallum::keys::fingerprint(line);
+        assert_eq!(snapshot.fingerprint, want, "interface fingerprint");
+        assert_eq!(snapshot.peers[0].fingerprint, want, "peer fingerprint");
     }
 
     /// The whole read path, over a real Unix socket: `vallum::control::request`

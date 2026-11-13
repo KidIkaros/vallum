@@ -1441,19 +1441,20 @@ fn qr_render_packs_half_blocks_with_a_quiet_zone_and_fits_in_modal() {
 }
 
 #[test]
-fn peer_fingerprint_falls_back_to_public_line_when_omitted_by_uapi() {
+fn peer_fingerprint_is_the_line_hash_peer_show_prints() {
+    // Even when the uapi omits its shorter hint, the console shows the same
+    // fingerprint `vallum peer show` prints — the operator compares one
+    // string across surfaces.
+    let line = "vallum1:0003:8b7e6d5c4b3a2918:AQIDBA==";
     let response = Response {
         device: vec![("vallum_interface".to_owned(), "vallum0".to_owned())],
         peers: vec![vec![
             ("vallum_name".to_owned(), "gateway-us-east".to_owned()),
-            (
-                "vallum_public_line".to_owned(),
-                "vallum1:0003:8b7e6d5c4b3a2918:AQIDBA==".to_owned(),
-            ),
+            ("vallum_public_line".to_owned(), line.to_owned()),
         ]],
     };
     let device = DeviceView::from_response(&response);
-    assert_eq!(device.peers[0].fingerprint, "8b7e6d5c4b3a2918");
+    assert_eq!(device.peers[0].fingerprint, crate::keys::fingerprint(line));
 }
 
 #[test]

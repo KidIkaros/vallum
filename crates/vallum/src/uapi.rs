@@ -850,8 +850,15 @@ pub fn parse_response(text: &str) -> Response {
 /// explicit requests.
 #[must_use]
 pub fn render_human(response: &Response) -> String {
+    // The headline identity is the line-hash fingerprint `peer show` prints;
+    // the raw uapi hint stays available as its own field below.
     let mut out = String::new();
-    let fingerprint = response.field(field::VALLUM_FINGERPRINT).unwrap_or("?");
+    let fingerprint = crate::keys::display_fingerprint(
+        response
+            .field(field::VALLUM_PUBLIC_LINE)
+            .unwrap_or_default(),
+        response.field(field::VALLUM_FINGERPRINT).unwrap_or("?"),
+    );
     out.push_str(&format!("interface {fingerprint}\n"));
     for (key, value) in &response.device {
         if hidden(key) {
@@ -860,7 +867,10 @@ pub fn render_human(response: &Response) -> String {
         out.push_str(&format!("  {key}={value}\n"));
     }
     for peer in &response.peers {
-        let fingerprint = field(peer, field::VALLUM_FINGERPRINT).unwrap_or("?");
+        let fingerprint = crate::keys::display_fingerprint(
+            field(peer, field::VALLUM_PUBLIC_LINE).unwrap_or_default(),
+            field(peer, field::VALLUM_FINGERPRINT).unwrap_or("?"),
+        );
         let name = field(peer, field::VALLUM_NAME).unwrap_or("");
         out.push_str(&format!("\npeer {fingerprint} ({name})\n"));
         for (key, value) in peer {
@@ -1628,6 +1638,35 @@ mod tests {
         assert!(!text.contains("private_key"));
         assert!(!text.contains("preshared_key"));
         assert!(!text.contains(&"bb".repeat(1187)));
+    }
+
+    /// When the response carries the public line, the human view headlines the
+    /// line-hash `peer show` prints — the same key must never read as two
+    /// different fingerprints on the CLI versus a console.
+    #[test]
+    fn the_human_view_headlines_the_line_fingerprint() {
+        let line = "vallum1:0003:ab:-";
+        let response = Response {
+            device: vec![
+                (
+                    "vallum_fingerprint".to_owned(),
+                    "0011223344556677".to_owned(),
+                ),
+                ("vallum_public_line".to_owned(), line.to_owned()),
+            ],
+            peers: vec![vec![
+                (
+                    "vallum_fingerprint".to_owned(),
+                    "8899aabbccddeeff".to_owned(),
+                ),
+                ("vallum_public_line".to_owned(), line.to_owned()),
+                ("vallum_name".to_owned(), "laptop".to_owned()),
+            ]],
+        };
+        let text = render_human(&response);
+        let want = crate::keys::fingerprint(line);
+        assert!(text.contains(&format!("interface {want}")));
+        assert!(text.contains(&format!("peer {want} (laptop)")));
     }
 
     #[test]

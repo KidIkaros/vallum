@@ -147,12 +147,12 @@ impl DeviceView {
                         )
                     });
                 let public_line = peer_field(field::VALLUM_PUBLIC_LINE);
-                let mut fingerprint = peer_field(field::VALLUM_FINGERPRINT);
-                if fingerprint.is_empty() {
-                    if let Some(extracted) = public_line.split(':').nth(2) {
-                        fingerprint = extracted.to_owned();
-                    }
-                }
+                // `peer show`'s line-hash fingerprint, not the uapi's shorter
+                // hint — the operator compares one string across surfaces.
+                let fingerprint = crate::keys::display_fingerprint(
+                    &public_line,
+                    &peer_field(field::VALLUM_FINGERPRINT),
+                );
                 let last_rejected_raw = peer_field(field::LAST_REJECTED_SOURCE);
                 PeerView {
                     name: peer_field(field::VALLUM_NAME),
@@ -200,6 +200,7 @@ impl DeviceView {
             .collect();
         let suite = get(field::VALLUM_SUITE);
         let suite_id = u16::from_str_radix(suite.trim_start_matches("0x"), 16).unwrap_or(0);
+        let public_line = get(field::VALLUM_PUBLIC_LINE);
         Self {
             interface: get(field::VALLUM_INTERFACE),
             listen: get(field::VALLUM_LISTEN),
@@ -207,8 +208,11 @@ impl DeviceView {
             fwmark: get(field::FWMARK).parse().unwrap_or(0),
             suite,
             suite_id,
-            fingerprint: get(field::VALLUM_FINGERPRINT),
-            public_line: get(field::VALLUM_PUBLIC_LINE),
+            fingerprint: crate::keys::display_fingerprint(
+                &public_line,
+                &get(field::VALLUM_FINGERPRINT),
+            ),
+            public_line,
             addresses,
             egress: get(field::VALLUM_EGRESS),
             offload: flag(field::VALLUM_OFFLOAD),

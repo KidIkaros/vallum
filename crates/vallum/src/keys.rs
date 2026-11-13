@@ -551,6 +551,20 @@ pub fn fingerprint(public_line: &str) -> String {
     hex_encode(&hash[..6])
 }
 
+/// The fingerprint a human compares against `vallum peer show` — derived from
+/// the public line so it is always the same 12 characters for the same key.
+/// The daemon's uapi also sends an 8-byte peer *hint* (a different hash, 16
+/// characters) meant for log/metric correlation; showing it under the label
+/// "fingerprint" made one key read as two different identities. `hint` is the
+/// fallback for the rare response that carries no public line.
+pub fn display_fingerprint(public_line: &str, hint: &str) -> String {
+    if public_line.is_empty() {
+        hint.to_owned()
+    } else {
+        fingerprint(public_line)
+    }
+}
+
 /// Write `bytes` to `path` with mode `0600` (owner-only).
 ///
 /// Centralised here so neither the enrolment responder nor the identity
