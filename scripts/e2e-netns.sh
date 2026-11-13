@@ -502,8 +502,10 @@ grep -q '^vallum_batching=true$' "$WORK/show.dump" \
 grep -q '^private_key=' "$WORK/show.dump" || bad "show --dump lost the private key"
 grep -q '^  private_key=' "$WORK/show.txt" && bad "the default show printed the private key"
 grep -q '^  preshared_key=' "$WORK/show.txt" && bad "the default show printed the PSK"
-awk '/^interface / { print length($2) }' "$WORK/show.txt" | grep -qx 16 \
-    || bad "the interface label is not a 16-hex fingerprint"
+awk '/^interface / { print length($2) }' "$WORK/show.txt" | grep -qx 12 \
+    || bad "the interface label is not the 12-hex fingerprint peer show prints"
+awk '/^peer / { print length($2) }' "$WORK/show.txt" | grep -qx 12 \
+    || bad "the peer label is not the 12-hex fingerprint peer show prints"
 PORT_NOW=$(sed -n 's/^listen_port=//p' "$WORK/show.dump")
 [ -n "$PORT_NOW" ] && [ "$PORT_NOW" -ne 0 ] \
     || bad "listen_port is $PORT_NOW, not the bound port"
