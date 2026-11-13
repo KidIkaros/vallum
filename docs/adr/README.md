@@ -40,3 +40,5 @@
 | [0036](0036-rekey-spread.md) | A session's rekey is spread, so a fleet does not rekey in lockstep | proposed | 2026-11-12 |
 | [0037](0037-guard-table-per-interface.md) | The egress guard has one table per interface | proposed | 2026-11-12 |
 | [0038](0038-rotation-window-expires.md) | A runtime rotation's replaced identity expires after 15 minutes | proposed | 2026-11-12 |
+| [0039](0039-alpha-distribution-surface.md) | The alpha ships the CLI, TUI and UTCP manual — the console stays a dev surface | accepted | 2026-11-13 |
+| [0040](0040-the-guidance-engine.md) | One facts-driven guidance engine, rendered by both consoles | accepted | 2026-11-13 |
