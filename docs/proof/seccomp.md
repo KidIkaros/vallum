@@ -229,6 +229,19 @@ descriptors it was handed.
    list was needed. If one is added, enforce mode kills the daemon on it, and a
    traced path would also show `execve` and fail the guard — but a path the
    exercise does not take would only be found by the log.
+5. **The aarch64 list is compile-verified only.** aarch64's syscall table has
+   no `unlink`, `mkdir`, `rmdir`, `rename`, `chmod`, `readlink`, `access`,
+   `poll`, `dup2`, or `arch_prctl`; its libc reaches the same operations
+   through `unlinkat`, `mkdirat`, `renameat`, `fchmodat`, `faccessat`/`2`,
+   `readlinkat`, `ppoll`, and `dup3`, which the list names instead (rmdir is
+   `unlinkat` with `AT_REMOVEDIR`). `cargo check --target
+   aarch64-unknown-linux-gnu` proves the filter *builds*; nothing here has run
+   it. `seccomp-trace.sh` and `seccomp-enforce.sh` exercise the native list,
+   so the same evidence this document is built on needs an ARM host (or
+   binfmt_misc with qemu-user, if its seccomp pass-through can be trusted —
+   that caveat is why emulation was not substituted for hardware). Until one
+   runs, the aarch64 artifact's sandbox is a best-effort port of the x86_64
+   list, not a derived one.
 
 ## 6. How to reproduce the trace
 

@@ -13,6 +13,7 @@
 #   scripts/release.sh --dry-run       # print what would be built and uploaded
 #   scripts/release.sh --skip-remote "why"   # release without a recent two-host run
 #   scripts/release.sh --skip-arm "why"      # release without an aarch64 artifact
+#   scripts/release.sh --skip-fuzz "why"     # release without the bounded fuzz run
 #
 # Releases are signed with an SSH key (`ssh-keygen -Y sign`, OpenSSH >= 8.0):
 # the private key lives at ~/.config/vallum/release-signing-key (or
@@ -34,6 +35,7 @@ DRY=0
 UPLOAD=1
 SKIP_REMOTE=""
 SKIP_ARM=""
+SKIP_FUZZ=""
 SIGN_KEY="${VALLUM_RELEASE_KEY:-$HOME/.config/vallum/release-signing-key}"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -48,6 +50,11 @@ while [ $# -gt 0 ]; do
             shift
             SKIP_ARM="${1:-}"
             [ -n "$SKIP_ARM" ] || { echo "--skip-arm needs a reason" >&2; exit 1; }
+            ;;
+        --skip-fuzz)
+            shift
+            SKIP_FUZZ="${1:-}"
+            [ -n "$SKIP_FUZZ" ] || { echo "--skip-fuzz needs a reason" >&2; exit 1; }
             ;;
         -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -165,6 +172,23 @@ else
     E2E=1 ./scripts/verify.sh >/tmp/vallum-release-gate.log 2>&1 \
         || { tail -20 /tmp/vallum-release-gate.log >&2; fail "scripts/verify.sh failed (see /tmp/vallum-release-gate.log)"; }
     ok "scripts/verify.sh passed"
+fi
+
+# The fuzz gate: the wire parsers get a bounded run on the release commit
+# itself. Nightly CI runs longer; this is the smoke pass that keeps "the tag
+# was fuzzed" from being an assumption. FUZZ_SECONDS overrides the per-target
+# budget; --skip-fuzz records the reason the way --skip-arm does.
+if [ "$DRY" -eq 1 ]; then
+    echo "   would run: ./scripts/fuzz.sh ${FUZZ_SECONDS:-60}"
+elif [ -n "$SKIP_FUZZ" ]; then
+    printf '   skip  fuzz: %s\n' "$SKIP_FUZZ"
+else
+    say "gate: fuzz"
+    cargo +nightly fuzz --version >/dev/null 2>&1 \
+        || fail "cargo-fuzz missing; cargo +nightly install cargo-fuzz (or --skip-fuzz \"reason\")"
+    ./scripts/fuzz.sh "${FUZZ_SECONDS:-60}" >/tmp/vallum-release-fuzz.log 2>&1 \
+        || { tail -20 /tmp/vallum-release-fuzz.log >&2; fail "scripts/fuzz.sh found a crash (see /tmp/vallum-release-fuzz.log)"; }
+    ok "scripts/fuzz.sh passed (all targets, ${FUZZ_SECONDS:-60}s each)"
 fi
 
 say "building"

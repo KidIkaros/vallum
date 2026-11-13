@@ -19,6 +19,15 @@ into the daemon.
 | `replay` | 9-byte chunks: `u64` counter + flag | `next()` never decreases; a counter is accepted at most once; nothing panics |
 | `shaping` | 9-byte chunks: event selector + `u64` draw | no panic; every effect names a real machine; all reference machines are driven through arbitrary interleavings |
 | `epoch_open` | arbitrary bytes as a data packet | after a rekey the session holds two epochs at once: arbitrary bytes never panic and never open; a packet sealed under the retired epoch **and** one under the current epoch both open; past `RETAIN_PREVIOUS_EPOCH_MS` the retired epoch's straggler is refused |
+| `segment_reassembly` | arbitrary bytes as a datagram, three times (two sources) | `Segments::inbound` never panics — there is no `catch_unwind` on the loop thread, so a panic here kills the daemon |
+
+`segment_reassembly` is the target 9b3cd19 made necessary: two fragments whose
+claimed totals disagreed made the copy index past the end of the entry's buffer —
+the first fragment sized the entry and the second was bounded by its own claim.
+Reassembly is where an unauthenticated peer reaches the daemon's memory
+management, so it feeds each datagram three times: to two different source
+addresses (a fragment accepted for one peer must not lean on another's entry) and
+twice to the first, so the two-fragment disagreement stays reachable.
 
 `epoch_open` is the target a rekey made necessary: `Session::open` is fed by the
 network on every packet, and a rekey is the only thing that makes it demultiplex
@@ -68,8 +77,9 @@ executions, no crash.
   `InitConf`), so the first run starts from valid, maximum-size inputs.
 - `replay`: a sequence with duplicates, gaps, and probes.
 - `shaping`: an event/draw stream that reaches `Timeout` and the block path.
-- `epoch_open`: none. Its interesting state is derived, not parsed, so the first
-  run starts from the empty corpus and the assertions build the epochs.
+- `epoch_open` and `segment_reassembly`: none. Their interesting state is
+  derived, not parsed, so the first run starts from the empty corpus and the
+  assertions build it.
 
 `scripts/fuzz.sh` copies the seeds into `fuzz/corpus/<target>/` (which is
 git-ignored, because libFuzzer writes new inputs there) before running.
@@ -125,3 +135,15 @@ state.
 5. **ASan only.** No MSan/TSan/UBSan runs in this phase.
 6. **No proof of absence.** A green run means these inputs, for this long, found
    nothing.
+7. **The control socket is not a fuzz target, on purpose.** `uapi::parse` is
+   property-tested — `parse_never_panics` and `parse_response_never_panics` on
+   arbitrary strings, plus a render/parse round-trip — and the socket itself is
+   `0600` inside a `0700` staging directory: only the daemon's own UID can send
+   it a byte (see `control::serve`'s publish comment). A libFuzzer target would
+   spend cycles defending a boundary an attacker cannot reach; if the socket is
+   ever exposed more widely, this item is the first thing to revisit.
+8. **The operator-facing parsers are out of scope.** Config TOML, the join
+   ticket file, and `peer show` output are parsed on data the operator controls
+   (their own files, their own server's control plane). A malformed config is an
+   operator error, not attacker input — its failure mode is a legible error,
+   which `config.rs`'s tests cover.
