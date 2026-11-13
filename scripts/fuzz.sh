@@ -19,7 +19,7 @@ SECONDS_PER_TARGET=${1:-60}
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-for target in message_parse handshake_decode replay shaping enroll_parse epoch_open; do
+for target in message_parse handshake_decode replay shaping enroll_parse epoch_open segment_reassembly; do
     mkdir -p "fuzz/corpus/$target"
     if [ -d "fuzz/seeds/$target" ]; then
         cp -n "fuzz/seeds/$target"/* "fuzz/corpus/$target"/ 2>/dev/null || true
