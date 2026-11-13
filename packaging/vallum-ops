@@ -199,11 +199,16 @@ enable)
     # Boot persistence: the tunnel comes up after every power-up, in the
     # config's current mode (split unless the operator applied the full tunnel).
     # The restore floor (vallum-cleanup) runs before it by unit ordering.
+    # quick/watch are the lifecycle pair the tunnel needs for routes and DNS —
+    # they are not pulled in by vallum@, so enable restores exactly the set
+    # disable stripped, minus guard/enroll which stay session-scoped on
+    # purpose (an enabled guard installs the egress block before any tunnel
+    # exists — the outage class this project already paid for once).
     # Optional second argument names another interface (a second tunnel).
     iface=${2:-$IFACE}
     require_iface "$iface"
     stem=$(basename "$(resolve_conf "$iface")" .toml)
-    systemctl enable "vallum@$stem"
+    systemctl enable "vallum@$stem" "vallum-quick@$stem" "vallum-quick-watch@$stem"
     systemctl is-enabled "vallum@$stem"
     ;;
 disable)
@@ -276,8 +281,17 @@ trace)
 sync)
     # Deployment automation: make the host match the build under test, then
     # stop. Never runs the cleanup itself — the floor fires at boot only.
+    # `--check` reports drift without touching it, so a console can ask
+    # "is anything stale?" as a read.
     require_trusted_source
-    exec bash "$REPO/scripts/vallum-sync.sh"
+    case "${2:-}" in
+        "" | --check) ;;
+        *)
+            echo "vallum-ops: unknown sync argument '${2:-}'" >&2
+            exit 2
+            ;;
+    esac
+    exec bash "$REPO/scripts/vallum-sync.sh" "${2:-}"
     ;;
 self-update)
     require_trusted_source

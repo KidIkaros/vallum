@@ -14,12 +14,23 @@ REPO=/home/ikaaros/Coding/Gold/vallum
 [ -d "$REPO/crates" ] || { echo "repo not found at $REPO" >&2; exit 1; }
 
 CHANGES=0
+CHECK=0
+[ "${1:-}" = "--check" ] && CHECK=1
+
+maybe_install() {
+    # $1 = source, $2 = destination, $3 = mode, $4 = label
+    if [ "$CHECK" = 1 ]; then
+        echo "sync: $4 is stale"
+    else
+        echo "sync: $4 is stale — updating"
+        install -m "$3" "$1" "$2"
+    fi
+    CHANGES=1
+}
 
 for b in vallum vallum-quick; do
     if ! cmp -s "$REPO/target/release/$b" "/usr/bin/$b"; then
-        echo "sync: $b is stale — updating"
-        install -m 755 "$REPO/target/release/$b" "/usr/bin/$b"
-        CHANGES=1
+        maybe_install "$REPO/target/release/$b" "/usr/bin/$b" 755 "$b"
     fi
 done
 
@@ -27,18 +38,16 @@ for u in vallum@.service vallum-quick@.service vallum-guard@.service \
     vallum-deadman@.service vallum-deadman@.timer vallum-cleanup.service \
     vallum-netlink-watch.service vallum-metrics.service vallum-metrics.timer; do
     if ! cmp -s "$REPO/packaging/$u" "/etc/systemd/system/$u"; then
-        echo "sync: unit $u is stale — updating"
-        install -m 644 "$REPO/packaging/$u" "/etc/systemd/system/$u"
-        CHANGES=1
+        maybe_install "$REPO/packaging/$u" "/etc/systemd/system/$u" 644 "unit $u"
     fi
 done
 
-install -d -m 755 /usr/local/lib/vallum
+if [ "$CHECK" = 0 ]; then
+    install -d -m 755 /usr/local/lib/vallum
+fi
 for lib in trial.sh go-full-tunnel.sh; do
     if ! cmp -s "$REPO/scripts/$lib" "/usr/local/lib/vallum/$lib"; then
-        echo "sync: deploy script $lib is stale — updating"
-        install -m 755 "$REPO/scripts/$lib" "/usr/local/lib/vallum/$lib"
-        CHANGES=1
+        maybe_install "$REPO/scripts/$lib" "/usr/local/lib/vallum/$lib" 755 "deploy script $lib"
     fi
 done
 
@@ -47,11 +56,14 @@ done
 # host, and the two copies drift exactly the way everything else does.
 for tool in vallum-ops vallum-panic vallum-guard-deadman vallum-cleanup vallum-heal-runtime-dir; do
     if ! cmp -s "$REPO/packaging/$tool" "/usr/local/sbin/$tool"; then
-        echo "sync: tool $tool is stale — updating"
-        install -m 755 "$REPO/packaging/$tool" "/usr/local/sbin/$tool"
-        CHANGES=1
+        maybe_install "$REPO/packaging/$tool" "/usr/local/sbin/$tool" 755 "tool $tool"
     fi
 done
+
+if [ "$CHECK" = 1 ]; then
+    echo "sync check: $([ "$CHANGES" = 1 ] && echo 'stale files found' || echo 'host current')"
+    exit 0
+fi
 
 # Server-init backups of the enroll unit accumulate forever; the live unit
 # ships with the installer, so every dated backup is a leftover.
