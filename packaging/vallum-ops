@@ -32,7 +32,10 @@ IFACE=vallum0
 
 require_iface() {
     case "${1:-}" in
-        ""|*[!A-Za-z0-9._-]*)
+        # A leading dash survives the charset check but lands in argv — a
+        # `peer_name` of `--config` would eat the following flag for whoever
+        # the verb execs. Names are names, not options.
+        ""|*[!A-Za-z0-9._-]*|-*)
             echo "vallum-ops: invalid interface name '${1:-}'" >&2
             exit 2
             ;;
