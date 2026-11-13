@@ -17,6 +17,13 @@
 # The timer is the safety property: it exists before the risk does.
 set -uo pipefail
 
+# The guard's table is named per interface: `vallum_policy_<interface>`, with
+# anything that is not a letter or a digit replaced by an underscore, because
+# nft identifiers are [A-Za-z_][A-Za-z0-9_]* (ADR-0037).
+vallum_guard_table() {
+    printf 'vallum_policy_%s' "$(printf '%s' "$1" | tr -c '[:alnum:]' '_')"
+}
+
 CONFIG=/etc/vallum/vallum0.toml
 TRIAL=60
 DRY_RUN=0
@@ -63,6 +70,7 @@ revert() {
     echo "reverting: $why" >&2
     systemctl stop "vallum-quick@$IFACE" 2>/dev/null
     /usr/bin/vallum policy off --config "$CONFIG" >/dev/null 2>&1
+    nft delete table inet "$(vallum_guard_table "$IFACE")" >/dev/null 2>&1
     nft delete table inet vallum_policy >/dev/null 2>&1
     systemctl stop "vallum-guard@$IFACE" 2>/dev/null
     ip route del default dev "$IFACE" >/dev/null 2>&1
@@ -77,8 +85,9 @@ revert() {
 # 2. The timer exists before the risk does. systemd-run owns it, so it survives
 #    this script dying.
 rm -f "$MARK"
+TABLE=$(vallum_guard_table "$IFACE")
 systemd-run --quiet --on-active="${TRIAL}s" --unit="vallum-trial-$IFACE" \
-    /bin/sh -c "[ -f $MARK ] || { /usr/bin/vallum policy off --config $CONFIG; nft delete table inet vallum_policy; systemctl stop vallum-quick@$IFACE; systemctl stop vallum-guard@$IFACE; ip route del default dev $IFACE; [ -f $BEFORE_RESOLV ] && cp $BEFORE_RESOLV /etc/resolv.conf; logger -t vallum-trial 'trial expired unreverted — restored egress and DNS'; }" \
+    /bin/sh -c "[ -f $MARK ] || { /usr/bin/vallum policy off --config $CONFIG; nft delete table inet $TABLE; nft delete table inet vallum_policy; systemctl stop vallum-quick@$IFACE; systemctl stop vallum-guard@$IFACE; ip route del default dev $IFACE; [ -f $BEFORE_RESOLV ] && cp $BEFORE_RESOLV /etc/resolv.conf; logger -t vallum-trial 'trial expired unreverted — restored egress and DNS'; }" \
     || { echo "cannot arm the revert timer; refusing to change anything" >&2; exit 1; }
 
 # 3. The change.

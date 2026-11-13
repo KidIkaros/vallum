@@ -15,6 +15,13 @@
 #
 # Any failure ends with the split config restored and the unit running.
 set -uo pipefail
+
+# The guard's table is named per interface: `vallum_policy_<interface>`, with
+# anything that is not a letter or a digit replaced by an underscore, because
+# nft identifiers are [A-Za-z_][A-Za-z0-9_]* (ADR-0037).
+vallum_guard_table() {
+    printf 'vallum_policy_%s' "$(printf '%s' "$1" | tr -c '[:alnum:]' '_')"
+}
 CHANGED=0
 
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
@@ -33,7 +40,9 @@ fail() {
     # goes back and the unit is left RUNNING — a rollback must end in a working
     # machine, not a stopped one.
     /usr/local/sbin/vallum-panic 2>/dev/null || \
-        { nft delete table inet vallum_policy 2>/dev/null; ip route del default dev "$IFACE" 2>/dev/null; }
+        { nft delete table inet "$(vallum_guard_table "$IFACE")" 2>/dev/null; \
+          nft delete table inet vallum_policy 2>/dev/null; \
+          ip route del default dev "$IFACE" 2>/dev/null; }
     [ -f /etc/vallum/vallum0.split.bak ] && \
         install -m 600 -o root -g root /etc/vallum/vallum0.split.bak "$CONF" 2>/dev/null
     systemctl reset-failed "$UNIT" 2>/dev/null || true

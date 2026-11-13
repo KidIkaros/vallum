@@ -26,7 +26,30 @@ use crate::error::Error;
 use crate::hostnet::{self, HostStep};
 
 /// The nftables table Vallum owns for this policy.
-pub const TABLE: &str = "vallum_policy";
+/// The prefix of the nft table that holds an interface's egress guard.
+pub const TABLE_PREFIX: &str = "vallum_policy";
+
+/// The nft table that holds ONE interface's egress guard.
+///
+/// One table per interface, not one table for the host. With a single table,
+/// installing the guard for a second tunnel replaced the first tunnel's
+/// ruleset - the first tunnel's guard silently stopped being there - and
+/// `policy off` removed the guard for every interface at once, whichever one
+/// the operator was thinking about.
+///
+/// nft identifiers are `[A-Za-z_][A-Za-z0-9_]*`, and an interface name may
+/// contain a hyphen, so anything that is not a letter or a digit becomes an
+/// underscore. Two interface names that differ only in punctuation therefore
+/// share a table; the names are bounded at 15 characters and are
+/// alphanumeric in practice, so that needs two deliberate names to happen.
+#[must_use]
+pub fn table_name(interface: &str) -> String {
+    let mut name = format!("{TABLE_PREFIX}_");
+    for ch in interface.chars() {
+        name.push(if ch.is_ascii_alphanumeric() { ch } else { '_' });
+    }
+    name
+}
 
 /// Private ranges a LAN exception covers.
 const LAN_V4: &str = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16";
@@ -180,9 +203,10 @@ pub fn ruleset(config: &Config, interface: &str) -> Result<String, Error> {
     let mut rules = String::new();
     // The canonical idempotent replace: declaring the table makes the delete
     // legal whether or not it already exists.
-    rules.push_str(&format!("table inet {TABLE}\n"));
-    rules.push_str(&format!("delete table inet {TABLE}\n"));
-    rules.push_str(&format!("table inet {TABLE} {{\n"));
+    let table = table_name(interface);
+    rules.push_str(&format!("table inet {table}\n"));
+    rules.push_str(&format!("delete table inet {table}\n"));
+    rules.push_str(&format!("table inet {table} {{\n"));
     rules.push_str("  chain output {\n");
     rules.push_str("    type filter hook output priority 0; policy accept;\n");
 
@@ -259,20 +283,40 @@ pub fn guard_steps(config: &Config, interface: &str) -> Result<Vec<HostStep>, Er
 
 /// The steps that remove it. Missing is success — the table may never have
 /// existed, and an uninstall must not fail because of that.
+///
+/// The legacy host-wide table is removed too. It was named
+/// `vallum_policy` and every interface used it, so an installation from
+/// before the per-interface tables leaves that table behind; leaving it
+/// behind would keep a stale guard blocking egress for an interface that no
+/// longer exists.
 #[must_use]
-pub fn unguard_steps() -> Vec<HostStep> {
-    vec![HostStep::Run {
-        summary: "remove the egress policy".to_owned(),
-        program: "nft".to_owned(),
-        args: vec![
-            "delete".to_owned(),
-            "table".to_owned(),
-            "inet".to_owned(),
-            TABLE.to_owned(),
-        ],
-        stdin: None,
-        ignore_failure: true,
-    }]
+pub fn unguard_steps(interface: &str) -> Vec<HostStep> {
+    vec![
+        HostStep::Run {
+            summary: format!("remove the egress policy for `{interface}`"),
+            program: "nft".to_owned(),
+            args: vec![
+                "delete".to_owned(),
+                "table".to_owned(),
+                "inet".to_owned(),
+                table_name(interface),
+            ],
+            stdin: None,
+            ignore_failure: true,
+        },
+        HostStep::Run {
+            summary: "remove the legacy host-wide egress policy".to_owned(),
+            program: "nft".to_owned(),
+            args: vec![
+                "delete".to_owned(),
+                "table".to_owned(),
+                "inet".to_owned(),
+                TABLE_PREFIX.to_owned(),
+            ],
+            stdin: None,
+            ignore_failure: true,
+        },
+    ]
 }
 
 /// What the host says about the guard.
@@ -320,9 +364,9 @@ impl GuardState {
 
 /// Read the guard's state from the host.
 #[must_use]
-pub fn guard_state() -> GuardState {
+pub fn guard_state(interface: &str) -> GuardState {
     let Ok(output) = std::process::Command::new("nft")
-        .args(["list", "table", "inet", TABLE])
+        .args(["list", "table", "inet", &table_name(interface)])
         .output()
     else {
         return GuardState::Unknown;
@@ -351,8 +395,8 @@ pub fn guard(config: &Config, interface: &str, dry_run: bool) -> Result<Vec<Stri
 ///
 /// # Errors
 /// Only a genuine `nft` failure; a missing table is fine.
-pub fn unguard(dry_run: bool) -> Result<Vec<String>, Error> {
-    hostnet::apply(&unguard_steps(), dry_run)
+pub fn unguard(interface: &str, dry_run: bool) -> Result<Vec<String>, Error> {
+    hostnet::apply(&unguard_steps(interface), dry_run)
 }
 
 /// Whether an explicit `on` is declined because the config's own shape says a
@@ -524,12 +568,52 @@ allowed_ips = ["10.7.0.1/32"]
         );
     }
 
+    /// One host-wide table meant that installing the guard for a second
+    /// tunnel replaced the first tunnel's ruleset - the first tunnel's guard
+    /// silently stopped being there - and that `policy off` removed every
+    /// interface's guard at once.
+    #[test]
+    fn each_interface_has_its_own_guard_table() {
+        assert_ne!(table_name("vallum0"), table_name("vpn1"));
+        assert!(table_name("vallum0").starts_with(TABLE_PREFIX));
+        // nft identifiers are `[A-Za-z_][A-Za-z0-9_]*`, and an interface name
+        // may contain a hyphen.
+        let dashed = table_name("vallum-laptop");
+        assert!(
+            dashed
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+            "{dashed} is not an nft identifier"
+        );
+        // Known limitation, and a narrow one: two interface names that
+        // differ only in punctuation share a table. Linux interface names are
+        // alphanumeric in practice, and the name is bounded at 15
+        // characters, so this needs two deliberate names to happen.
+        assert_eq!(dashed, table_name("vallum_laptop"));
+    }
+
+    /// The ruleset must name THIS interface's table, so one tunnel's guard
+    /// cannot replace another's.
+    #[test]
+    fn the_ruleset_names_this_interfaces_table() {
+        let rules = ruleset(&config(FULL_V4), "vallum-laptop").unwrap();
+        assert!(
+            rules.contains("table inet vallum_policy_vallum_laptop"),
+            "{rules}"
+        );
+        assert!(
+            !rules.contains("table inet vallum_policy_vallum0"),
+            "the ruleset named another interface's table: {rules}"
+        );
+    }
+
     #[test]
     fn the_ruleset_is_idempotent() {
         let rules = ruleset(&config(FULL_V4), "vallum-laptop").unwrap();
         // Declare-then-delete is what makes re-installing safe.
-        let declare = rules.find(&format!("table inet {TABLE}\n")).unwrap();
-        let delete = rules.find(&format!("delete table inet {TABLE}\n")).unwrap();
+        let table = table_name("vallum-laptop");
+        let declare = rules.find(&format!("table inet {table}\n")).unwrap();
+        let delete = rules.find(&format!("delete table inet {table}\n")).unwrap();
         assert!(
             declare < delete,
             "the table must be declared before deleting"

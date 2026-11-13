@@ -35,6 +35,10 @@ fi
 
 logger -t vallum-deadman "tunnel dead 3 checks running — removing the egress block on $IFACE"
 /usr/bin/vallum policy off --config "$CONF" >/dev/null 2>&1
+# The guard's table is per interface (ADR-0037); the legacy host-wide table
+# is removed too, so an installation from before that change leaves nothing
+# behind.
+nft delete table inet "vallum_policy_$(printf '%s' "$IFACE" | tr -c '[:alnum:]' '_')" >/dev/null 2>&1
 nft delete table inet vallum_policy >/dev/null 2>&1
 rm -f "$STATE"
 # Leave honest state: a guard unit that says active while its block is gone

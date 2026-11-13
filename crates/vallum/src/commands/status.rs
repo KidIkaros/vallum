@@ -287,7 +287,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
 
     // The daemon may be gone; that is the interesting case, not an error.
     let live = control::request(&socket, "get=1\n").ok();
-    let guard = policy::guard_state();
+    let guard = policy::guard_state(&interface);
     let resolved = policy::resolve(&config);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

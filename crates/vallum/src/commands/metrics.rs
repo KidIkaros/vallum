@@ -152,7 +152,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), Error> {
 /// the scrape staying up is not hiding anything it has not already surfaced.
 fn client_verdict_word(config: &Path, reply: Option<&str>, now: u64) -> Option<String> {
     let loaded = config_from(config)?;
-    let guard = policy::guard_state();
+    let guard = policy::guard_state(&policy::interface_name(&loaded));
     let resolved = policy::resolve(&loaded);
     Some(
         status_verdict(reply, guard, resolved, now)

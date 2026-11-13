@@ -98,7 +98,7 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
             }
         }
         PolicyAction::Off => {
-            policy::unguard(args.dry_run)?;
+            policy::unguard(&interface, args.dry_run)?;
             if args.json {
                 emit(&json!({
                     "action": "off",
@@ -110,7 +110,7 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
             }
         }
         PolicyAction::Status => {
-            let guard = policy::guard_state();
+            let guard = policy::guard_state(&interface);
             let (v4, v6) = policy::carries(&config);
             // The one line an operator, or an agent, has to be able to act on.
             let fix = (resolved == Mode::On && guard == policy::GuardState::Absent)
