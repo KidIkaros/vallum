@@ -42,10 +42,14 @@ not of the daemon, because the daemon is the thing that fails.
 
 ### Where the rules live
 
-An nftables table Vallum owns, `inet vallum_policy`, with one `output` hook:
+An nftables table Vallum owns, `inet vallum_policy_<interface>`, with one
+`output` hook. The table is named per interface, so that one tunnel's guard
+cannot replace another's on a host that runs two — see
+[ADR-0037](0037-guard-table-per-interface.md). (This ADR originally named a
+single host-wide table, `inet vallum_policy`.)
 
 ```
-table inet vallum_policy {
+table inet vallum_policy_vallum0 {
   chain output {
     type filter hook output priority 0; policy accept;
 
@@ -195,4 +199,4 @@ In a throwaway netns with a veth pair, not on a live host:
 | ICMP to the gateway, guard installed | **dropped** |
 | UDP to the endpoint port (51820) | **allowed** |
 | UDP to any other port (9999) | **dropped** |
-| `nft list table inet vallum_policy` | present inside the namespace |
+| `nft list table inet vallum_policy_vallum0` | present inside the namespace |
