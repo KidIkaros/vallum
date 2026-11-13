@@ -1106,6 +1106,17 @@ fn handshake_seen(response: &str) -> bool {
     })
 }
 
+/// Whether this enrolment must say that it is not checking the server's
+/// identity.
+///
+/// A join ticket carries the server's fingerprint, so the ticket path always
+/// checks it. The legacy `host:port` path has no fingerprint to check unless
+/// one is given with `--expect`, and it used to accept whichever server
+/// answered without saying so.
+fn warns_about_identity(expect: Option<&str>, ticket_fingerprint: &str) -> bool {
+    expect.is_none() && ticket_fingerprint.is_empty()
+}
+
 /// The join ticket to enrol with.
 ///
 /// `-` reads it from stdin, which keeps the single-use token inside it out of
@@ -1114,8 +1125,12 @@ fn handshake_seen(response: &str) -> bool {
 /// host - and the ticket is the one thing that must not be shared.
 fn read_ticket_arg(arg: &str, stdin: impl std::io::BufRead) -> Result<String, Error> {
     if arg != "-" {
-        say!("note: a ticket passed as an argument is visible in `ps` and stays in");
-        say!("      shell history; `--join -` reads it from stdin instead");
+        // Only a ticket carries the secret. The legacy `host:port` argument
+        // does not, so warning about it would be noise about nothing.
+        if arg.starts_with(crate::enroll::TICKET_PREFIX) {
+            say!("note: a ticket passed as an argument is visible in `ps` and stays in");
+            say!("      shell history; `--join -` reads it from stdin instead");
+        }
         return Ok(arg.to_owned());
     }
     let ticket = read_token_arg(Some("-"), stdin)?;
@@ -1193,6 +1208,16 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
         .expect
         .clone()
         .or_else(|| (!ticket.fingerprint.is_empty()).then(|| ticket.fingerprint.clone()));
+    if warns_about_identity(expect.as_deref(), &ticket.fingerprint) {
+        // The ticket form always carries the server's fingerprint, so this is
+        // only reachable on the legacy `host:port` path. It used to say
+        // nothing at all: the client accepted whichever server answered, and
+        // sent it the single-use token.
+        say!("warning: this enrolment does not check the server's identity.");
+        say!("         the client accepts whichever server answers {server}, and the");
+        say!("         single-use token is sent to it. Pass --expect <fingerprint> to be");
+        say!("         sure you reached the server you meant.");
+    }
     if args.dry_run {
         say!("would generate a key here and ask {server} to enrol `{name}`");
         say!("   the token proves the server invited this machine; no secrets travel");
@@ -1421,6 +1446,20 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 mod tests {
     use super::*;
 
+    /// The bare `host:port` path has no fingerprint to check, and it used to
+    /// say nothing about that.
+    #[test]
+    fn the_bare_join_path_says_it_is_not_checking_the_server() {
+        assert!(
+            warns_about_identity(None, ""),
+            "the bare path must warn: nothing checks the server"
+        );
+        // A ticket carries the fingerprint, so the ticket path checks it.
+        assert!(!warns_about_identity(None, "a1b2c3d4e5f6"));
+        // So does an explicit --expect.
+        assert!(!warns_about_identity(Some("a1b2c3d4e5f6"), ""));
+    }
+
     /// The ticket carries the single-use token, so it must be able to arrive
     /// on stdin instead of on the command line.
     #[test]
@@ -1439,6 +1478,17 @@ mod tests {
         let mut cursor = std::io::Cursor::new("\n");
         let error = read_ticket_arg("-", &mut cursor).expect_err("an empty stdin is an error");
         assert!(error.to_string().contains("no ticket on stdin"), "{error}");
+    }
+
+    /// The warning is about the secret: a bare `host:port` carries none, so
+    /// it must not be warned about.
+    #[test]
+    fn a_bare_host_is_not_warned_about_as_a_ticket() {
+        let mut cursor = std::io::Cursor::new("");
+        assert_eq!(
+            read_ticket_arg("192.168.1.1:51821", &mut cursor).unwrap(),
+            "192.168.1.1:51821"
+        );
     }
 
     /// A ticket in argv is still accepted - it is the only way on some
