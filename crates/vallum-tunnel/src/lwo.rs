@@ -386,6 +386,7 @@ fn xor_header(header: &mut [u8], mask: &[u8; HEADER_MASK_LEN]) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -533,14 +534,41 @@ mod tests {
             0
         ]));
         // Unknown message type must be rejected even with matching PROTOCOL_VERSION.
-        let mut bad_type = vec![PROTOCOL_VERSION, 0x7f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut bad_type = vec![
+            PROTOCOL_VERSION,
+            0x7f,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         assert!(!is_valid_vallum_packet(&bad_type));
         assert_eq!(
             classify_and_unpad(&mut bad_type),
             (bad_type.len(), PacketEncoding::Unrecognized)
         );
         // Fragment envelope requires full FRAGMENT_HEADER_LEN (10 bytes).
-        let short_frag = [PROTOCOL_VERSION, crate::segment::FRAGMENT_CODE, 0, 0, 0, 0, 0, 0, 0];
+        let short_frag = [
+            PROTOCOL_VERSION,
+            crate::segment::FRAGMENT_CODE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
         assert!(!is_valid_vallum_packet(&short_frag));
         let full_frag = [
             PROTOCOL_VERSION,
@@ -596,7 +624,10 @@ mod tests {
         sign_with_cookies(&suite, &mut init_b, responder_pk, None).unwrap();
         let init_pkt = init_b.finish().unwrap();
 
-        assert_eq!(extract_initiation_sender_index(&init_pkt), Some(0x0102_0304));
+        assert_eq!(
+            extract_initiation_sender_index(&init_pkt),
+            Some(0x0102_0304)
+        );
         assert!(verify_handshake_mac1(&suite, responder_pk, &init_pkt));
         assert!(!verify_handshake_mac1(
             &suite,
@@ -628,7 +659,10 @@ mod tests {
         };
         let mut frag_pkt = frag0.encode().to_vec();
         frag_pkt.extend_from_slice(&init_pkt[..64]);
-        assert_eq!(extract_initiation_sender_index(&frag_pkt), Some(0x0102_0304));
+        assert_eq!(
+            extract_initiation_sender_index(&frag_pkt),
+            Some(0x0102_0304)
+        );
         assert!(is_authentic_handshake_packet(&frag_pkt, &[], None));
 
         // 3. RespHello requires EPHEMERAL_CT, STATIC_CT, RECEIVER_INDEX, CONFIRMATION, PRE_TAG.

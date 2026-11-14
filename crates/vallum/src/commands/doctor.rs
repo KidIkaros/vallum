@@ -285,8 +285,7 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         if let Some(leak_check) = check_leak_guard(args.config.as_deref(), resolved) {
             checks.push(leak_check);
         }
-        if let Some(route_check) = check_route_leak(args.config.as_deref(), resolved, tunnel_live)
-        {
+        if let Some(route_check) = check_route_leak(args.config.as_deref(), resolved, tunnel_live) {
             checks.push(route_check);
         }
         let rotating: Vec<&str> = resolved
@@ -526,10 +525,7 @@ fn probe_endpoints(
         } else {
             format!("tcp: {joined} accepted a connection")
         };
-        (
-            Check::new("path", Status::Pass, detail),
-            Some(true),
-        )
+        (Check::new("path", Status::Pass, detail), Some(true))
     } else {
         let detail = if carrier == vallum_config::Carrier::Auto {
             format!(
@@ -544,10 +540,7 @@ fn probe_endpoints(
                 failed.join(", ")
             )
         };
-        (
-            Check::new("path", Status::Warn, detail),
-            Some(false),
-        )
+        (Check::new("path", Status::Warn, detail), Some(false))
     }
 }
 
@@ -1013,7 +1006,10 @@ fn evaluate_leak_guard(interface: &str, inputs: &LeakGuardInputs) -> Check {
     }
 }
 
-fn check_leak_guard(config_path: Option<&Path>, resolved: &crate::config::Resolved) -> Option<Check> {
+fn check_leak_guard(
+    config_path: Option<&Path>,
+    resolved: &crate::config::Resolved,
+) -> Option<Check> {
     let path = config_path?;
     let cfg = Config::load(path).ok()?;
     let full_tunnel = cfg.peers.iter().any(|peer| {
@@ -1072,8 +1068,10 @@ fn parse_resolv_nameservers(resolv_text: &str) -> Vec<String> {
 }
 
 fn is_loopback_resolver(ns: &str) -> bool {
-    ns.parse::<std::net::IpAddr>()
-        .map_or_else(|_| matches!(ns, "127.0.0.53" | "127.0.0.1" | "::1"), |ip| ip.is_loopback())
+    ns.parse::<std::net::IpAddr>().map_or_else(
+        |_| matches!(ns, "127.0.0.53" | "127.0.0.1" | "::1"),
+        |ip| ip.is_loopback(),
+    )
 }
 
 fn ip_route_dev(family_flag: &str, dest: &str) -> Option<String> {
@@ -1924,11 +1922,15 @@ mod tests {
         assert!(dns_leak.detail.contains("192.168.1.1"));
 
         assert_eq!(
-            super::parse_ip_route_dev("1.1.1.1 dev vallum-laptop table 51820 src 10.7.0.2 uid 1000"),
+            super::parse_ip_route_dev(
+                "1.1.1.1 dev vallum-laptop table 51820 src 10.7.0.2 uid 1000"
+            ),
             Some("vallum-laptop".to_owned())
         );
         assert_eq!(
-            super::parse_resolv_nameservers("# comment\nnameserver 127.0.0.53\nnameserver 1.1.1.1\n"),
+            super::parse_resolv_nameservers(
+                "# comment\nnameserver 127.0.0.53\nnameserver 1.1.1.1\n"
+            ),
             vec!["127.0.0.53".to_owned(), "1.1.1.1".to_owned()]
         );
     }
@@ -2190,7 +2192,8 @@ mod tests {
         let (dropped, reassembled, delivered) = super::parse_uapi_fragmentation_counters(&parsed);
         assert_eq!((dropped, reassembled, delivered), (3, 120, 5000));
 
-        let rec = crate::net::recommend_mtu_from_telemetry(1500, &[], dropped, reassembled, delivered);
+        let rec =
+            crate::net::recommend_mtu_from_telemetry(1500, &[], dropped, reassembled, delivered);
         assert_eq!(rec.recommended_inner_mtu, 1380);
         assert_eq!(rec.profile, crate::net::MtuProfile::GamingLowFrag1380);
     }

@@ -794,6 +794,7 @@ pub(crate) fn run_dns_proxy(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -939,8 +940,22 @@ mod tests {
                         ));
                         resp.extend_from_slice(&buf[12..parsed.question_end]);
                         resp.extend_from_slice(&[
-                            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04,
-                            10, 20, 30, reply_last_byte,
+                            0xc0,
+                            0x0c,
+                            0x00,
+                            0x01,
+                            0x00,
+                            0x01,
+                            0x00,
+                            0x00,
+                            0x00,
+                            0x3c,
+                            0x00,
+                            0x04,
+                            10,
+                            20,
+                            30,
+                            reply_last_byte,
                         ]);
                         let _ = sock.send_to(&resp, cli);
                     }
@@ -968,7 +983,9 @@ mod tests {
 
         // 1. AAAA query suppressed locally (NODATA, zero upstream hits).
         let q_aaaa = build_dns_query(0x1001, "example.com", DNS_TYPE_AAAA);
-        client.send_to(&q_aaaa, proxy.local_addr()).expect("send aaaa");
+        client
+            .send_to(&q_aaaa, proxy.local_addr())
+            .expect("send aaaa");
         let mut rbuf = [0u8; 512];
         let (n, _) = client.recv_from(&mut rbuf).expect("recv aaaa");
         assert_eq!(&rbuf[0..2], &0x1001u16.to_be_bytes());
@@ -978,14 +995,18 @@ mod tests {
 
         // 2. Public A query goes to tunnel upstream -> 10.20.30.11.
         let q_pub = build_dns_query(0x1002, "example.com", DNS_TYPE_A);
-        client.send_to(&q_pub, proxy.local_addr()).expect("send pub");
+        client
+            .send_to(&q_pub, proxy.local_addr())
+            .expect("send pub");
         let (n, _) = client.recv_from(&mut rbuf).expect("recv pub");
         assert_eq!(&rbuf[n - 4..n], &[10, 20, 30, 11]);
         assert_eq!(tunnel_hits.load(Ordering::Relaxed), 1);
 
         // 3. `.lan` A query goes to LAN upstream -> 10.20.30.22.
         let q_lan = build_dns_query(0x1003, "printer.lan", DNS_TYPE_A);
-        client.send_to(&q_lan, proxy.local_addr()).expect("send lan");
+        client
+            .send_to(&q_lan, proxy.local_addr())
+            .expect("send lan");
         let (n, _) = client.recv_from(&mut rbuf).expect("recv lan");
         assert_eq!(&rbuf[n - 4..n], &[10, 20, 30, 22]);
         assert_eq!(lan_hits.load(Ordering::Relaxed), 1);
@@ -993,7 +1014,9 @@ mod tests {
         // 4. Enabling captive_spoof intercepts A locally -> 198.51.100.1 without hitting upstream.
         proxy.set_captive_spoof(true);
         let q_cap = build_dns_query(0x1004, "captive.apple.com", DNS_TYPE_A);
-        client.send_to(&q_cap, proxy.local_addr()).expect("send cap");
+        client
+            .send_to(&q_cap, proxy.local_addr())
+            .expect("send cap");
         let (n, _) = client.recv_from(&mut rbuf).expect("recv cap");
         assert_eq!(&rbuf[n - 4..n], &[198, 51, 100, 1]);
         assert_eq!(tunnel_hits.load(Ordering::Relaxed), 1);

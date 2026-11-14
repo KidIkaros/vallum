@@ -1081,7 +1081,11 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
     for (table_name, key, raw) in [
         ("interface", "addresses", fields.addresses.as_str()),
         ("quick", "dns", fields.dns.as_str()),
-        ("quick", "content_blockers", fields.content_blockers.as_str()),
+        (
+            "quick",
+            "content_blockers",
+            fields.content_blockers.as_str(),
+        ),
     ] {
         let entries: Vec<&str> = raw
             .split(',')

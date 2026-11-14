@@ -211,7 +211,8 @@ impl UdpTransport {
                 if self.has_lwo_peers.load(Ordering::Acquire) {
                     if let Ok(mut peers) = self.lwo_peers.lock() {
                         peers.remove(&source);
-                        self.has_lwo_peers.store(!peers.is_empty(), Ordering::Release);
+                        self.has_lwo_peers
+                            .store(!peers.is_empty(), Ordering::Release);
                     }
                 }
             }
@@ -831,11 +832,7 @@ impl AutoTransport {
         })
     }
 
-    fn decide_outbound(
-        &self,
-        destination: SocketAddr,
-        bytes: &[u8],
-    ) -> (bool, bool, Vec<Vec<u8>>) {
+    fn decide_outbound(&self, destination: SocketAddr, bytes: &[u8]) -> (bool, bool, Vec<Vec<u8>>) {
         let now = Instant::now();
         let (lock, cv) = &*self.peers;
         let Ok(mut map) = lock.lock() else {
@@ -976,9 +973,10 @@ impl DatagramSocket for AutoTransport {
                 buf[..n].copy_from_slice(&bytes[..n]);
                 Ok((n, source))
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "no datagram waiting"))
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "no datagram waiting",
+            )),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "auto carrier closed",
@@ -2810,7 +2808,11 @@ mod tests {
 
         let mut buf = [0u8; 256];
         let (n, peer) = udp_server.recv_from(&mut buf).expect("server recv");
-        assert_eq!(&buf[..n], pkt.as_slice(), "server unmasks LWO transparently");
+        assert_eq!(
+            &buf[..n],
+            pkt.as_slice(),
+            "server unmasks LWO transparently"
+        );
 
         let reply = sample_vallum_packet(99);
         udp_server.send_to(&reply, peer).expect("server -> client");
@@ -2869,7 +2871,9 @@ mod tests {
 
         // UDP attempt fires first as LWO on the blackhole socket.
         let mut wire = [0u8; 256];
-        let (wn, _) = blackhole_udp.recv_from(&mut wire).expect("blackhole got udp");
+        let (wn, _) = blackhole_udp
+            .recv_from(&mut wire)
+            .expect("blackhole got udp");
         assert_eq!(wn, req.len());
         assert_ne!(wire[0], 0x01);
 
@@ -3002,11 +3006,16 @@ mod tests {
         // 1. Verify raw wire prelude emitted on outbound TCP dial when tcp_upgrade is configured.
         let raw_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("raw listener");
         let raw_addr = raw_listener.local_addr().expect("raw addr");
-        let probe_client =
-            TcpTransport::bind_with_upgrade("127.0.0.1:0".parse().expect("addr"), 0, Some("edge.wingman.gold:443"))
-                .expect("probe client");
+        let probe_client = TcpTransport::bind_with_upgrade(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Some("edge.wingman.gold:443"),
+        )
+        .expect("probe client");
         let req_pkt = sample_vallum_packet(77);
-        probe_client.send_to(&req_pkt, raw_addr).expect("send to raw");
+        probe_client
+            .send_to(&req_pkt, raw_addr)
+            .expect("send to raw");
 
         let (mut srv_stream, _) = raw_listener.accept().expect("accept raw");
         srv_stream
@@ -3031,9 +3040,12 @@ mod tests {
         // 2. End-to-end bidirectional exchange between client (with tcp_upgrade) and TcpTransport server.
         let tcp_server = TcpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("server");
         let server_addr = tcp_server.local_addr().expect("server addr");
-        let tcp_client =
-            TcpTransport::bind_with_upgrade("127.0.0.1:0".parse().expect("addr"), 0, Some("cdn.example.com"))
-                .expect("client");
+        let tcp_client = TcpTransport::bind_with_upgrade(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Some("cdn.example.com"),
+        )
+        .expect("client");
 
         tcp_client.send_to(&req_pkt, server_addr).expect("send req");
         let mut srv_buf = [0u8; 512];
@@ -3047,7 +3059,9 @@ mod tests {
         assert_eq!(&srv_buf[..sn], req_pkt.as_slice());
 
         let resp_pkt = sample_vallum_packet(88);
-        tcp_server.send_to(&resp_pkt, client_peer).expect("send resp");
+        tcp_server
+            .send_to(&resp_pkt, client_peer)
+            .expect("send resp");
         let mut cli_buf = [0u8; 512];
         let (cn, rsrc) = loop {
             match tcp_client.recv_from(&mut cli_buf) {
@@ -3113,7 +3127,9 @@ mod tests {
             .send_to(&[0x99; 24], tcp_peer)
             .expect("send garbage tcp frame");
         let resp = sample_vallum_packet(88);
-        tcp_server.send_to(&resp, tcp_peer).expect("send valid resp");
+        tcp_server
+            .send_to(&resp, tcp_peer)
+            .expect("send valid resp");
 
         let (cn, csrc) = loop {
             match auto_client.recv_from(&mut buf) {
@@ -3184,7 +3200,9 @@ mod tests {
         // Drain the 4 LWO-masked UDP fragments at the blackhole socket.
         let mut wire = [0u8; 512];
         for _ in 0..4 {
-            let (wn, _) = blackhole_udp.recv_from(&mut wire).expect("blackhole udp frag");
+            let (wn, _) = blackhole_udp
+                .recv_from(&mut wire)
+                .expect("blackhole udp frag");
             assert!(wn >= fragments[0].len());
         }
 
@@ -3285,11 +3303,11 @@ mod tests {
         good_b
             .field(tag::CONFIRMATION, &[0xcc; CONFIRMATION_SIZE])
             .unwrap();
-        good_b
-            .field(tag::PRE_TAG, &[0xdd; RESP_TAG_SIZE])
-            .unwrap();
+        good_b.field(tag::PRE_TAG, &[0xdd; RESP_TAG_SIZE]).unwrap();
         let good_resp = good_b.finish().unwrap();
-        udp_server.send_to(&good_resp, peer).expect("send good resp");
+        udp_server
+            .send_to(&good_resp, peer)
+            .expect("send good resp");
 
         let mut cbuf = [0u8; 512];
         let (cn, csrc) = loop {

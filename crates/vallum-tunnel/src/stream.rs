@@ -92,10 +92,7 @@ impl std::error::Error for FrameError {}
 /// a reverse proxy such as Caddy or Nginx.
 #[must_use]
 pub fn upgrade_request(host: &str) -> Vec<u8> {
-    let sanitized: String = host
-        .chars()
-        .filter(|c| !matches!(c, '\r' | '\n'))
-        .collect();
+    let sanitized: String = host.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
     let host_hdr = if sanitized.trim().is_empty() {
         "localhost"
     } else {
@@ -267,8 +264,7 @@ impl FrameReader {
                 return Err(FrameError::BadUpgrade);
             }
             self.upgrade_reply_needed = true;
-        } else if !first_line.starts_with("HTTP/1.1 101")
-            && !first_line.starts_with("HTTP/1.0 101")
+        } else if !first_line.starts_with("HTTP/1.1 101") && !first_line.starts_with("HTTP/1.0 101")
         {
             return Err(FrameError::BadUpgrade);
         }
@@ -452,14 +448,18 @@ mod tests {
         let mut bad_upgrade = FrameReader::new();
         bad_upgrade.push(b"GET /_vallum HTTP/1.1\r\nHost: wingman.gold\r\n\r\n");
         assert_eq!(
-            bad_upgrade.next_frame().expect_err("missing Upgrade header"),
+            bad_upgrade
+                .next_frame()
+                .expect_err("missing Upgrade header"),
             FrameError::BadUpgrade
         );
 
         let mut bad_status = FrameReader::new();
         bad_status.push(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
         assert_eq!(
-            bad_status.next_frame().expect_err("non-101 status rejected"),
+            bad_status
+                .next_frame()
+                .expect_err("non-101 status rejected"),
             FrameError::BadUpgrade
         );
 

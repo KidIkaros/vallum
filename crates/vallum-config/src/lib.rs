@@ -156,9 +156,7 @@ pub fn content_blocker_bit(name: &str) -> Option<u8> {
 /// Encode `[quick] content_blockers` into the CGNAT magic resolver address
 /// `100.64.0.<bitmask>`, returning `None` if no valid category is active.
 #[must_use]
-pub fn content_blocker_resolver_ip<S: AsRef<str>>(
-    blockers: &[S],
-) -> Option<std::net::Ipv4Addr> {
+pub fn content_blocker_resolver_ip<S: AsRef<str>>(blockers: &[S]) -> Option<std::net::Ipv4Addr> {
     let mut mask = 0u8;
     for raw in blockers {
         if let Some(bit) = content_blocker_bit(raw.as_ref()) {
@@ -777,7 +775,10 @@ pub fn validate_tcp_upgrade_host(host: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("[interface] tcp_upgrade must not be empty".to_owned());
     }
-    if trimmed.bytes().any(|b| b <= 0x20 || b == 0x7f || !b.is_ascii()) {
+    if trimmed
+        .bytes()
+        .any(|b| b <= 0x20 || b == 0x7f || !b.is_ascii())
+    {
         return Err(
             "[interface] tcp_upgrade must be an ASCII host or host:port without whitespace"
                 .to_owned(),
@@ -1284,8 +1285,7 @@ size = 1400
         assert!(validate_tcp_upgrade_host("https://cdn.example.com").is_err());
         assert!(validate_tcp_upgrade_host("cdn.example.com/path").is_err());
 
-        let dir =
-            std::env::temp_dir().join(format!("vallum-cfg-tcp-upg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vallum-cfg-tcp-upg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let good_path = dir.join("good.toml");

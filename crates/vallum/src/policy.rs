@@ -434,10 +434,7 @@ fn ruleset_steps(config: &Config, interface: &str, rules: String) -> Vec<HostSte
             summary: "restrict ARP replies to the ingress link's own addresses (arp_ignore=2)"
                 .to_owned(),
             program: "sysctl".to_owned(),
-            args: vec![
-                "-w".to_owned(),
-                "net.ipv4.conf.all.arp_ignore=2".to_owned(),
-            ],
+            args: vec!["-w".to_owned(), "net.ipv4.conf.all.arp_ignore=2".to_owned()],
             stdin: None,
             ignore_failure: true,
         });
@@ -457,7 +454,9 @@ fn ruleset_steps(config: &Config, interface: &str, rules: String) -> Vec<HostSte
 pub fn guard_steps(config: &Config, interface: &str) -> Result<Vec<HostStep>, Error> {
     let rules = match ruleset(config, interface) {
         Ok(rules) => rules,
-        Err(_) if Mode::from_config(config) == Mode::Lockdown => lockdown_ruleset(config, interface),
+        Err(_) if Mode::from_config(config) == Mode::Lockdown => {
+            lockdown_ruleset(config, interface)
+        }
         Err(error) => return Err(error),
     };
     Ok(ruleset_steps(config, interface, rules))
@@ -849,10 +848,8 @@ allowed_ips = ["10.7.0.1/32"]
         assert!(Mode::Lockdown.expects_guard());
         assert_eq!(Mode::Lockdown.as_str(), "lockdown");
 
-        let split_lockdown = config(&SPLIT_V4.replace(
-            "[[peer]]",
-            "[quick]\npolicy = \"lockdown\"\n\n[[peer]]",
-        ));
+        let split_lockdown =
+            config(&SPLIT_V4.replace("[[peer]]", "[quick]\npolicy = \"lockdown\"\n\n[[peer]]"));
         assert_eq!(resolve(&split_lockdown), Mode::Lockdown);
         assert!(!declines_guard(
             &split_lockdown,
@@ -888,7 +885,10 @@ allowed_ips = ["10.7.0.1/32"]
             );
         let cfg = config(&unresolved);
         let rules = lockdown_ruleset(&cfg, "vallum-laptop");
-        assert!(rules.contains("oifname \"vallum-laptop\" accept"), "{rules}");
+        assert!(
+            rules.contains("oifname \"vallum-laptop\" accept"),
+            "{rules}"
+        );
         assert!(rules.contains("    drop\n"), "{rules}");
         let steps = guard_steps(&cfg, "vallum-laptop").expect("lockdown falls back without DNS");
         assert_eq!(steps.len(), 3);

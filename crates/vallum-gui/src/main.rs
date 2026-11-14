@@ -959,7 +959,9 @@ pub(crate) fn dispatch(
             answer(apply_interface_at(&socket, &fields)?)
         }
         "save_runtime" => answer(save_runtime_at(&socket)?),
-        "tune_mtu" => serde_json::to_value(actions::tune_mtu(&socket)?).map_err(|error| error.to_string()),
+        "tune_mtu" => {
+            serde_json::to_value(actions::tune_mtu(&socket)?).map_err(|error| error.to_string())
+        }
         "export_bundle" => serde_json::to_value(export_at(
             &socket,
             &text("fingerprint")?,

@@ -324,11 +324,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
                 GuardState::Unknown => "unknown (needs root)",
             }
         );
-        println!(
-            "{:<10} {}",
-            "policy",
-            resolved.as_str()
-        );
+        println!("{:<10} {}", "policy", resolved.as_str());
     }
 
     if verdict.is_failure() {
