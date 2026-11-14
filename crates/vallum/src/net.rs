@@ -2732,7 +2732,7 @@ mod tests {
 
     #[test]
     fn mtu_optimizer_selects_1280_with_empirical_wingman_vps_jitter_profile() {
-        // Empirical live measurement (ikaaros -> 203.0.113.10):
+        // Empirical live measurement (operator -> 203.0.113.10):
         // 1280 had 0.4ms jitter while 1380/1420 jumped 4.25x-4.5x to 1.7-1.8ms.
         let samples = vec![
             MtuCandidateSample {

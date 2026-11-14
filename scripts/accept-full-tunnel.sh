@@ -29,7 +29,7 @@ VPS=${VPS:-wingman-vps}
 CONFIG=${CONFIG:-/etc/vallum/vallum0.toml}
 if [ -z "${SERVER_IP:-}" ]; then
     SERVER_IP=$(ssh -G "$VPS" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')
-    SERVER_IP=${SERVER_IP:-203.0.113.10}
+    [ -n "$SERVER_IP" ] || { echo "set SERVER_IP: could not resolve a hostname for $VPS" >&2; exit 2; }
 fi
 RUNDIR=$(mktemp -d -t accept-full.XXXXXX)
 

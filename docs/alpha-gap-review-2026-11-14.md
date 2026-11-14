@@ -24,11 +24,7 @@ pinned toolchain (rustc 1.100.0).
 
 ## Pre-publication hygiene (publication-checklist §2, still open)
 
-- Non-documentation IPs are committed: the VPS address `203.0.113.10` in
-  `crates/vallum/src/net.rs`, `docs/alpha-readiness-2026-11-12.md`, `docs/plan-2026-11-09.md`,
-  `scripts/accept-full-tunnel.sh`, and the operator's home-ISP address `198.51.100.7` in
-  `docs/proof/live-traffic-audit.md` and `docs/alpha-readiness-2026-11-12.md`.
-  Replace with `192.0.2.x` / `203.0.113.x` before the repo goes public.
+- Non-documentation IPs (the VPS and the operator's home ISP) were committed in code, docs and a script. **Scrubbed 2026-11-14** to `203.0.113.10` / `198.51.100.7`; `accept-full-tunnel.sh` now requires `SERVER_IP` or an `ssh -G` hostname instead of a baked-in fallback. Still present in git history: a history rewrite is a separate decision.
 - History scan for private keys / `gh*_` tokens: 0 hits on `git log -p --all`.
 - README screenshots must not show the endpoint (the Devices-panel capture does).
 
