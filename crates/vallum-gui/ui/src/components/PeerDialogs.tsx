@@ -1450,6 +1450,8 @@ export function InterfaceFormDialog({
     listen: "",
     carrier: "",
     tcp_upgrade: "",
+    ss_psk: "",
+    tls_sni: "",
     mtu: "",
     fwmark: "",
     addresses: "",
@@ -1457,6 +1459,7 @@ export function InterfaceFormDialog({
     table: "",
     policy: "",
     content_blockers: "",
+    via: "",
   })
   const { busy, submit } = useGuardedSubmit()
 
@@ -1640,7 +1643,7 @@ export function InterfaceFormDialog({
             </div>
             <Field
               label="carrier transport"
-              hint="udp, lwo (zero-overhead XOR), auto (500ms happy-eyeballs), or tcp"
+              hint="udp, lwo, auto, tcp, ss (AEAD UDP), tls (TLS 1.3), or quic (QUIC DATAGRAM)"
             >
               <Input
                 value={fields.carrier}
@@ -1673,6 +1676,24 @@ export function InterfaceFormDialog({
                   active={activeCarrier === "tcp"}
                   onClick={() => set("carrier")("tcp")}
                 />
+                <PresetChip
+                  label="ss (AEAD UDP)"
+                  disabled={loading}
+                  active={activeCarrier === "ss"}
+                  onClick={() => set("carrier")("ss")}
+                />
+                <PresetChip
+                  label="tls (TLS 1.3)"
+                  disabled={loading}
+                  active={activeCarrier === "tls"}
+                  onClick={() => set("carrier")("tls")}
+                />
+                <PresetChip
+                  label="quic (DATAGRAM)"
+                  disabled={loading}
+                  active={activeCarrier === "quic"}
+                  onClick={() => set("carrier")("quic")}
+                />
               </div>
             </Field>
             {(activeCarrier === "tcp" ||
@@ -1690,6 +1711,45 @@ export function InterfaceFormDialog({
                 />
               </Field>
             )}
+            {(activeCarrier === "ss" || Boolean(fields.ss_psk?.trim())) && (
+              <Field
+                label="ss pre-shared key (optional)"
+                hint="Shared obfuscation secret for carrier = 'ss' (hex/passphrase)"
+              >
+                <Input
+                  value={fields.ss_psk ?? ""}
+                  onChange={(e) => set("ss_psk")(e.target.value)}
+                  disabled={loading}
+                  placeholder="shared-obfuscation-secret"
+                />
+              </Field>
+            )}
+            {(activeCarrier === "tls" ||
+              activeCarrier === "quic" ||
+              Boolean(fields.tls_sni?.trim())) && (
+              <Field
+                label="tls sni hostname (optional)"
+                hint="Server Name Indication sent in TLS/QUIC ClientHello (defaults to localhost)"
+              >
+                <Input
+                  value={fields.tls_sni ?? ""}
+                  onChange={(e) => set("tls_sni")(e.target.value)}
+                  disabled={loading}
+                  placeholder="cdn.example.com"
+                />
+              </Field>
+            )}
+            <Field
+              label="multihop entry config (optional)"
+              hint="Path to entry tunnel TOML for 2-hop Client -> Entry -> Exit ([quick] via)"
+            >
+              <Input
+                value={fields.via ?? ""}
+                onChange={(e) => set("via")(e.target.value)}
+                disabled={loading}
+                placeholder="entry.toml"
+              />
+            </Field>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="firewall mark" hint="decimal or 0x hex">
                 <Input

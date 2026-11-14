@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.7.0 (Unreleased)
+
+- **New obfuscated & encrypted transport carriers (`ss`, `tls`, `quic`).**
+  - `carrier = "ss"`: Shadowsocks-style committing AEAD UDP framing (`[24B nonce || AEAD]`) with optional `[interface] ss_psk`, eliminating plaintext headers and fixed magic bytes on the wire.
+  - `carrier = "tls"`: Synchronous TLS 1.3 stream carrier over TCP (`rustls` + `rcgen` ephemeral certs + `[interface] tls_sni`), keeping the daemon's non-async architecture and 79-syscall `seccomp` allow-list intact.
+  - `carrier = "quic"`: Sans-I/O QUIC v1 `DATAGRAM` (RFC 9221) carrier over UDP (`quinn-proto`), providing encrypted QUIC framing without TCP head-of-line blocking.
+- **2-hop multihop (`[quick] via`).**
+  - Exit configs can specify `[quick] via = "<entry-config>"` in `vallum-quick` (`up`/`down`/`attach`/`detach`) to bring up an Entry tunnel first, route the Exit endpoint through Entry, and tear down Exit before Entry (with automatic Entry rollback on failure).
+- **Relay selector (`vallum peer select`).**
+  - Probes candidate relay endpoints (TCP dial or ICMP RTT) and ranks reachable relays by lowest latency.
+- **HTTPS/HTTP API fronting for enrolment.**
+  - `[enroll] front_port`, `front_tls`, and `front_sni` add an HTTP/HTTPS `POST /_vallum/enroll` responder sharing the cookie gate, rate limiter, and PQ-sealed `VEN2` reply path; `vallum setup --join --front-url <url> [--front-host <host>]` supports CDN domain fronting.
+- **Active leak checker & settings migration.**
+  - `vallum-quick leak-check` and periodic TTL=1 non-tunnel probes in `vallum-quick watch` (`/run/vallum/<if>.leak-check`, surfaced in `vallum doctor`).
+  - `schema_version` + `vallum_config::migrate_toml` (`v0` → `v1` canonicalizing legacy `failure_policy` aliases and injecting `DEFAULT_FWMARK` for full-tunnel configs).
+- **Console parity.**
+  - Updated `vallum-gui` Interface editor to support `ss`, `tls`, `quic`, `ss_psk`, `tls_sni`, and `[quick] via`.
+
 ## 1.6.5 — 2026-11-13
 
 - **The console's composition root stops implementing its own use cases.**

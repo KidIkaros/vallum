@@ -160,6 +160,8 @@ export interface InterfaceFields {
   listen: string
   carrier: string
   tcp_upgrade?: string
+  ss_psk?: string
+  tls_sni?: string
   mtu: string
   fwmark: string
   addresses: string
@@ -167,6 +169,7 @@ export interface InterfaceFields {
   table: string
   policy?: string
   content_blockers?: string
+  via?: string
 }
 
 export interface MtuTuneOut {

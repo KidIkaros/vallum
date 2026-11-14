@@ -57,7 +57,12 @@ Not built (ordered by alpha value, lowest effort first):
 4. ~~**Settings migration chain** (Mullvad §10.2)~~ — **landed 2026-11-14**: `schema_version`
    + `vallum_config::migrate_toml` (`v0` -> `v1` canonicalizing legacy `failure_policy` aliases,
    injecting `DEFAULT_FWMARK` for full-tunnel configs, and refusing future schema versions).
-5. TLS/QUIC `DATAGRAM` and Shadowsocks carriers; multihop; relay selector; API fronting (post-alpha).
+5. ~~TLS/QUIC `DATAGRAM` and Shadowsocks carriers; multihop; relay selector; API fronting (post-alpha).~~ — **landed 2026-11-14**:
+   - `carrier = "ss"`, `"tls"`, `"quic"` (+ `ss_psk`, `tls_sni`),
+   - 2-hop `[quick] via = "<entry-config>"` multihop,
+   - `vallum peer select` latency/reachability relay selector,
+   - `[enroll] front_port`/`front_tls`/`front_sni` + `vallum setup --join --front-url`/`--front-host` API fronting,
+   - `vallum-gui` Interface editor parity.
 
 Verification note for item 1: forwarding relay exercised end-to-end in an unprivileged user
 namespace against a mock upstream; attach/detach dry-run plans checked; the pidfile

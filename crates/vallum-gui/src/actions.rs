@@ -75,6 +75,8 @@ pub struct InterfaceFields {
     pub listen: String,
     pub carrier: String,
     pub tcp_upgrade: String,
+    pub ss_psk: String,
+    pub tls_sni: String,
     pub mtu: String,
     pub fwmark: String,
     pub addresses: String,
@@ -82,6 +84,7 @@ pub struct InterfaceFields {
     pub table: String,
     pub policy: String,
     pub content_blockers: String,
+    pub via: String,
 }
 
 /// The fields of the peer form, as typed.
@@ -927,6 +930,8 @@ pub fn read_interface_fields(config: &Path) -> Result<InterfaceFields, String> {
         listen: table_string("interface", "listen"),
         carrier: table_string("interface", "carrier"),
         tcp_upgrade: table_string("interface", "tcp_upgrade"),
+        ss_psk: table_string("interface", "ss_psk"),
+        tls_sni: table_string("interface", "tls_sni"),
         mtu: integer("mtu"),
         fwmark: integer("fwmark"),
         addresses: list("interface", "addresses"),
@@ -934,6 +939,7 @@ pub fn read_interface_fields(config: &Path) -> Result<InterfaceFields, String> {
         table: table_string("quick", "table"),
         policy: table_string("quick", "policy"),
         content_blockers: list("quick", "content_blockers"),
+        via: table_string("quick", "via"),
     })
 }
 
@@ -994,12 +1000,23 @@ fn validate_interface_fields(fields: &InterfaceFields) -> Result<(), String> {
         return Err("table must be `auto`, `off`, or a routing table number".to_owned());
     }
     let carrier = fields.carrier.trim();
-    if !carrier.is_empty() && !matches!(carrier, "udp" | "lwo" | "auto" | "tcp") {
-        return Err("carrier must be `udp`, `lwo`, `auto`, or `tcp`".to_owned());
+    if !carrier.is_empty()
+        && !matches!(
+            carrier,
+            "udp" | "lwo" | "auto" | "tcp" | "ss" | "tls" | "quic"
+        )
+    {
+        return Err(
+            "carrier must be `udp`, `lwo`, `auto`, `tcp`, `ss`, `tls`, or `quic`".to_owned(),
+        );
     }
     let tcp_upgrade = fields.tcp_upgrade.trim();
     if !tcp_upgrade.is_empty() {
         vallum_config::validate_tcp_upgrade_host(tcp_upgrade)?;
+    }
+    let tls_sni = fields.tls_sni.trim();
+    if !tls_sni.is_empty() {
+        vallum_config::validate_tls_sni(tls_sni)?;
     }
     let policy = fields.policy.trim();
     if !policy.is_empty() && !matches!(policy, "off" | "auto" | "on" | "lockdown") {
@@ -1052,6 +1069,8 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
     set_string(interface, "listen", &fields.listen);
     set_string(interface, "carrier", &fields.carrier);
     set_string(interface, "tcp_upgrade", &fields.tcp_upgrade);
+    set_string(interface, "ss_psk", &fields.ss_psk);
+    set_string(interface, "tls_sni", &fields.tls_sni);
 
     let mtu = fields.mtu.trim();
     if mtu.is_empty() {
@@ -1114,6 +1133,7 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
 
     if !fields.table.trim().is_empty()
         || !fields.policy.trim().is_empty()
+        || !fields.via.trim().is_empty()
         || doc.get("quick").is_some()
     {
         if doc.get("quick").is_none() {
@@ -1122,6 +1142,7 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
         if let Some(table) = doc["quick"].as_table_mut() {
             set_string(table, "table", &fields.table);
             set_string(table, "policy", &fields.policy);
+            set_string(table, "via", &fields.via);
         }
     }
 
@@ -1535,6 +1556,8 @@ mod config_tests {
             listen: "0.0.0.0:51820".to_owned(),
             carrier: "auto".to_owned(),
             tcp_upgrade: "edge.wingman.gold:443".to_owned(),
+            ss_psk: String::new(),
+            tls_sni: "cdn.example.com".to_owned(),
             mtu: "1420".to_owned(),
             fwmark: "0xca6c".to_owned(),
             addresses: "10.7.0.1/24, fd00:7::1/64".to_owned(),
@@ -1542,6 +1565,7 @@ mod config_tests {
             table: "auto".to_owned(),
             policy: "lockdown".to_owned(),
             content_blockers: "ads, trackers, malware".to_owned(),
+            via: "entry.toml".to_owned(),
         };
         apply_interface(&path, &updated).expect("apply valid interface fields");
 
