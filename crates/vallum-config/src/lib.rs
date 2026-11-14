@@ -143,6 +143,27 @@ pub struct Quick {
     /// running its own resolver (dnsmasq, bind) must not spare.
     #[serde(default)]
     pub dns_proxy: bool,
+    /// Optional entry-hop configuration path for 2-hop multihop (`Client -> Entry -> Exit`).
+    ///
+    /// When set, `vallum-quick up` / `attach` brings up the entry tunnel first
+    /// (which should route `<exit_endpoint>/32`) before starting this exit
+    /// tunnel, and `down` / `detach` tears them down in reverse order.
+    #[serde(default)]
+    pub via: Option<PathBuf>,
+}
+
+/// Resolve a `[quick] via` path relative to the exit config's parent directory.
+#[must_use]
+pub fn resolve_via_path(config_path: &Path, via: &Path) -> PathBuf {
+    if via.is_absolute() {
+        via.to_path_buf()
+    } else {
+        config_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join(via)
+    }
 }
 
 /// Server-side DNS content-blocker categories and their bit positions in the
@@ -802,6 +823,20 @@ impl Config {
                 message,
             })?;
         }
+        if let Some(via) = &self.quick.via {
+            if via.as_os_str().is_empty() {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: "[quick] via cannot be empty".to_owned(),
+                });
+            }
+            if self.quick.app_class {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: "cannot combine [quick] via with app_class = true".to_owned(),
+                });
+            }
+        }
         for raw in &self.quick.content_blockers {
             if content_blocker_bit(raw).is_none() {
                 return Err(ConfigError::Invalid {
@@ -1233,6 +1268,16 @@ cap = 4
 
         let config: Config = toml::from_str(&base("carrier = \"ss\"")).expect("parses ss");
         assert_eq!(config.interface.carrier, Some(Carrier::Ss));
+
+        let via_toml = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n\
+                        [quick]\nvia = \"entry.toml\"\n\n\
+                        [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n";
+        let via_cfg: Config = toml::from_str(via_toml).expect("parses via");
+        assert_eq!(via_cfg.quick.via.as_deref(), Some(Path::new("entry.toml")));
+        assert_eq!(
+            resolve_via_path(Path::new("/etc/vallum/exit.toml"), Path::new("entry.toml")),
+            PathBuf::from("/etc/vallum/entry.toml")
+        );
 
         // A typo must not silently leave the interface on the protocol it was
         // meant to avoid.

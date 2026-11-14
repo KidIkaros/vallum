@@ -641,6 +641,10 @@ pub(crate) fn up(
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
+    let entry_path = resolve_via_entry(config_path, &config, dry_run, allow_insecure_config)?;
+    if let Some(ref entry) = entry_path {
+        up(entry, dry_run, allow_insecure_config)?;
+    }
 
     for hook in &config.quick.pre_up {
         run_hook(hook, dry_run)?;
@@ -650,8 +654,38 @@ pub(crate) fn up(
     if result.is_err() {
         // A partially applied `up` must not leave a daemon or routes behind.
         rollback(&config, config_path, &interface, &table, dry_run);
+        if let Some(ref entry) = entry_path {
+            let _ = down(entry, dry_run, allow_insecure_config);
+        }
     }
     result
+}
+
+fn resolve_via_entry(
+    config_path: &Path,
+    config: &Config,
+    dry_run: bool,
+    allow_insecure_config: bool,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let Some(ref via) = config.quick.via else {
+        return Ok(None);
+    };
+    let entry_path = vallum_config::resolve_via_path(config_path, via);
+    if entry_path == config_path {
+        return Err("[quick] via cannot point to itself".into());
+    }
+    let entry_cfg = load_normalized(&entry_path)?;
+    check_config_ownership(&entry_path, &entry_cfg, allow_insecure_config)?;
+    if entry_cfg.quick.via.is_some() {
+        return Err("chained [quick] via beyond 2 hops is not supported".into());
+    }
+    if !dry_run && config.interface.outer_mtu.unwrap_or(1500) > 1380 {
+        eprintln!(
+            "vallum-quick: multihop exit config has outer_mtu > 1380; consider setting \
+             outer_mtu = 1380 to avoid inner-in-outer fragmentation"
+        );
+    }
+    Ok(Some(entry_path))
 }
 
 fn up_after_pre(
@@ -731,9 +765,14 @@ pub(crate) fn down(
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
-    withdraw_host_side(&config, &interface, &table, dry_run, || {
+    let entry_path = resolve_via_entry(config_path, &config, dry_run, allow_insecure_config)?;
+    let res = withdraw_host_side(&config, &interface, &table, dry_run, || {
         let _ = stop_daemon(config_path, dry_run);
-    })
+    });
+    if let Some(ref entry) = entry_path {
+        down(entry, dry_run, allow_insecure_config)?;
+    }
+    res
 }
 
 /// Apply the config's host-level work to an interface someone else started.
@@ -747,6 +786,10 @@ pub(crate) fn attach(
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
+    let entry_path = resolve_via_entry(config_path, &config, dry_run, allow_insecure_config)?;
+    if let Some(ref entry) = entry_path {
+        attach(entry, dry_run, allow_insecure_config)?;
+    }
 
     for hook in &config.quick.pre_up {
         run_hook(hook, dry_run)?;
@@ -761,12 +804,18 @@ pub(crate) fn attach(
         if config.quick.app_class {
             member::refuse_if_device_lost(&interface, unit)?;
         }
-        wait_for_interface(&interface)
-            .map_err(|_| interface_missing(&interface, config.quick.pre_up.len(), unit))?;
-        wait_for_session(&config, config_path, &interface)?;
+        if let Err(err) = wait_for_interface(&interface)
+            .map_err(|_| interface_missing(&interface, config.quick.pre_up.len(), unit))
+            .and_then(|()| wait_for_session(&config, config_path, &interface))
+        {
+            if let Some(ref entry) = entry_path {
+                let _ = detach(entry, dry_run, allow_insecure_config);
+            }
+            return Err(err);
+        }
     }
 
-    attach_host_side(
+    let res = attach_host_side(
         &config,
         config_path,
         &interface,
@@ -774,7 +823,13 @@ pub(crate) fn attach(
         unit,
         dry_run,
         remove_routes,
-    )
+    );
+    if res.is_err() {
+        if let Some(ref entry) = entry_path {
+            let _ = detach(entry, dry_run, allow_insecure_config);
+        }
+    }
+    res
 }
 
 /// Remove what [`attach`] applied, leaving the daemon running.
@@ -784,7 +839,12 @@ pub(crate) fn detach(
     allow_insecure_config: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (config, interface, table) = materialize(config_path, dry_run, allow_insecure_config)?;
-    withdraw_host_side(&config, &interface, &table, dry_run, || ())
+    let entry_path = resolve_via_entry(config_path, &config, dry_run, allow_insecure_config)?;
+    let res = withdraw_host_side(&config, &interface, &table, dry_run, || ());
+    if let Some(ref entry) = entry_path {
+        detach(entry, dry_run, allow_insecure_config)?;
+    }
+    res
 }
 
 pub(crate) fn save(
@@ -1802,5 +1862,59 @@ mod tests {
             config.quick.effective_dns_servers(),
             vec!["100.64.0.7".to_owned(), "9.9.9.9".to_owned()]
         );
+    }
+
+    #[test]
+    fn multihop_via_plans_entry_and_exit_and_refuses_chained_or_self_via() {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-quick-multihop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let entry_path = dir.join("entry.toml");
+        fs::write(
+            &entry_path,
+            "[interface]\nname = \"vallum-entry\"\nprivate_key = \"k1\"\naddress = \"10.8.0.2/24\"\n\n\
+             [[peer]]\nname = \"entry\"\npublic_key = \"k2\"\nendpoint = \"203.0.113.10:51820\"\n\
+             allowed_ips = [\"198.51.100.20/32\"]\n",
+        )
+        .unwrap();
+
+        let exit_path = dir.join("exit.toml");
+        fs::write(
+            &exit_path,
+            "[interface]\nname = \"vallum-exit\"\nprivate_key = \"k3\"\naddress = \"10.9.0.2/24\"\n\n\
+             [quick]\nvia = \"entry.toml\"\n\n\
+             [[peer]]\nname = \"exit\"\npublic_key = \"k4\"\nendpoint = \"198.51.100.20:51820\"\n\
+             allowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+
+        up(&exit_path, true, true).unwrap();
+        down(&exit_path, true, true).unwrap();
+
+        let chained_path = dir.join("chained.toml");
+        fs::write(
+            &chained_path,
+            "[interface]\nname = \"vallum-chain\"\nprivate_key = \"k5\"\naddress = \"10.10.0.2/24\"\n\n\
+             [quick]\nvia = \"exit.toml\"\n\n\
+             [[peer]]\nname = \"chain\"\npublic_key = \"k6\"\nendpoint = \"198.51.100.21:51820\"\n\
+             allowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        assert!(up(&chained_path, true, true).is_err());
+
+        let self_path = dir.join("self_via.toml");
+        fs::write(
+            &self_path,
+            "[interface]\nname = \"vallum-self\"\nprivate_key = \"k7\"\naddress = \"10.11.0.2/24\"\n\n\
+             [quick]\nvia = \"self_via.toml\"\n\n\
+             [[peer]]\nname = \"self\"\npublic_key = \"k8\"\nendpoint = \"198.51.100.22:51820\"\n\
+             allowed_ips = [\"0.0.0.0/0\"]\n",
+        )
+        .unwrap();
+        assert!(up(&self_path, true, true).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
