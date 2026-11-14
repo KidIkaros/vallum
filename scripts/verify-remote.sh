@@ -560,7 +560,16 @@ enrol_bundle() {
             --ship-key --bundle-out $REMOTE_DIR/$name.bundle" >/dev/null || bad "peer add ($name)"
     rsh "sudo chmod 644 $REMOTE_DIR/$name.bundle" || bad "chmod bundle"
     rscp "$TARGET:$REMOTE_DIR/$name.bundle" "$dir/$name.vallum-bundle" || bad "fetch bundle"
-    "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" >/dev/null || bad "import-bundle"
+    # A shipped-key bundle is refused by default (ADR: the key existed on
+    # another machine first, so the file's holder holds the key). Pin the
+    # refusal, then import with the explicit override.
+    if "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" >/dev/null 2>&1; then
+        bad "import-bundle: a shipped-key bundle was accepted WITHOUT --allow-shipped-key"
+    else
+        ok "import-bundle refuses a shipped-key bundle by default"
+    fi
+    "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" \
+        --allow-shipped-key >/dev/null || bad "import-bundle (--allow-shipped-key)"
 }
 
 enrol_ssh() {
