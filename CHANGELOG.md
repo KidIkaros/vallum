@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.7.0 (Unreleased)
+## 1.7.0 — 2026-11-14
 
 - **New obfuscated & encrypted transport carriers (`ss`, `tls`, `quic`).**
   - `carrier = "ss"`: Shadowsocks-style committing AEAD UDP framing (`[24B nonce || AEAD]`) with optional `[interface] ss_psk`, eliminating plaintext headers and fixed magic bytes on the wire.
