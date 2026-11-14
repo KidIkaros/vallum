@@ -24,7 +24,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use vallum_crypto_sdk::SdkSuite;
 use vallum_tunnel::lwo::{self, PacketEncoding};
+use vallum_tunnel::ss;
 use vallum_tunnel::stream::{frame, upgrade_request, FrameReader};
 
 use crate::config::Carrier;
@@ -103,6 +105,18 @@ pub fn bind_with_upgrade(
     fwmark: u32,
     tcp_upgrade: Option<&str>,
 ) -> io::Result<Arc<dyn DatagramSocket>> {
+    bind_with_options(carrier, address, fwmark, tcp_upgrade, None)
+}
+
+/// Bind the transport for `carrier` with optional HTTP/1.1 `Upgrade: vallum`
+/// `Host` header and optional `carrier = "ss"` pre-shared obfuscation key.
+pub fn bind_with_options(
+    carrier: Carrier,
+    address: SocketAddr,
+    fwmark: u32,
+    tcp_upgrade: Option<&str>,
+    ss_psk: Option<&str>,
+) -> io::Result<Arc<dyn DatagramSocket>> {
     Ok(match carrier {
         Carrier::Udp => Arc::new(UdpTransport::bind_with_fwmark(address, fwmark)?),
         Carrier::Lwo => Arc::new(LwoTransport::bind_with_fwmark(address, fwmark)?),
@@ -116,6 +130,7 @@ pub fn bind_with_upgrade(
             fwmark,
             tcp_upgrade,
         )?),
+        Carrier::Ss => Arc::new(SsTransport::bind_with_psk(address, fwmark, ss_psk)?),
     })
 }
 
@@ -365,6 +380,75 @@ impl DatagramSocket for LwoTransport {
         let (n, source) = self.udp.socket.recv_from(buf)?;
         let (logical_len, _) = lwo::classify_and_unpad(&mut buf[..n]);
         Ok((logical_len, source))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.udp.local_addr()
+    }
+}
+
+/// Shadowsocks-style AEAD-obfuscated UDP transport (`carrier = "ss"`).
+///
+/// Every outbound datagram is sealed with a fresh 24-byte random nonce and a
+/// committing 16-byte AEAD tag (`vallum_tunnel::ss`). Unauthenticated inbound
+/// datagrams are dropped before reaching the tunnel state machine.
+pub struct SsTransport {
+    udp: UdpTransport,
+    key: [u8; 32],
+    suite: SdkSuite,
+}
+
+impl std::fmt::Debug for SsTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsTransport")
+            .field("udp", &self.udp)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SsTransport {
+    /// Bind an AEAD-obfuscated UDP socket with an optional PSK.
+    pub fn bind_with_psk(address: SocketAddr, fwmark: u32, psk: Option<&str>) -> io::Result<Self> {
+        let suite = SdkSuite::tri_hybrid();
+        let key = ss::derive_ss_key(&suite, psk);
+        Ok(Self {
+            udp: UdpTransport::bind_with_fwmark(address, fwmark)?,
+            key,
+            suite,
+        })
+    }
+
+    fn seal_packet(&self, bytes: &[u8]) -> io::Result<Vec<u8>> {
+        let mut nonce = [0u8; ss::SS_NONCE_LEN];
+        getrandom::fill(&mut nonce).map_err(|e| io::Error::other(format!("ss nonce rng: {e}")))?;
+        ss::seal_ss_packet(&self.suite, &self.key, &nonce, bytes)
+            .map_err(|e| io::Error::other(format!("ss seal: {e}")))
+    }
+}
+
+impl DatagramSocket for SsTransport {
+    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+        let sealed = self.seal_packet(bytes)?;
+        self.udp.send_raw(&sealed, destination)
+    }
+
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        let mut sealed_batch = Vec::with_capacity(batch.len());
+        for (destination, bytes) in batch {
+            sealed_batch.push((*destination, self.seal_packet(bytes)?));
+        }
+        self.udp.send_raw_many(&sealed_batch)
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let mut scratch = vec![0u8; buf.len().saturating_add(ss::SS_OVERHEAD)];
+        let (n, source) = self.udp.socket.recv_from(&mut scratch)?;
+        let Some(plaintext) = ss::open_ss_packet(&self.suite, &self.key, &scratch[..n]) else {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        };
+        let copy_len = plaintext.len().min(buf.len());
+        buf[..copy_len].copy_from_slice(&plaintext[..copy_len]);
+        Ok((copy_len, source))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -3322,5 +3406,35 @@ mod tests {
         assert_eq!(csrc, target);
         assert_eq!(&cbuf[..cn], good_resp.as_slice());
         assert!(auto_client.inbound_dropped.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[test]
+    fn ss_transport_round_trips_with_matching_psk_and_drops_wrong_psk() {
+        let server =
+            SsTransport::bind_with_psk("127.0.0.1:0".parse().unwrap(), 0, Some("shared-psk"))
+                .expect("bind ss server");
+        let client =
+            SsTransport::bind_with_psk("127.0.0.1:0".parse().unwrap(), 0, Some("shared-psk"))
+                .expect("bind ss client");
+        let attacker =
+            SsTransport::bind_with_psk("127.0.0.1:0".parse().unwrap(), 0, Some("wrong-psk"))
+                .expect("bind ss attacker");
+
+        let server_addr = server.local_addr().unwrap();
+        let payload = b"vallum-ss-payload-123";
+
+        // Wrong PSK packet is dropped with WouldBlock.
+        attacker
+            .send_to(payload, server_addr)
+            .expect("attacker send");
+        let mut buf = [0u8; 256];
+        let err = server.recv_from(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // Matching PSK round-trips cleanly.
+        client.send_to(payload, server_addr).expect("client send");
+        let (n, src) = server.recv_from(&mut buf).expect("server recv");
+        assert_eq!(src, client.local_addr().unwrap());
+        assert_eq!(&buf[..n], payload);
     }
 }

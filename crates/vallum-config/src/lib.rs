@@ -269,6 +269,11 @@ pub enum Carrier {
     /// exists so a network that drops UDP has something to fall back to, not as
     /// an equal choice.
     Tcp,
+    /// Shadowsocks-style AEAD-obfuscated UDP datagrams (`[24B nonce || AEAD]`).
+    ///
+    /// Wraps every packet in fresh-nonce committing AEAD ciphertext so wire
+    /// traffic carries no plaintext Vallum header or fixed magic bytes.
+    Ss,
 }
 
 impl Carrier {
@@ -280,6 +285,7 @@ impl Carrier {
             Carrier::Lwo => "lwo",
             Carrier::Auto => "auto",
             Carrier::Tcp => "tcp",
+            Carrier::Ss => "ss",
         }
     }
 
@@ -290,7 +296,7 @@ impl Carrier {
     #[must_use]
     pub fn protocol(self) -> &'static str {
         match self {
-            Carrier::Udp | Carrier::Lwo | Carrier::Auto => "udp",
+            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss => "udp",
             Carrier::Tcp => "tcp",
         }
     }
@@ -298,7 +304,10 @@ impl Carrier {
     /// Whether this carrier uses UDP datagrams as its primary or raced path.
     #[must_use]
     pub fn uses_udp(self) -> bool {
-        matches!(self, Carrier::Udp | Carrier::Lwo | Carrier::Auto)
+        matches!(
+            self,
+            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss
+        )
     }
 
     /// Whether this carrier uses TCP streams (exclusively or as a staggered race).
@@ -410,6 +419,9 @@ pub struct Interface {
     /// [`MAX_OUTER_DATAGRAM`].
     #[serde(default)]
     pub outer_mtu: Option<u16>,
+    /// Optional pre-shared obfuscation key for `carrier = "ss"`.
+    #[serde(default)]
+    pub ss_psk: Option<String>,
     /// The user to become after the interface and socket are open.
     ///
     /// Absent means "keep the privileges the process started with", which is
@@ -1218,6 +1230,9 @@ cap = 4
 
         let config: Config = toml::from_str(&base("carrier = \"auto\"")).expect("parses auto");
         assert_eq!(config.interface.carrier, Some(Carrier::Auto));
+
+        let config: Config = toml::from_str(&base("carrier = \"ss\"")).expect("parses ss");
+        assert_eq!(config.interface.carrier, Some(Carrier::Ss));
 
         // A typo must not silently leave the interface on the protocol it was
         // meant to avoid.

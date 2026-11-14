@@ -74,6 +74,7 @@ pub mod peer;
 pub mod rng;
 pub mod routing;
 pub mod segment;
+pub mod ss;
 pub mod stream;
 
 pub use device::{

@@ -316,6 +316,7 @@ fn launch_over(
                 listen,
                 carrier: resolved.carrier,
                 tcp_upgrade: resolved.tcp_upgrade.clone(),
+                ss_psk: resolved.ss_psk.clone(),
                 fwmark: resolved.fwmark,
                 socket: Arc::clone(&shared),
                 suite: Arc::new(suite()),

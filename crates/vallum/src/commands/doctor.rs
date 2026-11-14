@@ -445,6 +445,11 @@ fn check_carrier(carrier: vallum_config::Carrier) -> Check {
              `carrier = \"tcp\"`, and a peer cannot roam under it"
                 .to_owned()
         }
+        vallum_config::Carrier::Ss => {
+            "ss: Shadowsocks-style 24-byte nonce AEAD UDP obfuscation — uniform-random \
+             wire packets with no plaintext header"
+                .to_owned()
+        }
     };
     Check::new("carrier", Status::Pass, detail)
 }

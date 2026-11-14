@@ -59,6 +59,23 @@ pub enum PeerCommand {
     Rotate(RotateArgs),
     /// Retire the previous identity a rotation kept.
     Finalize(FinalizeArgs),
+    /// Probe configured peers with endpoints and rank them by lowest RTT.
+    Select(SelectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SelectArgs {
+    /// The configuration file to read peer endpoints from.
+    #[arg(long, value_name = "FILE", default_value = crate::host::paths::DEFAULT_CONFIG)]
+    pub config: PathBuf,
+
+    /// Per-relay probe timeout in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    pub timeout_ms: u64,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -340,6 +357,7 @@ pub fn peer(args: &PeerArgs) -> Result<(), Error> {
         PeerCommand::Invites(args) => invites(args),
         PeerCommand::Rotate(args) => rotate(args),
         PeerCommand::Finalize(args) => finalize(args),
+        PeerCommand::Select(args) => select(args),
     }
 }
 
@@ -2514,4 +2532,203 @@ mod tests {
         ensure_no_interface_collision(&file, "laptop").unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn rank_relays_prefers_reachable_lowest_rtt_then_name() {
+        let candidates = vec![
+            RelayProbe {
+                name: "relay-slow".to_owned(),
+                endpoint: "203.0.113.10:51820".to_owned(),
+                reachable: true,
+                rtt_ms: Some(45.2),
+                detail: "tcp ok".to_owned(),
+            },
+            RelayProbe {
+                name: "relay-dead".to_owned(),
+                endpoint: "203.0.113.11:51820".to_owned(),
+                reachable: false,
+                rtt_ms: None,
+                detail: "timed out".to_owned(),
+            },
+            RelayProbe {
+                name: "relay-fast".to_owned(),
+                endpoint: "203.0.113.12:51820".to_owned(),
+                reachable: true,
+                rtt_ms: Some(12.4),
+                detail: "tcp ok".to_owned(),
+            },
+        ];
+
+        let ranked = rank_relays(&candidates);
+        let names: Vec<&str> = ranked.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["relay-fast", "relay-slow", "relay-dead"]);
+    }
+}
+
+/// Measured reachability and latency for one candidate relay peer.
+#[derive(Debug, Clone, serde::Serialize)]
+struct RelayProbe {
+    name: String,
+    endpoint: String,
+    reachable: bool,
+    rtt_ms: Option<f64>,
+    detail: String,
+}
+
+fn rank_relays(candidates: &[RelayProbe]) -> Vec<&RelayProbe> {
+    let mut ranked: Vec<&RelayProbe> = candidates.iter().collect();
+    ranked.sort_by(|a, b| match (a.reachable, b.reachable) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, true) => a
+            .rtt_ms
+            .unwrap_or(f64::INFINITY)
+            .total_cmp(&b.rtt_ms.unwrap_or(f64::INFINITY))
+            .then_with(|| a.name.cmp(&b.name)),
+        (false, false) => a.name.cmp(&b.name),
+    });
+    ranked
+}
+
+fn probe_relay(
+    name: &str,
+    endpoint: &str,
+    probe_tcp: bool,
+    timeout: std::time::Duration,
+) -> RelayProbe {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Instant;
+
+    let Ok(mut addrs) = endpoint.to_socket_addrs() else {
+        return RelayProbe {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+            reachable: false,
+            rtt_ms: None,
+            detail: "DNS resolution failed".to_owned(),
+        };
+    };
+    let Some(addr) = addrs.next() else {
+        return RelayProbe {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+            reachable: false,
+            rtt_ms: None,
+            detail: "no resolved socket address".to_owned(),
+        };
+    };
+
+    if probe_tcp {
+        let start = Instant::now();
+        return match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(_) => RelayProbe {
+                name: name.to_owned(),
+                endpoint: endpoint.to_owned(),
+                reachable: true,
+                rtt_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+                detail: "tcp connect ok".to_owned(),
+            },
+            Err(err) => RelayProbe {
+                name: name.to_owned(),
+                endpoint: endpoint.to_owned(),
+                reachable: false,
+                rtt_ms: None,
+                detail: format!("tcp connect failed: {err}"),
+            },
+        };
+    }
+
+    // UDP/LWO/SS relay: probe host reachability with ICMP `ping -c 1` to the resolved IP.
+    let wait_secs = timeout.as_secs().max(1).to_string();
+    let start = Instant::now();
+    let mut cmd = std::process::Command::new("ping");
+    if addr.is_ipv6() {
+        cmd.arg("-6");
+    }
+    cmd.args(["-n", "-c", "1", "-W", &wait_secs, &addr.ip().to_string()]);
+    match cmd.output() {
+        Ok(out) if out.status.success() => RelayProbe {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+            reachable: true,
+            rtt_ms: Some(start.elapsed().as_secs_f64() * 1000.0),
+            detail: "icmp ping ok".to_owned(),
+        },
+        Ok(_) => RelayProbe {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+            reachable: false,
+            rtt_ms: None,
+            detail: "icmp ping timed out".to_owned(),
+        },
+        Err(err) => RelayProbe {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+            reachable: false,
+            rtt_ms: None,
+            detail: format!("ping failed: {err}"),
+        },
+    }
+}
+
+fn select(args: &SelectArgs) -> Result<(), Error> {
+    let config = vallum_config::Config::load(&args.config)
+        .map_err(|e| Error::Precondition(e.to_string()))?;
+    let carrier = config.interface.carrier.unwrap_or_default();
+    let timeout = std::time::Duration::from_millis(args.timeout_ms.max(100));
+
+    let candidates: Vec<RelayProbe> = config
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            peer.endpoint
+                .as_deref()
+                .map(|ep| probe_relay(&peer.name, ep, carrier.is_probeable(), timeout))
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(Error::Precondition(
+            "no [[peer]] entries declare an `endpoint` to probe".to_owned(),
+        ));
+    }
+
+    let ranked = rank_relays(&candidates);
+    let best = ranked
+        .first()
+        .filter(|r| r.reachable)
+        .map(|r| r.name.clone());
+
+    if args.json {
+        let payload = serde_json::json!({
+            "best": best,
+            "candidates": ranked,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .map_err(|e| Error::Precondition(e.to_string()))?
+        );
+    } else {
+        for r in &ranked {
+            let status = if r.reachable { "ok" } else { "down" };
+            let rtt = r
+                .rtt_ms
+                .map_or_else(|| "-".to_owned(), |ms| format!("{ms:.1}ms"));
+            println!(
+                "{:<16} {:<24} {:<6} {:<10} {}",
+                r.name, r.endpoint, status, rtt, r.detail
+            );
+        }
+        if let Some(ref b) = best {
+            println!("\nbest relay: {b}");
+        }
+    }
+
+    if best.is_none() {
+        return Err(Error::Precondition(
+            "no reachable relay endpoints".to_owned(),
+        ));
+    }
+    Ok(())
 }

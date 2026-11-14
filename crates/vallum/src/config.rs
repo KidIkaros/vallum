@@ -115,6 +115,7 @@ pub struct Resolved {
     /// Optional HTTP/1.1 `Host` header value for outbound `carrier = "tcp"` or
     /// `carrier = "auto"` dial preambles.
     pub tcp_upgrade: Option<String>,
+    pub ss_psk: Option<String>,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -318,6 +319,21 @@ impl ResolveConfig for Config {
             );
         }
         let tcp_upgrade = raw_tcp_upgrade.filter(|_| carrier.uses_tcp());
+        let raw_ss_psk = self
+            .interface
+            .ss_psk
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if raw_ss_psk.is_some() && carrier != Carrier::Ss {
+            warnings.push(
+                "[interface] ss_psk is set, but the active carrier is not \"ss\"; \
+                 ignoring ss_psk"
+                    .to_owned(),
+            );
+        }
+        let ss_psk = raw_ss_psk.filter(|_| carrier == Carrier::Ss);
 
         // The outer path's budget. 1500 is the assumption the product was built
         // on; a narrower path names its MTU here and every datagram is cut to
@@ -744,6 +760,7 @@ impl ResolveConfig for Config {
             sandbox,
             outer_budget: budget,
             tcp_upgrade,
+            ss_psk,
         })
     }
 }
@@ -977,6 +994,7 @@ mod tests {
             sandbox: crate::sandbox::Mode::Log,
             outer_budget: 1372,
             tcp_upgrade: None,
+            ss_psk: None,
         };
         let rendered = format!("{resolved:?}");
         // The seed is 32 bytes of 0xAB — if any of it reached the log line it

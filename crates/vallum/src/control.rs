@@ -90,6 +90,7 @@ pub struct ControlContext {
     pub carrier: crate::config::Carrier,
     /// Optional HTTP/1.1 `Upgrade: vallum` `Host` header for outbound TCP dials.
     pub tcp_upgrade: Option<String>,
+    pub ss_psk: Option<String>,
     /// The socket mark.
     pub fwmark: u32,
     /// The swappable socket, for a runtime rebind.
@@ -545,11 +546,12 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
     let desired_mark = set.fwmark.unwrap_or(current_mark);
     if desired_port != current_listen.port() || desired_mark != current_mark {
         let address = SocketAddr::new(current_listen.ip(), desired_port);
-        match crate::net::bind_with_upgrade(
+        match crate::net::bind_with_options(
             context.carrier,
             address,
             desired_mark,
             context.tcp_upgrade.as_deref(),
+            context.ss_psk.as_deref(),
         ) {
             Ok(socket) => {
                 let bound = socket.local_addr().unwrap_or(address);
@@ -732,6 +734,7 @@ mod tests {
             listen,
             carrier: crate::config::Carrier::Udp,
             tcp_upgrade: None,
+            ss_psk: None,
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,
