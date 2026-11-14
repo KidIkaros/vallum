@@ -4,7 +4,10 @@ Documentation=man:vallum(8)
 # MOOR's mandatory exit notice, adopted: an exit relay serves an HTTP notice
 # explaining it is infrastructure. Same exposure applies to a Vallum server
 # carrying full-tunnel clients — this is the safe-harbour posture.
-After=network.target
+After=network-online.target
+Wants=network-online.target
+Conflicts=caddy.service nginx.service apache2.service
+ConditionPathIsDirectory=/usr/share/vallum/exit-notice
 
 [Service]
 Type=simple

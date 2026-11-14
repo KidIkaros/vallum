@@ -330,6 +330,30 @@ separate approximation of it.
 - **NAT traversal and relay.** ADR-0016 is `proposed` and deliberately says what
   Vallum will *not* do. Stays proposed until someone needs it behind a symmetric
   NAT.
+- **Layer 4 stream conduit & reverse-proxy TLS carrier ([ADR-0042](adr/0042-layer4-tls-and-adaptive-mtu.md)).**
+  All seven Layer-3 Alpha readiness gates above are now closed. Post-Alpha expands
+  Vallum from L3-only (`/dev/net/tun` + `root`) into rootless userspace **Layer 4**
+  port forwarding / SOCKS5 conduits (`vallum forward` / `vallum proxy`) sharing the
+  exact `0x0003` tri-hybrid handshake and session rotation engine, alongside a
+  standards-compliant **`carrier = "tls"`** outer transport (`rustls`, ALPN `h2`) that
+  supports both standalone `:443` termination and clean loopback proxying behind Caddy
+  or Nginx (preventing port collisions like the `:80` `vallum-exit-notice.service`
+  boot race with Caddy). Followed by QUIC `DATAGRAM` (`carrier = "quic"`) to avoid
+  TCP head-of-line blocking.
+- **`JA4+` / `JA4T` fingerprint hygiene & exit MSS normalization ([ADR-0042](adr/0042-layer4-tls-and-adaptive-mtu.md)).**
+  Modern firewalls and WAFs correlate `JA4` (TLS ClientHello), `JA4T` (TCP SYN
+  options/window/MSS), `JA4L`, and `JA4 Signals` (`uas_rank_1h` User-Agent
+  consistency). L3 TUN interfaces clamp TCP MSS (`1340`–`1380`), exposing VPN
+  traffic to `JA4T`; terminating streams at L4 and dialing natively from the exit
+  host restores normal `1460` MSS headers while keeping outer TLS stacks consistent
+  without fragile L7-only spoofing.
+- **Telemetry-driven adaptive MTU optimization ([ADR-0042](adr/0042-layer4-tls-and-adaptive-mtu.md)).**
+  Extend active path ceiling discovery (`probe_path_mtu`, which only finds $M_{\max}$)
+  into a closed-loop MTU optimizer (`vallum doctor --tune-mtu` + runtime scoring)
+  that evaluates $\{1280, 1340, 1380, 1400, 1420\} \le M_{\max}$ against goodput,
+  $\text{RTT}_{p99 - p50}$ tail jitter, and `reassembled + fragments_dropped` pressure —
+  automatically selecting profiles such as `1280` on USB 1GbE NICs or `1380` for
+  unfragmented low-latency gaming UDP traffic.
 
 ## Not on the roadmap, and why
 
