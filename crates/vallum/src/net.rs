@@ -16,7 +16,7 @@
 //! each socket to a real `SocketAddr` and delivers with the sender's own address,
 //! so roaming and source-address checks behave exactly as they do on a wire.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -24,7 +24,8 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use vallum_tunnel::stream::{frame, FrameReader};
+use vallum_tunnel::lwo::{self, PacketEncoding};
+use vallum_tunnel::stream::{frame, upgrade_request, FrameReader};
 
 use crate::config::Carrier;
 
@@ -91,16 +92,43 @@ pub fn bind(
     address: SocketAddr,
     fwmark: u32,
 ) -> io::Result<Arc<dyn DatagramSocket>> {
+    bind_with_upgrade(carrier, address, fwmark, None)
+}
+
+/// Bind the transport for `carrier` with an optional HTTP/1.1 `Upgrade: vallum`
+/// `Host` header value for outbound TCP dials.
+pub fn bind_with_upgrade(
+    carrier: Carrier,
+    address: SocketAddr,
+    fwmark: u32,
+    tcp_upgrade: Option<&str>,
+) -> io::Result<Arc<dyn DatagramSocket>> {
     Ok(match carrier {
         Carrier::Udp => Arc::new(UdpTransport::bind_with_fwmark(address, fwmark)?),
-        Carrier::Tcp => Arc::new(TcpTransport::bind_with_fwmark(address, fwmark)?),
+        Carrier::Lwo => Arc::new(LwoTransport::bind_with_fwmark(address, fwmark)?),
+        Carrier::Auto => Arc::new(AutoTransport::bind_with_upgrade(
+            address,
+            fwmark,
+            tcp_upgrade,
+        )?),
+        Carrier::Tcp => Arc::new(TcpTransport::bind_with_upgrade(
+            address,
+            fwmark,
+            tcp_upgrade,
+        )?),
     })
 }
 
 /// A [`UdpSocket`] behind [`DatagramSocket`].
+///
+/// Automatically detects inbound LWO-masked packets from `lwo` or `auto`
+/// peers and masks replies back to those peers, so an unmodified plain `udp`
+/// listener works transparently with obfuscated clients.
 #[derive(Debug)]
 pub struct UdpTransport {
     socket: UdpSocket,
+    lwo_peers: Mutex<HashSet<SocketAddr>>,
+    has_lwo_peers: AtomicBool,
 }
 
 impl UdpTransport {
@@ -155,19 +183,50 @@ impl UdpTransport {
             nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Ipv6DontFrag, &true)
                 .map_err(|e| io::Error::other(format!("IPV6_DONTFRAG: {e}")))?;
         }
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            lwo_peers: Mutex::new(HashSet::new()),
+            has_lwo_peers: AtomicBool::new(false),
+        })
     }
-}
 
-impl DatagramSocket for UdpTransport {
-    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+    fn is_lwo_peer(&self, destination: SocketAddr) -> bool {
+        self.has_lwo_peers.load(Ordering::Acquire)
+            && self
+                .lwo_peers
+                .lock()
+                .map(|peers| peers.contains(&destination))
+                .unwrap_or(false)
+    }
+
+    fn record_peer_encoding(&self, source: SocketAddr, encoding: PacketEncoding) {
+        match encoding {
+            PacketEncoding::LwoUnmasked => {
+                if let Ok(mut peers) = self.lwo_peers.lock() {
+                    peers.insert(source);
+                    self.has_lwo_peers.store(true, Ordering::Release);
+                }
+            }
+            PacketEncoding::Plain => {
+                if self.has_lwo_peers.load(Ordering::Acquire) {
+                    if let Ok(mut peers) = self.lwo_peers.lock() {
+                        peers.remove(&source);
+                        self.has_lwo_peers.store(!peers.is_empty(), Ordering::Release);
+                    }
+                }
+            }
+            PacketEncoding::Unrecognized => {}
+        }
+    }
+
+    fn send_raw(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
         // The count is deliberately dropped: a datagram either goes or it does
         // not, and a short write to a connectionless socket is not a thing.
         self.socket.send_to(bytes, destination).map(|_| ())
     }
 
     #[cfg(target_os = "linux")]
-    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+    fn send_raw_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
         use std::io::IoSlice;
         use std::os::fd::AsRawFd;
 
@@ -199,19 +258,116 @@ impl DatagramSocket for UdpTransport {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+    fn send_raw_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
         for (destination, bytes) in batch {
-            self.send_to(bytes, *destination)?;
+            self.send_raw(bytes, *destination)?;
         }
         Ok(batch.len())
     }
+}
+
+impl DatagramSocket for UdpTransport {
+    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+        if self.is_lwo_peer(destination) {
+            let mut masked = bytes.to_vec();
+            lwo::pad_and_mask_in_place(&mut masked, vallum_tunnel::segment::MAX_OUTER_DATAGRAM);
+            self.send_raw(&masked, destination)
+        } else {
+            self.send_raw(bytes, destination)
+        }
+    }
+
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        if !self.has_lwo_peers.load(Ordering::Acquire) {
+            return self.send_raw_many(batch);
+        }
+        let masked_batch: Vec<(SocketAddr, Vec<u8>)> = batch
+            .iter()
+            .map(|(destination, bytes)| {
+                let mut copy = bytes.clone();
+                if self.is_lwo_peer(*destination) {
+                    lwo::pad_and_mask_in_place(
+                        &mut copy,
+                        vallum_tunnel::segment::MAX_OUTER_DATAGRAM,
+                    );
+                }
+                (*destination, copy)
+            })
+            .collect();
+        self.send_raw_many(&masked_batch)
+    }
 
     fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        self.socket.recv_from(buf)
+        let (n, source) = self.socket.recv_from(buf)?;
+        let (logical_len, encoding) = lwo::classify_and_unpad(&mut buf[..n]);
+        self.record_peer_encoding(source, encoding);
+        Ok((logical_len, source))
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
+    }
+}
+
+/// Zero-overhead LWO v2 obfuscated UDP transport behind [`DatagramSocket`].
+///
+/// Outbound packets mask their leading 8-byte Vallum header using a SplitMix64
+/// keystream keyed by the packet's own trailing bytes and length. Inbound
+/// packets accept both LWO-masked and plain Vallum headers.
+#[derive(Debug)]
+pub struct LwoTransport {
+    udp: UdpTransport,
+}
+
+impl LwoTransport {
+    /// Bind an LWO-obfuscated UDP socket.
+    ///
+    /// # Errors
+    ///
+    /// If the address is in use, or cannot be bound.
+    pub fn bind(address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_fwmark(address, 0)
+    }
+
+    /// Bind with an `SO_MARK`, for policy routing.
+    ///
+    /// # Errors
+    ///
+    /// If the address cannot be bound, or the mark cannot be set.
+    pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
+        Ok(Self {
+            udp: UdpTransport::bind_with_fwmark(address, fwmark)?,
+        })
+    }
+}
+
+impl DatagramSocket for LwoTransport {
+    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+        let mut masked = bytes.to_vec();
+        lwo::pad_and_mask_in_place(&mut masked, vallum_tunnel::segment::MAX_OUTER_DATAGRAM);
+        self.udp.send_raw(&masked, destination)
+    }
+
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        let masked_batch: Vec<(SocketAddr, Vec<u8>)> = batch
+            .iter()
+            .map(|(destination, bytes)| {
+                let mut copy = bytes.clone();
+                lwo::pad_and_mask_in_place(&mut copy, vallum_tunnel::segment::MAX_OUTER_DATAGRAM);
+                (*destination, copy)
+            })
+            .collect();
+        self.udp.send_raw_many(&masked_batch)
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let (n, source) = self.udp.socket.recv_from(buf)?;
+        let (logical_len, _) = lwo::classify_and_unpad(&mut buf[..n]);
+        Ok((logical_len, source))
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.udp.local_addr()
     }
 }
 
@@ -313,6 +469,16 @@ impl TcpTransport {
     ///
     /// If the socket cannot be created, marked, bound or listened on.
     pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
+        Self::bind_with_upgrade(address, fwmark, None)
+    }
+
+    /// Bind the TCP carrier with an optional HTTP/1.1 `Upgrade: vallum` `Host`
+    /// preamble written at the start of outbound dialed connections.
+    pub fn bind_with_upgrade(
+        address: SocketAddr,
+        fwmark: u32,
+        tcp_upgrade: Option<&str>,
+    ) -> io::Result<Self> {
         let listener = listen_socket(address, fwmark)?;
         let local = listener.local_addr()?;
         let closed = Arc::new(AtomicBool::new(false));
@@ -320,6 +486,7 @@ impl TcpTransport {
             Arc::new(Mutex::new(HashMap::new()));
         let inbound_dropped = Arc::new(AtomicU64::new(0));
         let outbound_dropped = Arc::new(AtomicU64::new(0));
+        let upgrade_host: Option<Arc<str>> = tcp_upgrade.map(Arc::from);
 
         // The inbound queue keeps one sender of its own, so it stays open for the
         // socket's whole life instead of closing the moment no peer is connected.
@@ -344,6 +511,7 @@ impl TcpTransport {
             outbound_dropped.clone(),
             fwmark,
             local,
+            upgrade_host,
         );
 
         Ok(Self {
@@ -413,6 +581,21 @@ impl DatagramSocket for TcpTransport {
     }
 }
 
+impl TcpTransport {
+    /// Tear down active streams and unblock `accept` so bound ports free immediately.
+    pub(crate) fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Ok(connections) = self.connections.lock() {
+            for stream in connections.values() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        let _ = TcpStream::connect_timeout(&wake_addr(self.local), Duration::from_millis(200));
+    }
+}
+
 impl Drop for TcpTransport {
     fn drop(&mut self) {
         // Three things hold threads: the listener blocked in `accept`, readers
@@ -420,24 +603,604 @@ impl Drop for TcpTransport {
         // connections down so the readers see EOF, and dial ourselves so the
         // listener returns once — otherwise a rebind would find the port still
         // taken by a carrier nobody owns.
-        self.closed.store(true, Ordering::Relaxed);
-        if let Ok(connections) = self.connections.lock() {
-            for stream in connections.values() {
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+        self.close();
+    }
+}
+
+fn wake_addr(local: SocketAddr) -> SocketAddr {
+    if local.ip().is_unspecified() {
+        let ip = if local.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            IpAddr::V6(Ipv6Addr::LOCALHOST)
+        };
+        SocketAddr::new(ip, local.port())
+    } else {
+        local
+    }
+}
+
+/// Delay before `AutoTransport` staggers a parallel TCP dial if UDP-LWO has
+/// not yet answered a peer handshake or probe.
+pub const AUTO_TCP_STAGGER: Duration = Duration::from_millis(500);
+
+/// Duration `AutoTransport` stays pinned to UDP-LWO after receiving an authentic
+/// inbound datagram from a peer before re-evaluating the race.
+pub const AUTO_UDP_LOCK: Duration = Duration::from_secs(15);
+
+/// Maximum initial packets buffered per peer during `AutoTransport`'s UDP
+/// racing window so multi-fragment handshake bursts replay cleanly onto TCP
+/// when the stagger timer fires.
+pub const AUTO_MAX_INITIAL_PACKETS: usize = 100;
+
+#[derive(Debug)]
+enum PeerRaceMode {
+    RacingUdp {
+        first_attempt: Instant,
+        tcp_kicked: bool,
+        initial_packets: Vec<Vec<u8>>,
+        pending_indices: Vec<u32>,
+    },
+    LockedUdp {
+        until: Instant,
+    },
+    LockedTcp,
+}
+
+fn record_initial_packet(
+    initial_packets: &mut Vec<Vec<u8>>,
+    pending_indices: &mut Vec<u32>,
+    bytes: &[u8],
+) {
+    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
+        if !pending_indices.contains(&sender_index) {
+            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
+                pending_indices.remove(0);
+            }
+            pending_indices.push(sender_index);
+        }
+    }
+    if initial_packets.len() < AUTO_MAX_INITIAL_PACKETS {
+        initial_packets.push(bytes.to_vec());
+    }
+}
+
+fn pending_indices_for(
+    peers: &Mutex<HashMap<SocketAddr, PeerRaceMode>>,
+    source: SocketAddr,
+) -> Vec<u32> {
+    let Ok(map) = peers.lock() else {
+        return Vec::new();
+    };
+    match map.get(&source) {
+        Some(PeerRaceMode::RacingUdp {
+            pending_indices, ..
+        }) => pending_indices.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Happy-eyeballs carrier racer combining [`LwoTransport`] and [`TcpTransport`].
+///
+/// Outbound traffic starts immediately on LWO-obfuscated UDP. If a peer does
+/// not reply on UDP within [`AUTO_TCP_STAGGER`] (500ms), a background stagger
+/// worker automatically transmits the probe over TCP without waiting for an
+/// upper-layer retransmission. Whichever path answers first becomes the peer's
+/// active path; a winning UDP path stays locked for [`AUTO_UDP_LOCK`] (15s).
+pub struct AutoTransport {
+    local: SocketAddr,
+    lwo: Arc<LwoTransport>,
+    tcp: Arc<TcpTransport>,
+    stagger: Duration,
+    closed: Arc<AtomicBool>,
+    inbound: Mutex<mpsc::Receiver<(SocketAddr, Vec<u8>)>>,
+    inbound_dropped: Arc<AtomicU64>,
+    peers: Arc<(Mutex<HashMap<SocketAddr, PeerRaceMode>>, Condvar)>,
+}
+
+impl std::fmt::Debug for AutoTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let peer_count = self.peers.0.lock().map(|map| map.len()).unwrap_or(0);
+        f.debug_struct("AutoTransport")
+            .field("local", &self.local)
+            .field("peers", &peer_count)
+            .field("dropped", &self.inbound_dropped.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl AutoTransport {
+    /// Bind both LWO-UDP and TCP listeners on `address`.
+    ///
+    /// # Errors
+    ///
+    /// If either socket fails to bind cleanly.
+    pub fn bind(address: SocketAddr) -> io::Result<Self> {
+        Self::bind_with_fwmark(address, 0)
+    }
+
+    /// Bind with an `SO_MARK`, for policy routing.
+    ///
+    /// # Errors
+    ///
+    /// If either transport cannot be bound or marked.
+    pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
+        Self::bind_with_upgrade(address, fwmark, None)
+    }
+
+    /// Bind `AutoTransport` with an optional HTTP/1.1 `Upgrade: vallum` `Host`
+    /// preamble for staggered/locked TCP dials.
+    pub fn bind_with_upgrade(
+        address: SocketAddr,
+        fwmark: u32,
+        tcp_upgrade: Option<&str>,
+    ) -> io::Result<Self> {
+        Self::bind_with_timings_and_upgrade(
+            address,
+            fwmark,
+            AUTO_TCP_STAGGER,
+            AUTO_UDP_LOCK,
+            tcp_upgrade,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_with_timings(
+        address: SocketAddr,
+        fwmark: u32,
+        stagger: Duration,
+        udp_lock: Duration,
+    ) -> io::Result<Self> {
+        Self::bind_with_timings_and_upgrade(address, fwmark, stagger, udp_lock, None)
+    }
+
+    pub(crate) fn bind_with_timings_and_upgrade(
+        address: SocketAddr,
+        fwmark: u32,
+        stagger: Duration,
+        udp_lock: Duration,
+        tcp_upgrade: Option<&str>,
+    ) -> io::Result<Self> {
+        // When `address.port() == 0`, bind UDP first and match TCP to that
+        // exact ephemeral port so peers only need a single endpoint address.
+        let mut last_err = None;
+        let attempts = if address.port() == 0 { 4 } else { 1 };
+        let mut bound = None;
+        for attempt in 0..attempts {
+            let lwo = Arc::new(LwoTransport::bind_with_fwmark(address, fwmark)?);
+            let actual = lwo.local_addr()?;
+            match TcpTransport::bind_with_upgrade(actual, fwmark, tcp_upgrade) {
+                Ok(tcp) => {
+                    bound = Some((lwo, Arc::new(tcp), actual));
+                    break;
+                }
+                Err(err)
+                    if address.port() == 0
+                        && err.kind() == io::ErrorKind::AddrInUse
+                        && attempt + 1 < attempts =>
+                {
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
             }
         }
-        let wake = if self.local.ip().is_unspecified() {
-            let ip = if self.local.is_ipv4() {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            } else {
-                IpAddr::V6(Ipv6Addr::LOCALHOST)
-            };
-            SocketAddr::new(ip, self.local.port())
-        } else {
-            self.local
+        let (lwo, tcp, local) = match bound {
+            Some(parts) => parts,
+            None => {
+                return Err(last_err
+                    .unwrap_or_else(|| io::Error::new(io::ErrorKind::AddrInUse, "port busy")));
+            }
         };
-        let _ = TcpStream::connect_timeout(&wake, Duration::from_millis(200));
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let (inbound_tx, inbound_rx) = mpsc::sync_channel(CARRIER_QUEUE);
+        let inbound_dropped = Arc::new(AtomicU64::new(0));
+        let peers = Arc::new((Mutex::new(HashMap::new()), Condvar::new()));
+
+        spawn_auto_udp_reader(
+            Arc::clone(&lwo),
+            Arc::clone(&closed),
+            inbound_tx.clone(),
+            Arc::clone(&inbound_dropped),
+            Arc::clone(&peers),
+            udp_lock,
+        );
+        spawn_auto_tcp_reader(
+            Arc::clone(&tcp),
+            Arc::clone(&closed),
+            inbound_tx,
+            Arc::clone(&inbound_dropped),
+            Arc::clone(&peers),
+        );
+        spawn_auto_stagger_worker(
+            Arc::clone(&tcp),
+            Arc::clone(&closed),
+            Arc::clone(&peers),
+            stagger,
+        );
+
+        Ok(Self {
+            local,
+            lwo,
+            tcp,
+            stagger,
+            closed,
+            inbound: Mutex::new(inbound_rx),
+            inbound_dropped,
+            peers,
+        })
     }
+
+    fn decide_outbound(
+        &self,
+        destination: SocketAddr,
+        bytes: &[u8],
+    ) -> (bool, bool, Vec<Vec<u8>>) {
+        let now = Instant::now();
+        let (lock, cv) = &*self.peers;
+        let Ok(mut map) = lock.lock() else {
+            return (true, false, Vec::new());
+        };
+        match map.get_mut(&destination) {
+            None => {
+                let mut initial_packets = Vec::new();
+                let mut pending_indices = Vec::new();
+                record_initial_packet(&mut initial_packets, &mut pending_indices, bytes);
+                map.insert(
+                    destination,
+                    PeerRaceMode::RacingUdp {
+                        first_attempt: now,
+                        tcp_kicked: false,
+                        initial_packets,
+                        pending_indices,
+                    },
+                );
+                cv.notify_all();
+                (true, false, Vec::new())
+            }
+            Some(PeerRaceMode::RacingUdp {
+                first_attempt,
+                tcp_kicked,
+                initial_packets,
+                pending_indices,
+            }) => {
+                if *tcp_kicked {
+                    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
+                        if !pending_indices.contains(&sender_index) {
+                            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
+                                pending_indices.remove(0);
+                            }
+                            pending_indices.push(sender_index);
+                        }
+                    }
+                    (true, true, Vec::new())
+                } else if now.duration_since(*first_attempt) >= self.stagger {
+                    *tcp_kicked = true;
+                    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
+                        if !pending_indices.contains(&sender_index) {
+                            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
+                                pending_indices.remove(0);
+                            }
+                            pending_indices.push(sender_index);
+                        }
+                    }
+                    let replay = std::mem::take(initial_packets);
+                    (true, true, replay)
+                } else {
+                    record_initial_packet(initial_packets, pending_indices, bytes);
+                    (true, false, Vec::new())
+                }
+            }
+            Some(PeerRaceMode::LockedUdp { until }) => {
+                if now < *until {
+                    (true, false, Vec::new())
+                } else {
+                    let mut initial_packets = Vec::new();
+                    let mut pending_indices = Vec::new();
+                    record_initial_packet(&mut initial_packets, &mut pending_indices, bytes);
+                    map.insert(
+                        destination,
+                        PeerRaceMode::RacingUdp {
+                            first_attempt: now,
+                            tcp_kicked: false,
+                            initial_packets,
+                            pending_indices,
+                        },
+                    );
+                    cv.notify_all();
+                    (true, false, Vec::new())
+                }
+            }
+            Some(PeerRaceMode::LockedTcp) => (false, true, Vec::new()),
+        }
+    }
+}
+
+impl DatagramSocket for AutoTransport {
+    fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
+        let (send_udp, send_tcp, replay_tcp) = self.decide_outbound(destination, bytes);
+        match (send_udp, send_tcp) {
+            (true, false) => self.lwo.send_to(bytes, destination),
+            (false, true) => {
+                for pkt in replay_tcp {
+                    self.tcp.send_to(&pkt, destination)?;
+                }
+                self.tcp.send_to(bytes, destination)
+            }
+            (true, true) => {
+                let udp_res = self.lwo.send_to(bytes, destination);
+                for pkt in replay_tcp {
+                    let _ = self.tcp.send_to(&pkt, destination);
+                }
+                let tcp_res = self.tcp.send_to(bytes, destination);
+                udp_res.or(tcp_res)
+            }
+            (false, false) => Ok(()),
+        }
+    }
+
+    fn send_many(&self, batch: &[(SocketAddr, Vec<u8>)]) -> io::Result<usize> {
+        if batch.is_empty() {
+            return Ok(0);
+        }
+        let mut udp_batch = Vec::new();
+        let mut tcp_batch = Vec::new();
+        for (dst, payload) in batch {
+            let (send_udp, send_tcp, replay_tcp) = self.decide_outbound(*dst, payload);
+            if send_udp {
+                udp_batch.push((*dst, payload.clone()));
+            }
+            for pkt in replay_tcp {
+                tcp_batch.push((*dst, pkt));
+            }
+            if send_tcp {
+                tcp_batch.push((*dst, payload.clone()));
+            }
+        }
+        if !udp_batch.is_empty() {
+            let _ = self.lwo.send_many(&udp_batch);
+        }
+        if !tcp_batch.is_empty() {
+            self.tcp.send_many(&tcp_batch)?;
+        }
+        Ok(batch.len())
+    }
+
+    fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let Ok(inbound) = self.inbound.lock() else {
+            return Err(io::Error::other("auto carrier inbound queue is poisoned"));
+        };
+        match inbound.recv_timeout(Duration::from_millis(250)) {
+            Ok((source, bytes)) => {
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                Ok((n, source))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "no datagram waiting"))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "auto carrier closed",
+            )),
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local)
+    }
+}
+
+impl Drop for AutoTransport {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+        self.peers.1.notify_all();
+        self.tcp.close();
+        // Send a 0-byte self-wakeup packet so the UDP reader breaks out of
+        // `recv_from` immediately instead of waiting for the 250ms read timeout.
+        let _ = self.lwo.udp.socket.send_to(&[], wake_addr(self.local));
+    }
+}
+
+fn push_auto_inbound(
+    inbound_tx: &mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    inbound_dropped: &AtomicU64,
+    source: SocketAddr,
+    payload: Vec<u8>,
+) -> bool {
+    match inbound_tx.try_send((source, payload)) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            inbound_dropped.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
+fn is_transient_recv_err(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+
+fn spawn_auto_udp_reader(
+    lwo: Arc<LwoTransport>,
+    closed: Arc<AtomicBool>,
+    inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    inbound_dropped: Arc<AtomicU64>,
+    peers: Arc<(Mutex<HashMap<SocketAddr, PeerRaceMode>>, Condvar)>,
+    udp_lock: Duration,
+) {
+    let _ = thread::Builder::new()
+        .name("vallum-auto-udp-rx".to_owned())
+        .spawn(move || {
+            let mut buf = vec![0u8; STREAM_READ_BUFFER];
+            while !closed.load(Ordering::Acquire) {
+                match lwo.recv_from(&mut buf) {
+                    Ok((n, source)) => {
+                        if closed.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let pending = pending_indices_for(&peers.0, source);
+                        if !lwo::is_authentic_handshake_packet(&buf[..n], &pending, None) {
+                            if n > 0 {
+                                inbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            continue;
+                        }
+                        if let Ok(mut map) = peers.0.lock() {
+                            map.insert(
+                                source,
+                                PeerRaceMode::LockedUdp {
+                                    until: Instant::now() + udp_lock,
+                                },
+                            );
+                            peers.1.notify_all();
+                        }
+                        if !push_auto_inbound(
+                            &inbound_tx,
+                            &inbound_dropped,
+                            source,
+                            buf[..n].to_vec(),
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(err) if is_transient_recv_err(&err) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+}
+
+fn spawn_auto_tcp_reader(
+    tcp: Arc<TcpTransport>,
+    closed: Arc<AtomicBool>,
+    inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
+    inbound_dropped: Arc<AtomicU64>,
+    peers: Arc<(Mutex<HashMap<SocketAddr, PeerRaceMode>>, Condvar)>,
+) {
+    let _ = thread::Builder::new()
+        .name("vallum-auto-tcp-rx".to_owned())
+        .spawn(move || {
+            let mut buf = vec![0u8; STREAM_READ_BUFFER];
+            while !closed.load(Ordering::Acquire) {
+                match tcp.recv_from(&mut buf) {
+                    Ok((n, source)) => {
+                        if closed.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let pending = pending_indices_for(&peers.0, source);
+                        if !lwo::is_authentic_handshake_packet(&buf[..n], &pending, None) {
+                            if n > 0 {
+                                inbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                            continue;
+                        }
+                        if let Ok(mut map) = peers.0.lock() {
+                            let now = Instant::now();
+                            let keep_udp = matches!(
+                                map.get(&source),
+                                Some(PeerRaceMode::LockedUdp { until }) if now < *until
+                            );
+                            if !keep_udp {
+                                map.insert(source, PeerRaceMode::LockedTcp);
+                                peers.1.notify_all();
+                            }
+                        }
+                        if !push_auto_inbound(
+                            &inbound_tx,
+                            &inbound_dropped,
+                            source,
+                            buf[..n].to_vec(),
+                        ) {
+                            break;
+                        }
+                    }
+                    Err(err) if is_transient_recv_err(&err) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+}
+
+fn spawn_auto_stagger_worker(
+    tcp: Arc<TcpTransport>,
+    closed: Arc<AtomicBool>,
+    peers: Arc<(Mutex<HashMap<SocketAddr, PeerRaceMode>>, Condvar)>,
+    stagger: Duration,
+) {
+    let _ = thread::Builder::new()
+        .name("vallum-auto-stagger".to_owned())
+        .spawn(move || {
+            let (lock, cv) = &*peers;
+            let Ok(mut map) = lock.lock() else {
+                return;
+            };
+            while !closed.load(Ordering::Acquire) {
+                let now = Instant::now();
+                let mut due = Vec::new();
+                let mut next_deadline: Option<Instant> = None;
+
+                for (&destination, mode) in map.iter_mut() {
+                    if let PeerRaceMode::RacingUdp {
+                        first_attempt,
+                        tcp_kicked,
+                        initial_packets,
+                        ..
+                    } = mode
+                    {
+                        if *tcp_kicked {
+                            continue;
+                        }
+                        let deadline = *first_attempt + stagger;
+                        if now >= deadline {
+                            *tcp_kicked = true;
+                            let replay = std::mem::take(initial_packets);
+                            if !replay.is_empty() {
+                                due.push((destination, replay));
+                            }
+                        } else {
+                            next_deadline = Some(match next_deadline {
+                                Some(earliest) => earliest.min(deadline),
+                                None => deadline,
+                            });
+                        }
+                    }
+                }
+
+                if !due.is_empty() {
+                    drop(map);
+                    for (destination, replay) in due {
+                        for probe in replay {
+                            let _ = tcp.send_to(&probe, destination);
+                        }
+                    }
+                    map = match lock.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => return,
+                    };
+                    continue;
+                }
+
+                map = match next_deadline {
+                    Some(deadline) => {
+                        let wait = deadline.saturating_duration_since(Instant::now());
+                        let (guard, _) = match cv.wait_timeout(map, wait) {
+                            Ok(res) => res,
+                            Err(_) => return,
+                        };
+                        guard
+                    }
+                    None => match cv.wait_timeout(map, Duration::from_millis(250)) {
+                        Ok((guard, _)) => guard,
+                        Err(_) => return,
+                    },
+                };
+            }
+        });
 }
 
 /// Bind, mark and listen: a `TcpListener` that policy routing can see.
@@ -537,6 +1300,7 @@ fn spawn_writer(
     outbound_dropped: Arc<AtomicU64>,
     fwmark: u32,
     local: SocketAddr,
+    upgrade_host: Option<Arc<str>>,
 ) {
     let _ = thread::Builder::new()
         .name("vallum-tcp-write".to_owned())
@@ -559,6 +1323,7 @@ fn spawn_writer(
                     &inbound_dropped,
                     &closed,
                     fwmark,
+                    upgrade_host.as_deref(),
                 ) {
                     Some(stream) => stream,
                     None => {
@@ -586,13 +1351,20 @@ fn connection(
     dropped: &Arc<AtomicU64>,
     closed: &Arc<AtomicBool>,
     fwmark: u32,
+    upgrade_host: Option<&str>,
 ) -> Option<Arc<TcpStream>> {
     if let Ok(map) = connections.lock() {
         if let Some(stream) = map.get(&destination) {
             return Some(Arc::clone(stream));
         }
     }
-    let stream = dial(destination, fwmark).ok()?;
+    let mut stream = dial(destination, fwmark).ok()?;
+    if let Some(host) = upgrade_host {
+        let preamble = upgrade_request(host);
+        if stream.write_all(&preamble).is_err() {
+            return None;
+        }
+    }
     register(stream, destination, connections, inbound, dropped, closed);
     connections
         .lock()
@@ -715,7 +1487,13 @@ fn spawn_reader(
                     Ok(n) => {
                         reader.push(&buffer[..n]);
                         loop {
-                            match reader.next_frame() {
+                            let next = reader.next_frame();
+                            if let Some(reply) = reader.take_upgrade_reply() {
+                                if (&*registered).write_all(reply).is_err() {
+                                    break;
+                                }
+                            }
+                            match next {
                                 Ok(Some(packet)) => {
                                     if inbound.try_send((remote, packet)).is_err() {
                                         dropped.fetch_add(1, Ordering::Relaxed);
@@ -1491,6 +2269,17 @@ pub fn recommend_mtu_from_telemetry(
         );
     }
 
+    if !fit_1380 && ceiling_outer_mtu >= 1340 + WIRE_ENCAP_OVERHEAD {
+        return build_recommendation(
+            ceiling_outer_mtu,
+            1340,
+            MtuProfile::GamingLowFrag1380,
+            owned_samples,
+            "path ceiling fits 1340 (1404B outer) for PPPoE/cellular links without fragmenting"
+                .to_owned(),
+        );
+    }
+
     if fit_1420 {
         return build_recommendation(
             ceiling_outer_mtu,
@@ -1511,9 +2300,12 @@ pub fn recommend_mtu_from_telemetry(
     )
 }
 
-fn tune_path_mtu_with_overhead(
+fn tune_path_mtu_with_counters_and_overhead(
     ceiling_outer_mtu: u16,
     icmp_overhead: u16,
+    fragments_dropped: u64,
+    reassembled: u64,
+    packets_delivered: u64,
     mut probe_rtt_us: impl FnMut(u16) -> Option<u32>,
 ) -> MtuTuneRecommendation {
     let mut samples = Vec::new();
@@ -1551,7 +2343,13 @@ fn tune_path_mtu_with_overhead(
             });
         }
     }
-    recommend_mtu_from_telemetry(ceiling_outer_mtu, &samples, 0, 0, 0)
+    recommend_mtu_from_telemetry(
+        ceiling_outer_mtu,
+        &samples,
+        fragments_dropped,
+        reassembled,
+        packets_delivered,
+    )
 }
 
 /// Sweep candidate MTUs (`1280`, `1380`, `1420`) capped by `ceiling_outer_mtu` using
@@ -1560,19 +2358,28 @@ pub fn tune_path_mtu_with(
     ceiling_outer_mtu: u16,
     probe_rtt_us: impl FnMut(u16) -> Option<u32>,
 ) -> MtuTuneRecommendation {
-    tune_path_mtu_with_overhead(ceiling_outer_mtu, 28, probe_rtt_us)
+    tune_path_mtu_with_counters_and_overhead(ceiling_outer_mtu, 28, 0, 0, 0, probe_rtt_us)
 }
 
 /// Discover the path MTU ceiling to `host_or_endpoint`, sweep candidate payloads, and
-/// return a telemetry-backed MTU profile recommendation.
-pub fn tune_path_mtu_host(host_or_endpoint: &str) -> Option<MtuTuneRecommendation> {
+/// combine with live UAPI fragmentation counters (`fragments_dropped`, `reassembled`,
+/// `packets_delivered`) to return a closed-loop MTU profile recommendation.
+pub fn tune_path_mtu_host_with_counters(
+    host_or_endpoint: &str,
+    fragments_dropped: u64,
+    reassembled: u64,
+    packets_delivered: u64,
+) -> Option<MtuTuneRecommendation> {
     let ceiling_outer_mtu = probe_path_mtu_host(host_or_endpoint)?;
     let (host, is_ipv6) = parse_probe_host(host_or_endpoint);
     let icmp_overhead = if is_ipv6 { 48 } else { 28 };
     let started = Instant::now();
-    Some(tune_path_mtu_with_overhead(
+    Some(tune_path_mtu_with_counters_and_overhead(
         ceiling_outer_mtu,
         icmp_overhead,
+        fragments_dropped,
+        reassembled,
+        packets_delivered,
         |payload| {
             if started.elapsed() >= PROBE_BUDGET {
                 return None;
@@ -1585,6 +2392,12 @@ pub fn tune_path_mtu_host(host_or_endpoint: &str) -> Option<MtuTuneRecommendatio
             }
         },
     ))
+}
+
+/// Discover the path MTU ceiling to `host_or_endpoint`, sweep candidate payloads, and
+/// return a telemetry-backed MTU profile recommendation.
+pub fn tune_path_mtu_host(host_or_endpoint: &str) -> Option<MtuTuneRecommendation> {
+    tune_path_mtu_host_with_counters(host_or_endpoint, 0, 0, 0)
 }
 
 #[cfg(test)]
@@ -1958,5 +2771,536 @@ mod tests {
         assert_eq!(rec.recommended_inner_mtu, 1236);
         assert_eq!(rec.recommended_outer_mtu, 1300);
         assert_eq!(rec.profile, MtuProfile::ConstrainedPath);
+    }
+
+    fn sample_vallum_packet(tag: u8) -> Vec<u8> {
+        let mut pkt = vec![0u8; 64];
+        pkt[0] = 0x01; // PROTOCOL_VERSION
+        pkt[1] = 0x04; // Data
+        pkt[2] = 0x01; // Suite
+        for (i, b) in pkt.iter_mut().enumerate().skip(3) {
+            *b = tag.wrapping_add((i as u8).wrapping_mul(31));
+        }
+        pkt
+    }
+
+    #[test]
+    fn lwo_transport_masks_wire_and_interoperates_with_plain_udp() {
+        let raw_sniffer = UdpSocket::bind("127.0.0.1:0").expect("sniffer bind");
+        raw_sniffer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("sniffer timeout");
+        let lwo_client = LwoTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("lwo");
+
+        let pkt = sample_vallum_packet(7);
+        lwo_client
+            .send_to(&pkt, raw_sniffer.local_addr().expect("addr"))
+            .expect("send masked");
+
+        let mut wire = [0u8; 256];
+        let (n, _) = raw_sniffer.recv_from(&mut wire).expect("recv wire");
+        assert_eq!(n, pkt.len(), "LWO adds zero bytes on the wire");
+        assert_ne!(wire[0], 0x01, "LWO header byte must be obfuscated on wire");
+
+        // Now test full round-trip against an unmodified UdpTransport listener.
+        let udp_server = UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("udp");
+        lwo_client
+            .send_to(&pkt, udp_server.local_addr().expect("addr"))
+            .expect("client -> server");
+
+        let mut buf = [0u8; 256];
+        let (n, peer) = udp_server.recv_from(&mut buf).expect("server recv");
+        assert_eq!(&buf[..n], pkt.as_slice(), "server unmasks LWO transparently");
+
+        let reply = sample_vallum_packet(99);
+        udp_server.send_to(&reply, peer).expect("server -> client");
+        let (rn, _) = lwo_client.recv_from(&mut buf).expect("client recv");
+        assert_eq!(&buf[..rn], reply.as_slice());
+    }
+
+    #[test]
+    fn auto_transport_prefers_lwo_udp_and_locks_without_tcp_dial() {
+        let udp_server = UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("udp");
+        let server_addr = udp_server.local_addr().expect("addr");
+        let auto_client = AutoTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("auto");
+
+        let req = sample_vallum_packet(11);
+        auto_client.send_to(&req, server_addr).expect("auto send");
+
+        let mut buf = [0u8; 256];
+        let (n, peer) = udp_server.recv_from(&mut buf).expect("udp recv");
+        assert_eq!(&buf[..n], req.as_slice());
+
+        let resp = sample_vallum_packet(22);
+        udp_server.send_to(&resp, peer).expect("udp reply");
+
+        let (rn, rsrc) = loop {
+            match auto_client.recv_from(&mut buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("auto recv failed: {e}"),
+            }
+        };
+        assert_eq!(rsrc, server_addr);
+        assert_eq!(&buf[..rn], resp.as_slice());
+    }
+
+    #[test]
+    fn auto_transport_staggers_to_tcp_when_udp_is_blackholed() {
+        // Bind a UDP socket we never reply from (simulates firewall dropping UDP replies),
+        // and bind a TcpTransport on the exact same address:port.
+        let blackhole_udp = UdpSocket::bind("127.0.0.1:0").expect("blackhole udp");
+        blackhole_udp
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let target = blackhole_udp.local_addr().expect("addr");
+        let tcp_server = TcpTransport::bind(target).expect("tcp server");
+
+        let auto_client = AutoTransport::bind_with_timings(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Duration::from_millis(80),
+            Duration::from_millis(250),
+        )
+        .expect("auto client");
+
+        let req = sample_vallum_packet(55);
+        auto_client.send_to(&req, target).expect("send race probe");
+
+        // UDP attempt fires first as LWO on the blackhole socket.
+        let mut wire = [0u8; 256];
+        let (wn, _) = blackhole_udp.recv_from(&mut wire).expect("blackhole got udp");
+        assert_eq!(wn, req.len());
+        assert_ne!(wire[0], 0x01);
+
+        // Stagger worker automatically dials TCP after 80ms without a second send_to.
+        let mut buf = [0u8; 256];
+        let (tn, tcp_peer) = loop {
+            match tcp_server.recv_from(&mut buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("tcp server recv failed: {e}"),
+            }
+        };
+        assert_eq!(&buf[..tn], req.as_slice());
+
+        let resp = sample_vallum_packet(88);
+        tcp_server.send_to(&resp, tcp_peer).expect("tcp reply");
+
+        let (cn, csrc) = loop {
+            match auto_client.recv_from(&mut buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("auto recv failed: {e}"),
+            }
+        };
+        assert_eq!(csrc, target);
+        assert_eq!(&buf[..cn], resp.as_slice());
+    }
+
+    #[test]
+    fn lwo_transport_pads_handshakes_on_wire_and_unpads_at_udp_server() {
+        let raw_sniffer = UdpSocket::bind("127.0.0.1:0").expect("sniffer");
+        raw_sniffer
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let lwo_client = LwoTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("lwo");
+
+        let mut init_hello = sample_vallum_packet(41);
+        init_hello[1] = 0x01; // InitHello
+        lwo_client
+            .send_to(&init_hello, raw_sniffer.local_addr().expect("addr"))
+            .expect("send init hello");
+
+        let mut wire = [0u8; 512];
+        let (wire_len, _) = raw_sniffer.recv_from(&mut wire).expect("recv wire");
+        assert!(wire_len > init_hello.len(), "handshake must be padded");
+        assert!(wire_len <= init_hello.len() + lwo::MAX_HANDSHAKE_PAD);
+
+        let udp_server = UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("udp");
+        lwo_client
+            .send_to(&init_hello, udp_server.local_addr().expect("addr"))
+            .expect("send init hello to udp server");
+
+        let (logical_len, _) = udp_server.recv_from(&mut wire).expect("server recv");
+        assert_eq!(logical_len, init_hello.len());
+        assert_eq!(&wire[..logical_len], init_hello.as_slice());
+    }
+
+    #[test]
+    fn tcp_transport_completes_http_101_upgrade_before_carrying_frames() {
+        let tcp_server =
+            TcpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("tcp server");
+        let server_addr = tcp_server.local_addr().expect("server addr");
+
+        let mut client = TcpStream::connect(server_addr).expect("connect to tcp server");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+
+        let req = vallum_tunnel::stream::upgrade_request("wingman.gold");
+        client.write_all(&req).expect("write upgrade request");
+
+        let mut raw_resp = [0u8; 256];
+        let mut total = 0usize;
+        let mut client_reader = FrameReader::new();
+        while !raw_resp[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = client.read(&mut raw_resp[total..]).expect("read 101");
+            assert!(n > 0, "unexpected EOF waiting for 101 response");
+            client_reader.push(&raw_resp[total..total + n]);
+            total += n;
+        }
+        assert!(
+            raw_resp[..total].starts_with(vallum_tunnel::stream::UPGRADE_RESPONSE),
+            "expected HTTP/1.1 101 response, got {:?}",
+            String::from_utf8_lossy(&raw_resp[..total])
+        );
+
+        let req_pkt = sample_vallum_packet(77);
+        client
+            .write_all(&frame(&req_pkt).expect("frame request"))
+            .expect("send framed packet");
+
+        let mut srv_buf = [0u8; 512];
+        let (sn, client_addr) = loop {
+            match tcp_server.recv_from(&mut srv_buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("tcp_server recv failed: {e}"),
+            }
+        };
+        assert_eq!(&srv_buf[..sn], req_pkt.as_slice());
+
+        let resp_pkt = sample_vallum_packet(88);
+        tcp_server
+            .send_to(&resp_pkt, client_addr)
+            .expect("send reply frame");
+
+        let mut reply = None;
+        while reply.is_none() {
+            let mut tmp = [0u8; 512];
+            let n = client.read(&mut tmp).expect("read reply frame");
+            assert!(n > 0, "unexpected EOF waiting for reply frame");
+            client_reader.push(&tmp[..n]);
+            reply = client_reader.next_frame().expect("unframe reply");
+        }
+        assert_eq!(reply.as_deref(), Some(resp_pkt.as_slice()));
+    }
+
+    #[test]
+    fn mtu_optimizer_selects_1340_when_ceiling_is_between_1404_and_1443() {
+        let rec = recommend_mtu_from_telemetry(1420, &[], 0, 0, 0);
+        assert_eq!(rec.recommended_inner_mtu, 1340);
+        assert_eq!(rec.recommended_outer_mtu, 1404);
+        assert_eq!(rec.ipv4_tcp_mss, 1300);
+        assert_eq!(rec.ipv6_tcp_mss, 1280);
+        assert_eq!(rec.profile, MtuProfile::GamingLowFrag1380);
+    }
+
+    #[test]
+    fn tcp_transport_with_upgrade_host_emits_prelude_and_roundtrips_frames() {
+        // 1. Verify raw wire prelude emitted on outbound TCP dial when tcp_upgrade is configured.
+        let raw_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("raw listener");
+        let raw_addr = raw_listener.local_addr().expect("raw addr");
+        let probe_client =
+            TcpTransport::bind_with_upgrade("127.0.0.1:0".parse().expect("addr"), 0, Some("edge.wingman.gold:443"))
+                .expect("probe client");
+        let req_pkt = sample_vallum_packet(77);
+        probe_client.send_to(&req_pkt, raw_addr).expect("send to raw");
+
+        let (mut srv_stream, _) = raw_listener.accept().expect("accept raw");
+        srv_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let expected_req = vallum_tunnel::stream::upgrade_request("edge.wingman.gold:443");
+        let mut wire = Vec::new();
+        let mut chunk = [0u8; 512];
+        while wire.len() < expected_req.len() + req_pkt.len() + 2 {
+            let n = std::io::Read::read(&mut srv_stream, &mut chunk).expect("read prelude+frame");
+            assert!(n > 0, "unexpected EOF waiting for prelude and frame");
+            wire.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(&wire[..expected_req.len()], expected_req.as_slice());
+        let mut reader = FrameReader::new();
+        reader.push(&wire[expected_req.len()..]);
+        assert_eq!(
+            reader.next_frame().expect("valid frame").as_deref(),
+            Some(req_pkt.as_slice())
+        );
+
+        // 2. End-to-end bidirectional exchange between client (with tcp_upgrade) and TcpTransport server.
+        let tcp_server = TcpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("server");
+        let server_addr = tcp_server.local_addr().expect("server addr");
+        let tcp_client =
+            TcpTransport::bind_with_upgrade("127.0.0.1:0".parse().expect("addr"), 0, Some("cdn.example.com"))
+                .expect("client");
+
+        tcp_client.send_to(&req_pkt, server_addr).expect("send req");
+        let mut srv_buf = [0u8; 512];
+        let (sn, client_peer) = loop {
+            match tcp_server.recv_from(&mut srv_buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("server recv failed: {e}"),
+            }
+        };
+        assert_eq!(&srv_buf[..sn], req_pkt.as_slice());
+
+        let resp_pkt = sample_vallum_packet(88);
+        tcp_server.send_to(&resp_pkt, client_peer).expect("send resp");
+        let mut cli_buf = [0u8; 512];
+        let (cn, rsrc) = loop {
+            match tcp_client.recv_from(&mut cli_buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("client recv failed: {e}"),
+            }
+        };
+        assert_eq!(rsrc, server_addr);
+        assert_eq!(&cli_buf[..cn], resp_pkt.as_slice());
+    }
+
+    #[test]
+    fn auto_transport_handshake_filter_ignores_garbage_udp_and_staggers_to_tcp() {
+        let blackhole_udp = UdpSocket::bind("127.0.0.1:0").expect("blackhole udp");
+        blackhole_udp
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let target = blackhole_udp.local_addr().expect("target");
+        let tcp_server = TcpTransport::bind(target).expect("tcp server");
+
+        let auto_client = AutoTransport::bind_with_timings_and_upgrade(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Duration::from_millis(80),
+            Duration::from_millis(250),
+            Some("cdn.example.com"),
+        )
+        .expect("auto client");
+
+        let req = sample_vallum_packet(55);
+        auto_client.send_to(&req, target).expect("send race probe");
+
+        let mut wire = [0u8; 256];
+        let (wn, peer) = blackhole_udp.recv_from(&mut wire).expect("udp probe");
+        assert_eq!(wn, req.len());
+
+        // Inject non-Vallum UDP noise before the 80ms stagger fires: none of these
+        // should lock AutoTransport onto UDP or surface via recv_from.
+        blackhole_udp
+            .send_to(b"HTTP/1.1 200 OK\r\n\r\n", peer)
+            .expect("send http noise");
+        blackhole_udp
+            .send_to(&[0x01, 0x7f, 0, 0, 0, 0, 0, 0, 9, 9], peer)
+            .expect("send invalid type noise");
+        blackhole_udp
+            .send_to(&[0x01, 0x04], peer)
+            .expect("send truncated packet");
+
+        let mut buf = [0u8; 512];
+        let (tn, tcp_peer) = loop {
+            match tcp_server.recv_from(&mut buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("tcp server recv failed: {e}"),
+            }
+        };
+        assert_eq!(&buf[..tn], req.as_slice());
+
+        // Also send a non-Vallum framed payload over TCP before the valid reply;
+        // AutoTransport's TCP arm must drop it and only deliver the valid envelope.
+        tcp_server
+            .send_to(&[0x99; 24], tcp_peer)
+            .expect("send garbage tcp frame");
+        let resp = sample_vallum_packet(88);
+        tcp_server.send_to(&resp, tcp_peer).expect("send valid resp");
+
+        let (cn, csrc) = loop {
+            match auto_client.recv_from(&mut buf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("auto recv failed: {e}"),
+            }
+        };
+        assert_eq!(csrc, target);
+        assert_eq!(&buf[..cn], resp.as_slice());
+        assert!(auto_client.inbound_dropped.load(Ordering::Relaxed) >= 4);
+    }
+
+    #[test]
+    fn auto_transport_replays_multi_fragment_initial_burst_on_tcp_stagger() {
+        let mut buf_cap = Vec::new();
+        let mut idx_cap = Vec::new();
+        for n in 0..(AUTO_MAX_INITIAL_PACKETS + 15) {
+            let mut pkt = sample_vallum_packet((n & 0xff) as u8);
+            pkt[4..8].copy_from_slice(&(n as u32).to_be_bytes());
+            record_initial_packet(&mut buf_cap, &mut idx_cap, &pkt);
+        }
+        assert_eq!(buf_cap.len(), AUTO_MAX_INITIAL_PACKETS);
+
+        let blackhole_udp = UdpSocket::bind("127.0.0.1:0").expect("blackhole udp");
+        blackhole_udp
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let target = blackhole_udp.local_addr().expect("target");
+        let tcp_server = TcpTransport::bind(target).expect("tcp server");
+
+        let auto_client = AutoTransport::bind_with_timings(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Duration::from_millis(80),
+            Duration::from_millis(250),
+        )
+        .expect("auto client");
+
+        // Build 4 fragments of an oversized handshake burst and transmit as a batch.
+        let fragments: Vec<Vec<u8>> = (0..4u16)
+            .map(|i| {
+                let hdr = vallum_tunnel::segment::Fragment {
+                    message_id: 9001,
+                    offset: i * 64,
+                    total: 256,
+                };
+                let mut f = hdr.encode().to_vec();
+                f.extend(std::iter::repeat_n(0x40 + i as u8, 64));
+                if i == 0 {
+                    // Overlay an InitHello header inside fragment 0 payload.
+                    f[vallum_tunnel::segment::FRAGMENT_HEADER_LEN] =
+                        vallum_core::wire::PROTOCOL_VERSION;
+                    f[vallum_tunnel::segment::FRAGMENT_HEADER_LEN + 1] =
+                        vallum_core::wire::MessageType::InitHello.code();
+                    f[vallum_tunnel::segment::FRAGMENT_HEADER_LEN + 4
+                        ..vallum_tunnel::segment::FRAGMENT_HEADER_LEN + 8]
+                        .copy_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+                }
+                f
+            })
+            .collect();
+
+        let batch: Vec<(SocketAddr, Vec<u8>)> =
+            fragments.iter().map(|f| (target, f.clone())).collect();
+        assert_eq!(auto_client.send_many(&batch).expect("send burst"), 4);
+
+        // Drain the 4 LWO-masked UDP fragments at the blackhole socket.
+        let mut wire = [0u8; 512];
+        for _ in 0..4 {
+            let (wn, _) = blackhole_udp.recv_from(&mut wire).expect("blackhole udp frag");
+            assert!(wn >= fragments[0].len());
+        }
+
+        // After the 80ms stagger, TCP must receive all 4 buffered fragments in order.
+        let mut tcp_received = Vec::new();
+        let mut tbuf = [0u8; 512];
+        while tcp_received.len() < 4 {
+            match tcp_server.recv_from(&mut tbuf) {
+                Ok((tn, _)) => tcp_received.push(tbuf[..tn].to_vec()),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("tcp server recv failed: {e}"),
+            }
+        }
+        assert_eq!(tcp_received, fragments);
+    }
+
+    #[test]
+    fn auto_transport_rejects_forged_resp_hello_and_only_locks_on_authentic_response() {
+        use vallum_core::handshake::RESP_TAG_SIZE;
+        use vallum_core::wire::{
+            tag, MessageBuilder, MessageHeader, MessageType, CONFIRMATION_SIZE, PROTOCOL_VERSION,
+            TIMESTAMP_SIZE,
+        };
+
+        let udp_server = UdpTransport::bind("127.0.0.1:0".parse().expect("addr")).expect("udp");
+        let target = udp_server.local_addr().expect("target");
+        let auto_client = AutoTransport::bind_with_timings(
+            "127.0.0.1:0".parse().expect("addr"),
+            0,
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+        )
+        .expect("auto client");
+
+        let mut init_b = MessageBuilder::new(MessageHeader {
+            version: PROTOCOL_VERSION,
+            message_type: MessageType::InitHello,
+            suite_id: 0x0001,
+            sender_index: 0x1122_3344,
+        });
+        init_b.field(tag::STATIC_CT, &[0x11; 32]).unwrap();
+        init_b.field(tag::EPHEMERAL_PK, &[0x22; 32]).unwrap();
+        init_b
+            .field(tag::TIMESTAMP, &[0x33; TIMESTAMP_SIZE])
+            .unwrap();
+        init_b.field(tag::PEER_HINT, &[0x44; 24]).unwrap();
+        let init_pkt = init_b.finish().unwrap();
+
+        auto_client.send_to(&init_pkt, target).expect("send init");
+        let mut rbuf = [0u8; 512];
+        let (rn, peer) = udp_server.recv_from(&mut rbuf).expect("server recv init");
+        assert_eq!(&rbuf[..rn], init_pkt.as_slice());
+
+        // 1. Non-TLV forged RespHello even echoing matching index must be dropped.
+        let mut forged_raw = vec![0x77; 96];
+        forged_raw[0] = PROTOCOL_VERSION;
+        forged_raw[1] = MessageType::RespHello.code();
+        forged_raw[4..8].copy_from_slice(&0x1122_3344u32.to_be_bytes());
+        udp_server
+            .send_to(&forged_raw, peer)
+            .expect("send raw forged resp");
+
+        // 2. Syntactically valid TLV RespHello for the WRONG sender_index must be dropped.
+        let mut wrong_idx_b = MessageBuilder::new(MessageHeader {
+            version: PROTOCOL_VERSION,
+            message_type: MessageType::RespHello,
+            suite_id: 0x0001,
+            sender_index: 0x5566_7788,
+        });
+        wrong_idx_b.field(tag::EPHEMERAL_CT, &[0xaa; 32]).unwrap();
+        wrong_idx_b.field(tag::STATIC_CT, &[0xbb; 32]).unwrap();
+        wrong_idx_b
+            .field(tag::RECEIVER_INDEX, &0x9999_8888u32.to_be_bytes())
+            .unwrap();
+        wrong_idx_b
+            .field(tag::CONFIRMATION, &[0xcc; CONFIRMATION_SIZE])
+            .unwrap();
+        wrong_idx_b
+            .field(tag::PRE_TAG, &[0xdd; RESP_TAG_SIZE])
+            .unwrap();
+        let wrong_idx_resp = wrong_idx_b.finish().unwrap();
+        udp_server
+            .send_to(&wrong_idx_resp, peer)
+            .expect("send wrong-index resp");
+
+        // 3. Genuine TLV RespHello matching our pending InitHello sender_index must pass and lock.
+        let mut good_b = MessageBuilder::new(MessageHeader {
+            version: PROTOCOL_VERSION,
+            message_type: MessageType::RespHello,
+            suite_id: 0x0001,
+            sender_index: 0x5566_7788,
+        });
+        good_b.field(tag::EPHEMERAL_CT, &[0xaa; 32]).unwrap();
+        good_b.field(tag::STATIC_CT, &[0xbb; 32]).unwrap();
+        good_b
+            .field(tag::RECEIVER_INDEX, &0x1122_3344u32.to_be_bytes())
+            .unwrap();
+        good_b
+            .field(tag::CONFIRMATION, &[0xcc; CONFIRMATION_SIZE])
+            .unwrap();
+        good_b
+            .field(tag::PRE_TAG, &[0xdd; RESP_TAG_SIZE])
+            .unwrap();
+        let good_resp = good_b.finish().unwrap();
+        udp_server.send_to(&good_resp, peer).expect("send good resp");
+
+        let mut cbuf = [0u8; 512];
+        let (cn, csrc) = loop {
+            match auto_client.recv_from(&mut cbuf) {
+                Ok(ok) => break ok,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => panic!("auto recv failed: {e}"),
+            }
+        };
+        assert_eq!(csrc, target);
+        assert_eq!(&cbuf[..cn], good_resp.as_slice());
+        assert!(auto_client.inbound_dropped.load(Ordering::Relaxed) >= 2);
     }
 }

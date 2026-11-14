@@ -20,6 +20,7 @@ pub struct Snapshot {
     pub interface: String,
     pub addresses: Vec<String>,
     pub listen_port: Option<u32>,
+    pub carrier: String,
     pub suite: String,
     pub fwmark: Option<u32>,
     pub fingerprint: String,
@@ -124,6 +125,10 @@ impl Snapshot {
                 .map(str::to_owned)
                 .collect(),
             listen_port: device(field::LISTEN_PORT).and_then(|value| value.parse().ok()),
+            carrier: device(field::VALLUM_CARRIER)
+                .map(str::to_owned)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "udp".to_owned()),
             suite: device(field::VALLUM_SUITE).unwrap_or_default().to_owned(),
             fwmark: device(field::FWMARK).and_then(|value| value.parse().ok()),
             // The peer show fingerprint (a hash of the public line), not the

@@ -355,6 +355,68 @@ separate approximation of it.
   automatically selecting profiles such as `1280` on USB 1GbE NICs or `1380` for
   unfragmented low-latency gaming UDP traffic.
 
+### Mullvad & VariantVPN Parity Track (Interruption-Proof Continuation Queue)
+
+Derived from [`docs/research/mullvad-reference.md`](research/mullvad-reference.md) and the
+reference archive (`Mullvad Breakdown and Variant.md` / `VariantVPN-Prototype.html`). Each
+item can be picked up independently in order after any interruption:
+
+#### Completed Waves (v1.6.5)
+- **Wave 1 (`[Built]`)**: `vallum-tunnel::lwo` zero-overhead SplitMix64 UDP header XOR masking,
+  `Carrier::{Lwo, Auto}` happy-eyeballs 500 ms LWO-to-TCP racer, CVE-2019-14899 priority
+  `-300` input chain + `src_valid_mark=1` + `arp_ignore=2`, GUI carrier/progress/cover-traffic views.
+- **Wave 2 (`[Built]`)**: LWO v2 handshake & `9..=64` B fragment tail padding (`MAX_OUTER_DATAGRAM = 1452`),
+  live `vallum_carrier` UAPI telemetry across CLI/TUI/GUI, and active `route_leak` audit in `vallum doctor`.
+- **Wave 3 (`[Built]`)**: Reverse-proxy HTTP/1.1 `101 Switching Protocols` stream upgrade (`/_vallum`),
+  closed-loop `vallum doctor --tune-mtu`, GUI 1-click **Probe Live Path** + `JA4T` MSS advisor.
+- **Wave 4 (`[Built]`)**: Firewall ICMPv6 NDP accept rules (`nd-{router,neighbor}-{solicit,advert}`),
+  `policy = "lockdown"` / `vallum policy lockdown` (early-boot DNS-free blocking), `vallum-guard@.service`
+  `Before=network-pre.target` ordering, server-side `100.64.0.<bitmask>` `[quick] content_blockers`,
+  and GUI Guard Policy + 6-chip Content Blocker selector.
+- **Wave 5 (`[Built]`)**: Client-side HTTP/1.1 `Upgrade: vallum` dial emission via
+  `[interface] tcp_upgrade` (config validation, `TcpTransport` / `AutoTransport` dial preamble,
+  daemon/control wiring, Cockpit GUI field), envelope-validated `HandshakeFilter` gate
+  (`lwo::is_valid_vallum_packet` + `AutoTransport` UDP/TCP reader filtering), and
+  `KEEPALIVE_JITTER_MS` / `keepalive_offset` / `retransmit_offset` jitter support in
+  `vallum_core::timer`.
+- **Wave 6 (`[Built]`)**: Completed Track B + Track C:
+  - **Track B**: `KEEPALIVE_JITTER_MS = 2_000` (10–12 s reactive keepalive ceiling matching LWO v2),
+    per-session daemon RNG seeding of `keepalive_offset` and `retransmit_offset` in
+    `vallum_tunnel::device::timer`, upgraded `HandshakeFilter` (`extract_initiation_sender_index`,
+    `verify_handshake_mac1`, `is_authentic_handshake_packet` validating TLV framing, required tags,
+    pending `RECEIVER_INDEX` membership, and optional `MAC1`) gating `AutoTransport`, and
+    `AUTO_MAX_INITIAL_PACKETS = 100` multi-fragment initial burst replay on TCP stagger.
+  - **Track C**: Local loopback UDP DNS forwarder (`vallum-quick dns-proxy` / `LoopbackDnsProxy`
+    with bounded `MAX_CONCURRENT_DNS_QUERIES = 64`), pure-Rust RFC 1035 wire parser & `NODATA` /
+    captive-portal `A` (`198.51.100.1`) synthesizers, RFC1918 LAN vs tunnel resolver classification
+    (keeping `100.64.0.0/10` content-blocker IPs in-tunnel), and automatic `AAAA` suppression on
+    IPv4-only tunnels (`tunnel_is_ipv4_only`).
+
+#### Upcoming Tracks (Ordered)
+- **Track A (`[Next]`): Client-Side Web/TLS Upgrade Dial, QUIC `DATAGRAM` & Shadowsocks Carriers**
+  - `[Built in Wave 5]` Emit HTTP/1.1 `Upgrade: vallum` (`/_vallum`) on client TCP dials via
+    `[interface] tcp_upgrade` so clients traverse CDN/Caddy `:443` seamlessly.
+  - `[Next]` Add pure-Rust TLS/QUIC `DATAGRAM` (`carrier = "tls"`, `carrier = "quic"`, `carrier = "ss"`)
+    and extend `AutoTransport` fan-out across those transports with explicit per-packet overhead
+    accounting into `outer_mtu` derivation.
+- **Track B (`[Built in Wave 6]`): Cryptographic `HandshakeFilter` Multiplexer & Jittered Timers**
+  - `[Built in Wave 5–6]` `HandshakeFilter` (`is_authentic_handshake_packet`,
+    `verify_handshake_mac1`, `extract_initiation_sender_index`) in `AutoTransport`, 100-packet
+    initial burst replay on TCP stagger, and daemon RNG seeding of `keepalive_offset` (`<= 2_000` ms)
+    / `retransmit_offset` (`<= 333` ms) in `vallum_tunnel::device::timer`.
+- **Track C (`[Built in Wave 6]`): Local Loopback DNS Proxy & Captive-Portal Probe Handling**
+  - `[Built in Wave 6]` Bounded-concurrency (`64`) forwarding resolver (`vallum-quick dns-proxy` /
+    `LoopbackDnsProxy`) with RFC1918 LAN vs tunnel resolver split, IPv4-only `AAAA` `NODATA`
+    suppression, and `198.51.100.1` captive-portal spoofing for `Blocked` / `Lockdown` state.
+- **Track D (`[Next]`): Active Non-Tunnel Leak Traceroute & Early-Boot Systemd Unit**
+  - Add periodic post-connect non-tunnel probe (`mullvad-leak-checker` pattern) emitting a Prometheus
+    alert / UAPI warning if non-tunnel egress becomes reachable while connected.
+  - Optionally split a dedicated `vallum-early-boot-block.service` (`DefaultDependencies=no`) for
+    hosts that demand lockdown before local-fs network setup when no tunnel unit is active yet.
+- **Track E (`[Later]`): Multihop Entry+Exit Selection & Resilient API Fronting**
+  - Signed relay-list selector (`Auto`/`Always` entry+exit constraints) and rotating control-plane
+    access methods (Direct PQ-TLS, Bridge, DoH-encoded AAAA proxy, CDN fronting).
+
 ## Not on the roadmap, and why
 
 - **macOS, Windows, BSD.** ADR-0011 removed them for v0.1 and the macOS CI

@@ -71,18 +71,33 @@ impl Device {
             self.remap(index);
         }
 
-        // (2b) Draw this session's rekey spread, once. The rekey trigger is
-        //      otherwise exactly `established_at + 120 s`, so peers that
-        //      established together rekey together, in lockstep, forever - and
-        //      a fleet's initiations arrive at the server in the same second.
+        // (2b) Draw this session's rekey spread and idle-keepalive jitter, once.
+        //      The rekey trigger is otherwise exactly `established_at + 120 s` and
+        //      the reactive keepalive `10 s`, so peers that established together
+        //      synchronize in lockstep. Handshake retransmits likewise draw a
+        //      bounded offset so recovery traffic doesn't align on tick boundaries.
         //      The device owns the randomness; `vallum-core` has none.
-        if self.peers[index].timers.is_established()
-            && self.peers[index].timers.rekey_offset().is_none()
+        if self.peers[index].timers.is_established() {
+            if self.peers[index].timers.rekey_offset().is_none() {
+                let draw = rng.draw_u64();
+                self.peers[index]
+                    .timers
+                    .set_rekey_offset(draw % (vallum_core::timer::REKEY_SPREAD_MS + 1));
+            }
+            if self.peers[index].timers.keepalive_offset().is_none() {
+                let draw = rng.draw_u64();
+                self.peers[index]
+                    .timers
+                    .set_keepalive_offset(draw % (vallum_core::timer::KEEPALIVE_JITTER_MS + 1));
+            }
+        }
+        if self.peers[index].timers.handshake_in_flight()
+            && self.peers[index].timers.retransmit_offset().is_none()
         {
             let draw = rng.draw_u64();
             self.peers[index]
                 .timers
-                .set_rekey_offset(draw % (vallum_core::timer::REKEY_SPREAD_MS + 1));
+                .set_retransmit_offset(draw % (vallum_core::timer::REKEY_JITTER_MS + 1));
         }
 
         // (3) Retransmit the initiator's `InitConf` until the responder answers.
@@ -103,7 +118,13 @@ impl Device {
             TimerAction::SendKeepalive if persistent => {}
             TimerAction::SendKeepalive => self.send_keepalive(index, clock, rng, out),
             TimerAction::StartHandshake => self.start_handshake(index, None, clock, rng, out),
-            TimerAction::RetransmitHandshake => self.retransmit_handshake(index, clock, out),
+            TimerAction::RetransmitHandshake => {
+                self.retransmit_handshake(index, clock, out);
+                let draw = rng.draw_u64();
+                self.peers[index]
+                    .timers
+                    .set_retransmit_offset(draw % (vallum_core::timer::REKEY_JITTER_MS + 1));
+            }
             TimerAction::GiveUp => self.abandon_handshake(index),
             TimerAction::Expire => self.tear_down(index, now),
         }

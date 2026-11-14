@@ -8,8 +8,13 @@
 
 use std::fs;
 use std::io::Write as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use vallum_config::Config;
 use vallum_core::Prefix;
@@ -310,4 +315,687 @@ fn which(program: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
+}
+
+/// RFC 5737 TEST-NET-2 IP returned for spoofed captive-portal `A` queries when
+/// the tunnel host is in `Blocked` / `Lockdown` state (Mullvad §8.4 pattern).
+pub(crate) const CAPTIVE_PORTAL_SPOOF_IP: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
+
+/// Maximum concurrent forwarded upstream UDP DNS queries handled by
+/// [`LoopbackDnsProxy`] at once.
+pub(crate) const MAX_CONCURRENT_DNS_QUERIES: usize = 64;
+
+/// DNS RR type `A` (IPv4 host address).
+pub(crate) const DNS_TYPE_A: u16 = 1;
+
+/// DNS RR type `AAAA` (IPv6 host address).
+pub(crate) const DNS_TYPE_AAAA: u16 = 28;
+
+const DNS_CLASS_IN: u16 = 1;
+const DNS_PORT: u16 = 53;
+const DNS_MAX_PACKET: usize = 4096;
+
+/// Returns `true` when `ip` is a private/link-local LAN resolver address
+/// (RFC 1918 / RFC 3927 / RFC 4193 / fe80::/10).
+///
+/// Specifically excludes CGNAT `100.64.0.0/10` (used by Vallum's `100.64.0.X`
+/// server-side content-blocker resolvers), keeping those in the tunnel.
+#[must_use]
+pub(crate) fn is_private_lan_resolver(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            // fc00::/7 ULA or fe80::/10 link-local unicast.
+            (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Split configured DNS server strings into `(tunnel_resolvers, lan_resolvers)`.
+///
+/// Invalid IP strings are ignored. When `allow_lan` is `true`, RFC1918 / ULA /
+/// link-local resolvers go to `lan_resolvers` while CGNAT magic resolvers and
+/// public resolvers stay in `tunnel_resolvers`. When `allow_lan` is `false`, all
+/// valid resolvers stay in `tunnel_resolvers`.
+#[must_use]
+pub(crate) fn split_resolvers(servers: &[String], allow_lan: bool) -> (Vec<IpAddr>, Vec<IpAddr>) {
+    let mut tunnel = Vec::new();
+    let mut lan = Vec::new();
+    for raw in servers {
+        if let Ok(ip) = raw.trim().parse::<IpAddr>() {
+            if allow_lan && is_private_lan_resolver(ip) {
+                lan.push(ip);
+            } else {
+                tunnel.push(ip);
+            }
+        }
+    }
+    (tunnel, lan)
+}
+
+/// Returns `true` for hostnames that belong exclusively to a local LAN naming
+/// scope (`localhost`, `.local`, `.lan`, `.home.arpa`, `.internal`, `.intranet`,
+/// `.corp`).
+#[must_use]
+pub(crate) fn is_local_domain(qname: &str) -> bool {
+    let trimmed = qname.trim_end_matches('.').to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed == "localhost"
+        || trimmed == "local"
+        || trimmed.ends_with(".local")
+        || trimmed.ends_with(".lan")
+        || trimmed.ends_with(".home.arpa")
+        || trimmed.ends_with(".internal")
+        || trimmed.ends_with(".intranet")
+        || trimmed.ends_with(".corp")
+}
+
+/// Returns `true` when the tunnel carries IPv4 routes/addresses without any IPv6
+/// address or `allowed_ips` prefix, enabling zero-leak `AAAA` `NODATA` replies.
+#[must_use]
+pub(crate) fn tunnel_is_ipv4_only(config: &Config) -> bool {
+    let mut saw_v4 = false;
+    let mut saw_v6 = false;
+
+    for raw in config
+        .interface
+        .address
+        .iter()
+        .chain(config.interface.addresses.iter())
+        .chain(config.peers.iter().flat_map(|peer| peer.allowed_ips.iter()))
+    {
+        if let Ok(prefix) = raw.parse::<Prefix>() {
+            match prefix.as_ipnet().addr() {
+                IpAddr::V4(_) => saw_v4 = true,
+                IpAddr::V6(_) => saw_v6 = true,
+            }
+        } else if let Ok(ip) = raw.parse::<IpAddr>() {
+            match ip {
+                IpAddr::V4(_) => saw_v4 = true,
+                IpAddr::V6(_) => saw_v6 = true,
+            }
+        }
+    }
+
+    saw_v4 && !saw_v6
+}
+
+/// Parsed first question of an RFC 1035 DNS wire query packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DnsQueryQuestion {
+    pub(crate) tx_id: u16,
+    pub(crate) flags: u16,
+    pub(crate) qname: String,
+    pub(crate) qtype: u16,
+    pub(crate) qclass: u16,
+    pub(crate) question_end: usize,
+}
+
+/// Parse an RFC 1035 standard DNS query header and its first question.
+///
+/// Rejects responses (`QR=1`), empty question sections (`QDCOUNT == 0`),
+/// compressed labels inside the query question, or truncated packets.
+#[must_use]
+pub(crate) fn parse_dns_query(packet: &[u8]) -> Option<DnsQueryQuestion> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let tx_id = u16::from_be_bytes([packet[0], packet[1]]);
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    if (flags & 0x8000) != 0 {
+        return None;
+    }
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]);
+    if qdcount == 0 {
+        return None;
+    }
+
+    let mut pos = 12usize;
+    let mut qname = String::new();
+    loop {
+        let len = usize::from(*packet.get(pos)?);
+        pos += 1;
+        if len == 0 {
+            break;
+        }
+        if (len & 0xc0) != 0 || len > 63 {
+            return None;
+        }
+        let label = packet.get(pos..pos + len)?;
+        if !label.is_ascii() {
+            return None;
+        }
+        let label_str = std::str::from_utf8(label).ok()?;
+        if !qname.is_empty() {
+            qname.push('.');
+        }
+        qname.push_str(label_str);
+        if qname.len() > 253 {
+            return None;
+        }
+        pos += len;
+    }
+
+    let qt_hi = *packet.get(pos)?;
+    let qt_lo = *packet.get(pos + 1)?;
+    let qc_hi = *packet.get(pos + 2)?;
+    let qc_lo = *packet.get(pos + 3)?;
+    let question_end = pos + 4;
+
+    Some(DnsQueryQuestion {
+        tx_id,
+        flags,
+        qname,
+        qtype: u16::from_be_bytes([qt_hi, qt_lo]),
+        qclass: u16::from_be_bytes([qc_hi, qc_lo]),
+        question_end,
+    })
+}
+
+fn build_dns_response_header(tx_id: u16, req_flags: u16, ancount: u16) -> [u8; 12] {
+    let rd = req_flags & 0x0100;
+    let resp_flags = 0x8080 | rd;
+    let mut hdr = [0u8; 12];
+    hdr[0..2].copy_from_slice(&tx_id.to_be_bytes());
+    hdr[2..4].copy_from_slice(&resp_flags.to_be_bytes());
+    hdr[4..6].copy_from_slice(&1u16.to_be_bytes());
+    hdr[6..8].copy_from_slice(&ancount.to_be_bytes());
+    hdr
+}
+
+/// Synthesize a DNS `NOERROR` / `NODATA` (`ANCOUNT = 0`) reply preserving the
+/// query ID, recursion-desired bit, and original question section.
+#[must_use]
+pub(crate) fn synthesize_nodata_response(query: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_dns_query(query)?;
+    let mut resp = Vec::with_capacity(parsed.question_end);
+    resp.extend_from_slice(&build_dns_response_header(parsed.tx_id, parsed.flags, 0));
+    resp.extend_from_slice(query.get(12..parsed.question_end)?);
+    Some(resp)
+}
+
+/// Synthesize a captive-portal spoof `A` response resolving to
+/// [`CAPTIVE_PORTAL_SPOOF_IP`] (`198.51.100.1`, TTL 5 s). Non-`A` or non-`IN`
+/// queries receive a clean `NODATA` reply.
+#[must_use]
+pub(crate) fn synthesize_captive_portal_a_response(query: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_dns_query(query)?;
+    if parsed.qtype != DNS_TYPE_A || parsed.qclass != DNS_CLASS_IN {
+        return synthesize_nodata_response(query);
+    }
+
+    let mut resp = Vec::with_capacity(parsed.question_end + 16);
+    resp.extend_from_slice(&build_dns_response_header(parsed.tx_id, parsed.flags, 1));
+    resp.extend_from_slice(query.get(12..parsed.question_end)?);
+    // Compressed pointer to offset 12 (QNAME), TYPE A, CLASS IN, TTL 5s, RDLENGTH 4, 198.51.100.1
+    resp.extend_from_slice(&[0xc0, 0x0c]);
+    resp.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
+    resp.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+    resp.extend_from_slice(&5u32.to_be_bytes());
+    resp.extend_from_slice(&4u16.to_be_bytes());
+    resp.extend_from_slice(&CAPTIVE_PORTAL_SPOOF_IP.octets());
+    Some(resp)
+}
+
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn wake_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), v4.port())
+        }
+        SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), v6.port())
+        }
+        other => other,
+    }
+}
+
+fn forward_dns_query(
+    client_sock: &UdpSocket,
+    client_addr: SocketAddr,
+    query: &[u8],
+    targets: &[SocketAddr],
+) {
+    let mut rbuf = [0u8; DNS_MAX_PACKET];
+    for &upstream in targets {
+        let bind_addr: SocketAddr = match upstream {
+            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        let Ok(sock) = UdpSocket::bind(bind_addr) else {
+            continue;
+        };
+        let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = sock.set_write_timeout(Some(Duration::from_secs(2)));
+        if sock.send_to(query, upstream).is_err() {
+            continue;
+        }
+        if let Ok((rn, _)) = sock.recv_from(&mut rbuf) {
+            if rn >= 12 {
+                let _ = client_sock.send_to(&rbuf[..rn], client_addr);
+                return;
+            }
+        }
+    }
+}
+
+/// Bounded-concurrency local loopback UDP DNS proxy supporting LAN/tunnel split,
+/// IPv4-only `AAAA` `NODATA` suppression, and captive-portal `A` spoofing.
+#[derive(Debug)]
+pub(crate) struct LoopbackDnsProxy {
+    local: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    captive_spoof: Arc<AtomicBool>,
+    suppress_aaaa: Arc<AtomicBool>,
+    in_flight: Arc<AtomicUsize>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LoopbackDnsProxy {
+    /// Bind the loopback UDP DNS listener on `listen` and spawn its dispatch loop.
+    pub(crate) fn bind(
+        listen: SocketAddr,
+        tunnel_resolvers: Vec<SocketAddr>,
+        lan_resolvers: Vec<SocketAddr>,
+        suppress_aaaa: bool,
+        captive_spoof: bool,
+    ) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind(listen)?;
+        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let local = socket.local_addr()?;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let captive_flag = Arc::new(AtomicBool::new(captive_spoof));
+        let aaaa_flag = Arc::new(AtomicBool::new(suppress_aaaa));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker_captive = Arc::clone(&captive_flag);
+        let worker_aaaa = Arc::clone(&aaaa_flag);
+        let worker_in_flight = Arc::clone(&in_flight);
+
+        let handle = thread::Builder::new()
+            .name("vallum-dns-proxy".to_owned())
+            .spawn(move || {
+                let mut buf = vec![0u8; DNS_MAX_PACKET];
+                while !worker_shutdown.load(Ordering::Acquire) {
+                    let (n, client_addr) = match socket.recv_from(&mut buf) {
+                        Ok(ok) => ok,
+                        Err(err)
+                            if matches!(
+                                err.kind(),
+                                std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::Interrupted
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    if worker_shutdown.load(Ordering::Acquire) || n == 0 {
+                        continue;
+                    }
+                    let packet = &buf[..n];
+                    let Some(parsed) = parse_dns_query(packet) else {
+                        continue;
+                    };
+
+                    if worker_captive.load(Ordering::Acquire) {
+                        if let Some(reply) = synthesize_captive_portal_a_response(packet) {
+                            let _ = socket.send_to(&reply, client_addr);
+                        }
+                        continue;
+                    }
+
+                    if worker_aaaa.load(Ordering::Acquire) && parsed.qtype == DNS_TYPE_AAAA {
+                        if let Some(reply) = synthesize_nodata_response(packet) {
+                            let _ = socket.send_to(&reply, client_addr);
+                        }
+                        continue;
+                    }
+
+                    let use_lan = !lan_resolvers.is_empty()
+                        && (is_local_domain(&parsed.qname) || tunnel_resolvers.is_empty());
+                    let targets = if use_lan {
+                        lan_resolvers.clone()
+                    } else {
+                        tunnel_resolvers.clone()
+                    };
+                    if targets.is_empty() {
+                        continue;
+                    }
+
+                    let prev = worker_in_flight.fetch_add(1, Ordering::AcqRel);
+                    if prev >= MAX_CONCURRENT_DNS_QUERIES {
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+
+                    let guard = InFlightGuard(Arc::clone(&worker_in_flight));
+                    let Ok(reply_sock) = socket.try_clone() else {
+                        drop(guard);
+                        continue;
+                    };
+                    let query = packet.to_vec();
+                    let _ = thread::Builder::new()
+                        .name("vallum-dns-fwd".to_owned())
+                        .spawn(move || {
+                            let _guard = guard;
+                            forward_dns_query(&reply_sock, client_addr, &query, &targets);
+                        });
+                }
+            })?;
+
+        Ok(Self {
+            local,
+            shutdown,
+            captive_spoof: captive_flag,
+            suppress_aaaa: aaaa_flag,
+            in_flight,
+            worker: Some(handle),
+        })
+    }
+
+    /// The bound local socket address.
+    #[must_use]
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local
+    }
+
+    /// Enable or disable captive-portal `A` spoofing (`198.51.100.1`).
+    pub(crate) fn set_captive_spoof(&self, enabled: bool) {
+        self.captive_spoof.store(enabled, Ordering::Release);
+    }
+
+    /// Enable or disable `AAAA` `NODATA` suppression.
+    pub(crate) fn set_suppress_aaaa(&self, enabled: bool) {
+        self.suppress_aaaa.store(enabled, Ordering::Release);
+    }
+
+    /// Number of upstream queries currently in flight.
+    #[must_use]
+    pub(crate) fn active_queries(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for LoopbackDnsProxy {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let wake_target = wake_addr(self.local);
+        let bind_addr: SocketAddr = match wake_target {
+            SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+        };
+        if let Ok(sock) = UdpSocket::bind(bind_addr) {
+            let _ = sock.send_to(&[], wake_target);
+        }
+        if let Some(handle) = self.worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Run the local loopback DNS proxy using `[quick]` resolver settings.
+pub(crate) fn run_dns_proxy(
+    config: &Config,
+    listen: SocketAddr,
+    captive_spoof: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let servers = config.quick.effective_dns_servers();
+    let (tunnel_ips, lan_ips) = split_resolvers(&servers, config.quick.allow_lan);
+    let suppress_aaaa = tunnel_is_ipv4_only(config);
+
+    if dry_run {
+        println!(
+            "would run loopback DNS proxy on {listen} (tunnel={tunnel_ips:?}, lan={lan_ips:?}, suppress_aaaa={suppress_aaaa}, captive_spoof={captive_spoof})"
+        );
+        return Ok(());
+    }
+
+    let tunnel_addrs: Vec<SocketAddr> = tunnel_ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, DNS_PORT))
+        .collect();
+    let lan_addrs: Vec<SocketAddr> = lan_ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, DNS_PORT))
+        .collect();
+
+    let proxy = LoopbackDnsProxy::bind(
+        listen,
+        tunnel_addrs,
+        lan_addrs,
+        suppress_aaaa,
+        captive_spoof,
+    )?;
+    proxy.set_suppress_aaaa(suppress_aaaa);
+    proxy.set_captive_spoof(captive_spoof);
+    println!(
+        "vallum-quick: loopback DNS proxy listening on {} (active={})",
+        proxy.local_addr(),
+        proxy.active_queries()
+    );
+    loop {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_dns_query(tx_id: u16, name: &str, qtype: u16) -> Vec<u8> {
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&tx_id.to_be_bytes());
+        pkt.extend_from_slice(&0x0100u16.to_be_bytes()); // RD=1
+        pkt.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT=1
+        pkt.extend_from_slice(&[0u8; 6]);
+        for label in name.split('.') {
+            pkt.push(label.len() as u8);
+            pkt.extend_from_slice(label.as_bytes());
+        }
+        pkt.push(0);
+        pkt.extend_from_slice(&qtype.to_be_bytes());
+        pkt.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        pkt
+    }
+
+    #[test]
+    fn dns_wire_parser_and_captive_portal_or_nodata_synthesizers_roundtrip() {
+        let q_a = build_dns_query(0x1337, "connectivitycheck.gstatic.com", DNS_TYPE_A);
+        let parsed = parse_dns_query(&q_a).expect("parse A query");
+        assert_eq!(parsed.tx_id, 0x1337);
+        assert_eq!(parsed.qname, "connectivitycheck.gstatic.com");
+        assert_eq!(parsed.qtype, DNS_TYPE_A);
+        assert_eq!(parsed.qclass, DNS_CLASS_IN);
+
+        // Captive portal A response has ANCOUNT=1 and resolves to 198.51.100.1.
+        let spoof_a = synthesize_captive_portal_a_response(&q_a).expect("captive A");
+        assert_eq!(&spoof_a[0..2], &0x1337u16.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([spoof_a[6], spoof_a[7]]), 1);
+        assert_eq!(&spoof_a[spoof_a.len() - 4..], &[198, 51, 100, 1]);
+
+        // AAAA query gets clean NODATA (ANCOUNT=0, RCODE=0) from both synthesizers.
+        let q_aaaa = build_dns_query(0x4242, "example.com", DNS_TYPE_AAAA);
+        let nodata = synthesize_nodata_response(&q_aaaa).expect("nodata AAAA");
+        assert_eq!(&nodata[0..2], &0x4242u16.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([nodata[6], nodata[7]]), 0);
+        assert_eq!(nodata[3] & 0x0f, 0); // RCODE=0 (NOERROR)
+        assert_eq!(
+            synthesize_captive_portal_a_response(&q_aaaa).expect("captive AAAA"),
+            nodata
+        );
+
+        // Malformed / response packet (QR=1) is rejected cleanly.
+        assert!(parse_dns_query(&nodata).is_none());
+        assert!(parse_dns_query(&[0u8; 5]).is_none());
+    }
+
+    #[test]
+    fn resolver_classifier_splits_rfc1918_lan_from_cgnat_magic_and_public_dns() {
+        let servers = vec![
+            "100.64.0.7".to_owned(),
+            "192.168.1.1".to_owned(),
+            "10.0.0.53".to_owned(),
+            "172.16.4.2".to_owned(),
+            "fd00::53".to_owned(),
+            "1.1.1.1".to_owned(),
+            "2606:4700:4700::1111".to_owned(),
+        ];
+        // When allow_lan is true, RFC1918/ULA go to LAN while CGNAT magic 100.64.0.7 + public stay in tunnel.
+        let (tunnel, lan) = split_resolvers(&servers, true);
+        assert_eq!(
+            tunnel,
+            vec![
+                "100.64.0.7".parse::<IpAddr>().unwrap(),
+                "1.1.1.1".parse::<IpAddr>().unwrap(),
+                "2606:4700:4700::1111".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        assert_eq!(
+            lan,
+            vec![
+                "192.168.1.1".parse::<IpAddr>().unwrap(),
+                "10.0.0.53".parse::<IpAddr>().unwrap(),
+                "172.16.4.2".parse::<IpAddr>().unwrap(),
+                "fd00::53".parse::<IpAddr>().unwrap(),
+            ]
+        );
+
+        // When allow_lan is false, every resolver stays in-tunnel.
+        let (all_tunnel, no_lan) = split_resolvers(&servers, false);
+        assert!(no_lan.is_empty());
+        assert_eq!(all_tunnel.len(), servers.len());
+
+        assert!(is_local_domain("printer.lan"));
+        assert!(is_local_domain("nas.local."));
+        assert!(is_local_domain("router.home.arpa"));
+        assert!(!is_local_domain("mullvad.net"));
+
+        let load_cfg = |tag: &str, body: &str| {
+            let dir = std::env::temp_dir().join(format!(
+                "vallum-quick-dns-classify-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("mkdir");
+            let path = dir.join("v.toml");
+            fs::write(&path, body).expect("write toml");
+            let cfg = Config::load(&path).expect("load cfg");
+            let _ = fs::remove_dir_all(&dir);
+            cfg
+        };
+
+        let v4_only_cfg = load_cfg(
+            "v4",
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\naddresses = [\"10.7.0.2/24\"]\n\
+             [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        assert!(tunnel_is_ipv4_only(&v4_only_cfg));
+
+        let dual_cfg = load_cfg(
+            "dual",
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\naddresses = [\"10.7.0.2/24\", \"fd00:7::2/64\"]\n\
+             [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\", \"::/0\"]\n",
+        );
+        assert!(!tunnel_is_ipv4_only(&dual_cfg));
+    }
+
+    #[test]
+    fn loopback_dns_proxy_suppresses_aaaa_spoofs_captive_portal_and_routes_lan_domains() {
+        fn spawn_mock_upstream(reply_last_byte: u8) -> (SocketAddr, Arc<AtomicUsize>) {
+            let sock = UdpSocket::bind("127.0.0.1:0").expect("mock upstream");
+            sock.set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("timeout");
+            let addr = sock.local_addr().expect("addr");
+            let count = Arc::new(AtomicUsize::new(0));
+            let c2 = Arc::clone(&count);
+            thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                for _ in 0..4 {
+                    let Ok((n, cli)) = sock.recv_from(&mut buf) else {
+                        break;
+                    };
+                    c2.fetch_add(1, Ordering::Relaxed);
+                    if let Some(parsed) = parse_dns_query(&buf[..n]) {
+                        let mut resp = Vec::with_capacity(parsed.question_end + 16);
+                        resp.extend_from_slice(&build_dns_response_header(
+                            parsed.tx_id,
+                            parsed.flags,
+                            1,
+                        ));
+                        resp.extend_from_slice(&buf[12..parsed.question_end]);
+                        resp.extend_from_slice(&[
+                            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04,
+                            10, 20, 30, reply_last_byte,
+                        ]);
+                        let _ = sock.send_to(&resp, cli);
+                    }
+                }
+            });
+            (addr, count)
+        }
+
+        let (tunnel_up, tunnel_hits) = spawn_mock_upstream(11);
+        let (lan_up, lan_hits) = spawn_mock_upstream(22);
+
+        let proxy = LoopbackDnsProxy::bind(
+            "127.0.0.1:0".parse().expect("loopback"),
+            vec![tunnel_up],
+            vec![lan_up],
+            true,
+            false,
+        )
+        .expect("bind proxy");
+
+        let client = UdpSocket::bind("127.0.0.1:0").expect("client");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+
+        // 1. AAAA query suppressed locally (NODATA, zero upstream hits).
+        let q_aaaa = build_dns_query(0x1001, "example.com", DNS_TYPE_AAAA);
+        client.send_to(&q_aaaa, proxy.local_addr()).expect("send aaaa");
+        let mut rbuf = [0u8; 512];
+        let (n, _) = client.recv_from(&mut rbuf).expect("recv aaaa");
+        assert_eq!(&rbuf[0..2], &0x1001u16.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([rbuf[6], rbuf[7]]), 0);
+        assert!(n >= q_aaaa.len());
+        assert_eq!(tunnel_hits.load(Ordering::Relaxed), 0);
+
+        // 2. Public A query goes to tunnel upstream -> 10.20.30.11.
+        let q_pub = build_dns_query(0x1002, "example.com", DNS_TYPE_A);
+        client.send_to(&q_pub, proxy.local_addr()).expect("send pub");
+        let (n, _) = client.recv_from(&mut rbuf).expect("recv pub");
+        assert_eq!(&rbuf[n - 4..n], &[10, 20, 30, 11]);
+        assert_eq!(tunnel_hits.load(Ordering::Relaxed), 1);
+
+        // 3. `.lan` A query goes to LAN upstream -> 10.20.30.22.
+        let q_lan = build_dns_query(0x1003, "printer.lan", DNS_TYPE_A);
+        client.send_to(&q_lan, proxy.local_addr()).expect("send lan");
+        let (n, _) = client.recv_from(&mut rbuf).expect("recv lan");
+        assert_eq!(&rbuf[n - 4..n], &[10, 20, 30, 22]);
+        assert_eq!(lan_hits.load(Ordering::Relaxed), 1);
+
+        // 4. Enabling captive_spoof intercepts A locally -> 198.51.100.1 without hitting upstream.
+        proxy.set_captive_spoof(true);
+        let q_cap = build_dns_query(0x1004, "captive.apple.com", DNS_TYPE_A);
+        client.send_to(&q_cap, proxy.local_addr()).expect("send cap");
+        let (n, _) = client.recv_from(&mut rbuf).expect("recv cap");
+        assert_eq!(&rbuf[n - 4..n], &[198, 51, 100, 1]);
+        assert_eq!(tunnel_hits.load(Ordering::Relaxed), 1);
+    }
 }

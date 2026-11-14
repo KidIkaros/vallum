@@ -13,7 +13,9 @@ Documentation=man:vallum(8) man:vallum.toml(5)
 # It deliberately does NOT carry `PartOf=vallum@%i.service`. Stopping the tunnel
 # must not remove the block: that is the exact moment the block is needed, and
 # the tunnel's own detach path is what used to leave the host fail-open.
-Before=vallum@%i.service
+After=vallum-cleanup.service
+Before=network-pre.target vallum@%i.service
+Wants=network-pre.target
 Requires=vallum@%i.service
 
 [Service]

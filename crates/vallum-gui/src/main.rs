@@ -31,8 +31,8 @@ use serde::Serialize;
 use tauri::{Emitter, State};
 
 use actions::{
-    BundleOut, Done, InterfaceFields, InviteFields, JoinFields, KeyOut, PeerFields, QrFrame,
-    ServerSetupFields,
+    BundleOut, Done, InterfaceFields, InviteFields, JoinFields, KeyOut, MtuTuneOut, PeerFields,
+    QrFrame, ServerSetupFields,
 };
 use snapshot::Snapshot;
 
@@ -669,6 +669,12 @@ fn save_runtime(console: State<'_, Arc<Console>>) -> Result<Done, String> {
 }
 
 #[tauri::command]
+fn tune_mtu(console: State<'_, Arc<Console>>) -> Result<MtuTuneOut, String> {
+    let socket = selected(&console)?;
+    actions::tune_mtu(&socket)
+}
+
+#[tauri::command]
 fn import_bundle(
     console: State<'_, Arc<Console>>,
     bundle_path: String,
@@ -953,6 +959,7 @@ pub(crate) fn dispatch(
             answer(apply_interface_at(&socket, &fields)?)
         }
         "save_runtime" => answer(save_runtime_at(&socket)?),
+        "tune_mtu" => serde_json::to_value(actions::tune_mtu(&socket)?).map_err(|error| error.to_string()),
         "export_bundle" => serde_json::to_value(export_at(
             &socket,
             &text("fingerprint")?,
@@ -1593,6 +1600,7 @@ fn main() {
             read_interface_fields,
             apply_interface,
             save_runtime,
+            tune_mtu,
             join_network,
             setup_server,
             close_enrollment,
@@ -1680,6 +1688,7 @@ mod transport_parity_tests {
         "read_interface_fields",
         "apply_interface",
         "save_runtime",
+        "tune_mtu",
         "join_network",
         "setup_server",
         "close_enrollment",

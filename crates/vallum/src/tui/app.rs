@@ -509,9 +509,10 @@ impl Form {
     }
 
     #[must_use]
-    pub fn interface(values: [String; 6]) -> Self {
+    pub fn interface(values: [String; 7]) -> Self {
         let labels = [
             "listen",
+            "carrier",
             "mtu",
             "fwmark",
             "addresses (comma)",
@@ -520,6 +521,7 @@ impl Form {
         ];
         let placeholders = [
             "e.g. 0.0.0.0:51820",
+            "udp, lwo, auto, or tcp",
             "e.g. 1420",
             "e.g. 51820 or 0",
             "e.g. 10.7.0.1/24, fd00::1/64",
@@ -551,6 +553,7 @@ impl Form {
     pub(crate) fn validate_interface(values: &[String]) -> Result<(), FormError> {
         const LABELS: &[&str] = &[
             "listen",
+            "carrier",
             "mtu",
             "fwmark",
             "addresses (comma)",
@@ -569,6 +572,14 @@ impl Form {
                         return Err(FormError {
                             field: Some("listen"),
                             message: "must be an address:port (e.g. 0.0.0.0:51820)".to_string(),
+                        });
+                    }
+                }
+                Some("carrier") => {
+                    if !matches!(value.trim(), "udp" | "lwo" | "auto" | "tcp") {
+                        return Err(FormError {
+                            field: Some("carrier"),
+                            message: "must be udp, lwo, auto, or tcp".to_string(),
                         });
                     }
                 }

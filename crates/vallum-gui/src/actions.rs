@@ -66,17 +66,22 @@ pub struct ServerSetupFields {
 
 /// The fields of the interface config form, as typed.
 ///
-/// Mirrors the TUI's `FormKind::Interface`: `[interface]` (`listen`, `mtu`,
-/// `fwmark`, `addresses`) and `[quick]` (`dns`, `table`).
+/// Mirrors the TUI's `FormKind::Interface`: `[interface]` (`listen`, `carrier`,
+/// `mtu`, `fwmark`, `addresses`) and `[quick]` (`dns`, `table`, `policy`,
+/// `content_blockers`).
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct InterfaceFields {
     pub listen: String,
+    pub carrier: String,
+    pub tcp_upgrade: String,
     pub mtu: String,
     pub fwmark: String,
     pub addresses: String,
     pub dns: String,
     pub table: String,
+    pub policy: String,
+    pub content_blockers: String,
 }
 
 /// The fields of the peer form, as typed.
@@ -892,8 +897,8 @@ pub fn read_interface_fields(config: &Path) -> Result<InterfaceFields, String> {
     let doc: toml_edit::DocumentMut = text
         .parse()
         .map_err(|error| format!("parse {}: {error}", config.display()))?;
-    let string = |key: &str| {
-        doc.get("interface")
+    let table_string = |table_name: &str, key: &str| {
+        doc.get(table_name)
             .and_then(|item| item.get(key))
             .and_then(|item| item.as_str())
             .unwrap_or("")
@@ -919,17 +924,16 @@ pub fn read_interface_fields(config: &Path) -> Result<InterfaceFields, String> {
             .unwrap_or_default()
     };
     Ok(InterfaceFields {
-        listen: string("listen"),
+        listen: table_string("interface", "listen"),
+        carrier: table_string("interface", "carrier"),
+        tcp_upgrade: table_string("interface", "tcp_upgrade"),
         mtu: integer("mtu"),
         fwmark: integer("fwmark"),
         addresses: list("interface", "addresses"),
         dns: list("quick", "dns"),
-        table: doc
-            .get("quick")
-            .and_then(|item| item.get("table"))
-            .and_then(|item| item.as_str())
-            .unwrap_or("")
-            .to_owned(),
+        table: table_string("quick", "table"),
+        policy: table_string("quick", "policy"),
+        content_blockers: list("quick", "content_blockers"),
     })
 }
 
@@ -989,6 +993,32 @@ fn validate_interface_fields(fields: &InterfaceFields) -> Result<(), String> {
     if !table.is_empty() && !matches!(table, "auto" | "off") && table.parse::<u32>().is_err() {
         return Err("table must be `auto`, `off`, or a routing table number".to_owned());
     }
+    let carrier = fields.carrier.trim();
+    if !carrier.is_empty() && !matches!(carrier, "udp" | "lwo" | "auto" | "tcp") {
+        return Err("carrier must be `udp`, `lwo`, `auto`, or `tcp`".to_owned());
+    }
+    let tcp_upgrade = fields.tcp_upgrade.trim();
+    if !tcp_upgrade.is_empty() {
+        vallum_config::validate_tcp_upgrade_host(tcp_upgrade)?;
+    }
+    let policy = fields.policy.trim();
+    if !policy.is_empty() && !matches!(policy, "off" | "auto" | "on" | "lockdown") {
+        return Err("policy must be `auto`, `on`, `lockdown`, or `off`".to_owned());
+    }
+    let content_blockers = fields.content_blockers.trim();
+    if !content_blockers.is_empty() {
+        for raw in content_blockers
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if vallum_config::content_blocker_bit(raw).is_none() {
+                return Err(format!(
+                    "content blocker `{raw}` must be ads, trackers, malware, adult, gambling, or social"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1020,6 +1050,8 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
         }
     };
     set_string(interface, "listen", &fields.listen);
+    set_string(interface, "carrier", &fields.carrier);
+    set_string(interface, "tcp_upgrade", &fields.tcp_upgrade);
 
     let mtu = fields.mtu.trim();
     if mtu.is_empty() {
@@ -1049,6 +1081,7 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
     for (table_name, key, raw) in [
         ("interface", "addresses", fields.addresses.as_str()),
         ("quick", "dns", fields.dns.as_str()),
+        ("quick", "content_blockers", fields.content_blockers.as_str()),
     ] {
         let entries: Vec<&str> = raw
             .split(',')
@@ -1075,12 +1108,16 @@ pub fn apply_interface(config: &Path, fields: &InterfaceFields) -> Result<Done, 
         }
     }
 
-    if !fields.table.trim().is_empty() || doc.get("quick").is_some() {
+    if !fields.table.trim().is_empty()
+        || !fields.policy.trim().is_empty()
+        || doc.get("quick").is_some()
+    {
         if doc.get("quick").is_none() {
             doc["quick"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
         if let Some(table) = doc["quick"].as_table_mut() {
             set_string(table, "table", &fields.table);
+            set_string(table, "policy", &fields.policy);
         }
     }
 
@@ -1154,6 +1191,55 @@ pub fn save_runtime(path: &Path, config: &Path) -> Result<Done, String> {
         snap.peers.len(),
         done.message
     )))
+}
+
+/// Result of an active path MTU + live UAPI fragmentation sweep from the GUI.
+#[derive(Debug, serde::Serialize)]
+pub struct MtuTuneOut {
+    pub host: String,
+    pub ceiling_outer_mtu: u16,
+    pub recommended_inner_mtu: u16,
+    pub recommended_outer_mtu: u16,
+    pub ipv4_tcp_mss: u16,
+    pub ipv6_tcp_mss: u16,
+    pub profile: String,
+    pub rationale: String,
+}
+
+/// Run a live path MTU + fragmentation telemetry sweep against the first
+/// configured peer endpoint on `socket`.
+///
+/// # Errors
+///
+/// If the socket cannot be read, no peer has an endpoint, or ICMP probes fail.
+pub fn tune_mtu(socket: &Path) -> Result<MtuTuneOut, String> {
+    let snap = snapshot::fetch(socket)?;
+    let endpoint = snap
+        .peers
+        .iter()
+        .map(|peer| peer.endpoint.trim())
+        .find(|ep| !ep.is_empty() && *ep != "(none)")
+        .ok_or_else(|| "no peer endpoint configured to probe".to_owned())?;
+    let c = &snap.counters;
+    let rec = vallum::net::tune_path_mtu_host_with_counters(
+        endpoint,
+        c.fragments_dropped,
+        c.reassembled,
+        c.packets_delivered,
+    )
+    .ok_or_else(|| {
+        format!("path MTU probe to {endpoint} inconclusive (ICMP blocked or unreachable)")
+    })?;
+    Ok(MtuTuneOut {
+        host: endpoint.to_owned(),
+        ceiling_outer_mtu: rec.ceiling_outer_mtu,
+        recommended_inner_mtu: rec.recommended_inner_mtu,
+        recommended_outer_mtu: rec.recommended_outer_mtu,
+        ipv4_tcp_mss: rec.ipv4_tcp_mss,
+        ipv6_tcp_mss: rec.ipv6_tcp_mss,
+        profile: rec.profile.as_str().to_owned(),
+        rationale: rec.rationale,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1439,30 +1525,63 @@ mod config_tests {
         let fields = read_interface_fields(&path).expect("read initial fields");
         assert_eq!(fields.addresses, "10.7.0.1/32");
         assert_eq!(fields.listen, "");
+        assert_eq!(fields.tcp_upgrade, "");
 
         let updated = InterfaceFields {
             listen: "0.0.0.0:51820".to_owned(),
+            carrier: "auto".to_owned(),
+            tcp_upgrade: "edge.wingman.gold:443".to_owned(),
             mtu: "1420".to_owned(),
             fwmark: "0xca6c".to_owned(),
             addresses: "10.7.0.1/24, fd00:7::1/64".to_owned(),
             dns: "1.1.1.1, 9.9.9.9".to_owned(),
             table: "auto".to_owned(),
+            policy: "lockdown".to_owned(),
+            content_blockers: "ads, trackers, malware".to_owned(),
         };
         apply_interface(&path, &updated).expect("apply valid interface fields");
 
         let reread = read_interface_fields(&path).expect("re-read updated fields");
         assert_eq!(reread.listen, "0.0.0.0:51820");
+        assert_eq!(reread.carrier, "auto");
+        assert_eq!(reread.tcp_upgrade, "edge.wingman.gold:443");
         assert_eq!(reread.mtu, "1420");
         assert_eq!(reread.fwmark, "51820");
         assert_eq!(reread.addresses, "10.7.0.1/24, fd00:7::1/64");
         assert_eq!(reread.dns, "1.1.1.1, 9.9.9.9");
         assert_eq!(reread.table, "auto");
+        assert_eq!(reread.policy, "lockdown");
+        assert_eq!(reread.content_blockers, "ads, trackers, malware");
 
         let invalid = InterfaceFields {
             mtu: "100".to_owned(),
-            ..updated
+            ..updated.clone()
         };
         assert!(apply_interface(&path, &invalid).is_err());
+
+        let invalid_carrier = InterfaceFields {
+            carrier: "wireguard".to_owned(),
+            ..updated.clone()
+        };
+        assert!(apply_interface(&path, &invalid_carrier).is_err());
+
+        let invalid_tcp_upgrade = InterfaceFields {
+            tcp_upgrade: "edge.wingman.gold\r\nX-Inject: 1".to_owned(),
+            ..updated.clone()
+        };
+        assert!(apply_interface(&path, &invalid_tcp_upgrade).is_err());
+
+        let invalid_policy = InterfaceFields {
+            policy: "permissive".to_owned(),
+            ..updated.clone()
+        };
+        assert!(apply_interface(&path, &invalid_policy).is_err());
+
+        let invalid_blocker = InterfaceFields {
+            content_blockers: "ads, nonexistent".to_owned(),
+            ..updated
+        };
+        assert!(apply_interface(&path, &invalid_blocker).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

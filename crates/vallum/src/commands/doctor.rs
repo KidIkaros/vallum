@@ -36,6 +36,11 @@ pub struct DoctorArgs {
     #[arg(long)]
     probe_path: bool,
 
+    /// Sweep candidate MTUs against each peer endpoint and combine with live
+    /// UAPI fragmentation counters to recommend an optimal MTU profile.
+    #[arg(long)]
+    pub tune_mtu: bool,
+
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -185,15 +190,17 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         .control
         .clone()
         .or_else(|| config.as_ref().and_then(control_from_config));
-    match socket {
+    let mut tunnel_live = false;
+    match &socket {
         Some(path) => {
-            match check_control(&path) {
+            match check_control(path) {
                 Ok(detail) => {
+                    tunnel_live = true;
                     checks.push(Check::new("control", Status::Pass, detail));
                     // The parts can all pass while nothing crosses the wire. This
                     // is the only check that says whether the tunnel is *live*.
                     checks.push(check_tunnel(
-                        &path,
+                        path,
                         config.as_ref().map(|resolved| resolved.carrier),
                         is_client,
                         reachable,
@@ -201,8 +208,8 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
                     // Handshake age says the keys were agreed; this says data is
                     // still moving. The two come apart in the one failure that
                     // matters — a path that dies while the daemon keeps dialling.
-                    checks.push(check_path_liveness(&path));
-                    checks.push(check_handshake_drops(&path));
+                    checks.push(check_path_liveness(path));
+                    checks.push(check_handshake_drops(path));
                 }
                 Err(error) => {
                     let is_offline = match &error {
@@ -275,6 +282,13 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         if resolved.listen.port() != 0 {
             checks.push(check_enroll_firewall(resolved));
         }
+        if let Some(leak_check) = check_leak_guard(args.config.as_deref(), resolved) {
+            checks.push(leak_check);
+        }
+        if let Some(route_check) = check_route_leak(args.config.as_deref(), resolved, tunnel_live)
+        {
+            checks.push(route_check);
+        }
         let rotating: Vec<&str> = resolved
             .peers
             .iter()
@@ -294,9 +308,10 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         }
         checks.push(check_service(args.config.as_deref()));
         checks.push(check_config_mode(args.config.as_deref()));
+        let frag_counters = live_fragmentation_counters(socket.as_deref(), tunnel_live);
         if let Some(host) = &args.probe_mtu {
             checks.push(check_path_mtu(host, resolved));
-            checks.push(check_mtu_tune(host, resolved));
+            checks.push(check_mtu_tune(host, resolved, frag_counters));
         } else {
             let mut probed = std::collections::HashSet::new();
             for peer in &resolved.peers {
@@ -304,6 +319,9 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
                     let host = endpoint.ip().to_string();
                     if probed.insert(host.clone()) {
                         checks.push(check_path_mtu(&host, resolved));
+                        if args.tune_mtu {
+                            checks.push(check_mtu_tune(&host, resolved, frag_counters));
+                        }
                     }
                 }
             }
@@ -409,6 +427,16 @@ fn check_carrier(carrier: vallum_config::Carrier) -> Check {
         vallum_config::Carrier::Udp => {
             "udp (the default): datagrams, one packet each, and peers may roam".to_owned()
         }
+        vallum_config::Carrier::Lwo => {
+            "lwo: zero-overhead UDP header masking (SplitMix64 tail-keyed XOR); peers may roam \
+             and unmodified `udp` listeners auto-detect it"
+                .to_owned()
+        }
+        vallum_config::Carrier::Auto => {
+            "auto: races LWO-obfuscated UDP first, staggers TCP after 500ms if unanswered, \
+             and locks onto UDP for 15s when UDP responds"
+                .to_owned()
+        }
         vallum_config::Carrier::Tcp => {
             "tcp: framed packets over one connection per peer — both ends must set \
              `carrier = \"tcp\"`, and a peer cannot roam under it"
@@ -488,32 +516,36 @@ fn probe_endpoints(
         }
     }
     if failed.is_empty() {
+        let joined = endpoints
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detail = if carrier == vallum_config::Carrier::Auto {
+            format!("auto: tcp fallback {joined} accepted a connection (lwo udp tried first)")
+        } else {
+            format!("tcp: {joined} accepted a connection")
+        };
         (
-            Check::new(
-                "path",
-                Status::Pass,
-                format!(
-                    "tcp: {} accepted a connection",
-                    endpoints
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ),
+            Check::new("path", Status::Pass, detail),
             Some(true),
         )
     } else {
+        let detail = if carrier == vallum_config::Carrier::Auto {
+            format!(
+                "auto: tcp fallback closed/filtered on {}; lwo/udp datagrams will still be \
+                 attempted first",
+                failed.join(", ")
+            )
+        } else {
+            format!(
+                "tcp: no answer from {}; the port is closed or filtered, or the far end is not \
+                 on `carrier = \"tcp\"` — UDP to the same host is the other half of the question",
+                failed.join(", ")
+            )
+        };
         (
-            Check::new(
-                "path",
-                Status::Warn,
-                format!(
-                    "tcp: no answer from {}; the port is closed or filtered, or the far end is not \
-                     on `carrier = \"tcp\"` — UDP to the same host is the other half of the question",
-                    failed.join(", ")
-                ),
-            ),
+            Check::new("path", Status::Warn, detail),
             Some(false),
         )
     }
@@ -887,8 +919,265 @@ fn output(program: &str, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn sysctl_eq(path: &str, expected: &str) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|value| value.trim() == expected)
+}
+
 fn sysctl(path: &str) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|value| value.trim() == "1")
+    sysctl_eq(path, "1")
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct LeakGuardInputs {
+    has_v4: bool,
+    policy_mode: crate::policy::Mode,
+    guard: crate::policy::GuardState,
+    src_valid_mark: bool,
+    arp_ignore_strict: bool,
+}
+
+fn evaluate_leak_guard(interface: &str, inputs: &LeakGuardInputs) -> Check {
+    let mut missing_sysctls = Vec::new();
+    if inputs.has_v4 {
+        if !inputs.src_valid_mark {
+            missing_sysctls.push("net.ipv4.conf.all.src_valid_mark=1");
+        }
+        if !inputs.arp_ignore_strict {
+            missing_sysctls.push("net.ipv4.conf.all.arp_ignore=2");
+        }
+    }
+
+    if inputs.policy_mode == crate::policy::Mode::Off {
+        return Check::new(
+            "leak_guard",
+            Status::Warn,
+            "full tunnel configured, but `[quick] policy = \"off\"` disables the nftables \
+             kill-switch and CVE-2019-14899 input guard"
+                .to_owned(),
+        );
+    }
+
+    match inputs.guard {
+        crate::policy::GuardState::Absent => Check::new(
+            "leak_guard",
+            Status::Warn,
+            format!(
+                "nftables leak guard for `{interface}` is not installed (egress unrestricted); \
+                 run `vallum up` or `vallum policy on`"
+            ),
+        ),
+        crate::policy::GuardState::Unknown => {
+            if missing_sysctls.is_empty() {
+                Check::new(
+                    "leak_guard",
+                    Status::Warn,
+                    format!(
+                        "could not inspect nftables guard for `{interface}` (needs CAP_NET_ADMIN); \
+                         CVE-2019-14899 sysctls (src_valid_mark=1, arp_ignore=2) are active"
+                    ),
+                )
+            } else {
+                Check::new(
+                    "leak_guard",
+                    Status::Warn,
+                    format!(
+                        "could not inspect nftables guard for `{interface}`, and CVE-2019-14899 \
+                         sysctls missing: {}",
+                        missing_sysctls.join(", ")
+                    ),
+                )
+            }
+        }
+        crate::policy::GuardState::Installed => {
+            if missing_sysctls.is_empty() {
+                Check::new(
+                    "leak_guard",
+                    Status::Pass,
+                    format!(
+                        "nftables egress + CVE-2019-14899 input guard active on `{interface}`; \
+                         src_valid_mark=1 and arp_ignore=2"
+                    ),
+                )
+            } else {
+                Check::new(
+                    "leak_guard",
+                    Status::Warn,
+                    format!(
+                        "nftables egress + input guard active on `{interface}`, but missing \
+                         CVE-2019-14899 sysctl hardening: {}",
+                        missing_sysctls.join(", ")
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn check_leak_guard(config_path: Option<&Path>, resolved: &crate::config::Resolved) -> Option<Check> {
+    let path = config_path?;
+    let cfg = Config::load(path).ok()?;
+    let full_tunnel = cfg.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|cidr| cidr.trim() == "0.0.0.0/0" || cidr.trim() == "::/0")
+    });
+    if !full_tunnel {
+        return None;
+    }
+
+    let interface = resolved.interface_name.as_deref().unwrap_or("vallum0");
+    let has_v4 = crate::policy::carries(&cfg).0;
+    let inputs = LeakGuardInputs {
+        has_v4,
+        policy_mode: crate::policy::resolve(&cfg),
+        guard: crate::policy::guard_state(interface),
+        src_valid_mark: sysctl("/proc/sys/net/ipv4/conf/all/src_valid_mark"),
+        arp_ignore_strict: sysctl_eq("/proc/sys/net/ipv4/conf/all/arp_ignore", "2"),
+    };
+    Some(evaluate_leak_guard(interface, &inputs))
+}
+
+#[allow(clippy::struct_excessive_bools)]
+struct RouteLeakInputs {
+    has_v4: bool,
+    has_v6: bool,
+    route4_dev: Option<String>,
+    route6_dev: Option<String>,
+    resolv_nameservers: Vec<String>,
+    dns_routes_via_tunnel: bool,
+}
+
+fn parse_ip_route_dev(route_output: &str) -> Option<String> {
+    let mut tokens = route_output.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "dev" {
+            return tokens.next().map(str::to_owned);
+        }
+    }
+    None
+}
+
+fn parse_resolv_nameservers(resolv_text: &str) -> Vec<String> {
+    resolv_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with(';'))
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let key = parts.next()?;
+            let addr = parts.next()?;
+            (key == "nameserver").then(|| addr.to_owned())
+        })
+        .collect()
+}
+
+fn is_loopback_resolver(ns: &str) -> bool {
+    ns.parse::<std::net::IpAddr>()
+        .map_or_else(|_| matches!(ns, "127.0.0.53" | "127.0.0.1" | "::1"), |ip| ip.is_loopback())
+}
+
+fn ip_route_dev(family_flag: &str, dest: &str) -> Option<String> {
+    output("ip", &[family_flag, "route", "get", dest]).and_then(|out| parse_ip_route_dev(&out))
+}
+
+fn evaluate_route_leak(interface: &str, inputs: &RouteLeakInputs) -> Check {
+    let mut leaks = Vec::new();
+    if inputs.has_v4 {
+        match inputs.route4_dev.as_deref() {
+            Some(dev) if dev == interface => {}
+            Some(dev) => leaks.push(format!(
+                "IPv4 egress (1.1.1.1) resolves via `{dev}` instead of `{interface}`"
+            )),
+            None => leaks.push("no active IPv4 route to 1.1.1.1".to_owned()),
+        }
+    }
+    if inputs.has_v6 {
+        if let Some(dev) = inputs.route6_dev.as_deref() {
+            if dev != interface {
+                leaks.push(format!(
+                    "IPv6 egress (2606:4700:4700::1111) resolves via `{dev}` instead of `{interface}`"
+                ));
+            }
+        }
+    }
+    if !inputs.resolv_nameservers.is_empty() && !inputs.dns_routes_via_tunnel {
+        let non_loopbacks: Vec<&str> = inputs
+            .resolv_nameservers
+            .iter()
+            .map(String::as_str)
+            .filter(|ns| !is_loopback_resolver(ns))
+            .collect();
+        let summary = if non_loopbacks.is_empty() {
+            "configured resolvers".to_owned()
+        } else {
+            non_loopbacks.join(", ")
+        };
+        leaks.push(format!(
+            "DNS resolver(s) ({summary}) do not route via `{interface}`"
+        ));
+    }
+
+    if leaks.is_empty() {
+        Check::new(
+            "route_leak",
+            Status::Pass,
+            format!("active full-tunnel egress and DNS resolvers route cleanly via `{interface}`"),
+        )
+    } else {
+        Check::new("route_leak", Status::Warn, leaks.join("; "))
+    }
+}
+
+fn check_route_leak(
+    config_path: Option<&Path>,
+    resolved: &crate::config::Resolved,
+    tunnel_live: bool,
+) -> Option<Check> {
+    if !tunnel_live {
+        return None;
+    }
+    let path = config_path?;
+    let cfg = Config::load(path).ok()?;
+    let full_tunnel = cfg.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|cidr| cidr.trim() == "0.0.0.0/0" || cidr.trim() == "::/0")
+    });
+    if !full_tunnel {
+        return None;
+    }
+
+    let interface = resolved.interface_name.as_deref().unwrap_or("vallum0");
+    let (has_v4, has_v6) = crate::policy::carries(&cfg);
+    let route4_dev = if has_v4 {
+        ip_route_dev("-4", "1.1.1.1")
+    } else {
+        None
+    };
+    let route6_dev = if has_v6 {
+        ip_route_dev("-6", "2606:4700:4700::1111")
+    } else {
+        None
+    };
+
+    let resolv_text = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let resolv_nameservers = parse_resolv_nameservers(&resolv_text);
+    let dns_routes_via_tunnel = resolv_nameservers.iter().all(|ns| {
+        is_loopback_resolver(ns) || {
+            let flag = if ns.contains(':') { "-6" } else { "-4" };
+            ip_route_dev(flag, ns).as_deref() == Some(interface)
+        }
+    });
+
+    let inputs = RouteLeakInputs {
+        has_v4,
+        has_v6,
+        route4_dev,
+        route6_dev,
+        resolv_nameservers,
+        dns_routes_via_tunnel,
+    };
+    Some(evaluate_route_leak(interface, &inputs))
 }
 
 /// A server has to forward, or clients reach nothing but the server.
@@ -1210,10 +1499,45 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
     }
 }
 
-/// Sweep candidate inner MTUs (`1280`, `1380`, `1420`) against RTT jitter and
-/// path ceiling to recommend the optimal inner MTU profile and TCP MSS values.
-fn check_mtu_tune(host: &str, resolved: &crate::config::Resolved) -> Check {
-    let Some(rec) = crate::net::tune_path_mtu_host(host) else {
+fn parse_uapi_fragmentation_counters(response: &uapi::Response) -> (u64, u64, u64) {
+    let count = |field: &str| {
+        response
+            .field(field)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    (
+        count(uapi::field::VALLUM_FRAGMENTS_DROPPED),
+        count(uapi::field::VALLUM_REASSEMBLED),
+        count(uapi::field::VALLUM_PACKETS_DELIVERED),
+    )
+}
+
+fn live_fragmentation_counters(socket: Option<&Path>, tunnel_live: bool) -> (u64, u64, u64) {
+    if !tunnel_live {
+        return (0, 0, 0);
+    }
+    let Some(path) = socket else {
+        return (0, 0, 0);
+    };
+    let Ok(reply) = control::request(path, "get=1\n") else {
+        return (0, 0, 0);
+    };
+    let response = uapi::parse_response(&reply);
+    parse_uapi_fragmentation_counters(&response)
+}
+
+/// Sweep candidate inner MTUs (`1280`, `1380`, `1420`) against RTT jitter,
+/// path ceiling, and live UAPI fragmentation counters to recommend the optimal
+/// inner MTU profile and TCP MSS values.
+fn check_mtu_tune(
+    host: &str,
+    resolved: &crate::config::Resolved,
+    counters: (u64, u64, u64),
+) -> Check {
+    let Some(rec) =
+        crate::net::tune_path_mtu_host_with_counters(host, counters.0, counters.1, counters.2)
+    else {
         return Check::new(
             "mtu-tune",
             Status::Warn,
@@ -1495,12 +1819,118 @@ mod tests {
             udp.detail
         );
 
+        let lwo = super::check_carrier(Carrier::Lwo);
+        assert_eq!(lwo.status, super::Status::Pass);
+        assert!(lwo.detail.starts_with("lwo:"), "{}", lwo.detail);
+
+        let auto = super::check_carrier(Carrier::Auto);
+        assert_eq!(auto.status, super::Status::Pass);
+        assert!(auto.detail.starts_with("auto:"), "{}", auto.detail);
+
         let tcp = super::check_carrier(Carrier::Tcp);
         assert_eq!(tcp.status, super::Status::Pass);
         // The failure this line exists to prevent: one end on tcp, the other
         // on udp, which is silence rather than an error.
         assert!(tcp.detail.contains("both ends"), "{}", tcp.detail);
         assert!(tcp.detail.contains("cannot roam"), "{}", tcp.detail);
+    }
+
+    #[test]
+    fn leak_guard_evaluation_verifies_cve_2019_14899_sysctls_and_nft_state() {
+        use crate::policy::{GuardState, Mode};
+
+        let healthy = super::evaluate_leak_guard(
+            "vallum-laptop",
+            &super::LeakGuardInputs {
+                has_v4: true,
+                policy_mode: Mode::On,
+                guard: GuardState::Installed,
+                src_valid_mark: true,
+                arp_ignore_strict: true,
+            },
+        );
+        assert_eq!(healthy.status, super::Status::Pass);
+        assert!(healthy.detail.contains("src_valid_mark=1"));
+
+        let missing_sysctl = super::evaluate_leak_guard(
+            "vallum-laptop",
+            &super::LeakGuardInputs {
+                has_v4: true,
+                policy_mode: Mode::On,
+                guard: GuardState::Installed,
+                src_valid_mark: true,
+                arp_ignore_strict: false,
+            },
+        );
+        assert_eq!(missing_sysctl.status, super::Status::Warn);
+        assert!(missing_sysctl.detail.contains("arp_ignore=2"));
+
+        let unguarded = super::evaluate_leak_guard(
+            "vallum-laptop",
+            &super::LeakGuardInputs {
+                has_v4: true,
+                policy_mode: Mode::On,
+                guard: GuardState::Absent,
+                src_valid_mark: true,
+                arp_ignore_strict: true,
+            },
+        );
+        assert_eq!(unguarded.status, super::Status::Warn);
+        assert!(unguarded.detail.contains("not installed"));
+    }
+
+    #[test]
+    fn route_leak_evaluation_detects_clean_tunnel_egress_and_dns_leaks() {
+        let clean = super::evaluate_route_leak(
+            "vallum-laptop",
+            &super::RouteLeakInputs {
+                has_v4: true,
+                has_v6: true,
+                route4_dev: Some("vallum-laptop".to_owned()),
+                route6_dev: Some("vallum-laptop".to_owned()),
+                resolv_nameservers: vec!["127.0.0.53".to_owned()],
+                dns_routes_via_tunnel: true,
+            },
+        );
+        assert_eq!(clean.status, super::Status::Pass);
+        assert!(clean.detail.contains("route cleanly via `vallum-laptop`"));
+
+        let v4_leak = super::evaluate_route_leak(
+            "vallum-laptop",
+            &super::RouteLeakInputs {
+                has_v4: true,
+                has_v6: false,
+                route4_dev: Some("wlan0".to_owned()),
+                route6_dev: None,
+                resolv_nameservers: vec!["1.1.1.1".to_owned()],
+                dns_routes_via_tunnel: true,
+            },
+        );
+        assert_eq!(v4_leak.status, super::Status::Warn);
+        assert!(v4_leak.detail.contains("wlan0"));
+
+        let dns_leak = super::evaluate_route_leak(
+            "vallum-laptop",
+            &super::RouteLeakInputs {
+                has_v4: true,
+                has_v6: false,
+                route4_dev: Some("vallum-laptop".to_owned()),
+                route6_dev: None,
+                resolv_nameservers: vec!["192.168.1.1".to_owned()],
+                dns_routes_via_tunnel: false,
+            },
+        );
+        assert_eq!(dns_leak.status, super::Status::Warn);
+        assert!(dns_leak.detail.contains("192.168.1.1"));
+
+        assert_eq!(
+            super::parse_ip_route_dev("1.1.1.1 dev vallum-laptop table 51820 src 10.7.0.2 uid 1000"),
+            Some("vallum-laptop".to_owned())
+        );
+        assert_eq!(
+            super::parse_resolv_nameservers("# comment\nnameserver 127.0.0.53\nnameserver 1.1.1.1\n"),
+            vec!["127.0.0.53".to_owned(), "1.1.1.1".to_owned()]
+        );
     }
 
     #[test]
@@ -1728,6 +2158,7 @@ mod tests {
             control: None,
             probe_mtu: None,
             probe_path: false,
+            tune_mtu: false,
             json: false,
         };
         // Ephemeral port 0 means no firewall/forwarding check; socket is offline so control warns.
@@ -1743,11 +2174,24 @@ mod tests {
         assert_eq!(loopback_check.status, super::Status::Pass);
         assert!(loopback_check.detail.contains("fits"));
 
-        let tune_check = super::check_mtu_tune("127.0.0.1", &resolved);
+        let tune_check = super::check_mtu_tune("127.0.0.1", &resolved, (0, 0, 0));
         assert_eq!(tune_check.status, super::Status::Pass);
         assert!(tune_check.detail.contains("recommends mtu ="));
         assert!(tune_check.detail.contains("IPv4 MSS ="));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uapi_fragmentation_counters_parse_and_feed_mtu_recommendation() {
+        let reply = "vallum_interface=vallum0\nvallum_fragments_dropped=3\n\
+                     vallum_reassembled=120\nvallum_packets_delivered=5000\nerrno=0\n";
+        let parsed = crate::uapi::parse_response(reply);
+        let (dropped, reassembled, delivered) = super::parse_uapi_fragmentation_counters(&parsed);
+        assert_eq!((dropped, reassembled, delivered), (3, 120, 5000));
+
+        let rec = crate::net::recommend_mtu_from_telemetry(1500, &[], dropped, reassembled, delivered);
+        assert_eq!(rec.recommended_inner_mtu, 1380);
+        assert_eq!(rec.profile, crate::net::MtuProfile::GamingLowFrag1380);
     }
 }

@@ -56,6 +56,7 @@ export interface Snapshot {
   interface: string
   addresses: string[]
   listen_port: number | null
+  carrier?: string
   suite: string
   fwmark: number | null
   fingerprint: string

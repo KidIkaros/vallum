@@ -807,6 +807,7 @@ pub fn interface_form(app: &mut App) {
     };
     let values = [
         string(&doc, "listen"),
+        string(&doc, "carrier"),
         integer(&doc, "mtu"),
         integer(&doc, "fwmark"),
         list(&doc, "interface", "addresses"),
@@ -851,6 +852,7 @@ fn apply_interface_form(app: &mut App, form: &super::app::Form) -> FormResult {
         }
     };
     set_string(interface, "listen", form.field("listen"));
+    set_string(interface, "carrier", form.field("carrier"));
     for (key, label) in [("mtu", "mtu"), ("fwmark", "fwmark")] {
         let value = form.field(label).trim();
         if value.is_empty() {
@@ -2099,6 +2101,7 @@ mod tests {
         )]);
         let form = super::super::app::Form::interface([
             "0.0.0.0:51821".to_owned(),
+            "auto".to_owned(),
             "1400".to_owned(),
             "7".to_owned(),
             "10.7.0.1/24, fd00:7::1/64".to_owned(),
@@ -2122,6 +2125,7 @@ mod tests {
         assert!(app.confirm.is_none());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("listen = \"0.0.0.0:51821\""));
+        assert!(text.contains("carrier = \"auto\""));
         assert!(text.contains("mtu = 1400"));
         assert!(text.contains("10.7.0.1/24"));
         assert!(text.contains("9.9.9.9"));

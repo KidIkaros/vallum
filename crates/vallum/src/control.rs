@@ -88,6 +88,8 @@ pub struct ControlContext {
     pub listen: SocketAddr,
     /// The transport, so a rebind binds the same one.
     pub carrier: crate::config::Carrier,
+    /// Optional HTTP/1.1 `Upgrade: vallum` `Host` header for outbound TCP dials.
+    pub tcp_upgrade: Option<String>,
     /// The socket mark.
     pub fwmark: u32,
     /// The swappable socket, for a runtime rebind.
@@ -490,6 +492,7 @@ fn snapshot(device: &Device, context: &ControlContext) -> uapi::DeviceState {
         public_line: crate::keys::encode_public(device.suite_id(), &device.identity().to_peer()),
         fingerprint: vallum_core::peer_hint(&*context.suite, device.public_key()),
         listen: context.listen,
+        carrier: context.carrier,
         control: context
             .control_path
             .as_ref()
@@ -542,7 +545,12 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
     let desired_mark = set.fwmark.unwrap_or(current_mark);
     if desired_port != current_listen.port() || desired_mark != current_mark {
         let address = SocketAddr::new(current_listen.ip(), desired_port);
-        match crate::net::bind(context.carrier, address, desired_mark) {
+        match crate::net::bind_with_upgrade(
+            context.carrier,
+            address,
+            desired_mark,
+            context.tcp_upgrade.as_deref(),
+        ) {
             Ok(socket) => {
                 let bound = socket.local_addr().unwrap_or(address);
                 context.socket.replace(socket);
@@ -723,6 +731,7 @@ mod tests {
             control_path: None,
             listen,
             carrier: crate::config::Carrier::Udp,
+            tcp_upgrade: None,
             fwmark: 0,
             socket: Arc::new(crate::net::SharedSocket::new(socket)),
             suite,

@@ -246,7 +246,7 @@ pub fn verdict(live: Option<&str>, guard: GuardState, resolved: Mode, now: u64) 
         }
         None => match guard {
             GuardState::Installed => Verdict::Blocked,
-            GuardState::Absent if resolved == Mode::On => Verdict::Leaking,
+            GuardState::Absent if resolved.expects_guard() => Verdict::Leaking,
             GuardState::Absent => Verdict::Down,
             GuardState::Unknown => Verdict::Unknown,
         },
@@ -305,11 +305,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
                 GuardState::Absent => "absent",
                 GuardState::Unknown => "unknown",
             },
-            "policy": match resolved {
-                Mode::On => "on",
-                Mode::Off => "off",
-                Mode::Auto => "auto",
-            },
+            "policy": resolved.as_str(),
         });
         println!(
             "{}",
@@ -331,11 +327,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
         println!(
             "{:<10} {}",
             "policy",
-            match resolved {
-                Mode::On => "on",
-                Mode::Off => "off",
-                Mode::Auto => "auto",
-            }
+            resolved.as_str()
         );
     }
 

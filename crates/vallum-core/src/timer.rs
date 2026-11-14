@@ -64,6 +64,14 @@ pub const REJECT_AFTER_TIME_MS: u64 = 180_000;
 /// has no RNG.
 pub const REKEY_SPREAD_MS: u64 = 20_000;
 
+/// Maximum jitter the caller should add to [`KEEPALIVE_TIMEOUT_MS`], in
+/// milliseconds.
+///
+/// Peers with identical keepalive intervals synchronize idle probes behind
+/// NATs and relays. The caller supplies the randomness — `vallum-core` has no
+/// RNG — and it lands in `0..=KEEPALIVE_JITTER_MS`.
+pub const KEEPALIVE_JITTER_MS: u64 = 2_000;
+
 /// Maximum jitter the caller should add to [`REKEY_TIMEOUT_MS`], in
 /// milliseconds.
 ///
@@ -101,6 +109,12 @@ pub struct Timers {
     /// How far this session's rekey is spread, in milliseconds. Drawn once per
     /// session by the caller, and cleared when the session changes.
     rekey_offset: Option<u64>,
+    /// How far this session's idle keepalive is jittered past [`KEEPALIVE_TIMEOUT_MS`],
+    /// in milliseconds. Drawn by the caller and cleared when the session changes.
+    keepalive_offset: Option<u64>,
+    /// How far handshake retransmissions are jittered past [`REKEY_TIMEOUT_MS`],
+    /// in milliseconds. Drawn by the caller and cleared when a handshake settles or fails.
+    retransmit_offset: Option<u64>,
     last_sent: u64,
     last_received: u64,
     attempts: Option<Attempts>,
@@ -125,6 +139,8 @@ impl Timers {
             now,
             established_at: None,
             rekey_offset: None,
+            keepalive_offset: None,
+            retransmit_offset: None,
             last_sent: now,
             last_received: now,
             attempts: None,
@@ -143,9 +159,11 @@ impl Timers {
     pub fn on_established(&mut self, now: u64) {
         self.now = now;
         self.established_at = Some(now);
-        // A new session draws a new spread, so a peer that rekeys repeatedly
-        // does not always rekey at the same offset.
+        // A new session draws a new spread and jitter offsets, so a peer that
+        // rekeys repeatedly does not synchronize probes on the same beat.
         self.rekey_offset = None;
+        self.keepalive_offset = None;
+        self.retransmit_offset = None;
         self.attempts = None;
     }
 
@@ -169,6 +187,30 @@ impl Timers {
         self.rekey_offset = Some(offset.min(REKEY_SPREAD_MS));
     }
 
+    /// The jitter offset applied to this session's idle keepalive probe, if drawn.
+    #[must_use]
+    pub fn keepalive_offset(&self) -> Option<u64> {
+        self.keepalive_offset
+    }
+
+    /// Record caller-supplied jitter for idle keepalive probes, bounded to
+    /// [`KEEPALIVE_JITTER_MS`].
+    pub fn set_keepalive_offset(&mut self, offset: u64) {
+        self.keepalive_offset = Some(offset.min(KEEPALIVE_JITTER_MS));
+    }
+
+    /// The jitter offset applied to handshake retransmissions, if drawn.
+    #[must_use]
+    pub fn retransmit_offset(&self) -> Option<u64> {
+        self.retransmit_offset
+    }
+
+    /// Record caller-supplied jitter for handshake retransmissions, bounded to
+    /// [`REKEY_JITTER_MS`].
+    pub fn set_retransmit_offset(&mut self, offset: u64) {
+        self.retransmit_offset = Some(offset.min(REKEY_JITTER_MS));
+    }
+
     /// Record that the device tore down the session because its key expired.
     ///
     /// Expiry outranks everything in [`poll`](Self::poll). A device that removed
@@ -183,6 +225,8 @@ impl Timers {
     pub fn on_torn_down(&mut self, now: u64) {
         self.now = now;
         self.established_at = None;
+        self.rekey_offset = None;
+        self.keepalive_offset = None;
         // With no session, "we spoke and heard nothing" is meaningless; leaving
         // the old times in place would fire a useless reactive keepalive every
         // tick, because a failed send cannot advance `last_sent`.
@@ -246,6 +290,7 @@ impl Timers {
     /// start a fresh run rather than retransmitting a known-bad message.
     pub fn on_handshake_failed(&mut self) {
         self.attempts = None;
+        self.retransmit_offset = None;
     }
 
     /// Whether a handshake is outstanding.
@@ -288,7 +333,8 @@ impl Timers {
             {
                 return TimerAction::GiveUp;
             }
-            if waiting >= REKEY_TIMEOUT_MS {
+            let retransmit_wait = REKEY_TIMEOUT_MS + self.retransmit_offset.unwrap_or(0);
+            if waiting >= retransmit_wait {
                 return TimerAction::RetransmitHandshake;
             }
             return TimerAction::None;
@@ -305,8 +351,9 @@ impl Timers {
 
         // We spoke and heard nothing back: the path may have gone idle. Send an
         // empty data packet to find out, or to hold a NAT binding open.
+        let keepalive_wait = KEEPALIVE_TIMEOUT_MS + self.keepalive_offset.unwrap_or(0);
         if self.last_sent > self.last_received
-            && now.saturating_sub(self.last_sent) >= KEEPALIVE_TIMEOUT_MS
+            && now.saturating_sub(self.last_sent) >= keepalive_wait
         {
             return TimerAction::SendKeepalive;
         }
@@ -321,6 +368,22 @@ impl Timers {
     #[must_use]
     pub fn retransmit_delay(jitter: u64) -> u64 {
         REKEY_TIMEOUT_MS + jitter % (REKEY_JITTER_MS + 1)
+    }
+
+    /// The keepalive delay to use, given caller-supplied `jitter`.
+    ///
+    /// Add the result to `last_sent` when spreading idle keepalive probes in `0..=KEEPALIVE_JITTER_MS`.
+    #[must_use]
+    pub fn keepalive_delay(jitter: u64) -> u64 {
+        KEEPALIVE_TIMEOUT_MS + jitter % (KEEPALIVE_JITTER_MS + 1)
+    }
+
+    /// The session rekey delay to use, given caller-supplied `spread`.
+    ///
+    /// Add the result to `established_at` when spreading session rekeys in `0..=REKEY_SPREAD_MS`.
+    #[must_use]
+    pub fn rekey_delay(spread: u64) -> u64 {
+        REKEY_AFTER_TIME_MS + spread % (REKEY_SPREAD_MS + 1)
     }
 }
 
@@ -557,5 +620,79 @@ mod tests {
                 "jitter {jitter} gave {delay}"
             );
         }
+    }
+
+    #[test]
+    fn keepalive_and_rekey_delays_stay_in_range() {
+        assert_eq!(Timers::keepalive_delay(0), KEEPALIVE_TIMEOUT_MS);
+        assert_eq!(
+            Timers::keepalive_delay(KEEPALIVE_JITTER_MS),
+            KEEPALIVE_TIMEOUT_MS + KEEPALIVE_JITTER_MS
+        );
+        for jitter in [1, 750, KEEPALIVE_JITTER_MS + 1, u64::MAX] {
+            let delay = Timers::keepalive_delay(jitter);
+            assert!(
+                (KEEPALIVE_TIMEOUT_MS..=KEEPALIVE_TIMEOUT_MS + KEEPALIVE_JITTER_MS)
+                    .contains(&delay),
+                "keepalive jitter {jitter} gave {delay}"
+            );
+        }
+
+        assert_eq!(Timers::rekey_delay(0), REKEY_AFTER_TIME_MS);
+        assert_eq!(
+            Timers::rekey_delay(REKEY_SPREAD_MS),
+            REKEY_AFTER_TIME_MS + REKEY_SPREAD_MS
+        );
+        for spread in [1, 5_000, REKEY_SPREAD_MS + 1, u64::MAX] {
+            let delay = Timers::rekey_delay(spread);
+            assert!(
+                (REKEY_AFTER_TIME_MS..=REKEY_AFTER_TIME_MS + REKEY_SPREAD_MS).contains(&delay),
+                "rekey spread {spread} gave {delay}"
+            );
+        }
+    }
+
+    #[test]
+    fn keepalive_and_retransmit_offsets_delay_poll_and_clear_on_lifecycle() {
+        let mut timers = Timers::established(0);
+        timers.set_keepalive_offset(u64::MAX);
+        assert_eq!(timers.keepalive_offset(), Some(KEEPALIVE_JITTER_MS));
+        timers.set_keepalive_offset(1_250);
+        timers.on_received(50);
+        timers.on_sent(100);
+
+        assert_eq!(
+            timers.poll(100 + KEEPALIVE_TIMEOUT_MS + 1_249),
+            TimerAction::None
+        );
+        assert_eq!(
+            timers.poll(100 + KEEPALIVE_TIMEOUT_MS + 1_250),
+            TimerAction::SendKeepalive
+        );
+
+        timers.on_torn_down(20_000);
+        assert_eq!(timers.keepalive_offset(), None);
+
+        timers.begin_handshake(20_000);
+        timers.set_retransmit_offset(u64::MAX);
+        assert_eq!(timers.retransmit_offset(), Some(REKEY_JITTER_MS));
+        timers.set_retransmit_offset(200);
+        assert_eq!(
+            timers.poll(20_000 + REKEY_TIMEOUT_MS + 199),
+            TimerAction::None
+        );
+        assert_eq!(
+            timers.poll(20_000 + REKEY_TIMEOUT_MS + 200),
+            TimerAction::RetransmitHandshake
+        );
+
+        timers.on_handshake_failed();
+        assert_eq!(timers.retransmit_offset(), None);
+
+        timers.set_keepalive_offset(900);
+        timers.set_retransmit_offset(150);
+        timers.on_established(30_000);
+        assert_eq!(timers.keepalive_offset(), None);
+        assert_eq!(timers.retransmit_offset(), None);
     }
 }

@@ -508,7 +508,7 @@ pub(crate) fn attach(
         }
     }
 
-    let servers = config.quick.dns.clone();
+    let servers = config.quick.effective_dns_servers();
     let resolv = (!servers.is_empty()).then(|| resolv_path(interface));
 
     if dry_run {

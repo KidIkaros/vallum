@@ -99,6 +99,42 @@ export function TunnelFlowMap({
   const maxPeerTotal = Math.max(1, ...orderedPeers.map((p) => p.rx_bytes + p.tx_bytes))
   const totalRate = rxRate + txRate
   const rxPct = totalRate > 0 ? Math.round((rxRate / totalRate) * 100) : 50
+  const datagramsSent = data?.counters?.datagrams_sent ?? 0
+  const packetsDelivered = data?.counters?.packets_delivered ?? 0
+  const coverFrames = Math.max(0, datagramsSent - packetsDelivered)
+  const frameTotal = Math.max(1, packetsDelivered + coverFrames)
+  const payloadPct = datagramsSent + packetsDelivered > 0 ? Math.round((packetsDelivered / frameTotal) * 100) : 0
+  const fresh = peers.filter(
+    (p) => p.last_handshake_sec > 0 && freshness(p.last_handshake_sec, now) === "recent",
+  ).length
+  const carrierLabel = (data?.carrier || "udp").toUpperCase()
+
+  const stages: Array<{ step: string; label: string; detail: string; state: "done" | "warn" | "idle" }> = [
+    {
+      step: "01",
+      label: "Leak Guard",
+      detail: guardOn ? "nft + rp_filter armed" : full ? "unarmed" : "split-tunnel",
+      state: guardOn ? "done" : full ? "warn" : live ? "done" : "idle",
+    },
+    {
+      step: "02",
+      label: "Carrier Bind",
+      detail: data?.listen_port ? `${carrierLabel} :${data.listen_port}` : `${carrierLabel} ephemeral`,
+      state: live ? "done" : "idle",
+    },
+    {
+      step: "03",
+      label: "PQ Handshake",
+      detail: fresh > 0 ? `${fresh}/${peers.length} ML-KEM-1024` : "awaiting peer",
+      state: fresh > 0 ? "done" : live && peers.length > 0 ? "warn" : "idle",
+    },
+    {
+      step: "04",
+      label: "Tunnel Verified",
+      detail: `${packetsDelivered} delivered`,
+      state: live && fresh > 0 && packetsDelivered > 0 ? "done" : live ? "warn" : "idle",
+    },
+  ]
 
   const lanes: Array<{ label: string; via: string; dest: string; state: LaneState }> = health
     ? [
@@ -152,6 +188,37 @@ export function TunnelFlowMap({
         </span>
       }
     >
+      <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {stages.map((stage) => {
+          const badgeCls =
+            stage.state === "done"
+              ? "border-live/35 bg-live/10 text-live"
+              : stage.state === "warn"
+                ? "border-stale/35 bg-stale/10 text-stale"
+                : "border-border/70 bg-secondary/40 text-muted-foreground"
+          const dotCls =
+            stage.state === "done"
+              ? "bg-live"
+              : stage.state === "warn"
+                ? "bg-stale"
+                : "bg-muted-foreground/45"
+          return (
+            <div
+              key={stage.step}
+              className={`flex flex-col gap-0.5 rounded-md border px-2.5 py-1.5 ${badgeCls}`}
+            >
+              <div className="flex items-center justify-between gap-1.5 text-[11px] font-medium">
+                <span className="truncate font-mono">
+                  {stage.step} · {stage.label}
+                </span>
+                <span className={`size-1.5 shrink-0 rounded-full ${dotCls}`} aria-hidden />
+              </div>
+              <span className="text-foreground/85 truncate font-mono text-[10px]">{stage.detail}</span>
+            </div>
+          )
+        })}
+      </div>
+
       <div className="grid grid-cols-1 items-stretch gap-3 lg:grid-cols-12">
         {/* Stage 1: Local Host Node */}
         <div className="cyber-grid border-border/80 bg-background/60 flex flex-col justify-between gap-2.5 rounded-lg border p-3 lg:col-span-3">
@@ -225,6 +292,33 @@ export function TunnelFlowMap({
               <span
                 className={`bg-violet h-full transition-all duration-300 ${live && txRate > 0 ? "pipe-shimmer-tx" : ""}`}
                 style={{ width: `${totalRate > 0 ? 100 - rxPct : 0}%` }}
+              />
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-2 font-mono text-[10px]">
+              <span className="text-signal inline-flex items-center gap-1">
+                <span
+                  className={`size-1.5 rounded-full bg-signal ${live && packetsDelivered > 0 ? "animate-pulse" : "opacity-50"}`}
+                  aria-hidden
+                />
+                Payload {packetsDelivered}
+              </span>
+              <span className="text-muted-foreground">Stream mix</span>
+              <span className="text-stale inline-flex items-center gap-1">
+                LWO / Chaff {coverFrames}
+                <span
+                  className={`size-1.5 rounded-full bg-stale ${live && coverFrames > 0 ? "animate-pulse" : "opacity-50"}`}
+                  aria-hidden
+                />
+              </span>
+            </div>
+            <div className="bg-muted flex h-1 w-full overflow-hidden rounded-full">
+              <span
+                className="bg-signal/85 h-full transition-all duration-300"
+                style={{ width: `${datagramsSent + packetsDelivered > 0 ? payloadPct : 0}%` }}
+              />
+              <span
+                className="bg-stale/85 h-full transition-all duration-300"
+                style={{ width: `${datagramsSent + packetsDelivered > 0 ? 100 - payloadPct : 0}%` }}
               />
             </div>
           </div>

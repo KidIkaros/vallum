@@ -158,17 +158,33 @@ export const writeConfig = (text: string) => command<Done>("write_config", { tex
 
 export interface InterfaceFields {
   listen: string
+  carrier: string
+  tcp_upgrade?: string
   mtu: string
   fwmark: string
   addresses: string
   dns: string
   table: string
+  policy?: string
+  content_blockers?: string
+}
+
+export interface MtuTuneOut {
+  host: string
+  ceiling_outer_mtu: number
+  recommended_inner_mtu: number
+  recommended_outer_mtu: number
+  ipv4_tcp_mss: number
+  ipv6_tcp_mss: number
+  profile: string
+  rationale: string
 }
 
 export const readInterfaceFields = () => command<InterfaceFields>("read_interface_fields", {})
 export const applyInterface = (fields: InterfaceFields) =>
   command<Done>("apply_interface", { fields })
 export const saveRuntime = () => command<Done>("save_runtime", {})
+export const tuneMtu = () => command<MtuTuneOut>("tune_mtu", {})
 
 /** Change the device's listen port and firewall mark through the daemon. */
 export const applyDevice = (listenPort: string, fwmark: string) =>

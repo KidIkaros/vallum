@@ -35,6 +35,8 @@ pub struct PolicyArgs {
 pub enum PolicyAction {
     /// Block egress outside the tunnel, except the endpoint that carries it.
     On,
+    /// Block non-tunnel egress immediately even without resolvable endpoints (early-boot/lockdown).
+    Lockdown,
     /// Remove the block. This is the escape hatch; it needs no daemon.
     Off,
     /// Report what the config asks for and what the host currently has.
@@ -97,6 +99,35 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
                 println!("   on    egress outside `{interface}` is blocked");
             }
         }
+        PolicyAction::Lockdown => {
+            if args.dry_run {
+                let rules = policy::lockdown_ruleset(&config, &interface);
+                if args.json {
+                    emit(&json!({
+                        "action": "lockdown",
+                        "interface": interface,
+                        "dry_run": true,
+                        "ruleset": rules,
+                    }))?;
+                    return Ok(());
+                }
+                println!("   would install this lockdown ruleset:");
+                println!();
+                print!("{rules}");
+                return Ok(());
+            }
+            policy::lockdown(&config, &interface, false)?;
+            if args.json {
+                emit(&json!({
+                    "action": "lockdown",
+                    "interface": interface,
+                    "dry_run": false,
+                    "egress": "blocked",
+                }))?;
+            } else {
+                println!("   lock  non-tunnel egress for `{interface}` is locked down");
+            }
+        }
         PolicyAction::Off => {
             policy::unguard(&interface, args.dry_run)?;
             if args.json {
@@ -113,7 +144,7 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
             let guard = policy::guard_state(&interface);
             let (v4, v6) = policy::carries(&config);
             // The one line an operator, or an agent, has to be able to act on.
-            let fix = (resolved == Mode::On && guard == policy::GuardState::Absent)
+            let fix = (resolved.expects_guard() && guard == policy::GuardState::Absent)
                 .then(|| format!("sudo systemctl start vallum-guard@{interface}"));
             if args.json {
                 let mut families = Vec::new();
@@ -180,11 +211,7 @@ fn emit(report: &Value) -> Result<(), Error> {
 }
 
 fn mode_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Off => "off",
-        Mode::On => "on",
-        Mode::Auto => "auto",
-    }
+    mode.as_str()
 }
 
 fn describe(mode: Mode) -> &'static str {
@@ -192,5 +219,6 @@ fn describe(mode: Mode) -> &'static str {
         Mode::Off => "off",
         Mode::On => "on",
         Mode::Auto => "auto (on for a full tunnel)",
+        Mode::Lockdown => "lockdown (always block outside tunnel, even when disconnected)",
     }
 }

@@ -315,6 +315,7 @@ fn launch_over(
                 control_path: Some(path),
                 listen,
                 carrier: resolved.carrier,
+                tcp_upgrade: resolved.tcp_upgrade.clone(),
                 fwmark: resolved.fwmark,
                 socket: Arc::clone(&shared),
                 suite: Arc::new(suite()),

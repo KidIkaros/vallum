@@ -69,6 +69,7 @@
 
 pub mod device;
 pub mod error;
+pub mod lwo;
 pub mod peer;
 pub mod rng;
 pub mod routing;
@@ -84,4 +85,7 @@ pub use peer::{PeerConfig, PeerId};
 pub use rng::Randomness;
 pub use routing::{packet_destination, packet_source, AllowedIps, Prefix};
 pub use segment::{Segments, MAX_REASSEMBLIES};
-pub use stream::{frame, unframe, FrameError, FrameReader, FRAME_LEN_SIZE, MAX_FRAME};
+pub use stream::{
+    frame, unframe, upgrade_request, FrameError, FrameReader, FRAME_LEN_SIZE, MAX_FRAME,
+    MAX_HTTP_PRELUDE, UPGRADE_PATH, UPGRADE_RESPONSE,
+};

@@ -136,6 +136,21 @@ enum Action {
         /// The configuration file.
         config: PathBuf,
     },
+    /// Run a bounded-concurrency local loopback DNS forwarder with RFC1918 LAN
+    /// split, IPv4-only AAAA suppression, and optional captive-portal spoofing.
+    DnsProxy {
+        /// The configuration file.
+        config: PathBuf,
+        /// Socket address to bind the loopback DNS forwarder on.
+        #[arg(long, default_value = "127.0.0.1:53")]
+        listen: std::net::SocketAddr,
+        /// Spoof captive-portal A queries to `198.51.100.1` (for Blocked/Lockdown state).
+        #[arg(long)]
+        captive_spoof: bool,
+        /// Print the proxy plan without binding the socket.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Export the running daemon as a config (via `vallum showconf`).
     Save {
         /// The configuration file, for its `control` path.
@@ -187,6 +202,14 @@ fn main() -> std::process::ExitCode {
             allow_insecure_config,
         } => watch(config, *dry_run, *allow_insecure_config),
         Action::Strip { config } => strip(config),
+        Action::DnsProxy {
+            config,
+            listen,
+            captive_spoof,
+            dry_run,
+        } => load_normalized(config)
+            .map_err(Box::<dyn std::error::Error>::from)
+            .and_then(|loaded| dns::run_dns_proxy(&loaded, *listen, *captive_spoof, *dry_run)),
         Action::Save {
             config,
             output,
@@ -489,10 +512,11 @@ fn attach_host_side(
 
     apply_routes(config, interface, table, dry_run)?;
 
-    if !config.quick.dns.is_empty() {
+    let effective_dns = config.quick.effective_dns_servers();
+    if !effective_dns.is_empty() {
         if let Err(error) = set_dns(
             interface,
-            &config.quick.dns,
+            &effective_dns,
             dns_domain(config).as_deref(),
             dry_run,
         ) {
@@ -537,7 +561,7 @@ fn withdraw_host_side(
     }
 
     remove_routes(config, interface, table, dry_run);
-    if !config.quick.dns.is_empty() {
+    if !config.quick.effective_dns_servers().is_empty() {
         unset_dns(interface, dry_run)?;
     }
 
@@ -628,7 +652,7 @@ fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, d
     member::detach(interface, dry_run);
     if !config.quick.app_class {
         remove_routes(config, interface, table, dry_run);
-        if !config.quick.dns.is_empty() {
+        if !config.quick.effective_dns_servers().is_empty() {
             let _ = unset_dns(interface, dry_run);
         }
     }
@@ -1691,5 +1715,18 @@ mod tests {
         assert!(plan.nft_script.contains("ip saddr 10.7.0.0/24 masquerade"));
         ensure_forwarding_and_nat(&config, true).unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn content_blockers_prepend_magic_resolver_to_effective_dns() {
+        let config = config_with(
+            "content-blockers",
+            "\n[quick]\ndns = [\"9.9.9.9\"]\ncontent_blockers = [\"ads\", \"trackers\", \"malware\"]\n\n\
+             [[peer]]\nname = \"p\"\npublic_key = \"k\"\nallowed_ips = [\"0.0.0.0/0\"]\n",
+        );
+        assert_eq!(
+            config.quick.effective_dns_servers(),
+            vec!["100.64.0.7".to_owned(), "9.9.9.9".to_owned()]
+        );
     }
 }

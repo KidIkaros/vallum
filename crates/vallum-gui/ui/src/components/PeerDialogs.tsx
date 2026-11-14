@@ -31,12 +31,14 @@ import {
   removePeer,
   rotatePeer,
   saveRuntime,
+  tuneMtu,
   writeConfig,
   type BundleOut,
   type Done,
   type InterfaceFields,
   type InviteFields,
   type KeyOut,
+  type MtuTuneOut,
   type PeerFields,
   type QrFrame,
 } from "@/lib/actions"
@@ -1399,6 +1401,37 @@ export function ConfigDialog({
   )
 }
 
+const CONTENT_BLOCKER_OPTIONS = [
+  { key: "ads", label: "Ads", bit: 1 << 0 },
+  { key: "trackers", label: "Trackers", bit: 1 << 1 },
+  { key: "malware", label: "Malware", bit: 1 << 2 },
+  { key: "adult", label: "Adult", bit: 1 << 3 },
+  { key: "gambling", label: "Gambling", bit: 1 << 4 },
+  { key: "social", label: "Social", bit: 1 << 5 },
+] as const
+
+const BLOCKER_ALIASES: Record<string, string> = {
+  ad: "ads",
+  ads: "ads",
+  tracker: "trackers",
+  trackers: "trackers",
+  malware: "malware",
+  adult: "adult",
+  adult_content: "adult",
+  gambling: "gambling",
+  social: "social",
+  social_media: "social",
+}
+
+function parseContentBlockers(raw: string | undefined): Set<string> {
+  const active = new Set<string>()
+  for (const part of (raw ?? "").split(",")) {
+    const canonical = BLOCKER_ALIASES[part.trim().toLowerCase()]
+    if (canonical) active.add(canonical)
+  }
+  return active
+}
+
 export function InterfaceFormDialog({
   blocked,
   data,
@@ -1411,19 +1444,26 @@ export function InterfaceFormDialog({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [probingMtu, setProbingMtu] = useState(false)
+  const [probedMtu, setProbedMtu] = useState<MtuTuneOut | null>(null)
   const [fields, setFields] = useState<InterfaceFields>({
     listen: "",
+    carrier: "",
+    tcp_upgrade: "",
     mtu: "",
     fwmark: "",
     addresses: "",
     dns: "",
     table: "",
+    policy: "",
+    content_blockers: "",
   })
   const { busy, submit } = useGuardedSubmit()
 
   const load = () => {
     setLoading(true)
     setLoadError(null)
+    setProbedMtu(null)
     readInterfaceFields()
       .then((loaded) => setFields(loaded))
       .catch((error) => setLoadError(formatError(error)))
@@ -1443,7 +1483,11 @@ export function InterfaceFormDialog({
   let advisorProfile = "PQ-Safe / Gaming (1380)"
   let advisorReason =
     "Balances ML-KEM-768 handshake headroom (1444 B wire) with unfragmented ~1300 B real-time UDP datagrams."
-  if (counters && counters.datagrams_failed > 0) {
+  if (probedMtu) {
+    recommendedMtu = String(probedMtu.recommended_inner_mtu)
+    advisorProfile = `${probedMtu.profile} (${probedMtu.recommended_inner_mtu} · ceiling ${probedMtu.ceiling_outer_mtu} B)`
+    advisorReason = `${probedMtu.host}: ${probedMtu.rationale}`
+  } else if (counters && counters.datagrams_failed > 0) {
     recommendedMtu = "1280"
     advisorProfile = "Low-Jitter / USB NIC (1280)"
     advisorReason = `${counters.datagrams_failed} outer datagram failure(s) recorded; 1280 minimizes USB URB straddling and driver drops.`
@@ -1466,7 +1510,23 @@ export function InterfaceFormDialog({
     Number.isFinite(parsedMtu) && parsedMtu >= 576 && parsedMtu <= 65535
       ? parsedMtu
       : Number.parseInt(recommendedMtu, 10)
-  const outerWireMtu = effectiveMtu + 64
+  const activeCarrier = (fields.carrier.trim() || "udp").toLowerCase()
+  const activePolicy = (fields.policy?.trim() || "auto").toLowerCase()
+  const activeBlockers = parseContentBlockers(fields.content_blockers)
+  const blockerMask = CONTENT_BLOCKER_OPTIONS.reduce(
+    (mask, item) => (activeBlockers.has(item.key) ? mask | item.bit : mask),
+    0,
+  )
+  const toggleBlocker = (key: string) => {
+    const next = new Set(activeBlockers)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    const serialized = CONTENT_BLOCKER_OPTIONS.filter((item) => next.has(item.key))
+      .map((item) => item.key)
+      .join(", ")
+    set("content_blockers")(serialized)
+  }
+  const outerWireMtu = effectiveMtu + (activeCarrier === "tcp" ? 66 : 64)
   const ipv4TcpMss = Math.max(536, effectiveMtu - 40)
   const ipv6TcpMss = Math.max(516, effectiveMtu - 60)
 
@@ -1542,22 +1602,94 @@ export function InterfaceFormDialog({
                 <span className="text-signal font-medium">
                   Adaptive MTU &amp; JA4T Advisor · {advisorProfile}
                 </span>
-                <PresetChip
-                  label={
-                    fields.mtu.trim() === recommendedMtu
-                      ? `Recommended (${recommendedMtu}) active`
-                      : `Apply ${recommendedMtu}`
-                  }
-                  disabled={loading}
-                  active={fields.mtu.trim() === recommendedMtu}
-                  onClick={() => set("mtu")(recommendedMtu)}
-                />
+                <div className="flex flex-wrap items-center gap-1">
+                  <PresetChip
+                    label={probingMtu ? "Probing Path…" : "Probe Live Path"}
+                    disabled={loading || probingMtu}
+                    active={probedMtu !== null}
+                    onClick={() => {
+                      setProbingMtu(true)
+                      tuneMtu()
+                        .then((res) => {
+                          setProbedMtu(res)
+                          set("mtu")(String(res.recommended_inner_mtu))
+                          toast.success(
+                            `Probed ${res.host}: ${res.profile} recommends MTU ${res.recommended_inner_mtu} (ceiling ${res.ceiling_outer_mtu} B)`,
+                          )
+                        })
+                        .catch((error) => toast.error(formatError(error), { duration: 8000 }))
+                        .finally(() => setProbingMtu(false))
+                    }}
+                  />
+                  <PresetChip
+                    label={
+                      fields.mtu.trim() === recommendedMtu
+                        ? `Recommended (${recommendedMtu}) active`
+                        : `Apply ${recommendedMtu}`
+                    }
+                    disabled={loading}
+                    active={fields.mtu.trim() === recommendedMtu}
+                    onClick={() => set("mtu")(recommendedMtu)}
+                  />
+                </div>
               </div>
               <p className="text-muted-foreground mt-1 text-[11px]">{advisorReason}</p>
               <p className="text-muted-foreground mt-1 font-mono text-[11px]">
-                Wire {outerWireMtu} B · JA4T MSS IPv4 {ipv4TcpMss} / IPv6 {ipv6TcpMss}
+                Wire {outerWireMtu} B ({activeCarrier}) · JA4T MSS IPv4 {ipv4TcpMss} / IPv6 {ipv6TcpMss}
               </p>
             </div>
+            <Field
+              label="carrier transport"
+              hint="udp, lwo (zero-overhead XOR), auto (500ms happy-eyeballs), or tcp"
+            >
+              <Input
+                value={fields.carrier}
+                onChange={(e) => set("carrier")(e.target.value)}
+                disabled={loading}
+                placeholder="udp"
+              />
+              <div className="mt-1 flex flex-wrap gap-1">
+                <PresetChip
+                  label="udp (Default)"
+                  disabled={loading}
+                  active={activeCarrier === "udp"}
+                  onClick={() => set("carrier")("udp")}
+                />
+                <PresetChip
+                  label="lwo (Obfuscated 0B)"
+                  disabled={loading}
+                  active={activeCarrier === "lwo"}
+                  onClick={() => set("carrier")("lwo")}
+                />
+                <PresetChip
+                  label="auto (LWO + TCP Race)"
+                  disabled={loading}
+                  active={activeCarrier === "auto"}
+                  onClick={() => set("carrier")("auto")}
+                />
+                <PresetChip
+                  label="tcp (Framed Stream)"
+                  disabled={loading}
+                  active={activeCarrier === "tcp"}
+                  onClick={() => set("carrier")("tcp")}
+                />
+              </div>
+            </Field>
+            {(activeCarrier === "tcp" ||
+              activeCarrier === "auto" ||
+              Boolean(fields.tcp_upgrade?.trim())) && (
+              <Field
+                label="tcp upgrade host (optional)"
+                hint="HTTP/1.1 Host header sent with GET /_vallum Upgrade: vallum on TCP dials"
+              >
+                <Input
+                  value={fields.tcp_upgrade ?? ""}
+                  onChange={(e) => set("tcp_upgrade")(e.target.value)}
+                  disabled={loading}
+                  placeholder="edge.wingman.gold:443"
+                />
+              </Field>
+            )}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="firewall mark" hint="decimal or 0x hex">
                 <Input
@@ -1602,6 +1734,40 @@ export function InterfaceFormDialog({
                 <PresetChip label="Clear" disabled={loading} active={fields.dns.trim() === ""} onClick={() => set("dns")("")} />
               </div>
             </Field>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field
+                label="egress guard ([quick] policy)"
+                hint="auto (full tunnel), on, lockdown (even disconnected), or off"
+              >
+                <div className="mt-1 flex flex-wrap gap-1">
+                  <PresetChip label="auto" disabled={loading} active={activePolicy === "auto"} onClick={() => set("policy")("auto")} />
+                  <PresetChip label="on" disabled={loading} active={activePolicy === "on"} onClick={() => set("policy")("on")} />
+                  <PresetChip label="lockdown" disabled={loading} active={activePolicy === "lockdown"} onClick={() => set("policy")("lockdown")} />
+                  <PresetChip label="off" disabled={loading} active={activePolicy === "off"} onClick={() => set("policy")("off")} />
+                </div>
+              </Field>
+              <Field
+                label="content blockers (100.64.0.X)"
+                hint="ORs selected categories into the in-tunnel magic resolver IP"
+              >
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {CONTENT_BLOCKER_OPTIONS.map((item) => (
+                    <PresetChip
+                      key={item.key}
+                      label={item.label}
+                      disabled={loading}
+                      active={activeBlockers.has(item.key)}
+                      onClick={() => toggleBlocker(item.key)}
+                    />
+                  ))}
+                </div>
+                {blockerMask > 0 && (
+                  <p className="text-signal mt-1 font-mono text-[11px]">
+                    → resolver 100.64.0.{blockerMask} (blocklist bits ORed into last octet)
+                  </p>
+                )}
+              </Field>
+            </div>
             <DialogFooter showCloseButton>
               <Button type="submit" size="sm" disabled={loading || busy}>
                 {busy ? "Saving…" : "Save network settings"}

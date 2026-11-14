@@ -30,8 +30,12 @@
   Clients generate their own private keys locally. Servers exchange short-lived, pinned join tickets or animated `VALLUM1` QR codes without private keys ever leaving the client device. Zero-downtime key rotation (`peer rotate` ➔ `peer finalize`) eliminates rekey outages.
 - 🖥️ **Dual Operations Cockpits (TUI + Cyberpunk GUI)**  
   Real-time telemetry, spline throughput charts, animated packet-pipeline tracking, live topology flow lanes, scannable QR generation, inline TOML configuration editor with diffs, and structured `VAL-E*` diagnostics.
-- 🔒 **Fail-Closed Guard & Policy Egress**  
-  Automatic detection and mitigation of IPv6 and DNS egress leaks, systemd deadman switch, and full-tunnel rollback trials.
+- 🔒 **Fail-Closed Guard & CVE-2019-14899 Hardening**  
+  Automatic detection and mitigation of IPv6, routing, and DNS egress leaks (`vallum doctor`), raw input-chain anti-spoofing + `src_valid_mark=1` / `arp_ignore=2`, systemd deadman switch, and full-tunnel rollback trials.
+- 🌐 **Adaptive Carriers (`udp`, `lwo`, `auto`, `tcp`) & Proxy Upgrade**  
+  Zero-overhead SplitMix64 UDP header masking with handshake length jitter (`carrier = "lwo"`), happy-eyeballs 500ms LWO-to-TCP racing (`carrier = "auto"`), framed TCP fallback (`carrier = "tcp"`) with HTTP/1.1 `101 Switching Protocols` reverse-proxy upgrade (`/_vallum` for Caddy/Nginx TLS `:443`), and closed-loop adaptive MTU tuning (`vallum doctor --tune-mtu`). `auto` validates handshake TLV/index/`mac1` before locking a carrier and replays up to 100 initial packets onto TCP.
+- 🧭 **Loopback DNS Proxy (`vallum-quick dns-proxy`)**  
+  Bounded-concurrency forwarder with RFC1918 LAN vs in-tunnel resolver split, `AAAA` suppression on IPv4-only tunnels, and `198.51.100.1` captive-portal spoofing while blocked.
 - 🔌 **Clean Decoupled Architecture**  
   Built on a clean `CryptoSuite` boundary trait (`vallum-crypto`) with zero hardcoded SDK locks. Protocol framing, key schedule, and sans-I/O datapath remain isolated from the underlying crypto engine.
 
@@ -44,10 +48,15 @@ Vallum ships two synchronized, zero-compromise operations cockpits with feature 
 ### 1. Cyberpunk GUI Cockpit (`vallum-gui`)
 Runs either as a native desktop application (via Tauri) or as a secure, authenticated local web console (`vallum-gui --serve 7317`).
 
-- **Real-Time Animated Telemetry:** Spline RX/TX throughput charts with dynamic leading-edge beacons, streaming egress lanes (`FlowLane`), and live packet pipeline stage monitors (`Wire ingress` ➔ `Handshake gate` ➔ `Tunnel delivery` ➔ `Wire egress`).
+- **Real-Time Animated Telemetry:** Spline RX/TX throughput charts with dynamic leading-edge beacons, 4-stage connection progress ladder (`Leak Guard` ➔ `Carrier Bind` ➔ `PQ Handshake` ➔ `Tunnel Verified`), live payload-vs-cover packet stream, streaming egress lanes (`FlowLane`), and live packet pipeline stage monitors.
 - **User Identity & Key Management:** Local operator profiles, scannable public key QR codes (`qrFrame`), offline ML-KEM keypair generation studio, and config backup downloads.
-- **Everyday QoL:** Next-available subnet IP suggestions (`10.7.0.x/32`), one-click DNS presets (Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, Mullvad), MTU chips, and auto-clipboard invite tickets.
+- **Everyday QoL:** Next-available subnet IP suggestions (`10.7.0.x/32`), carrier transport chips (`udp`, `lwo`, `auto`, `tcp`), one-click DNS presets (Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`, Mullvad), live **Probe Live Path** Adaptive MTU optimizer (`1280` / `1340` / `1380` / `1420`), and auto-clipboard invite tickets.
 - **Doctor & Diagnostic Modal (`d`):** Integrated `VAL-E*` error codes, host preflight verification, and systemd service lifecycle controls.
+
+<p align="center">
+  <img src="assets/vallum-gui-onboarding.jpg" alt="Vallum GUI: Doctor, error catalog and guided onboarding" width="70%">
+</p>
+<p align="center"><sub>Doctor modal with the role-based <b>Start &amp; Onboarding</b> workflow and live host-readiness score.</sub></p>
 
 *Learn more in the [`vallum-gui` Documentation](docs/gui.md).*
 
@@ -193,7 +202,10 @@ vallum tui
 ## Operational Commands
 
 ```sh
-# Diagnostics & health probe
+# Diagnostics, closed-loop MTU sweep & health probe
+vallum doctor --config /etc/vallum/vallum0.toml --tune-mtu
+
+# Explicit target MTU sweep
 vallum doctor --config /etc/vallum/vallum0.toml --probe-mtu 1.1.1.1
 
 # Prometheus telemetry export
@@ -238,8 +250,15 @@ scripts/
 ## Security & Cryptographic Posture
 
 - **Tri-Hybrid KEM**: Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking confidentiality requires compromising all three algorithms.
-- **Reachability & Transport**: UDP by default with opt-in framed TCP fallback (`carrier = "tcp"`) for restrictive networks, paired with AEAD padding and Maybenot-style traffic shaping ([ADR-0026](docs/adr/0026-censorship-resistance.md)).
+- **Reachability & Transport**: `udp` by default alongside zero-overhead LWO obfuscation + handshake length jitter (`carrier = "lwo"`), happy-eyeballs 500ms LWO-to-TCP racing (`carrier = "auto"`), and framed TCP fallback (`carrier = "tcp"`) supporting HTTP/1.1 `101 Switching Protocols` reverse-proxy upgrades (`/_vallum` behind Caddy/Nginx TLS `:443`), paired with AEAD padding and Maybenot-style traffic shaping ([ADR-0026](docs/adr/0026-censorship-resistance.md), [ADR-0042](docs/adr/0042-layer4-tls-and-adaptive-mtu.md)).
 - **Audit Status**: Post-quantum algorithms utilize `origin-crypto-sdk` (`EXPERIMENTAL`). Formal audits are ongoing; deployers should evaluate threat models accordingly.
+
+### Reverse-Proxy TLS `:443` Example (Caddy)
+```caddyfile
+vpn.example.com {
+    reverse_proxy /_vallum 127.0.0.1:51820
+}
+```
 
 ---
 

@@ -105,8 +105,111 @@ pub struct Quick {
     /// A full tunnel only — the namespace's default route is the tunnel device,
     /// so `allowed_ips` must claim `0.0.0.0/0` (or `::/0`), and the interface
     /// needs an address to carry inside; `attach` refuses anything else.
+    /// Tunnel only the processes launched into the member namespace (ADR-0023).
+    ///
+    /// When true, `vallum-quick attach` creates one shared mount+net namespace,
+    /// binds a private `resolv.conf` naming `[quick] dns` inside it, and moves
+    /// the tunnel device there. The host installs no routes and rewrites no
+    /// resolver, so a process outside the namespace keeps exactly the
+    /// networking it had. `vallum-quick app CONFIG NAME -- CMD` is the only way
+    /// in. The daemon parses and ignores this: the namespace is host-level
+    /// work, owned by `vallum-quick` alone.
+    ///
+    /// A full tunnel only — the namespace's default route is the tunnel device,
+    /// so `allowed_ips` must claim `0.0.0.0/0` (or `::/0`), and the interface
+    /// needs an address to carry inside; `attach` refuses anything else.
     #[serde(default)]
     pub app_class: bool,
+    /// Server-side DNS content-blocker categories (`ads`, `trackers`, `malware`,
+    /// `adult`, `gambling`, `social`), encoded into the tunnel resolver IP
+    /// `100.64.0.<bitmask>` (Mullvad §8.2 convention).
+    #[serde(default)]
+    pub content_blockers: Vec<String>,
+}
+
+/// Server-side DNS content-blocker categories and their bit positions in the
+/// fourth octet of `100.64.0.<bitmask>` (Mullvad §8.2 convention).
+pub const CONTENT_BLOCKER_CATEGORIES: &[(&str, u8)] = &[
+    ("ads", 1 << 0),
+    ("trackers", 1 << 1),
+    ("malware", 1 << 2),
+    ("adult", 1 << 3),
+    ("gambling", 1 << 4),
+    ("social", 1 << 5),
+];
+
+/// Map a `[quick] content_blockers` category name to its bitmask bit, or `None`
+/// if the category is unknown.
+#[must_use]
+pub fn content_blocker_bit(name: &str) -> Option<u8> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "ads" | "ad" => Some(1 << 0),
+        "trackers" | "tracker" => Some(1 << 1),
+        "malware" => Some(1 << 2),
+        "adult" | "adult_content" => Some(1 << 3),
+        "gambling" => Some(1 << 4),
+        "social" | "social_media" => Some(1 << 5),
+        _ => None,
+    }
+}
+
+/// Encode `[quick] content_blockers` into the CGNAT magic resolver address
+/// `100.64.0.<bitmask>`, returning `None` if no valid category is active.
+#[must_use]
+pub fn content_blocker_resolver_ip<S: AsRef<str>>(
+    blockers: &[S],
+) -> Option<std::net::Ipv4Addr> {
+    let mut mask = 0u8;
+    for raw in blockers {
+        if let Some(bit) = content_blocker_bit(raw.as_ref()) {
+            mask |= bit;
+        }
+    }
+    (mask != 0).then(|| std::net::Ipv4Addr::new(100, 64, 0, mask))
+}
+
+/// Decode a `100.64.0.<bitmask>` content-blocker resolver IP back into its
+/// enabled category names (empty when `ip` is outside `100.64.0.1..=100.64.0.63`).
+#[must_use]
+pub fn decode_content_blocker_ip(ip: std::net::IpAddr) -> Vec<&'static str> {
+    let std::net::IpAddr::V4(v4) = ip else {
+        return Vec::new();
+    };
+    let octets = v4.octets();
+    if octets[0] != 100 || octets[1] != 64 || octets[2] != 0 {
+        return Vec::new();
+    }
+    let mask = octets[3];
+    if mask == 0 || mask >= (1 << CONTENT_BLOCKER_CATEGORIES.len()) {
+        return Vec::new();
+    }
+    CONTENT_BLOCKER_CATEGORIES
+        .iter()
+        .filter_map(|&(name, bit)| ((mask & bit) != 0).then_some(name))
+        .collect()
+}
+
+impl Quick {
+    /// Effective DNS servers to install inside the tunnel: prepends the
+    /// `100.64.0.<bitmask>` content-blocker resolver when `[quick] content_blockers`
+    /// is non-empty and not already present in [`Self::dns`].
+    #[must_use]
+    pub fn effective_dns_servers(&self) -> Vec<String> {
+        let mut servers = Vec::with_capacity(self.dns.len() + 1);
+        if let Some(blocker_ip) = content_blocker_resolver_ip(&self.content_blockers) {
+            let formatted = blocker_ip.to_string();
+            if !self.dns.iter().any(|entry| entry.trim() == formatted) {
+                servers.push(formatted);
+            }
+        }
+        for entry in &self.dns {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() && !servers.iter().any(|existing| existing == trimmed) {
+                servers.push(trimmed.to_owned());
+            }
+        }
+        servers
+    }
 }
 
 /// The `[enroll]` table: the optional token-gated enrolment responder.
@@ -136,6 +239,13 @@ pub enum Carrier {
     /// path-MTU handling and roaming.
     #[default]
     Udp,
+    /// Zero-overhead UDP header obfuscation (LWO v2): masks the first 8 header
+    /// bytes using a SplitMix64 keystream keyed by the packet's own trailing bytes.
+    Lwo,
+    /// Happy-eyeballs carrier racer: begins on LWO-obfuscated UDP, staggers a
+    /// TCP connection after 500ms if the peer has not replied, and locks onto
+    /// UDP for 15s when UDP answers.
+    Auto,
     /// Frames inside TCP, one connection per peer.
     ///
     /// A peer cannot roam under this carrier — the connection is the endpoint —
@@ -151,30 +261,44 @@ impl Carrier {
     pub fn as_str(self) -> &'static str {
         match self {
             Carrier::Udp => "udp",
+            Carrier::Lwo => "lwo",
+            Carrier::Auto => "auto",
             Carrier::Tcp => "tcp",
         }
     }
 
-    /// The transport protocol name, for firewall rules and probes.
+    /// The primary transport protocol name, for firewall rules and probes.
     ///
     /// Same spellings as `/etc/services` and `ufw`, which is what an operator
     /// types after the port.
     #[must_use]
     pub fn protocol(self) -> &'static str {
         match self {
-            Carrier::Udp => "udp",
+            Carrier::Udp | Carrier::Lwo | Carrier::Auto => "udp",
             Carrier::Tcp => "tcp",
         }
     }
 
-    /// Whether the endpoint can be probed with a connection attempt.
+    /// Whether this carrier uses UDP datagrams as its primary or raced path.
+    #[must_use]
+    pub fn uses_udp(self) -> bool {
+        matches!(self, Carrier::Udp | Carrier::Lwo | Carrier::Auto)
+    }
+
+    /// Whether this carrier uses TCP streams (exclusively or as a staggered race).
+    #[must_use]
+    pub fn uses_tcp(self) -> bool {
+        matches!(self, Carrier::Tcp | Carrier::Auto)
+    }
+
+    /// Whether the endpoint can be probed with a TCP connection attempt.
     ///
     /// A TCP listener answers a dial, so a refusal is information. UDP has no
     /// connection: a closed port is an ICMP message that may never come back,
     /// and a filtered one is silence either way.
     #[must_use]
     pub fn is_probeable(self) -> bool {
-        matches!(self, Carrier::Tcp)
+        matches!(self, Carrier::Tcp | Carrier::Auto)
     }
 }
 
@@ -314,6 +438,10 @@ pub struct Interface {
     /// instead of guessing a source route that is often a private address.
     #[serde(default)]
     pub public_endpoint: Option<String>,
+    /// Optional HTTP/1.1 `Host` header value for outbound `carrier = "tcp"` or
+    /// `carrier = "auto"` dial preambles (`GET /_vallum HTTP/1.1` + `Upgrade: vallum`).
+    #[serde(default)]
+    pub tcp_upgrade: Option<String>,
 }
 
 /// `interface.seccomp`: what the syscall filter does with a syscall it does not
@@ -617,8 +745,54 @@ impl Config {
                 message,
             })?;
         }
+        if let Some(host) = &self.interface.tcp_upgrade {
+            validate_tcp_upgrade_host(host).map_err(|message| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message,
+            })?;
+        }
+        for raw in &self.quick.content_blockers {
+            if content_blocker_bit(raw).is_none() {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "unknown [quick] content_blockers category `{raw}` \
+                         (expected ads, trackers, malware, adult, gambling, or social)"
+                    ),
+                });
+            }
+        }
         Ok(())
     }
+}
+
+/// Validate an HTTP/1.1 `Host` header value for `[interface] tcp_upgrade`.
+pub fn validate_tcp_upgrade_host(host: &str) -> Result<(), String> {
+    if host.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(
+            "[interface] tcp_upgrade must not contain control characters or newlines".to_owned(),
+        );
+    }
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return Err("[interface] tcp_upgrade must not be empty".to_owned());
+    }
+    if trimmed.bytes().any(|b| b <= 0x20 || b == 0x7f || !b.is_ascii()) {
+        return Err(
+            "[interface] tcp_upgrade must be an ASCII host or host:port without whitespace"
+                .to_owned(),
+        );
+    }
+    if trimmed.contains(['/', '\\', '?', '#', '@'])
+        || trimmed.starts_with(':')
+        || trimmed.ends_with(':')
+    {
+        return Err(
+            "[interface] tcp_upgrade must be a host or host:port, not a URL, path, or bare port"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// The kernel's own limits on an interface name, checked here because the name
@@ -997,6 +1171,12 @@ cap = 4
         let config: Config = toml::from_str(&base("carrier = \"tcp\"")).expect("parses tcp");
         assert_eq!(config.interface.carrier, Some(Carrier::Tcp));
 
+        let config: Config = toml::from_str(&base("carrier = \"lwo\"")).expect("parses lwo");
+        assert_eq!(config.interface.carrier, Some(Carrier::Lwo));
+
+        let config: Config = toml::from_str(&base("carrier = \"auto\"")).expect("parses auto");
+        assert_eq!(config.interface.carrier, Some(Carrier::Auto));
+
         // A typo must not silently leave the interface on the protocol it was
         // meant to avoid.
         let error = toml::from_str::<Config>(&base("carrier = \"tcpp\"")).expect_err("refused");
@@ -1045,6 +1225,89 @@ size = 1400
         let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
         let with = with_outer_mtu(text, 1400);
         assert_eq!(with, text);
+    }
+
+    #[test]
+    fn content_blockers_encode_and_decode_magic_resolver_ip() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        assert_eq!(content_blocker_resolver_ip::<&str>(&[]), None);
+        assert_eq!(
+            content_blocker_resolver_ip(&["ads", "trackers", "malware"]),
+            Some(Ipv4Addr::new(100, 64, 0, 7))
+        );
+        assert_eq!(
+            content_blocker_resolver_ip(&["adult", "gambling", "social"]),
+            Some(Ipv4Addr::new(100, 64, 0, 56))
+        );
+        assert_eq!(
+            decode_content_blocker_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 7))),
+            vec!["ads", "trackers", "malware"]
+        );
+        assert!(decode_content_blocker_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))).is_empty());
+
+        let quick = Quick {
+            dns: vec!["1.1.1.1".to_owned()],
+            content_blockers: vec![
+                "ads".to_owned(),
+                "trackers".to_owned(),
+                "malware".to_owned(),
+            ],
+            ..Quick::default()
+        };
+        assert_eq!(quick.effective_dns_servers(), vec!["100.64.0.7", "1.1.1.1"]);
+
+        let dir = std::env::temp_dir().join(format!("vallum-cfg-cb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad_path = dir.join("bad.toml");
+        std::fs::write(
+            &bad_path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[quick]\ncontent_blockers = [\"unknown_cat\"]\n",
+        )
+        .unwrap();
+        assert!(Config::load(&bad_path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tcp_upgrade_validates_host_and_rejects_control_characters() {
+        assert!(validate_tcp_upgrade_host("cdn.example.com").is_ok());
+        assert!(validate_tcp_upgrade_host("cdn.example.com:443").is_ok());
+        assert!(validate_tcp_upgrade_host("[::1]:8443").is_ok());
+
+        assert!(validate_tcp_upgrade_host("").is_err());
+        assert!(validate_tcp_upgrade_host("   ").is_err());
+        assert!(validate_tcp_upgrade_host("cdn.example.com\r\nX-Inject: 1").is_err());
+        assert!(validate_tcp_upgrade_host("cdn.example.com\n").is_err());
+        assert!(validate_tcp_upgrade_host("bad host").is_err());
+        assert!(validate_tcp_upgrade_host("https://cdn.example.com").is_err());
+        assert!(validate_tcp_upgrade_host("cdn.example.com/path").is_err());
+
+        let dir =
+            std::env::temp_dir().join(format!("vallum-cfg-tcp-upg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good_path = dir.join("good.toml");
+        std::fs::write(
+            &good_path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\ncarrier = \"tcp\"\ntcp_upgrade = \"edge.example.com:443\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&good_path).unwrap();
+        assert_eq!(
+            cfg.interface.tcp_upgrade.as_deref(),
+            Some("edge.example.com:443")
+        );
+
+        let bad_path = dir.join("bad.toml");
+        std::fs::write(
+            &bad_path,
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\ntcp_upgrade = \"edge.example.com\\r\\nInjected: yes\"\n",
+        )
+        .unwrap();
+        assert!(Config::load(&bad_path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

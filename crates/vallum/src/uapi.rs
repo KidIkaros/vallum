@@ -69,6 +69,8 @@ pub mod field {
     pub const VALLUM_FINGERPRINT: &str = "vallum_fingerprint";
     /// Device fields.
     pub const VALLUM_LISTEN: &str = "vallum_listen";
+    /// Device fields: active transport carrier (`udp`, `lwo`, `auto`, `tcp`).
+    pub const VALLUM_CARRIER: &str = "vallum_carrier";
     /// Device fields.
     pub const VALLUM_CONTROL: &str = "vallum_control";
     /// Device fields.
@@ -451,6 +453,8 @@ pub struct DeviceState {
     pub fingerprint: [u8; 8],
     /// The bound UDP address.
     pub listen: SocketAddr,
+    /// The configured datagram carrier (`udp`, `lwo`, `auto`, `tcp`).
+    pub carrier: crate::config::Carrier,
     /// The control socket path, if one is configured.
     pub control: Option<String>,
     /// The socket mark.
@@ -593,6 +597,11 @@ pub fn render_get(state: &DeviceState) -> String {
         hex_encode(&state.fingerprint)
     ));
     out.push_str(&format!("{}={}\n", field::VALLUM_LISTEN, state.listen));
+    out.push_str(&format!(
+        "{}={}\n",
+        field::VALLUM_CARRIER,
+        state.carrier.as_str()
+    ));
     if let Some(control) = &state.control {
         out.push_str(&format!("{}={control}\n", field::VALLUM_CONTROL));
     }
@@ -1263,6 +1272,7 @@ mod tests {
                     public_line,
                     fingerprint,
                     listen,
+                    carrier: crate::config::Carrier::Udp,
                     control: None,
                     fwmark,
                     suite,
@@ -1303,6 +1313,10 @@ mod tests {
             let fwmark = state.fwmark.to_string();
             prop_assert_eq!(response.peers.len(), state.peers.len());
             prop_assert_eq!(response.field("listen_port"), Some(port.as_str()));
+            prop_assert_eq!(
+                response.field(field::VALLUM_CARRIER),
+                Some(state.carrier.as_str())
+            );
             prop_assert_eq!(response.field(field::VALLUM_INTERFACE), Some(state.interface.as_str()));
             prop_assert_eq!(response.field(field::FWMARK), Some(fwmark.as_str()));
             for (index, peer) in state.peers.iter().enumerate() {
@@ -1451,6 +1465,7 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            carrier: crate::config::Carrier::Udp,
             control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,
@@ -1499,6 +1514,7 @@ mod tests {
         let text = render_get(&state);
         assert!(text.contains("private_key=0101"));
         assert!(text.contains("vallum_interface=vallum0"));
+        assert!(text.contains("vallum_carrier=udp"));
         // An expiring credential and an open rotation are visible to a client
         // of the control socket, not just to the config file.
         assert!(text.contains("vallum_valid_until=1800000000"));
@@ -1523,6 +1539,7 @@ mod tests {
             public_line: "vallum1:0003:02:-".to_owned(),
             fingerprint: [4u8; 8],
             listen: "0.0.0.0:51820".parse().unwrap(),
+            carrier: crate::config::Carrier::Udp,
             control: Some("/run/vallum/vallum0.sock".to_owned()),
             fwmark: 0,
             suite: 0x0003,

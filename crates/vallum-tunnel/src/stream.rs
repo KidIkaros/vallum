@@ -32,6 +32,17 @@ pub const MAX_FRAME: usize = 32 * 1024;
 /// The size of the length prefix, in bytes.
 pub const FRAME_LEN_SIZE: usize = 2;
 
+/// Default HTTP/1.1 Upgrade path for reverse proxies (Caddy / Nginx) forwarding
+/// TLS 1.3 `:443` traffic to a local Vallum `TcpTransport` listener.
+pub const UPGRADE_PATH: &str = "/_vallum";
+
+/// Maximum bytes buffered while waiting for `\r\n\r\n` on an HTTP Upgrade prelude.
+pub const MAX_HTTP_PRELUDE: usize = 4096;
+
+/// Server response completing an HTTP/1.1 `Upgrade: vallum` handshake.
+pub const UPGRADE_RESPONSE: &[u8] =
+    b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: vallum\r\n\r\n";
+
 /// Why a stream could not be turned back into packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
@@ -53,6 +64,8 @@ pub enum FrameError {
         /// Bytes that arrived before the stream ended.
         got: usize,
     },
+    /// An HTTP/1.1 Upgrade prelude at the start of the stream was malformed or exceeded [`MAX_HTTP_PRELUDE`].
+    BadUpgrade,
 }
 
 impl std::fmt::Display for FrameError {
@@ -68,11 +81,31 @@ impl std::fmt::Display for FrameError {
             Self::Truncated { expected, got } => {
                 write!(f, "a frame promised {expected} bytes and ended after {got}")
             }
+            Self::BadUpgrade => f.write_str("malformed or oversized HTTP/1.1 Upgrade prelude"),
         }
     }
 }
 
 impl std::error::Error for FrameError {}
+
+/// Build an HTTP/1.1 `Upgrade: vallum` client request prelude for traversing
+/// a reverse proxy such as Caddy or Nginx.
+#[must_use]
+pub fn upgrade_request(host: &str) -> Vec<u8> {
+    let sanitized: String = host
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    let host_hdr = if sanitized.trim().is_empty() {
+        "localhost"
+    } else {
+        sanitized.trim()
+    };
+    format!(
+        "GET {UPGRADE_PATH} HTTP/1.1\r\nHost: {host_hdr}\r\nConnection: Upgrade\r\nUpgrade: vallum\r\n\r\n"
+    )
+    .into_bytes()
+}
 
 /// Write one packet as a length-prefixed frame.
 ///
@@ -133,10 +166,24 @@ pub fn unframe(buf: &[u8]) -> Result<Option<(&[u8], usize)>, FrameError> {
 /// A reader that turns a stream's bytes into frames.
 ///
 /// The buffer grows only as far as [`MAX_FRAME`], because a prefix is refused
-/// before the body it promises is buffered.
-#[derive(Debug, Default)]
+/// before the body it promises is buffered. At stream start it also recognizes
+/// an optional HTTP/1.1 `Upgrade: vallum` request or `101 Switching Protocols`
+/// response prelude for traversing TLS reverse proxies (Caddy / Nginx).
+#[derive(Debug)]
 pub struct FrameReader {
     buffer: Vec<u8>,
+    at_stream_start: bool,
+    upgrade_reply_needed: bool,
+}
+
+impl Default for FrameReader {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            at_stream_start: true,
+            upgrade_reply_needed: false,
+        }
+    }
 }
 
 impl FrameReader {
@@ -151,12 +198,96 @@ impl FrameReader {
         self.buffer.extend_from_slice(bytes);
     }
 
+    /// If the reader just consumed an inbound client `GET ... Upgrade` request prelude,
+    /// returns the `HTTP/1.1 101 Switching Protocols` response bytes once so the
+    /// transport can write them back on the stream.
+    pub fn take_upgrade_reply(&mut self) -> Option<&'static [u8]> {
+        if self.upgrade_reply_needed {
+            self.upgrade_reply_needed = false;
+            Some(UPGRADE_RESPONSE)
+        } else {
+            None
+        }
+    }
+
+    /// Consume an HTTP/1.1 Upgrade request or `101 Switching Protocols` response at
+    /// the start of the stream. Returns `Ok(true)` if more bytes are needed before
+    /// deciding/completing the prelude, or `Ok(false)` once ready to read binary frames.
+    fn try_consume_http_prelude(&mut self) -> Result<bool, FrameError> {
+        const GET_PREFIX: &[u8] = b"GET ";
+        const HTTP_PREFIX: &[u8] = b"HTTP/";
+
+        if !self.at_stream_start || self.buffer.is_empty() {
+            return Ok(false);
+        }
+
+        let is_get = if self.buffer.len() < GET_PREFIX.len() {
+            GET_PREFIX.starts_with(&self.buffer)
+        } else {
+            self.buffer.starts_with(GET_PREFIX)
+        };
+        let is_http = if self.buffer.len() < HTTP_PREFIX.len() {
+            HTTP_PREFIX.starts_with(&self.buffer)
+        } else {
+            self.buffer.starts_with(HTTP_PREFIX)
+        };
+
+        if !is_get && !is_http {
+            self.at_stream_start = false;
+            return Ok(false);
+        }
+
+        let Some(pos) = self.buffer.windows(4).position(|w| w == b"\r\n\r\n") else {
+            if self.buffer.len() > MAX_HTTP_PRELUDE {
+                return Err(FrameError::BadUpgrade);
+            }
+            return Ok(true);
+        };
+
+        let header_end = pos + 4;
+        if header_end > MAX_HTTP_PRELUDE {
+            return Err(FrameError::BadUpgrade);
+        }
+
+        let head_str =
+            core::str::from_utf8(&self.buffer[..pos]).map_err(|_| FrameError::BadUpgrade)?;
+        let mut lines = head_str.split("\r\n");
+        let first_line = lines.next().ok_or(FrameError::BadUpgrade)?;
+
+        if is_get {
+            if !first_line.starts_with("GET /") || !first_line.contains("HTTP/1.") {
+                return Err(FrameError::BadUpgrade);
+            }
+            let has_upgrade = lines.any(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.starts_with("upgrade:")
+                    && (lower.contains("vallum") || lower.contains("websocket"))
+            });
+            if !has_upgrade {
+                return Err(FrameError::BadUpgrade);
+            }
+            self.upgrade_reply_needed = true;
+        } else if !first_line.starts_with("HTTP/1.1 101")
+            && !first_line.starts_with("HTTP/1.0 101")
+        {
+            return Err(FrameError::BadUpgrade);
+        }
+
+        self.buffer.drain(..header_end);
+        self.at_stream_start = false;
+        Ok(false)
+    }
+
     /// Take the next whole frame, if one has arrived.
     ///
     /// # Errors
     ///
-    /// As [`unframe`]: a zero or oversized prefix is fatal to the stream.
+    /// As [`unframe`]: a zero or oversized prefix is fatal to the stream, as is
+    /// a malformed or oversized HTTP Upgrade prelude.
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
+        if self.try_consume_http_prelude()? {
+            return Ok(None);
+        }
         let Some((packet, consumed)) = unframe(&self.buffer)? else {
             return Ok(None);
         };
@@ -276,5 +407,69 @@ mod tests {
         reader.push(&framed[..5]);
         assert_eq!(reader.next_frame().expect("waiting"), None);
         assert_eq!(reader.pending(), 5);
+    }
+
+    #[test]
+    fn http_upgrade_request_and_response_preludes_unframe_cleanly() {
+        let pkt = vec![0x42u8; 96];
+        let framed = frame(&pkt).expect("frame");
+
+        // Server side: receives HTTP GET Upgrade request followed immediately by a binary frame
+        // delivered in small 7-byte chunks.
+        let mut req_stream = upgrade_request("wingman.gold");
+        req_stream.extend_from_slice(&framed);
+
+        let mut server_reader = FrameReader::new();
+        let mut received = None;
+        for chunk in req_stream.chunks(7) {
+            server_reader.push(chunk);
+            if let Some(frame) = server_reader.next_frame().expect("valid upgrade + frame") {
+                received = Some(frame);
+                break;
+            }
+        }
+        assert_eq!(received.as_deref(), Some(pkt.as_slice()));
+        assert_eq!(server_reader.take_upgrade_reply(), Some(UPGRADE_RESPONSE));
+        assert_eq!(server_reader.take_upgrade_reply(), None);
+
+        // Client side: receives 101 Switching Protocols response followed by a frame.
+        let mut resp_stream = UPGRADE_RESPONSE.to_vec();
+        resp_stream.extend_from_slice(&framed);
+        let mut client_reader = FrameReader::new();
+        client_reader.push(&resp_stream);
+        assert_eq!(
+            client_reader
+                .next_frame()
+                .expect("101 response + frame")
+                .as_deref(),
+            Some(pkt.as_slice())
+        );
+        assert_eq!(client_reader.take_upgrade_reply(), None);
+    }
+
+    #[test]
+    fn malformed_or_oversized_http_prelude_is_refused() {
+        let mut bad_upgrade = FrameReader::new();
+        bad_upgrade.push(b"GET /_vallum HTTP/1.1\r\nHost: wingman.gold\r\n\r\n");
+        assert_eq!(
+            bad_upgrade.next_frame().expect_err("missing Upgrade header"),
+            FrameError::BadUpgrade
+        );
+
+        let mut bad_status = FrameReader::new();
+        bad_status.push(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            bad_status.next_frame().expect_err("non-101 status rejected"),
+            FrameError::BadUpgrade
+        );
+
+        let mut oversized = FrameReader::new();
+        let mut blob = b"GET /_vallum HTTP/1.1\r\nX-Pad: ".to_vec();
+        blob.resize(MAX_HTTP_PRELUDE + 32, b'a');
+        oversized.push(&blob);
+        assert_eq!(
+            oversized.next_frame().expect_err("oversized prelude"),
+            FrameError::BadUpgrade
+        );
     }
 }

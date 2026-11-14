@@ -180,7 +180,12 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         log_warn!(log, "{warning}");
     }
 
-    let socket = net::bind(resolved.carrier, resolved.listen, resolved.fwmark)?;
+    let socket = net::bind_with_upgrade(
+        resolved.carrier,
+        resolved.listen,
+        resolved.fwmark,
+        resolved.tcp_upgrade.as_deref(),
+    )?;
     let bound = socket.local_addr().unwrap_or(resolved.listen);
     let shared = Arc::new(SharedSocket::new(Arc::clone(&socket)));
 
@@ -251,6 +256,7 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
                     control_path: Some(path),
                     listen: bound,
                     carrier: resolved.carrier,
+                    tcp_upgrade: resolved.tcp_upgrade.clone(),
                     fwmark: resolved.fwmark,
                     socket: Arc::clone(&shared),
                     suite,

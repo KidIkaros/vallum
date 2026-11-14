@@ -112,6 +112,9 @@ pub struct Resolved {
     pub sandbox: crate::sandbox::Mode,
     /// The largest UDP payload the outer path can carry: `outer_mtu - 48`.
     pub outer_budget: usize,
+    /// Optional HTTP/1.1 `Host` header value for outbound `carrier = "tcp"` or
+    /// `carrier = "auto"` dial preambles.
+    pub tcp_upgrade: Option<String>,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -135,6 +138,7 @@ impl std::fmt::Debug for Resolved {
             .field("privileges", &self.privileges)
             .field("sandbox", &self.sandbox)
             .field("outer_budget", &self.outer_budget)
+            .field("tcp_upgrade", &self.tcp_upgrade)
             .finish_non_exhaustive()
     }
 }
@@ -299,6 +303,21 @@ impl ResolveConfig for Config {
                     .to_owned(),
             );
         }
+        let raw_tcp_upgrade = self
+            .interface
+            .tcp_upgrade
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned);
+        if raw_tcp_upgrade.is_some() && !carrier.uses_tcp() {
+            warnings.push(
+                "[interface] tcp_upgrade is set, but the active carrier does not use TCP; \
+                 ignoring tcp_upgrade unless carrier is \"tcp\" or \"auto\""
+                    .to_owned(),
+            );
+        }
+        let tcp_upgrade = raw_tcp_upgrade.filter(|_| carrier.uses_tcp());
 
         // The outer path's budget. 1500 is the assumption the product was built
         // on; a narrower path names its MTU here and every datagram is cut to
@@ -724,6 +743,7 @@ impl ResolveConfig for Config {
             privileges,
             sandbox,
             outer_budget: budget,
+            tcp_upgrade,
         })
     }
 }
@@ -956,6 +976,7 @@ mod tests {
             privileges: None,
             sandbox: crate::sandbox::Mode::Log,
             outer_budget: 1372,
+            tcp_upgrade: None,
         };
         let rendered = format!("{resolved:?}");
         // The seed is 32 bytes of 0xAB — if any of it reached the log line it
