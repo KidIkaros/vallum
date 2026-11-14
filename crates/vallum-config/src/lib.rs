@@ -261,6 +261,17 @@ pub struct Enroll {
     /// The UDP port to answer on. Defaults to the interface's `listen + 1`.
     #[serde(default)]
     pub port: Option<u16>,
+    /// Optional TCP port for the HTTP/HTTPS API fronting enrolment listener
+    /// (`POST /_vallum/enroll`).
+    #[serde(default)]
+    pub front_port: Option<u16>,
+    /// Whether `front_port` terminates TLS 1.3 directly (`true`, default) or
+    /// serves plain HTTP on `127.0.0.1` behind a local reverse proxy (`false`).
+    #[serde(default)]
+    pub front_tls: Option<bool>,
+    /// Optional TLS SNI / certificate hostname used when `front_tls` is enabled.
+    #[serde(default)]
+    pub front_sni: Option<String>,
 }
 
 /// Which transport the tunnel's packets travel in.
@@ -846,6 +857,18 @@ impl Config {
             })?;
         }
         if let Some(sni) = &self.interface.tls_sni {
+            validate_tls_sni(sni).map_err(|message| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message,
+            })?;
+        }
+        if self.enroll.front_port == Some(0) {
+            return Err(ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: "[enroll] front_port cannot be 0".to_owned(),
+            });
+        }
+        if let Some(sni) = &self.enroll.front_sni {
             validate_tls_sni(sni).map_err(|message| ConfigError::Invalid {
                 path: path.to_path_buf(),
                 message,

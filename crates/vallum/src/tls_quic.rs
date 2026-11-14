@@ -98,7 +98,7 @@ fn generate_self_signed_cert(
     Ok((vec![cert], key))
 }
 
-fn build_tls_configs(
+pub(crate) fn build_tls_configs(
     sni: &str,
     alpn: &[&[u8]],
 ) -> io::Result<(Arc<ServerConfig>, Arc<ClientConfig>)> {
@@ -124,7 +124,7 @@ fn build_tls_configs(
     Ok((Arc::new(server_cfg), Arc::new(client_cfg)))
 }
 
-fn normalize_sni(tls_sni: Option<&str>) -> String {
+pub(crate) fn normalize_sni(tls_sni: Option<&str>) -> String {
     tls_sni
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -132,7 +132,7 @@ fn normalize_sni(tls_sni: Option<&str>) -> String {
         .to_owned()
 }
 
-fn server_name_for(sni: &str) -> io::Result<ServerName<'static>> {
+pub(crate) fn server_name_for(sni: &str) -> io::Result<ServerName<'static>> {
     ServerName::try_from(sni.to_owned())
         .or_else(|_| ServerName::try_from(DEFAULT_SNI.to_owned()))
         .map_err(|e| io::Error::other(format!("invalid TLS SNI: {e}")))

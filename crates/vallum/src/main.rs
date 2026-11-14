@@ -211,6 +211,8 @@ fn main() -> ExitCode {
             join: Some(args.ticket.clone()),
             token: None,
             invite_id: None,
+            front_url: None,
+            front_host: None,
             expect: None,
             enroll: false,
             dry_run: args.dry_run,

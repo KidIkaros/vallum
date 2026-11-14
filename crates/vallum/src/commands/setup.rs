@@ -116,6 +116,16 @@ pub struct SetupArgs {
     #[arg(long, value_name = "HEX", requires = "join")]
     pub invite_id: Option<String>,
 
+    /// HTTPS/HTTP API fronting URL for `--join` (e.g. `https://cdn.example.com/_vallum/enroll`)
+    /// when UDP enrolment is blocked.
+    #[arg(long, value_name = "URL", requires = "join")]
+    pub front_url: Option<String>,
+
+    /// Optional HTTP `Host:` header override when enrolling through `--front-url`
+    /// (for CDN domain fronting).
+    #[arg(long, value_name = "HOST", requires = "front_url")]
+    pub front_host: Option<String>,
+
     /// Refuse unless the server's fingerprint matches this. Printed by
     /// `vallum peer invite`; it is how a client knows it reached the right
     /// server rather than one that answered first.
@@ -220,6 +230,8 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                     join: Some(ticket.clone()),
                     token: None,
                     invite_id: None,
+                    front_url: None,
+                    front_host: None,
                     expect: None,
                     enroll: false,
                     endpoint: None,
@@ -1235,13 +1247,24 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
     say!("generated a key here; the private half does not leave this machine");
     say!("asking {server} to enrol `{name}`…");
 
-    let answer = crate::enroll::join(
-        server,
-        &ticket.token,
-        &ticket.invite_id,
-        &name,
-        &public_line,
-    )?;
+    let answer = if let Some(front_url) = args.front_url.as_deref() {
+        crate::enroll::join_via_front(
+            front_url,
+            args.front_host.as_deref(),
+            &ticket.token,
+            &ticket.invite_id,
+            &name,
+            &public_line,
+        )?
+    } else {
+        crate::enroll::join(
+            server,
+            &ticket.token,
+            &ticket.invite_id,
+            &name,
+            &public_line,
+        )?
+    };
     let report: serde_json::Value = serde_json::from_str(&answer)
         .map_err(|error| Error::Usage(format!("the server's answer was not JSON: {error}")))?;
     let config_text = report

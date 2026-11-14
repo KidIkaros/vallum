@@ -824,73 +824,119 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
         .map_err(|error| Error::Usage(format!("socket: {error}")))?;
     say!("enrolment on :{port} (interface {interface})");
 
-    let mut cookies = CookieSecret::new(&crate::entropy::seed());
-    let mut rotated = Instant::now();
-    let mut limit = RateLimit::new();
-    let mut legacy: Option<Instant> = None;
+    let state = std::sync::Arc::new(std::sync::Mutex::new(EnrollResponderState {
+        config_path: config_path.to_path_buf(),
+        interface: interface.clone(),
+        cookies: CookieSecret::new(&crate::entropy::seed()),
+        rotated: Instant::now(),
+        limit: RateLimit::new(),
+        legacy: None,
+    }));
+
+    if let Some(front_port) = enroll.front_port {
+        let use_tls = enroll.front_tls.unwrap_or(true);
+        let bind_ip = if use_tls { "0.0.0.0" } else { "127.0.0.1" };
+        let front_addr: std::net::SocketAddr = format!("{bind_ip}:{front_port}")
+            .parse()
+            .map_err(|e| Error::Usage(format!("invalid front address: {e}")))?;
+        let tls_cfg = if use_tls {
+            let sni = crate::tls_quic::normalize_sni(enroll.front_sni.as_deref());
+            let (server_cfg, _) = crate::tls_quic::build_tls_configs(&sni, &[b"http/1.1"])
+                .map_err(|e| Error::Usage(format!("front TLS setup: {e}")))?;
+            Some(server_cfg)
+        } else {
+            None
+        };
+        let listener = std::net::TcpListener::bind(front_addr).map_err(|source| Error::IoPath {
+            action: "bind the enrolment fronting port",
+            path: PathBuf::from(front_addr.to_string()),
+            source,
+        })?;
+        say!(
+            "enrolment API fronting on {front_addr} ({})",
+            if use_tls { "https" } else { "http" }
+        );
+        spawn_front_listener(listener, tls_cfg, std::sync::Arc::clone(&state));
+    }
+
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
-        if rotated.elapsed().as_secs() >= COOKIE_ROTATION_SECONDS {
-            cookies.rotate(&crate::entropy::seed());
-            rotated = Instant::now();
-        }
         let Ok((size, source)) = socket.recv_from(&mut buf) else {
+            if let Ok(mut guard) = state.lock() {
+                guard.maybe_rotate();
+            }
             continue; // timeout: rotate and listen again
         };
+        let reply = state
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.handle_datagram(source.ip(), &buf[..size]));
+        if let Some(datagram) = reply {
+            let _ = socket.send_to(&datagram, source);
+        }
+    }
+}
+
+struct EnrollResponderState {
+    config_path: PathBuf,
+    interface: String,
+    cookies: CookieSecret,
+    rotated: Instant,
+    limit: RateLimit,
+    legacy: Option<Instant>,
+}
+
+impl EnrollResponderState {
+    fn maybe_rotate(&mut self) {
+        if self.rotated.elapsed().as_secs() >= COOKIE_ROTATION_SECONDS {
+            self.cookies.rotate(&crate::entropy::seed());
+            self.rotated = Instant::now();
+        }
+    }
+
+    fn handle_datagram(&mut self, source_ip: IpAddr, payload: &[u8]) -> Option<Vec<u8>> {
+        self.maybe_rotate();
         // The global reply budget, before anything else: it bounds the work
         // this server does for anyone.
-        if !limit.admit_reply() {
-            continue;
+        if !self.limit.admit_reply() {
+            return None;
         }
-        let Some(hello) = parse_hello(&buf[..size]) else {
-            // A v1 client cannot be answered in a form it would understand, so
-            // the honest thing is to say so where an operator will see it
-            // rather than let them debug a silent timeout.
-            if buf[..size].starts_with(b"VEN1") && legacy_notice(&mut legacy) {
+        let Some(hello) = parse_hello(payload) else {
+            if payload.starts_with(b"VEN1") && legacy_notice(&mut self.legacy) {
                 eprintln!(
-                    "vallum: a v1 enrolment client ({}) tried to enrol; this server \
-                     speaks v2 — upgrade that client (`vallum setup --join`)",
-                    source.ip()
+                    "vallum: a v1 enrolment client ({source_ip}) tried to enrol; this server \
+                     speaks v2 — upgrade that client (`vallum setup --join`)"
                 );
             }
-            continue;
+            return None;
         };
-        // The cookie gate: before any invite lookup, any filesystem access, or
-        // any KEM work. A spoofed source cannot receive it. `verify_cookie`
-        // accepts both the current and the previous secret so a rotation does
-        // not reject a cookie issued moments earlier.
-        let client_addr = source_key(source.ip());
+        let client_addr = source_key(source_ip);
         let cookie_ok = hello
             .cookie
             .as_ref()
-            .and_then(|cookie| cookies.verify_cookie(&suite(), &client_addr, cookie).ok())
+            .and_then(|cookie| {
+                self.cookies
+                    .verify_cookie(&suite(), &client_addr, cookie)
+                    .ok()
+            })
             .unwrap_or(false);
         if !cookie_ok {
-            if let Ok(fresh) = cookies.cookie(&suite(), &client_addr) {
-                let _ = socket.send_to(&encode_cookie(&fresh), source);
-            }
-            continue;
+            return self
+                .cookies
+                .cookie(&suite(), &client_addr)
+                .ok()
+                .map(|fresh| encode_cookie(&fresh));
         }
-        // Only now is the source known to be the address it claims to be, so
-        // only now can a budget be charged to it.
-        if !limit.admit_source(source.ip()) {
-            continue;
+        if !self.limit.admit_source(source_ip) {
+            return None;
         }
-        let Some(invite) = load_invite(&interface, &hello.id) else {
-            continue; // no such invite: silently
-        };
-        let Ok(token) = invite.token() else {
-            continue;
-        };
+        let invite = load_invite(&self.interface, &hello.id)?;
+        let token = invite.token().ok()?;
         if !verify_hello(&token, &hello) {
-            continue; // wrong token or tampered: silently
+            return None;
         }
 
-        // Post-auth: one encapsulation serves either the refusal, the
-        // retransmit, or the fresh enrolment.
-        let Ok((ciphertext, shared)) = ephemeral_answer(&hello) else {
-            continue;
-        };
+        let (ciphertext, shared) = ephemeral_answer(&hello).ok()?;
         let seal = |status: &str, body: &str| -> Option<Vec<u8>> {
             encode_reply(
                 &token,
@@ -904,48 +950,23 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
             .ok()
         };
         match decide_invite(&invite, &hello, unix_now()) {
-            InviteDecision::Refuse(reason) => {
-                if let Some(datagram) = seal("err", reason) {
-                    let _ = socket.send_to(&datagram, source);
-                }
-                continue;
-            }
-            InviteDecision::Retransmit(config) => {
-                if let Some(datagram) = seal("ok", config) {
-                    let _ = socket.send_to(&datagram, source);
-                }
-                continue;
-            }
+            InviteDecision::Refuse(reason) => return seal("err", reason),
+            InviteDecision::Retransmit(config) => return seal("ok", config),
             InviteDecision::Proceed => {}
         }
         match crate::commands::peer::enroll_report(&crate::commands::peer::EnrollArgs {
             name: invite.name.clone(),
-            config: config_path.to_path_buf(),
+            config: self.config_path.clone(),
             public_key: Some(hello.public_line.clone()),
             public_key_file: None,
             address: None,
             keepalive: None,
-            // An invite is answered from a token the device already holds, and
-            // shaping is a per-device choice the operator makes on the server
-            // side (`peer add --shaping`) or in the config the device keeps.
             shaping: None,
             no_apply: false,
             json: true,
         }) {
             Ok(report) => {
-                // The device is about to receive a config and try to connect. If
-                // the peer was written but not applied to the running daemon, that
-                // config cannot work until someone reloads — and the device has no
-                // way to know. Say it here, where an operator will see it, because
-                // the alternative is a join that fails with "no handshake" and no
-                // cause (2026-11-11: two devices enrolled, neither could connect).
                 if !report.applied {
-                    // Loud, but still sent: `applied: false` does not say WHY.
-                    // It is false both when the daemon refused the peer and when
-                    // there was no daemon to ask (a standalone responder, or
-                    // --no-apply), and refusing the send would break the second
-                    // case. The fix is for the report to carry `apply_attempted`
-                    // so this can refuse only a real failure (review, 2026-11-11).
                     eprintln!(
                         "vallum: enrolled `{}` in {} but could NOT apply it to the running \
                          daemon — this device cannot connect until the daemon reloads the \
@@ -953,56 +974,182 @@ pub fn serve(config_path: &Path) -> Result<(), Error> {
                         invite.name, report.config, report.config
                     );
                 }
-                let Ok(json) = serde_json::to_string(&report) else {
-                    continue;
-                };
-                // Persist the spent invite *before* the answer leaves the
-                // socket: a crash between send and store would otherwise leave
-                // a live invite the client believes is consumed. Stored first,
-                // a retry is answered from `Retransmit` with the same config.
+                let json = serde_json::to_string(&report).ok()?;
                 let mut spent = invite.clone();
                 spent.public_line = Some(hello.public_line.clone());
                 spent.config = Some(json.clone());
-                if store_invite(&interface, &spent).is_err() {
+                if store_invite(&self.interface, &spent).is_err() {
                     eprintln!(
-                        "vallum: enrolled `{}` for {} but could not persist the spent invite;                          refusing the send so the client retries",
+                        "vallum: enrolled `{}` for {source_ip} but could not persist the spent invite; \
+                         refusing the send so the client retries",
                         invite.name,
-                        source.ip()
                     );
-                    continue;
-                }
-                if let Ok(datagram) = encode_reply(
-                    &token,
-                    &hello,
-                    &ciphertext,
-                    &shared,
-                    &server_nonce(),
-                    "ok",
-                    &json,
-                ) {
-                    let _ = socket.send_to(&datagram, source);
+                    return None;
                 }
                 eprintln!(
-                    "vallum: enrolled `{}` for {} (token enrolment)",
+                    "vallum: enrolled `{}` for {source_ip} (token enrolment)",
                     invite.name,
-                    source.ip()
                 );
+                seal("ok", &json)
             }
-            Err(error) => {
-                if let Ok(datagram) = encode_reply(
-                    &token,
-                    &hello,
-                    &ciphertext,
-                    &shared,
-                    &server_nonce(),
-                    "err",
-                    &format!("the server refused: {error}"),
-                ) {
-                    let _ = socket.send_to(&datagram, source);
+            Err(error) => seal("err", &format!("the server refused: {error}")),
+        }
+    }
+}
+
+fn spawn_front_listener(
+    listener: std::net::TcpListener,
+    tls_cfg: Option<std::sync::Arc<rustls::ServerConfig>>,
+    state: std::sync::Arc<std::sync::Mutex<EnrollResponderState>>,
+) {
+    let _ = std::thread::Builder::new()
+        .name("vallum-enroll-front".to_owned())
+        .spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(stream) = incoming else {
+                    continue;
+                };
+                let peer_ip = stream
+                    .peer_addr()
+                    .map_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), |a| a.ip());
+                let tls_cfg = tls_cfg.clone();
+                let state = std::sync::Arc::clone(&state);
+                let _ = std::thread::Builder::new()
+                    .name("vallum-enroll-req".to_owned())
+                    .spawn(move || {
+                        handle_front_connection(stream, peer_ip, tls_cfg, &state);
+                    });
+            }
+        });
+}
+
+fn handle_front_connection(
+    stream: std::net::TcpStream,
+    peer_ip: IpAddr,
+    tls_cfg: Option<std::sync::Arc<rustls::ServerConfig>>,
+    state: &std::sync::Arc<std::sync::Mutex<EnrollResponderState>>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_nodelay(true);
+
+    if let Some(cfg) = tls_cfg {
+        let Ok(conn) = rustls::ServerConnection::new(cfg) else {
+            return;
+        };
+        let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+        serve_front_http(&mut tls_stream, peer_ip, state);
+    } else {
+        let mut plain = stream;
+        serve_front_http(&mut plain, peer_ip, state);
+    }
+}
+
+fn serve_front_http<S: std::io::Read + std::io::Write>(
+    io: &mut S,
+    peer_ip: IpAddr,
+    state: &std::sync::Arc<std::sync::Mutex<EnrollResponderState>>,
+) {
+    let Ok((method, path, forwarded_ip, body)) = read_http_request(io) else {
+        let _ = write_http_response(io, "400 Bad Request", &[]);
+        return;
+    };
+    if method != "POST" || (path != "/_vallum/enroll" && path != "/v1/enroll") {
+        let _ = write_http_response(io, "404 Not Found", &[]);
+        return;
+    }
+    let client_ip = forwarded_ip.unwrap_or(peer_ip);
+    let reply = state
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.handle_datagram(client_ip, &body));
+    match reply {
+        Some(bytes) => {
+            let _ = write_http_response(io, "200 OK", &bytes);
+        }
+        None => {
+            let _ = write_http_response(io, "204 No Content", &[]);
+        }
+    }
+}
+
+fn read_http_request<R: std::io::Read>(
+    reader: &mut R,
+) -> Result<(String, String, Option<IpAddr>, Vec<u8>), ()> {
+    let mut buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    let header_end = loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos;
+        }
+        if buf.len() >= 16_384 {
+            return Err(());
+        }
+        let n = reader.read(&mut chunk).map_err(|_| ())?;
+        if n == 0 {
+            return Err(());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+
+    let head = std::str::from_utf8(&buf[..header_end]).map_err(|_| ())?;
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().ok_or(())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().ok_or(())?.to_owned();
+    let raw_target = parts.next().ok_or(())?;
+    let path = raw_target
+        .split('?')
+        .next()
+        .unwrap_or(raw_target)
+        .to_owned();
+
+    let mut content_len: usize = 0;
+    let mut forwarded_ip: Option<IpAddr> = None;
+    for line in lines {
+        if let Some((name, val)) = line.split_once(':') {
+            let key = name.trim();
+            let value = val.trim();
+            if key.eq_ignore_ascii_case("content-length") {
+                content_len = value.parse::<usize>().map_err(|_| ())?;
+                if content_len > MAX_DATAGRAM {
+                    return Err(());
+                }
+            } else if key.eq_ignore_ascii_case("x-forwarded-for") && forwarded_ip.is_none() {
+                if let Some(first) = value.split(',').next() {
+                    forwarded_ip = first.trim().parse::<IpAddr>().ok();
                 }
             }
         }
     }
+
+    let body_start = header_end + 4;
+    let mut body = buf[body_start..].to_vec();
+    while body.len() < content_len {
+        let n = reader.read(&mut chunk).map_err(|_| ())?;
+        if n == 0 {
+            return Err(());
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(content_len);
+    Ok((method, path, forwarded_ip, body))
+}
+
+fn write_http_response<W: std::io::Write>(
+    writer: &mut W,
+    status: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    writer.write_all(header.as_bytes())?;
+    if !body.is_empty() {
+        writer.write_all(body)?;
+    }
+    writer.flush()
 }
 
 /// Pure post-auth decision for a verified `HELLO` against a loaded `Invite`.
@@ -1166,6 +1313,200 @@ pub fn join(
          new one: sudo vallum peer invite {name}",
         last_error.unwrap_or_else(|| "no response".to_owned()),
         name = name,
+    )))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrontEndpoint {
+    tls: bool,
+    connect_host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_front_url(raw: &str) -> Result<FrontEndpoint, Error> {
+    let trimmed = raw.trim();
+    let (tls, rest) = if let Some(r) = trimmed.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(Error::Usage(
+            "front URL must start with `https://` or `http://`".to_owned(),
+        ));
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], rest[idx..].to_owned()),
+        None => (rest, "/_vallum/enroll".to_owned()),
+    };
+    if authority.is_empty() {
+        return Err(Error::Usage("front URL is missing a host".to_owned()));
+    }
+    let default_port = if tls { 443 } else { 80 };
+    let (connect_host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed
+            .find(']')
+            .ok_or_else(|| Error::Usage("malformed IPv6 host in front URL".to_owned()))?;
+        let host = bracketed[..end].to_owned();
+        let after = &bracketed[end + 1..];
+        let port = if let Some(p) = after.strip_prefix(':') {
+            p.parse::<u16>()
+                .map_err(|_| Error::Usage("invalid port in front URL".to_owned()))?
+        } else if after.is_empty() {
+            default_port
+        } else {
+            return Err(Error::Usage("invalid authority in front URL".to_owned()));
+        };
+        (host, port)
+    } else if let Some((h, p)) = authority.rsplit_once(':') {
+        let port = p
+            .parse::<u16>()
+            .map_err(|_| Error::Usage("invalid port in front URL".to_owned()))?;
+        (h.to_owned(), port)
+    } else {
+        (authority.to_owned(), default_port)
+    };
+    if connect_host.is_empty() {
+        return Err(Error::Usage("front URL host cannot be empty".to_owned()));
+    }
+    Ok(FrontEndpoint {
+        tls,
+        connect_host,
+        port,
+        path,
+    })
+}
+
+fn front_round_trip(
+    endpoint: &FrontEndpoint,
+    host_header: &str,
+    client_cfg: Option<&std::sync::Arc<rustls::ClientConfig>>,
+    payload: &[u8],
+) -> Result<Vec<u8>, Error> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+
+    let addr = (endpoint.connect_host.as_str(), endpoint.port)
+        .to_socket_addrs()
+        .map_err(|e| Error::Usage(format!("resolve front host: {e}")))?
+        .next()
+        .ok_or_else(|| Error::Usage("front host resolved to no addresses".to_owned()))?;
+    let stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| Error::Usage(format!("connect front endpoint {addr}: {e}")))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_nodelay(true);
+
+    let req_head = format!(
+        "POST {} HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        endpoint.path,
+        payload.len()
+    );
+
+    let mut raw_resp = Vec::with_capacity(4096);
+    if endpoint.tls {
+        let cfg = client_cfg.ok_or_else(|| Error::Usage("missing TLS client config".to_owned()))?;
+        let server_name = crate::tls_quic::server_name_for(&endpoint.connect_host)
+            .map_err(|e| Error::Usage(format!("front SNI: {e}")))?;
+        let conn = rustls::ClientConnection::new(std::sync::Arc::clone(cfg), server_name)
+            .map_err(|e| Error::Usage(format!("front TLS init: {e}")))?;
+        let mut tls_stream = rustls::StreamOwned::new(conn, stream);
+        tls_stream
+            .write_all(req_head.as_bytes())
+            .and_then(|()| tls_stream.write_all(payload))
+            .and_then(|()| tls_stream.flush())
+            .map_err(|e| Error::Usage(format!("front TLS write: {e}")))?;
+        let _ = tls_stream.read_to_end(&mut raw_resp);
+    } else {
+        let mut plain = stream;
+        plain
+            .write_all(req_head.as_bytes())
+            .and_then(|()| plain.write_all(payload))
+            .and_then(|()| plain.flush())
+            .map_err(|e| Error::Usage(format!("front HTTP write: {e}")))?;
+        let _ = plain.read_to_end(&mut raw_resp);
+    }
+
+    let Some(hdr_end) = raw_resp.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Err(Error::Usage(
+            "malformed HTTP response from front endpoint".to_owned(),
+        ));
+    };
+    let head = std::str::from_utf8(&raw_resp[..hdr_end])
+        .map_err(|_| Error::Usage("non-UTF-8 HTTP header from front endpoint".to_owned()))?;
+    let status_line = head.lines().next().unwrap_or("");
+    if status_line.contains(" 204 ") {
+        return Ok(Vec::new());
+    }
+    if !status_line.contains(" 200 ") {
+        return Err(Error::Usage(format!(
+            "front endpoint returned `{status_line}`"
+        )));
+    }
+    Ok(raw_resp[hdr_end + 4..].to_vec())
+}
+
+/// Enrol through an HTTPS/HTTP API fronting endpoint (`POST /_vallum/enroll`),
+/// optionally overriding the HTTP `Host:` header for CDN domain fronting.
+pub fn join_via_front(
+    front_url: &str,
+    front_host: Option<&str>,
+    token: &Token,
+    invite_id: &str,
+    name: &str,
+    public_line: &str,
+) -> Result<String, Error> {
+    if !valid_id(invite_id) {
+        return Err(Error::Usage(
+            "--invite-id must be the 32 hex characters `vallum peer invite` printed".to_owned(),
+        ));
+    }
+    let endpoint = parse_front_url(front_url)?;
+    let host_header = front_host
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or(&endpoint.connect_host)
+        .to_owned();
+    let client_cfg = if endpoint.tls {
+        let (_, cfg) = crate::tls_quic::build_tls_configs(&endpoint.connect_host, &[b"http/1.1"])
+            .map_err(|e| Error::Usage(format!("front TLS setup: {e}")))?;
+        Some(cfg)
+    } else {
+        None
+    };
+
+    let client_nonce = server_nonce();
+    let (ephemeral_pk, ephemeral_sk) = suite()
+        .kem_keygen(&crate::entropy::seed(), KemRole::Ephemeral)
+        .map_err(|error| Error::Usage(format!("enroll keygen: {error}")))?;
+
+    let mut cookie: Option<[u8; COOKIE_SIZE]> = None;
+    for _attempt in 0..4 {
+        let hello = encode_hello(
+            invite_id,
+            &client_nonce,
+            ephemeral_pk.as_bytes(),
+            public_line,
+            cookie.as_ref(),
+            token,
+        )?;
+        let resp = front_round_trip(&endpoint, &host_header, client_cfg.as_ref(), &hello)?;
+        if let Some(fresh) = parse_cookie(&resp) {
+            cookie = Some(fresh);
+            continue;
+        }
+        if let Some((status, body)) =
+            open_reply(token, invite_id, &client_nonce, &ephemeral_sk, &resp)
+        {
+            return if status == "ok" {
+                Ok(body)
+            } else {
+                Err(Error::Usage(format!("the server refused: {body}")))
+            };
+        }
+    }
+    Err(Error::Usage(format!(
+        "no valid enrolment reply from front endpoint {front_url} for `{name}`"
     )))
 }
 
@@ -1544,5 +1885,63 @@ mod tests {
             "vpn.example.com:60000"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn parse_front_url_handles_https_http_ports_and_paths() {
+        assert_eq!(
+            parse_front_url("https://cdn.example.com").unwrap(),
+            FrontEndpoint {
+                tls: true,
+                connect_host: "cdn.example.com".to_owned(),
+                port: 443,
+                path: "/_vallum/enroll".to_owned(),
+            }
+        );
+        assert_eq!(
+            parse_front_url("http://127.0.0.1:8443/v1/enroll").unwrap(),
+            FrontEndpoint {
+                tls: false,
+                connect_host: "127.0.0.1".to_owned(),
+                port: 8443,
+                path: "/v1/enroll".to_owned(),
+            }
+        );
+        assert!(parse_front_url("ftp://bad.example.com").is_err());
+    }
+
+    #[test]
+    fn front_enrolment_round_trips_over_tls_and_domain_fronting_host() {
+        let sni = "localhost";
+        let (server_cfg, _) =
+            crate::tls_quic::build_tls_configs(sni, &[b"http/1.1"]).expect("tls configs");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new(EnrollResponderState {
+            config_path: PathBuf::from("/nonexistent-vallum-test.toml"),
+            interface: "vallum-front-test".to_owned(),
+            cookies: CookieSecret::new(&[7u8; 32]),
+            rotated: Instant::now(),
+            limit: RateLimit::new(),
+            legacy: None,
+        }));
+        spawn_front_listener(listener, Some(server_cfg), state);
+
+        let token = Token::generate();
+        let invite_id = "0123456789abcdef0123456789abcdef";
+        let url = format!("https://127.0.0.1:{}/_vallum/enroll", addr.port());
+        // No invite file exists for this synthetic id, so the responder cleanly
+        // returns 204 after issuing & verifying the TLS-fronted cookie exchange.
+        let err = join_via_front(
+            &url,
+            Some("origin.internal.example"),
+            &token,
+            invite_id,
+            "laptop-front",
+            "vallum1:testkey",
+        )
+        .expect_err("synthetic invite returns no reply after cookie exchange");
+        assert!(err.to_string().contains("no valid enrolment reply"));
     }
 }
