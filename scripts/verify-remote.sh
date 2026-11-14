@@ -1039,6 +1039,16 @@ PY" || bad "$name: pointing the config at the rotated key failed"
             bad "$name: the rotated key did not handshake"
         fi
         ok "$name: the rotated key handshakes a fresh session"
+
+        cli_put "$quick_r leak-check --json $rdir/client.toml" > "$dir/leak-check.json" 2>&1 \
+            || { cat "$dir/leak-check.json"; bad "$name: remote leak-check failed"; }
+        grep -qE '"status":"(clean|skipped)"' "$dir/leak-check.json" \
+            || { cat "$dir/leak-check.json"; bad "$name: unexpected leak-check verdict"; }
+        ok "$name: remote vallum-quick leak-check verified"
+
+        cli_put "$quick_r dns-proxy --dry-run $rdir/client.toml" > "$dir/dns-proxy-plan.txt" 2>&1 \
+            || { cat "$dir/dns-proxy-plan.txt"; bad "$name: remote dns-proxy --dry-run failed"; }
+        ok "$name: remote vallum-quick dns-proxy plan verified"
     fi
 
     # ── the client verdict, on the real link ──
