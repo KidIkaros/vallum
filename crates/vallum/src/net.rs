@@ -1440,14 +1440,14 @@ pub fn recommend_mtu_from_telemetry(
         || (packets_delivered > 0 && reassembled.saturating_mul(100) / packets_delivered >= 2);
 
     // USB Ethernet URB straddling or driver buffer pressure shows up as packet loss
-    // or a >1.5 ms (>2x baseline) tail jitter jump at larger frame sizes vs 1280.
+    // or a >1.0 ms (>2x baseline) tail jitter jump at larger frame sizes vs 1280.
     let larger_lossy = [s1380, s1420].into_iter().flatten().any(|s| s.loss_pct > 0)
         && s1280.is_some_and(|s| s.loss_pct == 0);
     let larger_jitter_spike = s1280.is_some_and(|base| {
         let spike_threshold = base
             .rtt_jitter_us
-            .saturating_add(1_500)
-            .max(base.rtt_jitter_us.saturating_mul(2).saturating_add(400));
+            .saturating_add(1_000)
+            .max(base.rtt_jitter_us.saturating_mul(2).saturating_add(300));
         [s1380, s1420]
             .into_iter()
             .flatten()
@@ -1917,6 +1917,39 @@ mod tests {
         assert_eq!(rec.ipv4_tcp_mss, 1380);
         assert_eq!(rec.profile, MtuProfile::BulkStandard1420);
         assert_eq!(rec.samples.len(), 3);
+    }
+
+    #[test]
+    fn mtu_optimizer_selects_1280_with_empirical_wingman_vps_jitter_profile() {
+        // Empirical live measurement (ikaaros -> 203.0.113.10):
+        // 1280 had 0.4ms jitter while 1380/1420 jumped 4.25x-4.5x to 1.7-1.8ms.
+        let samples = vec![
+            MtuCandidateSample {
+                inner_mtu: 1280,
+                outer_mtu: 1344,
+                rtt_p50_us: 69_800,
+                rtt_jitter_us: 400,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1380,
+                outer_mtu: 1444,
+                rtt_p50_us: 69_600,
+                rtt_jitter_us: 1_700,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1420,
+                outer_mtu: 1484,
+                rtt_p50_us: 69_200,
+                rtt_jitter_us: 1_800,
+                loss_pct: 0,
+            },
+        ];
+        let rec = recommend_mtu_from_telemetry(1500, &samples, 0, 0, 0);
+        assert_eq!(rec.recommended_inner_mtu, 1280);
+        assert_eq!(rec.recommended_outer_mtu, 1344);
+        assert_eq!(rec.profile, MtuProfile::LowJitterUsb1280);
     }
 
     #[test]

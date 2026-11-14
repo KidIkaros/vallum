@@ -36,7 +36,8 @@ done
 
 for u in vallum@.service vallum-quick@.service vallum-guard@.service \
     vallum-deadman@.service vallum-deadman@.timer vallum-cleanup.service \
-    vallum-netlink-watch.service vallum-metrics.service vallum-metrics.timer; do
+    vallum-netlink-watch.service vallum-metrics.service vallum-metrics.timer \
+    vallum-enroll@.service vallum-exit-notice.service; do
     if ! cmp -s "$REPO/packaging/$u" "/etc/systemd/system/$u"; then
         maybe_install "$REPO/packaging/$u" "/etc/systemd/system/$u" 644 "unit $u"
     fi

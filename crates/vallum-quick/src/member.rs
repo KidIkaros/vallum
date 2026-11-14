@@ -120,7 +120,7 @@ pub(crate) fn check_config(config: &Config) -> Result<(), String> {
 }
 
 /// Every address the interface carries, in config order.
-fn addresses(config: &Config) -> Vec<String> {
+pub(crate) fn addresses(config: &Config) -> Vec<String> {
     let mut all: Vec<String> = config.interface.addresses.clone();
     if let Some(address) = &config.interface.address {
         if !all.contains(address) {

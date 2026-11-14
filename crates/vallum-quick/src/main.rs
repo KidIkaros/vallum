@@ -353,6 +353,106 @@ fn stop_daemon(config_path: &Path, dry_run: bool) -> Result<(), Box<dyn std::err
     }
 }
 
+struct ForwardingNatPlan {
+    has_v4: bool,
+    has_v6: bool,
+    sysctl_text: String,
+    nft_script: String,
+}
+
+/// Derive the persistent sysctl and `inet vallum` NAT masquerade script when
+/// `[interface] forward = true` is active on a gateway/exit config.
+fn plan_forwarding_nat(
+    config: &Config,
+) -> Result<Option<ForwardingNatPlan>, Box<dyn std::error::Error>> {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for raw in member::addresses(config) {
+        let net = raw.parse::<ipnet::IpNet>()?.trunc();
+        match net {
+            ipnet::IpNet::V4(_) => v4.push(net),
+            ipnet::IpNet::V6(_) => v6.push(net),
+        }
+    }
+    if v4.is_empty() && v6.is_empty() {
+        return Ok(None);
+    }
+
+    let mut sysctl_text = String::from("# Written by vallum-quick (forward = true).\n");
+    if !v4.is_empty() {
+        sysctl_text.push_str("net.ipv4.ip_forward = 1\n");
+    }
+    if !v6.is_empty() {
+        sysctl_text.push_str("net.ipv6.conf.all.forwarding = 1\n");
+    }
+
+    let mut nft_script = String::from(
+        "table inet vallum {\n  chain postrouting {\n    type nat hook postrouting priority srcnat; policy accept;\n",
+    );
+    for subnet in &v4 {
+        nft_script.push_str(&format!("    ip saddr {subnet} masquerade\n"));
+    }
+    for subnet in &v6 {
+        nft_script.push_str(&format!("    ip6 saddr {subnet} masquerade\n"));
+    }
+    nft_script.push_str("  }\n}\n");
+
+    Ok(Some(ForwardingNatPlan {
+        has_v4: !v4.is_empty(),
+        has_v6: !v6.is_empty(),
+        sysctl_text,
+        nft_script,
+    }))
+}
+
+/// Reconcile kernel IP forwarding and the `inet vallum` NAT masquerade table so
+/// gateway routing survives host reboots cleanly.
+fn ensure_forwarding_and_nat(
+    config: &Config,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(plan) = plan_forwarding_nat(config)? else {
+        return Ok(());
+    };
+    if dry_run {
+        if plan.has_v4 {
+            println!("sysctl -w net.ipv4.ip_forward=1");
+        }
+        if plan.has_v6 {
+            println!("sysctl -w net.ipv6.conf.all.forwarding=1");
+        }
+        println!("nft -f - (table inet vallum masquerade)");
+        return Ok(());
+    }
+
+    let _ = fs::write("/etc/sysctl.d/90-vallum.conf", &plan.sysctl_text);
+    if plan.has_v4 {
+        fs::write("/proc/sys/net/ipv4/ip_forward", "1\n")?;
+    }
+    if plan.has_v6 {
+        fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1\n")?;
+    }
+
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", "vallum"])
+        .output();
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        std::io::Write::write_all(&mut stdin, plan.nft_script.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("nft masquerade setup failed: {}", stderr.trim()).into());
+    }
+    Ok(())
+}
+
 /// Everything after the daemon side of an attach: routes, DNS, then the post
 /// hooks. A DNS failure takes the routes back out — a full tunnel must not
 /// take the host's traffic while its resolver is unmanaged — and the caller's
@@ -381,6 +481,10 @@ fn attach_host_side(
             run_hook(hook, dry_run)?;
         }
         return Ok(());
+    }
+
+    if config.interface.forward == Some(true) {
+        ensure_forwarding_and_nat(config, dry_run)?;
     }
 
     apply_routes(config, interface, table, dry_run)?;
@@ -1563,6 +1667,29 @@ mod tests {
         let config = Config::load(&path).unwrap();
         let plan = plan_blackhole_routes(&config, "v0", "auto", true).unwrap();
         assert_eq!(plan.render(), "route replace blackhole 10.9.0.0/24\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forward_true_plans_sysctl_and_nft_masquerade_and_dry_run_succeeds() {
+        let dir = std::env::temp_dir().join(format!("vallum-quick-fwd-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.toml");
+        fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k\"\n\
+             address = \"10.7.0.1/24\"\nforward = true\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        let plan = plan_forwarding_nat(&config)
+            .unwrap()
+            .expect("gateway config with address plans forwarding/NAT");
+        assert!(plan.has_v4);
+        assert!(!plan.has_v6);
+        assert!(plan.sysctl_text.contains("net.ipv4.ip_forward = 1"));
+        assert!(plan.nft_script.contains("ip saddr 10.7.0.0/24 masquerade"));
+        ensure_forwarding_and_nat(&config, true).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 }
