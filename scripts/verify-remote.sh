@@ -229,7 +229,7 @@ restore_nat() {
 
 # Where the 'this commit passed the two-host gate' stamp lives.
 verified_stamp() {
-    if [ -n "$SUDO_USER" ]; then
+    if [ -n "${SUDO_USER:-}" ]; then
         printf '%s/vallum/remote-verified' \
             "$(sudo -u "$SUDO_USER" sh -c 'printf %s "${XDG_STATE_HOME:-$HOME/.local/state}"')"
     else
