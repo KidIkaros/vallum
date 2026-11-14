@@ -117,6 +117,19 @@ pub fn bind_with_options(
     tcp_upgrade: Option<&str>,
     ss_psk: Option<&str>,
 ) -> io::Result<Arc<dyn DatagramSocket>> {
+    bind_with_transport_options(carrier, address, fwmark, tcp_upgrade, ss_psk, None)
+}
+
+/// Bind the transport for `carrier` with full carrier-specific options
+/// (`tcp_upgrade`, `ss_psk`, and `tls_sni`).
+pub fn bind_with_transport_options(
+    carrier: Carrier,
+    address: SocketAddr,
+    fwmark: u32,
+    tcp_upgrade: Option<&str>,
+    ss_psk: Option<&str>,
+    tls_sni: Option<&str>,
+) -> io::Result<Arc<dyn DatagramSocket>> {
     Ok(match carrier {
         Carrier::Udp => Arc::new(UdpTransport::bind_with_fwmark(address, fwmark)?),
         Carrier::Lwo => Arc::new(LwoTransport::bind_with_fwmark(address, fwmark)?),
@@ -131,7 +144,40 @@ pub fn bind_with_options(
             tcp_upgrade,
         )?),
         Carrier::Ss => Arc::new(SsTransport::bind_with_psk(address, fwmark, ss_psk)?),
+        Carrier::Tls => Arc::new(crate::tls_quic::TlsTransport::bind_with_options(
+            address, fwmark, tls_sni,
+        )?),
+        Carrier::Quic => Arc::new(crate::tls_quic::QuicTransport::bind_with_options(
+            address, fwmark, tls_sni,
+        )?),
     })
+}
+
+/// Bind a [`UdpSocket`] with `SO_MARK` and PMTUD / don't-fragment options.
+pub(crate) fn bind_udp_socket(address: SocketAddr, fwmark: u32) -> io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(address)?;
+    socket.set_read_timeout(Some(Duration::from_millis(250)))?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = fwmark;
+    #[cfg(target_os = "linux")]
+    if fwmark != 0 {
+        nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &fwmark)
+            .map_err(|e| io::Error::other(format!("SO_MARK: {e}")))?;
+    }
+    #[cfg(target_os = "linux")]
+    if address.is_ipv4() {
+        rustix::net::sockopt::set_ip_mtu_discover(
+            &socket,
+            rustix::net::sockopt::Ipv4PathMtuDiscovery::DO,
+        )
+        .map_err(|e| io::Error::other(format!("IP_MTU_DISCOVER: {e}")))?;
+    }
+    #[cfg(target_os = "linux")]
+    if address.is_ipv6() {
+        nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Ipv6DontFrag, &true)
+            .map_err(|e| io::Error::other(format!("IPV6_DONTFRAG: {e}")))?;
+    }
+    Ok(socket)
 }
 
 /// A [`UdpSocket`] behind [`DatagramSocket`].
@@ -163,41 +209,7 @@ impl UdpTransport {
     /// If the address cannot be bound, or the mark cannot be set (it needs
     /// `CAP_NET_ADMIN`).
     pub fn bind_with_fwmark(address: SocketAddr, fwmark: u32) -> io::Result<Self> {
-        let socket = UdpSocket::bind(address)?;
-        // A short read timeout is what lets the reader notice a rebind: it
-        // wakes, checks the shared socket's generation, and switches.
-        socket.set_read_timeout(Some(Duration::from_millis(250)))?;
-        // SO_MARK is a Linux routing hook; off Linux the mark is simply not
-        // applied — policy routing there belongs to a different mechanism.
-        #[cfg(not(target_os = "linux"))]
-        let _ = fwmark;
-        #[cfg(target_os = "linux")]
-        if fwmark != 0 {
-            nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Mark, &fwmark)
-                .map_err(|e| io::Error::other(format!("SO_MARK: {e}")))?;
-        }
-        // Ask the kernel to report an oversize datagram with `EMSGSIZE` instead
-        // of fragmenting it. This is the other half of H6's "loud failure": the
-        // `outer_mtu` knob bounds what is emitted, and this makes a path that
-        // disagrees say so rather than silently splitting the datagram.
-        //
-        // Both are fatal: the daemon is Linux-only, the options are old, and a
-        // daemon that cannot make the guarantee should not pretend it did.
-        #[cfg(target_os = "linux")]
-        if address.is_ipv4() {
-            // `rustix` is the safe wrapper; `nix` exposes `IP_MTU_DISCOVER` as
-            // a getter only, and `socket2` not at all.
-            rustix::net::sockopt::set_ip_mtu_discover(
-                &socket,
-                rustix::net::sockopt::Ipv4PathMtuDiscovery::DO,
-            )
-            .map_err(|e| io::Error::other(format!("IP_MTU_DISCOVER: {e}")))?;
-        }
-        #[cfg(target_os = "linux")]
-        if address.is_ipv6() {
-            nix::sys::socket::setsockopt(&socket, nix::sys::socket::sockopt::Ipv6DontFrag, &true)
-                .map_err(|e| io::Error::other(format!("IPV6_DONTFRAG: {e}")))?;
-        }
+        let socket = bind_udp_socket(address, fwmark)?;
         Ok(Self {
             socket,
             lwo_peers: Mutex::new(HashSet::new()),
@@ -470,7 +482,7 @@ pub const CARRIER_DIAL_TIMEOUT: Duration = Duration::from_secs(3);
 /// The same order as [`crate::run::QUEUE_CAPACITY`]: the loop already holds a
 /// queue between its readers and itself, and a second, larger one would only
 /// move the drop point away from where the counters are.
-const CARRIER_QUEUE: usize = 1_024;
+pub(crate) const CARRIER_QUEUE: usize = 1_024;
 
 /// How much a reader takes from a stream per read. Larger than any frame, so a
 /// read is a frame or a few of them and never a half in normal operation.
@@ -692,7 +704,7 @@ impl Drop for TcpTransport {
     }
 }
 
-fn wake_addr(local: SocketAddr) -> SocketAddr {
+pub(crate) fn wake_addr(local: SocketAddr) -> SocketAddr {
     if local.ip().is_unspecified() {
         let ip = if local.is_ipv4() {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
@@ -1289,7 +1301,7 @@ fn spawn_auto_stagger_worker(
 }
 
 /// Bind, mark and listen: a `TcpListener` that policy routing can see.
-fn listen_socket(address: SocketAddr, fwmark: u32) -> io::Result<TcpListener> {
+pub(crate) fn listen_socket(address: SocketAddr, fwmark: u32) -> io::Result<TcpListener> {
     #[cfg(target_os = "linux")]
     if fwmark != 0 {
         let fd = marked_socket(address, fwmark)?;
@@ -1458,7 +1470,7 @@ fn connection(
 }
 
 /// Dial with the mark already on the socket, and a bounded wait.
-fn dial(destination: SocketAddr, fwmark: u32) -> io::Result<TcpStream> {
+pub(crate) fn dial(destination: SocketAddr, fwmark: u32) -> io::Result<TcpStream> {
     #[cfg(target_os = "linux")]
     if fwmark != 0 {
         let fd = marked_socket(destination, fwmark)?;

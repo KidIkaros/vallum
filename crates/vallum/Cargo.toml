@@ -63,6 +63,14 @@ signal-hook = "0.4"
 # `unsafe_code = "forbid"`. Unix-wide — the Linux-only calls live behind cfg.
 nix = { version = "0.31", features = ["user", "process", "socket", "net", "uio", "fs"] }
 
+# Outer TLS 1.3 and QUIC DATAGRAM carriers (synchronous / sans-I/O so the
+# daemon's seccomp allow-list and non-async architecture stay intact).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1"
+quinn-proto = { version = "0.11", default-features = false, features = ["rustls-ring", "ring"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+bytes = "1"
+
 # Linux only, for now. `tun2` is the TUN backend behind this crate's own trait;
 # default features are off so no async runtime is pulled in.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -66,6 +66,7 @@ pub mod qr_frames;
 pub mod run;
 pub mod sandbox;
 pub mod style;
+pub mod tls_quic;
 pub mod tun;
 
 #[cfg(feature = "tui")]

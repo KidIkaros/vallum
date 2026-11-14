@@ -295,6 +295,16 @@ pub enum Carrier {
     /// Wraps every packet in fresh-nonce committing AEAD ciphertext so wire
     /// traffic carries no plaintext Vallum header or fixed magic bytes.
     Ss,
+    /// TLS 1.3 stream carrier over TCP.
+    ///
+    /// Wraps framed Vallum packets inside a genuine TLS 1.3 session so DPI sees
+    /// standard TLS handshake + ApplicationData records.
+    Tls,
+    /// QUIC v1 DATAGRAM (RFC 9221) carrier over UDP.
+    ///
+    /// Carries Vallum packets as unreliable QUIC datagrams inside a real QUIC
+    /// encrypted connection without TCP head-of-line blocking.
+    Quic,
 }
 
 impl Carrier {
@@ -307,6 +317,8 @@ impl Carrier {
             Carrier::Auto => "auto",
             Carrier::Tcp => "tcp",
             Carrier::Ss => "ss",
+            Carrier::Tls => "tls",
+            Carrier::Quic => "quic",
         }
     }
 
@@ -317,8 +329,8 @@ impl Carrier {
     #[must_use]
     pub fn protocol(self) -> &'static str {
         match self {
-            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss => "udp",
-            Carrier::Tcp => "tcp",
+            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss | Carrier::Quic => "udp",
+            Carrier::Tcp | Carrier::Tls => "tcp",
         }
     }
 
@@ -327,14 +339,20 @@ impl Carrier {
     pub fn uses_udp(self) -> bool {
         matches!(
             self,
-            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss
+            Carrier::Udp | Carrier::Lwo | Carrier::Auto | Carrier::Ss | Carrier::Quic
         )
     }
 
     /// Whether this carrier uses TCP streams (exclusively or as a staggered race).
     #[must_use]
     pub fn uses_tcp(self) -> bool {
-        matches!(self, Carrier::Tcp | Carrier::Auto)
+        matches!(self, Carrier::Tcp | Carrier::Auto | Carrier::Tls)
+    }
+
+    /// Whether this carrier uses an outer TLS 1.3 handshake (`tls` or `quic`).
+    #[must_use]
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Carrier::Tls | Carrier::Quic)
     }
 
     /// Whether the endpoint can be probed with a TCP connection attempt.
@@ -344,7 +362,7 @@ impl Carrier {
     /// and a filtered one is silence either way.
     #[must_use]
     pub fn is_probeable(self) -> bool {
-        matches!(self, Carrier::Tcp | Carrier::Auto)
+        matches!(self, Carrier::Tcp | Carrier::Auto | Carrier::Tls)
     }
 }
 
@@ -491,6 +509,10 @@ pub struct Interface {
     /// `carrier = "auto"` dial preambles (`GET /_vallum HTTP/1.1` + `Upgrade: vallum`).
     #[serde(default)]
     pub tcp_upgrade: Option<String>,
+    /// Optional TLS SNI hostname sent in `ClientHello` for `carrier = "tls"`
+    /// and `carrier = "quic"` (defaults to `"localhost"` when unset).
+    #[serde(default)]
+    pub tls_sni: Option<String>,
 }
 
 /// `interface.seccomp`: what the syscall filter does with a syscall it does not
@@ -823,6 +845,12 @@ impl Config {
                 message,
             })?;
         }
+        if let Some(sni) = &self.interface.tls_sni {
+            validate_tls_sni(sni).map_err(|message| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message,
+            })?;
+        }
         if let Some(via) = &self.quick.via {
             if via.as_os_str().is_empty() {
                 return Err(ConfigError::Invalid {
@@ -850,6 +878,26 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Validate a TLS SNI hostname for `[interface] tls_sni`.
+pub fn validate_tls_sni(sni: &str) -> Result<(), String> {
+    if sni.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("[interface] tls_sni must not contain control characters".to_owned());
+    }
+    let trimmed = sni.trim();
+    if trimmed.is_empty() {
+        return Err("[interface] tls_sni must not be empty".to_owned());
+    }
+    if !trimmed.is_ascii() || trimmed.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err("[interface] tls_sni must be an ASCII hostname without whitespace".to_owned());
+    }
+    if trimmed.contains('/') || trimmed.contains(':') {
+        return Err(
+            "[interface] tls_sni must be a bare hostname without scheme, port, or path".to_owned(),
+        );
+    }
+    Ok(())
 }
 
 /// Validate an HTTP/1.1 `Host` header value for `[interface] tcp_upgrade`.
@@ -1268,6 +1316,25 @@ cap = 4
 
         let config: Config = toml::from_str(&base("carrier = \"ss\"")).expect("parses ss");
         assert_eq!(config.interface.carrier, Some(Carrier::Ss));
+
+        let config: Config = toml::from_str(&base("carrier = \"tls\"")).expect("parses tls");
+        assert_eq!(config.interface.carrier, Some(Carrier::Tls));
+        assert_eq!(Carrier::Tls.protocol(), "tcp");
+        assert!(Carrier::Tls.uses_tcp());
+        assert!(Carrier::Tls.uses_tls());
+        assert!(Carrier::Tls.is_probeable());
+
+        let config: Config = toml::from_str(&base("carrier = \"quic\"")).expect("parses quic");
+        assert_eq!(config.interface.carrier, Some(Carrier::Quic));
+        assert_eq!(Carrier::Quic.protocol(), "udp");
+        assert!(Carrier::Quic.uses_udp());
+        assert!(Carrier::Quic.uses_tls());
+        assert!(!Carrier::Quic.is_probeable());
+
+        assert!(validate_tls_sni("cdn.example.com").is_ok());
+        assert!(validate_tls_sni("").is_err());
+        assert!(validate_tls_sni("https://cdn.example.com").is_err());
+        assert!(validate_tls_sni("cdn.example.com:443").is_err());
 
         let via_toml = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n\
                         [quick]\nvia = \"entry.toml\"\n\n\

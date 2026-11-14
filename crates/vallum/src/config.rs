@@ -116,6 +116,8 @@ pub struct Resolved {
     /// `carrier = "auto"` dial preambles.
     pub tcp_upgrade: Option<String>,
     pub ss_psk: Option<String>,
+    /// Optional TLS SNI hostname for `carrier = "tls"` and `carrier = "quic"`.
+    pub tls_sni: Option<String>,
 }
 
 impl std::fmt::Debug for Resolved {
@@ -140,6 +142,7 @@ impl std::fmt::Debug for Resolved {
             .field("sandbox", &self.sandbox)
             .field("outer_budget", &self.outer_budget)
             .field("tcp_upgrade", &self.tcp_upgrade)
+            .field("tls_sni", &self.tls_sni)
             .finish_non_exhaustive()
     }
 }
@@ -311,14 +314,15 @@ impl ResolveConfig for Config {
             .map(str::trim)
             .filter(|host| !host.is_empty())
             .map(str::to_owned);
-        if raw_tcp_upgrade.is_some() && !carrier.uses_tcp() {
+        let uses_http_upgrade = matches!(carrier, Carrier::Tcp | Carrier::Auto);
+        if raw_tcp_upgrade.is_some() && !uses_http_upgrade {
             warnings.push(
-                "[interface] tcp_upgrade is set, but the active carrier does not use TCP; \
+                "[interface] tcp_upgrade is set, but the active carrier does not use HTTP upgrade; \
                  ignoring tcp_upgrade unless carrier is \"tcp\" or \"auto\""
                     .to_owned(),
             );
         }
-        let tcp_upgrade = raw_tcp_upgrade.filter(|_| carrier.uses_tcp());
+        let tcp_upgrade = raw_tcp_upgrade.filter(|_| uses_http_upgrade);
         let raw_ss_psk = self
             .interface
             .ss_psk
@@ -334,6 +338,21 @@ impl ResolveConfig for Config {
             );
         }
         let ss_psk = raw_ss_psk.filter(|_| carrier == Carrier::Ss);
+        let raw_tls_sni = self
+            .interface
+            .tls_sni
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if raw_tls_sni.is_some() && !carrier.uses_tls() {
+            warnings.push(
+                "[interface] tls_sni is set, but the active carrier does not use TLS/QUIC; \
+                 ignoring tls_sni unless carrier is \"tls\" or \"quic\""
+                    .to_owned(),
+            );
+        }
+        let tls_sni = raw_tls_sni.filter(|_| carrier.uses_tls());
 
         // The outer path's budget. 1500 is the assumption the product was built
         // on; a narrower path names its MTU here and every datagram is cut to
@@ -761,6 +780,7 @@ impl ResolveConfig for Config {
             outer_budget: budget,
             tcp_upgrade,
             ss_psk,
+            tls_sni,
         })
     }
 }
@@ -995,6 +1015,7 @@ mod tests {
             outer_budget: 1372,
             tcp_upgrade: None,
             ss_psk: None,
+            tls_sni: None,
         };
         let rendered = format!("{resolved:?}");
         // The seed is 32 bytes of 0xAB — if any of it reached the log line it

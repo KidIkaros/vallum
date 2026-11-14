@@ -450,6 +450,16 @@ fn check_carrier(carrier: vallum_config::Carrier) -> Check {
              wire packets with no plaintext header"
                 .to_owned()
         }
+        vallum_config::Carrier::Tls => {
+            "tls: TLS 1.3 stream carrier over TCP — wraps framed Vallum packets in a \
+             standard TLS 1.3 session"
+                .to_owned()
+        }
+        vallum_config::Carrier::Quic => {
+            "quic: QUIC v1 DATAGRAM (RFC 9221) carrier over UDP — carries Vallum packets \
+             as unreliable QUIC datagrams without TCP head-of-line blocking"
+                .to_owned()
+        }
     };
     Check::new("carrier", Status::Pass, detail)
 }
