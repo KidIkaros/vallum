@@ -13,12 +13,39 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/KidIkaros/vallum/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/KidIkaros/vallum/ci.yml?branch=main&style=flat-square&label=CI&logo=githubactions&logoColor=white" alt="CI"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-24292f.svg?style=flat-square&logo=linux&logoColor=white" alt="Linux">
+  <img src="https://img.shields.io/badge/unsafe-forbidden-3fb950.svg?style=flat-square" alt="forbid(unsafe_code)">
+  <img src="https://img.shields.io/badge/post--quantum-ML--KEM%20%2B%20sntrup761-bc8cff.svg?style=flat-square" alt="Post-quantum">
+  <img src="https://img.shields.io/badge/status-experimental--pq-f0883e.svg?style=flat-square" alt="Status">
+</p>
+
+<p align="center">
+  <a href="docs/quickstart.md"><b>Quickstart</b></a> &nbsp;·&nbsp;
+  <a href="docs/gui.md"><b>GUI Cockpit</b></a> &nbsp;·&nbsp;
+  <a href="docs/tui.md"><b>TUI</b></a> &nbsp;·&nbsp;
+  <a href="docs/roadmap.md"><b>Roadmap</b></a> &nbsp;·&nbsp;
+  <a href="docs/adr"><b>ADRs</b></a> &nbsp;·&nbsp;
+  <a href="SECURITY.md"><b>Security</b></a>
+</p>
+
+<p align="center">
   <b>A deployable, hybrid post-quantum layer-3 tunnel for Linux</b>
   <br>
   <em>Production client and gateway VPN with real-time operations telemetry, live cyberpunk cockpits (TUI & Desktop GUI), and zero private-key exposure.</em>
   <br>
   <sub>Developed in joint engineering partnership between <b>Ikaros Digital</b> and <b>Atomguard</b>.</sub>
 </p>
+
+---
+
+## At a Glance
+
+| 🔐 Crypto | 🌐 Transport | 🖥️ Operations | 🛡️ Safety |
+|:---|:---|:---|:---|
+| X25519 + sntrup761 + ML-KEM-768 | `udp` · `lwo` · `auto` · `tcp` + HTTP `101` upgrade | Desktop/Web GUI + TUI + Prometheus | Fail-closed guard, leak doctor |
+| Hybrid signatures, timed identities | LWO v2 masking, jittered timers | Zero-downtime key rotation | Loopback DNS proxy, captive-portal spoof |
+| Epoch erasure & PCS | Happy-eyeballs UDP→TCP race | Adaptive MTU tuning | `#![forbid(unsafe_code)]` (one audited `mlockall`) |
 
 ---
 
@@ -101,16 +128,15 @@ PQ-WireGuard (Hülsing–Ning–Weber–Schwabe–Zimmermann, 2023) proved a KEM
 
 ## Architectural Boundary
 
-```
-   protocol (handshake · key schedule · framing · data plane)
-        │  bytes only — no provider type crosses this line
-        ▼
-   vallum-crypto        -- CryptoSuite trait + protocol combiners (zero deps)
-        ▲
-   ┌────┴─────────────────────────┐
-   │                              │
-vallum-crypto-sdk            (future adapter)
-(origin-crypto-sdk)          same trait, new suite id
+```mermaid
+flowchart TD
+    P["protocol<br/>handshake · key schedule · framing · data plane"]
+    C["vallum-crypto<br/>CryptoSuite trait + combiners (zero deps)"]
+    S["vallum-crypto-sdk<br/>origin-crypto-sdk adapter"]
+    F["future adapter<br/>same trait, new suite id"]
+    P -- "bytes only; no provider type crosses" --> C
+    S --> C
+    F -.-> C
 ```
 
 - **`vallum-crypto`**: Pure Rust `CryptoSuite` trait, protocol combiner, and transcript hash. Zero external dependencies.
@@ -123,11 +149,14 @@ vallum-crypto-sdk            (future adapter)
 
 Three messages, three hybrid-KEM operations, one round trip:
 
-```
-Initiator                                              Responder
-InitHello    ── STATIC_CT (A) · EPHEMERAL_PK · TIMESTAMP ──▶   [static key]
-             ◀── EPHEMERAL_CT (B) · STATIC_CT (C) · conf_r ──   RespHello
-InitConf     ── conf_i ────────────────────────────────────▶   [verify]
+```mermaid
+sequenceDiagram
+    participant I as Initiator
+    participant R as Responder
+    I->>R: InitHello (STATIC_CT A, EPHEMERAL_PK, TIMESTAMP, mac1)
+    R-->>I: RespHello (EPHEMERAL_CT B, STATIC_CT C, conf_r, PRE_TAG)
+    I->>R: InitConf (conf_i)
+    Note over I,R: Mutual explicit key confirmation, one round trip
 ```
 
 Both static operations are **MEX-bound** (`KDF1(σ, r)`) with mutual explicit key confirmation ([proof details](docs/proof/eck-pfs-psk.md)).
@@ -244,6 +273,19 @@ scripts/
   verify-remote.sh          Two-host acceptance harness across all transports
   gui-smoke.sh              End-to-end GUI backend and RPC smoke test suite
 ```
+
+---
+
+## Roadmap
+
+| Wave | Status | Delivered |
+|:---:|:---:|---|
+| 4 | ✅ | NDP firewall rules, `lockdown` policy, early-boot guard, content-blocker resolvers |
+| 5 | ✅ | Client `tcp_upgrade` dial, envelope `HandshakeFilter`, keepalive jitter |
+| 6 | ✅ | Handshake TLV/`mac1` filter, daemon-seeded timer jitter, 100-packet burst replay, loopback DNS proxy |
+| Next | 🚧 | TLS/QUIC `DATAGRAM` & Shadowsocks carriers, active leak traceroute, multihop |
+
+Full detail in [`docs/roadmap.md`](docs/roadmap.md).
 
 ---
 
