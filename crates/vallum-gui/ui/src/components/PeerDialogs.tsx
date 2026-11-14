@@ -40,11 +40,11 @@ import {
   type PeerFields,
   type QrFrame,
 } from "@/lib/actions"
-import type { Peer } from "@/types"
+import type { Peer, Snapshot } from "@/types"
 import { preflight, type SshHost } from "@/lib/bridge"
 import { CopyButton } from "@/components/Copy"
 import { ResultPanel } from "@/components/Result"
-import { loadUserPrefs, suggestNextPeerIp } from "@/lib/userPrefs"
+import { loadUserPrefs, suggestNextPeerIp, type NodeRole } from "@/lib/userPrefs"
 import {
   allowedIpsProblem,
   endpointProblem,
@@ -1401,8 +1401,12 @@ export function ConfigDialog({
 
 export function InterfaceFormDialog({
   blocked,
+  data,
+  role = "client",
 }: {
   blocked?: string
+  data?: Snapshot | null
+  role?: NodeRole
 }) {
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -1428,6 +1432,43 @@ export function InterfaceFormDialog({
 
   const set = (key: keyof InterfaceFields) => (value: string) =>
     setFields((current) => ({ ...current, [key]: value }))
+
+  const counters = data?.counters
+  const fragRatioPct =
+    counters && counters.packets_delivered > 0
+      ? Math.round((counters.reassembled * 100) / counters.packets_delivered)
+      : 0
+
+  let recommendedMtu = "1380"
+  let advisorProfile = "PQ-Safe / Gaming (1380)"
+  let advisorReason =
+    "Balances ML-KEM-768 handshake headroom (1444 B wire) with unfragmented ~1300 B real-time UDP datagrams."
+  if (counters && counters.datagrams_failed > 0) {
+    recommendedMtu = "1280"
+    advisorProfile = "Low-Jitter / USB NIC (1280)"
+    advisorReason = `${counters.datagrams_failed} outer datagram failure(s) recorded; 1280 minimizes USB URB straddling and driver drops.`
+  } else if (counters && (counters.fragments_dropped > 0 || fragRatioPct >= 2)) {
+    recommendedMtu = "1380"
+    advisorProfile = "Gaming / Low-Frag UDP (1380)"
+    advisorReason =
+      counters.fragments_dropped > 0
+        ? `${counters.fragments_dropped} fragment drop(s) detected; 1380 prevents inner UDP fragmentation.`
+        : `${fragRatioPct}% packet reassembly observed; 1380 avoids splitting real-time datagrams.`
+  } else if (role === "server") {
+    recommendedMtu = "1420"
+    advisorProfile = "Gateway Bulk Throughput (1420)"
+    advisorReason =
+      "Clean counters on Gateway/Server role; 1420 maximizes bulk TCP/UDP goodput (1484 B outer wire)."
+  }
+
+  const parsedMtu = Number.parseInt(fields.mtu.trim(), 10)
+  const effectiveMtu =
+    Number.isFinite(parsedMtu) && parsedMtu >= 576 && parsedMtu <= 65535
+      ? parsedMtu
+      : Number.parseInt(recommendedMtu, 10)
+  const outerWireMtu = effectiveMtu + 64
+  const ipv4TcpMss = Math.max(536, effectiveMtu - 40)
+  const ipv6TcpMss = Math.max(516, effectiveMtu - 60)
 
   return (
     <Dialog
@@ -1495,6 +1536,27 @@ export function InterfaceFormDialog({
                   <PresetChip label="1280 IPv6 Min" disabled={loading} active={fields.mtu.trim() === "1280"} onClick={() => set("mtu")("1280")} />
                 </div>
               </Field>
+            </div>
+            <div className="border-signal/35 bg-signal/5 rounded-md border px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-signal font-medium">
+                  Adaptive MTU &amp; JA4T Advisor · {advisorProfile}
+                </span>
+                <PresetChip
+                  label={
+                    fields.mtu.trim() === recommendedMtu
+                      ? `Recommended (${recommendedMtu}) active`
+                      : `Apply ${recommendedMtu}`
+                  }
+                  disabled={loading}
+                  active={fields.mtu.trim() === recommendedMtu}
+                  onClick={() => set("mtu")(recommendedMtu)}
+                />
+              </div>
+              <p className="text-muted-foreground mt-1 text-[11px]">{advisorReason}</p>
+              <p className="text-muted-foreground mt-1 font-mono text-[11px]">
+                Wire {outerWireMtu} B · JA4T MSS IPv4 {ipv4TcpMss} / IPv6 {ipv6TcpMss}
+              </p>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Field label="firewall mark" hint="decimal or 0x hex">

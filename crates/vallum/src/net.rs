@@ -1141,10 +1141,41 @@ fn parse_reported_mtu(output: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
-/// Test whether an ICMP packet with `payload` bytes fits the path to `host` with DF set.
-///
-/// Returns `(fits, reported_mtu)`.
-fn default_ping_probe(host: &str, payload: u16) -> (bool, Option<u16>) {
+/// Parse `time=<ms>` from `ping` stdout and convert it to integer microseconds.
+pub fn parse_ping_rtt_micros(output: &str) -> Option<u32> {
+    let tag = "time=";
+    let idx = output.find(tag)?;
+    let rest = output[idx + tag.len()..].trim_start();
+    let token: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if token.is_empty() {
+        return None;
+    }
+    let (whole_str, frac_str) = match token.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (token.as_str(), ""),
+    };
+    let whole_ms: u32 = if whole_str.is_empty() {
+        0
+    } else {
+        whole_str.parse().ok()?
+    };
+    let mut frac_digits = frac_str.bytes().filter(u8::is_ascii_digit);
+    let d1 = u32::from(frac_digits.next().map_or(0, |b| b - b'0'));
+    let d2 = u32::from(frac_digits.next().map_or(0, |b| b - b'0'));
+    let d3 = u32::from(frac_digits.next().map_or(0, |b| b - b'0'));
+    let mut frac_us = d1 * 100 + d2 * 10 + d3;
+    if frac_digits.next().is_some_and(|b| b >= b'5') {
+        frac_us += 1;
+    }
+    whole_ms.checked_mul(1_000)?.checked_add(frac_us)
+}
+
+/// Test whether an ICMP packet with `payload` bytes fits the path to `host` with DF set,
+/// returning `(fits, reported_mtu, rtt_us)`.
+fn default_ping_probe_with_rtt(host: &str, payload: u16) -> (bool, Option<u16>, Option<u32>) {
     let output = std::process::Command::new("ping")
         .args([
             "-M",
@@ -1159,15 +1190,23 @@ fn default_ping_probe(host: &str, payload: u16) -> (bool, Option<u16>) {
         ])
         .output();
     let Ok(output) = output else {
-        return (false, None);
+        return (false, None, None);
     };
+    let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() {
-        return (true, None);
+        return (true, None, parse_ping_rtt_micros(&stdout));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stderr}\n{stdout}");
-    (false, parse_reported_mtu(&combined))
+    (false, parse_reported_mtu(&combined), None)
+}
+
+/// Test whether an ICMP packet with `payload` bytes fits the path to `host` with DF set.
+///
+/// Returns `(fits, reported_mtu)`.
+fn default_ping_probe(host: &str, payload: u16) -> (bool, Option<u16>) {
+    let (fits, reported, _) = default_ping_probe_with_rtt(host, payload);
+    (fits, reported)
 }
 
 /// Probe the path MTU to `host` using PMTUD with a custom probe function.
@@ -1283,6 +1322,269 @@ fn within_budget_with(
 pub fn probe_path_mtu_host(host_or_endpoint: &str) -> Option<u16> {
     let (host, is_ipv6) = parse_probe_host(host_or_endpoint);
     probe_path_mtu_with(&host, is_ipv6, within_budget(default_ping_probe))
+}
+
+/// Standard outer encapsulation overhead (IPv4/UDP + Vallum transport header + AEAD tag)
+/// mapping `1420` inner MTU to `1484` outer wire MTU.
+pub const WIRE_ENCAP_OVERHEAD: u16 = 64;
+
+/// Operating profile selected by the telemetry-driven adaptive MTU optimizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtuProfile {
+    /// `1280` inner MTU: minimizes tail jitter and buffer straddling on USB Ethernet,
+    /// Wi-Fi, cellular, or lossy driver paths.
+    LowJitterUsb1280,
+    /// `1380` inner MTU: balances ~1300-byte real-time game/voice UDP datagrams with
+    /// outer headroom against path fragmentation.
+    GamingLowFrag1380,
+    /// `1420` inner MTU: maximizes bulk TCP/UDP goodput on clean, low-jitter paths.
+    BulkStandard1420,
+    /// Path MTU ceiling is below `1344`, forcing the inner MTU down to fit.
+    ConstrainedPath,
+}
+
+impl MtuProfile {
+    /// Machine-readable identifier emitted in `doctor --json` and telemetry logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LowJitterUsb1280 => "low-jitter-1280",
+            Self::GamingLowFrag1380 => "gaming-pq-1380",
+            Self::BulkStandard1420 => "bulk-1420",
+            Self::ConstrainedPath => "constrained-path",
+        }
+    }
+}
+
+/// Measured latency, jitter, and loss metrics for a candidate inner/outer MTU pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtuCandidateSample {
+    pub inner_mtu: u16,
+    pub outer_mtu: u16,
+    pub rtt_p50_us: u32,
+    pub rtt_jitter_us: u32,
+    pub loss_pct: u8,
+}
+
+/// Output of the adaptive MTU optimizer, including MSS alignment for JA4T/TCP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtuTuneRecommendation {
+    pub ceiling_outer_mtu: u16,
+    pub recommended_inner_mtu: u16,
+    pub recommended_outer_mtu: u16,
+    pub ipv4_tcp_mss: u16,
+    pub ipv6_tcp_mss: u16,
+    pub profile: MtuProfile,
+    pub samples: Vec<MtuCandidateSample>,
+    pub rationale: String,
+}
+
+fn build_recommendation(
+    ceiling_outer_mtu: u16,
+    inner_mtu: u16,
+    profile: MtuProfile,
+    samples: Vec<MtuCandidateSample>,
+    rationale: String,
+) -> MtuTuneRecommendation {
+    let outer_mtu = inner_mtu.saturating_add(WIRE_ENCAP_OVERHEAD);
+    MtuTuneRecommendation {
+        ceiling_outer_mtu,
+        recommended_inner_mtu: inner_mtu,
+        recommended_outer_mtu: outer_mtu,
+        ipv4_tcp_mss: inner_mtu.saturating_sub(40),
+        ipv6_tcp_mss: inner_mtu.saturating_sub(60),
+        profile,
+        samples,
+        rationale,
+    }
+}
+
+/// Score measured candidate MTU probes alongside live fragmentation counters
+/// (`fragments_dropped`, `reassembled`, `packets_delivered`) to recommend an optimal MTU.
+#[must_use]
+pub fn recommend_mtu_from_telemetry(
+    ceiling_outer_mtu: u16,
+    samples: &[MtuCandidateSample],
+    fragments_dropped: u64,
+    reassembled: u64,
+    packets_delivered: u64,
+) -> MtuTuneRecommendation {
+    let owned_samples = samples.to_vec();
+    let min_standard_outer = 1280u16.saturating_add(WIRE_ENCAP_OVERHEAD);
+    if ceiling_outer_mtu < min_standard_outer {
+        let clamped_inner = ceiling_outer_mtu
+            .saturating_sub(WIRE_ENCAP_OVERHEAD)
+            .max(576);
+        return build_recommendation(
+            ceiling_outer_mtu,
+            clamped_inner,
+            MtuProfile::ConstrainedPath,
+            owned_samples,
+            format!(
+                "path ceiling {ceiling_outer_mtu} B is below {min_standard_outer} B; \
+                 clamping inner MTU to {clamped_inner}"
+            ),
+        );
+    }
+
+    let usable: Vec<&MtuCandidateSample> = samples
+        .iter()
+        .filter(|s| s.outer_mtu <= ceiling_outer_mtu && s.loss_pct < 100)
+        .collect();
+
+    let s1280 = usable.iter().copied().find(|s| s.inner_mtu == 1280);
+    let s1380 = usable.iter().copied().find(|s| s.inner_mtu == 1380);
+    let s1420 = usable.iter().copied().find(|s| s.inner_mtu == 1420);
+
+    let frag_pressure = fragments_dropped > 0
+        || (packets_delivered > 0 && reassembled.saturating_mul(100) / packets_delivered >= 2);
+
+    // USB Ethernet URB straddling or driver buffer pressure shows up as packet loss
+    // or a >1.5 ms (>2x baseline) tail jitter jump at larger frame sizes vs 1280.
+    let larger_lossy = [s1380, s1420].into_iter().flatten().any(|s| s.loss_pct > 0)
+        && s1280.is_some_and(|s| s.loss_pct == 0);
+    let larger_jitter_spike = s1280.is_some_and(|base| {
+        let spike_threshold = base
+            .rtt_jitter_us
+            .saturating_add(1_500)
+            .max(base.rtt_jitter_us.saturating_mul(2).saturating_add(400));
+        [s1380, s1420]
+            .into_iter()
+            .flatten()
+            .any(|larger| larger.rtt_jitter_us > spike_threshold)
+    });
+
+    if larger_lossy || larger_jitter_spike {
+        return build_recommendation(
+            ceiling_outer_mtu,
+            1280,
+            MtuProfile::LowJitterUsb1280,
+            owned_samples,
+            "1280 MTU eliminates larger-frame jitter spikes / loss (USB NIC URB or access link profile)"
+                .to_owned(),
+        );
+    }
+
+    let fit_1420 = ceiling_outer_mtu >= 1420 + WIRE_ENCAP_OVERHEAD;
+    let fit_1380 = ceiling_outer_mtu >= 1380 + WIRE_ENCAP_OVERHEAD;
+    let degraded_1420 = s1420.is_some_and(|s| s.loss_pct > 0)
+        || (s1380.is_some()
+            && s1420.is_some_and(|l| {
+                let b = s1380.map_or(0, |s| s.rtt_jitter_us);
+                l.rtt_jitter_us > b.saturating_add(1_000)
+            }));
+
+    if fit_1380 && (frag_pressure || !fit_1420 || degraded_1420) {
+        let reason = if frag_pressure {
+            "inner fragmentation/reassembly pressure detected; 1380 keeps ~1300B gaming/UDP frames unfragmented"
+        } else if !fit_1420 {
+            "path ceiling fits 1380 (1444B outer) without hitting 1484B overflow"
+        } else {
+            "1380 delivers lower tail jitter than 1420 while preserving gaming UDP headroom"
+        };
+        return build_recommendation(
+            ceiling_outer_mtu,
+            1380,
+            MtuProfile::GamingLowFrag1380,
+            owned_samples,
+            reason.to_owned(),
+        );
+    }
+
+    if fit_1420 {
+        return build_recommendation(
+            ceiling_outer_mtu,
+            1420,
+            MtuProfile::BulkStandard1420,
+            owned_samples,
+            "clean low-jitter path with negligible inner fragmentation favors 1420 bulk goodput"
+                .to_owned(),
+        );
+    }
+
+    build_recommendation(
+        ceiling_outer_mtu,
+        1280,
+        MtuProfile::LowJitterUsb1280,
+        owned_samples,
+        "selecting 1280 safe baseline within path MTU ceiling".to_owned(),
+    )
+}
+
+fn tune_path_mtu_with_overhead(
+    ceiling_outer_mtu: u16,
+    icmp_overhead: u16,
+    mut probe_rtt_us: impl FnMut(u16) -> Option<u32>,
+) -> MtuTuneRecommendation {
+    let mut samples = Vec::new();
+    if ceiling_outer_mtu >= 1280 + WIRE_ENCAP_OVERHEAD {
+        for inner_mtu in [1280u16, 1380, 1420] {
+            let outer_mtu = inner_mtu.saturating_add(WIRE_ENCAP_OVERHEAD);
+            if outer_mtu > ceiling_outer_mtu {
+                continue;
+            }
+            let payload = outer_mtu.saturating_sub(icmp_overhead);
+            let mut rtts = Vec::with_capacity(3);
+            let mut lost = 0u8;
+            for _ in 0..3 {
+                match probe_rtt_us(payload) {
+                    Some(rtt) => rtts.push(rtt),
+                    None => lost += 1,
+                }
+            }
+            rtts.sort_unstable();
+            let loss_pct = ((u16::from(lost) * 100) / 3) as u8;
+            let (rtt_p50_us, rtt_jitter_us) = if rtts.is_empty() {
+                (0, 0)
+            } else {
+                let p50 = rtts[rtts.len() / 2];
+                let min = rtts[0];
+                let max = rtts[rtts.len() - 1];
+                (p50, max.saturating_sub(min))
+            };
+            samples.push(MtuCandidateSample {
+                inner_mtu,
+                outer_mtu,
+                rtt_p50_us,
+                rtt_jitter_us,
+                loss_pct,
+            });
+        }
+    }
+    recommend_mtu_from_telemetry(ceiling_outer_mtu, &samples, 0, 0, 0)
+}
+
+/// Sweep candidate MTUs (`1280`, `1380`, `1420`) capped by `ceiling_outer_mtu` using
+/// a caller-supplied IPv4 ICMP payload RTT prober (`payload -> Option<rtt_us>`).
+pub fn tune_path_mtu_with(
+    ceiling_outer_mtu: u16,
+    probe_rtt_us: impl FnMut(u16) -> Option<u32>,
+) -> MtuTuneRecommendation {
+    tune_path_mtu_with_overhead(ceiling_outer_mtu, 28, probe_rtt_us)
+}
+
+/// Discover the path MTU ceiling to `host_or_endpoint`, sweep candidate payloads, and
+/// return a telemetry-backed MTU profile recommendation.
+pub fn tune_path_mtu_host(host_or_endpoint: &str) -> Option<MtuTuneRecommendation> {
+    let ceiling_outer_mtu = probe_path_mtu_host(host_or_endpoint)?;
+    let (host, is_ipv6) = parse_probe_host(host_or_endpoint);
+    let icmp_overhead = if is_ipv6 { 48 } else { 28 };
+    let started = Instant::now();
+    Some(tune_path_mtu_with_overhead(
+        ceiling_outer_mtu,
+        icmp_overhead,
+        |payload| {
+            if started.elapsed() >= PROBE_BUDGET {
+                return None;
+            }
+            let (fits, _, rtt_us) = default_ping_probe_with_rtt(&host, payload);
+            if fits {
+                Some(rtt_us.unwrap_or(500))
+            } else {
+                None
+            }
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1516,5 +1818,112 @@ mod tests {
         // IPv6 min 1232 (1280), max 1452 (1500)
         let mtu = probe_path_mtu_with("host", true, |_host, payload| (payload <= 1352, None));
         assert_eq!(mtu, Some(1400));
+    }
+
+    #[test]
+    fn parse_ping_rtt_micros_extracts_submillisecond_and_millisecond_times() {
+        let subms = "64 bytes from 127.0.0.1: icmp_seq=1 ttl=64 time=0.042 ms";
+        assert_eq!(parse_ping_rtt_micros(subms), Some(42));
+
+        let multi = "1460 bytes from 203.0.113.10: icmp_seq=1 ttl=55 time=24.856 ms";
+        assert_eq!(parse_ping_rtt_micros(multi), Some(24_856));
+
+        let rounded = "64 bytes from 10.7.0.1: icmp_seq=1 ttl=64 time=1.2346 ms";
+        assert_eq!(parse_ping_rtt_micros(rounded), Some(1_235));
+
+        assert_eq!(
+            parse_ping_rtt_micros("Request timeout for icmp_seq 0"),
+            None
+        );
+    }
+
+    #[test]
+    fn mtu_optimizer_selects_1280_when_larger_frames_cause_usb_jitter_spike() {
+        let samples = vec![
+            MtuCandidateSample {
+                inner_mtu: 1280,
+                outer_mtu: 1344,
+                rtt_p50_us: 1_200,
+                rtt_jitter_us: 180,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1380,
+                outer_mtu: 1444,
+                rtt_p50_us: 2_900,
+                rtt_jitter_us: 2_600,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1420,
+                outer_mtu: 1484,
+                rtt_p50_us: 3_400,
+                rtt_jitter_us: 3_800,
+                loss_pct: 0,
+            },
+        ];
+        let rec = recommend_mtu_from_telemetry(1500, &samples, 0, 0, 10_000);
+        assert_eq!(rec.recommended_inner_mtu, 1280);
+        assert_eq!(rec.recommended_outer_mtu, 1344);
+        assert_eq!(rec.ipv4_tcp_mss, 1240);
+        assert_eq!(rec.ipv6_tcp_mss, 1220);
+        assert_eq!(rec.profile, MtuProfile::LowJitterUsb1280);
+    }
+
+    #[test]
+    fn mtu_optimizer_selects_1380_when_inner_fragmentation_pressure_is_present() {
+        let samples = vec![
+            MtuCandidateSample {
+                inner_mtu: 1280,
+                outer_mtu: 1344,
+                rtt_p50_us: 14_000,
+                rtt_jitter_us: 300,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1380,
+                outer_mtu: 1444,
+                rtt_p50_us: 14_100,
+                rtt_jitter_us: 320,
+                loss_pct: 0,
+            },
+            MtuCandidateSample {
+                inner_mtu: 1420,
+                outer_mtu: 1484,
+                rtt_p50_us: 14_200,
+                rtt_jitter_us: 350,
+                loss_pct: 0,
+            },
+        ];
+        // Reassembly at >=2% of delivered packets triggers the gaming / PQ-safe 1380 profile.
+        let rec = recommend_mtu_from_telemetry(1500, &samples, 0, 250, 10_000);
+        assert_eq!(rec.recommended_inner_mtu, 1380);
+        assert_eq!(rec.recommended_outer_mtu, 1444);
+        assert_eq!(rec.ipv4_tcp_mss, 1340);
+        assert_eq!(rec.profile, MtuProfile::GamingLowFrag1380);
+    }
+
+    #[test]
+    fn mtu_optimizer_selects_1420_on_clean_low_jitter_ethernet_path() {
+        let mut idx = 0usize;
+        let rtts = [500u32, 520, 510, 515, 530, 525, 520, 540, 535];
+        let rec = tune_path_mtu_with(1500, |_payload| {
+            let v = rtts[idx % rtts.len()];
+            idx += 1;
+            Some(v)
+        });
+        assert_eq!(rec.recommended_inner_mtu, 1420);
+        assert_eq!(rec.recommended_outer_mtu, 1484);
+        assert_eq!(rec.ipv4_tcp_mss, 1380);
+        assert_eq!(rec.profile, MtuProfile::BulkStandard1420);
+        assert_eq!(rec.samples.len(), 3);
+    }
+
+    #[test]
+    fn mtu_optimizer_clamps_to_constrained_path_below_1344() {
+        let rec = recommend_mtu_from_telemetry(1300, &[], 0, 0, 0);
+        assert_eq!(rec.recommended_inner_mtu, 1236);
+        assert_eq!(rec.recommended_outer_mtu, 1300);
+        assert_eq!(rec.profile, MtuProfile::ConstrainedPath);
     }
 }

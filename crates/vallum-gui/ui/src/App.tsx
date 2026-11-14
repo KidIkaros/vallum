@@ -1782,7 +1782,7 @@ export default function App() {
                           {data?.expected_egress === "full" ? "Full tunnel" : "Split tunnel"}
                         </div>
                       </div>
-                      <InterfaceFormDialog blocked={blocked} />
+                      <InterfaceFormDialog blocked={blocked} data={data} role={userPrefs.role} />
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-3 py-3">
                       <div className="min-w-0">

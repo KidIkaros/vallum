@@ -296,6 +296,7 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         checks.push(check_config_mode(args.config.as_deref()));
         if let Some(host) = &args.probe_mtu {
             checks.push(check_path_mtu(host, resolved));
+            checks.push(check_mtu_tune(host, resolved));
         } else {
             let mut probed = std::collections::HashSet::new();
             for peer in &resolved.peers {
@@ -1209,6 +1210,51 @@ fn check_path_mtu(host: &str, resolved: &crate::config::Resolved) -> Check {
     }
 }
 
+/// Sweep candidate inner MTUs (`1280`, `1380`, `1420`) against RTT jitter and
+/// path ceiling to recommend the optimal inner MTU profile and TCP MSS values.
+fn check_mtu_tune(host: &str, resolved: &crate::config::Resolved) -> Check {
+    let Some(rec) = crate::net::tune_path_mtu_host(host) else {
+        return Check::new(
+            "mtu-tune",
+            Status::Warn,
+            format!("{host}: path MTU tuning inconclusive (ICMP blocked or unreachable)"),
+        );
+    };
+    let configured = if resolved.mtu == 0 {
+        "auto".to_owned()
+    } else {
+        resolved.mtu.to_string()
+    };
+    let sample_summary = if rec.samples.is_empty() {
+        "none".to_owned()
+    } else {
+        rec.samples
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}:p50={}us/jit={}us/loss={}%",
+                    s.inner_mtu, s.rtt_p50_us, s.rtt_jitter_us, s.loss_pct
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Check::new(
+        "mtu-tune",
+        Status::Pass,
+        format!(
+            "{host}: profile={} recommends mtu = {} (outer_mtu = {}, IPv4 MSS = {}, IPv6 MSS = {}; ceiling = {}, configured = {configured}): {} [samples: {sample_summary}]",
+            rec.profile.as_str(),
+            rec.recommended_inner_mtu,
+            rec.recommended_outer_mtu,
+            rec.ipv4_tcp_mss,
+            rec.ipv6_tcp_mss,
+            rec.ceiling_outer_mtu,
+            rec.rationale
+        ),
+    )
+}
+
 /// Replay-window timestamps and identity validity windows are wall-clock
 /// checks, so a host drifting minutes or hours peers and re-keys badly. Warn,
 /// never fail: an offline lab without NTP still tunnels correctly today.
@@ -1696,6 +1742,11 @@ mod tests {
         let loopback_check = super::check_path_mtu("127.0.0.1", &resolved);
         assert_eq!(loopback_check.status, super::Status::Pass);
         assert!(loopback_check.detail.contains("fits"));
+
+        let tune_check = super::check_mtu_tune("127.0.0.1", &resolved);
+        assert_eq!(tune_check.status, super::Status::Pass);
+        assert!(tune_check.detail.contains("recommends mtu ="));
+        assert!(tune_check.detail.contains("IPv4 MSS ="));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
