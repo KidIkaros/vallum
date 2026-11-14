@@ -71,34 +71,9 @@ impl Device {
             self.remap(index);
         }
 
-        // (2b) Draw this session's rekey spread and idle-keepalive jitter, once.
-        //      The rekey trigger is otherwise exactly `established_at + 120 s` and
-        //      the reactive keepalive `10 s`, so peers that established together
-        //      synchronize in lockstep. Handshake retransmits likewise draw a
-        //      bounded offset so recovery traffic doesn't align on tick boundaries.
-        //      The device owns the randomness; `vallum-core` has none.
-        if self.peers[index].timers.is_established() {
-            if self.peers[index].timers.rekey_offset().is_none() {
-                let draw = rng.draw_u64();
-                self.peers[index]
-                    .timers
-                    .set_rekey_offset(draw % (vallum_core::timer::REKEY_SPREAD_MS + 1));
-            }
-            if self.peers[index].timers.keepalive_offset().is_none() {
-                let draw = rng.draw_u64();
-                self.peers[index]
-                    .timers
-                    .set_keepalive_offset(draw % (vallum_core::timer::KEEPALIVE_JITTER_MS + 1));
-            }
-        }
-        if self.peers[index].timers.handshake_in_flight()
-            && self.peers[index].timers.retransmit_offset().is_none()
-        {
-            let draw = rng.draw_u64();
-            self.peers[index]
-                .timers
-                .set_retransmit_offset(draw % (vallum_core::timer::REKEY_JITTER_MS + 1));
-        }
+        // (2b) Jitter, drawn once per session so peers that established
+        //      together do not rekey, probe or retransmit in lockstep.
+        seed_timer_jitter(&mut self.peers[index].timers, rng);
 
         // (3) Retransmit the initiator's `InitConf` until the responder answers.
         self.retransmit_conf(index, now, out);
@@ -120,10 +95,8 @@ impl Device {
             TimerAction::StartHandshake => self.start_handshake(index, None, clock, rng, out),
             TimerAction::RetransmitHandshake => {
                 self.retransmit_handshake(index, clock, out);
-                let draw = rng.draw_u64();
-                self.peers[index]
-                    .timers
-                    .set_retransmit_offset(draw % (vallum_core::timer::REKEY_JITTER_MS + 1));
+                let jitter = draw_up_to(rng, vallum_core::timer::REKEY_JITTER_MS);
+                self.peers[index].timers.set_retransmit_offset(jitter);
             }
             TimerAction::GiveUp => self.abandon_handshake(index),
             TimerAction::Expire => self.tear_down(index, now),
@@ -174,5 +147,32 @@ impl Device {
             self.start_handshake(index, None, clock, rng, out);
             false
         }
+    }
+}
+
+/// A uniform draw in `0..=max`. The device owns the randomness; `vallum-core`
+/// has none, so every timer offset is drawn here and handed in.
+fn draw_up_to(rng: &mut dyn Randomness, max: u64) -> u64 {
+    rng.draw_u64() % (max + 1)
+}
+
+/// Give a session's timers the offsets they are still missing.
+///
+/// Rekey spread and idle-keepalive jitter belong to an established session;
+/// the retransmit jitter belongs to a handshake in flight. Each is drawn once
+/// and kept until the session (or handshake) changes.
+fn seed_timer_jitter(timers: &mut Timers, rng: &mut dyn Randomness) {
+    use vallum_core::timer::{KEEPALIVE_JITTER_MS, REKEY_JITTER_MS, REKEY_SPREAD_MS};
+
+    if timers.is_established() {
+        if timers.rekey_offset().is_none() {
+            timers.set_rekey_offset(draw_up_to(rng, REKEY_SPREAD_MS));
+        }
+        if timers.keepalive_offset().is_none() {
+            timers.set_keepalive_offset(draw_up_to(rng, KEEPALIVE_JITTER_MS));
+        }
+    }
+    if timers.handshake_in_flight() && timers.retransmit_offset().is_none() {
+        timers.set_retransmit_offset(draw_up_to(rng, REKEY_JITTER_MS));
     }
 }

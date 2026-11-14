@@ -634,35 +634,96 @@ pub const AUTO_UDP_LOCK: Duration = Duration::from_secs(15);
 /// when the stagger timer fires.
 pub const AUTO_MAX_INITIAL_PACKETS: usize = 100;
 
+/// One peer's UDP-versus-TCP race: when it started, whether TCP has joined,
+/// and what must be replayed onto TCP when it does.
+#[derive(Debug)]
+struct RaceWindow {
+    first_attempt: Instant,
+    tcp_kicked: bool,
+    initial_packets: Vec<Vec<u8>>,
+    /// `sender_index` of every `InitHello` sent so far: the only receiver
+    /// indices an authentic reply may echo.
+    pending_indices: Vec<u32>,
+}
+
+impl RaceWindow {
+    fn start(now: Instant, first_packet: &[u8]) -> Self {
+        let mut window = Self {
+            first_attempt: now,
+            tcp_kicked: false,
+            initial_packets: Vec::new(),
+            pending_indices: Vec::new(),
+        };
+        window.buffer(first_packet);
+        window
+    }
+
+    /// Remember an initiation's index so its reply can be recognised.
+    fn note_initiation(&mut self, packet: &[u8]) {
+        let Some(sender_index) = lwo::extract_initiation_sender_index(packet) else {
+            return;
+        };
+        if self.pending_indices.contains(&sender_index) {
+            return;
+        }
+        if self.pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
+            self.pending_indices.remove(0);
+        }
+        self.pending_indices.push(sender_index);
+    }
+
+    /// Note the packet and keep it for replay, up to the burst cap.
+    fn buffer(&mut self, packet: &[u8]) {
+        self.note_initiation(packet);
+        if self.initial_packets.len() < AUTO_MAX_INITIAL_PACKETS {
+            self.initial_packets.push(packet.to_vec());
+        }
+    }
+
+    /// Mark TCP as joined and hand over the packets it missed.
+    fn kick_tcp(&mut self) -> Vec<Vec<u8>> {
+        self.tcp_kicked = true;
+        std::mem::take(&mut self.initial_packets)
+    }
+}
+
 #[derive(Debug)]
 enum PeerRaceMode {
-    RacingUdp {
-        first_attempt: Instant,
-        tcp_kicked: bool,
-        initial_packets: Vec<Vec<u8>>,
-        pending_indices: Vec<u32>,
-    },
-    LockedUdp {
-        until: Instant,
-    },
+    RacingUdp(RaceWindow),
+    LockedUdp { until: Instant },
     LockedTcp,
 }
 
-fn record_initial_packet(
-    initial_packets: &mut Vec<Vec<u8>>,
-    pending_indices: &mut Vec<u32>,
-    bytes: &[u8],
-) {
-    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
-        if !pending_indices.contains(&sender_index) {
-            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
-                pending_indices.remove(0);
-            }
-            pending_indices.push(sender_index);
+/// Which carriers an outbound packet takes, and what TCP must first catch up on.
+#[derive(Debug, Default)]
+struct Outbound {
+    udp: bool,
+    tcp: bool,
+    /// Earlier packets of this race that TCP has not seen yet, oldest first.
+    tcp_catch_up: Vec<Vec<u8>>,
+}
+
+impl Outbound {
+    fn udp_only() -> Self {
+        Self {
+            udp: true,
+            ..Self::default()
         }
     }
-    if initial_packets.len() < AUTO_MAX_INITIAL_PACKETS {
-        initial_packets.push(bytes.to_vec());
+
+    fn tcp_only() -> Self {
+        Self {
+            tcp: true,
+            ..Self::default()
+        }
+    }
+
+    fn both(tcp_catch_up: Vec<Vec<u8>>) -> Self {
+        Self {
+            udp: true,
+            tcp: true,
+            tcp_catch_up,
+        }
     }
 }
 
@@ -674,9 +735,7 @@ fn pending_indices_for(
         return Vec::new();
     };
     match map.get(&source) {
-        Some(PeerRaceMode::RacingUdp {
-            pending_indices, ..
-        }) => pending_indices.clone(),
+        Some(PeerRaceMode::RacingUdp(window)) => window.pending_indices.clone(),
         _ => Vec::new(),
     }
 }
@@ -832,107 +891,55 @@ impl AutoTransport {
         })
     }
 
-    fn decide_outbound(&self, destination: SocketAddr, bytes: &[u8]) -> (bool, bool, Vec<Vec<u8>>) {
+    fn decide_outbound(&self, destination: SocketAddr, bytes: &[u8]) -> Outbound {
         let now = Instant::now();
         let (lock, cv) = &*self.peers;
         let Ok(mut map) = lock.lock() else {
-            return (true, false, Vec::new());
+            return Outbound::udp_only();
         };
-        match map.get_mut(&destination) {
-            None => {
-                let mut initial_packets = Vec::new();
-                let mut pending_indices = Vec::new();
-                record_initial_packet(&mut initial_packets, &mut pending_indices, bytes);
-                map.insert(
-                    destination,
-                    PeerRaceMode::RacingUdp {
-                        first_attempt: now,
-                        tcp_kicked: false,
-                        initial_packets,
-                        pending_indices,
-                    },
-                );
-                cv.notify_all();
-                (true, false, Vec::new())
-            }
-            Some(PeerRaceMode::RacingUdp {
-                first_attempt,
-                tcp_kicked,
-                initial_packets,
-                pending_indices,
-            }) => {
-                if *tcp_kicked {
-                    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
-                        if !pending_indices.contains(&sender_index) {
-                            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
-                                pending_indices.remove(0);
-                            }
-                            pending_indices.push(sender_index);
-                        }
-                    }
-                    (true, true, Vec::new())
-                } else if now.duration_since(*first_attempt) >= self.stagger {
-                    *tcp_kicked = true;
-                    if let Some(sender_index) = lwo::extract_initiation_sender_index(bytes) {
-                        if !pending_indices.contains(&sender_index) {
-                            if pending_indices.len() >= AUTO_MAX_INITIAL_PACKETS {
-                                pending_indices.remove(0);
-                            }
-                            pending_indices.push(sender_index);
-                        }
-                    }
-                    let replay = std::mem::take(initial_packets);
-                    (true, true, replay)
-                } else {
-                    record_initial_packet(initial_packets, pending_indices, bytes);
-                    (true, false, Vec::new())
+        let begin_race = match map.get_mut(&destination) {
+            None => true,
+            Some(PeerRaceMode::LockedTcp) => return Outbound::tcp_only(),
+            Some(PeerRaceMode::LockedUdp { until }) => now >= *until,
+            Some(PeerRaceMode::RacingUdp(window)) => {
+                if window.tcp_kicked {
+                    window.note_initiation(bytes);
+                    return Outbound::both(Vec::new());
                 }
-            }
-            Some(PeerRaceMode::LockedUdp { until }) => {
-                if now < *until {
-                    (true, false, Vec::new())
-                } else {
-                    let mut initial_packets = Vec::new();
-                    let mut pending_indices = Vec::new();
-                    record_initial_packet(&mut initial_packets, &mut pending_indices, bytes);
-                    map.insert(
-                        destination,
-                        PeerRaceMode::RacingUdp {
-                            first_attempt: now,
-                            tcp_kicked: false,
-                            initial_packets,
-                            pending_indices,
-                        },
-                    );
-                    cv.notify_all();
-                    (true, false, Vec::new())
+                if now.duration_since(window.first_attempt) >= self.stagger {
+                    window.note_initiation(bytes);
+                    return Outbound::both(window.kick_tcp());
                 }
+                window.buffer(bytes);
+                return Outbound::udp_only();
             }
-            Some(PeerRaceMode::LockedTcp) => (false, true, Vec::new()),
+        };
+        if !begin_race {
+            return Outbound::udp_only();
         }
+        map.insert(
+            destination,
+            PeerRaceMode::RacingUdp(RaceWindow::start(now, bytes)),
+        );
+        cv.notify_all();
+        Outbound::udp_only()
     }
 }
 
 impl DatagramSocket for AutoTransport {
     fn send_to(&self, bytes: &[u8], destination: SocketAddr) -> io::Result<()> {
-        let (send_udp, send_tcp, replay_tcp) = self.decide_outbound(destination, bytes);
-        match (send_udp, send_tcp) {
-            (true, false) => self.lwo.send_to(bytes, destination),
-            (false, true) => {
-                for pkt in replay_tcp {
-                    self.tcp.send_to(&pkt, destination)?;
-                }
-                self.tcp.send_to(bytes, destination)
+        let route = self.decide_outbound(destination, bytes);
+        let udp_result = route.udp.then(|| self.lwo.send_to(bytes, destination));
+        let tcp_result = route.tcp.then(|| {
+            for earlier in &route.tcp_catch_up {
+                self.tcp.send_to(earlier, destination)?;
             }
-            (true, true) => {
-                let udp_res = self.lwo.send_to(bytes, destination);
-                for pkt in replay_tcp {
-                    let _ = self.tcp.send_to(&pkt, destination);
-                }
-                let tcp_res = self.tcp.send_to(bytes, destination);
-                udp_res.or(tcp_res)
-            }
-            (false, false) => Ok(()),
+            self.tcp.send_to(bytes, destination)
+        });
+        match (udp_result, tcp_result) {
+            (Some(udp), Some(tcp)) => udp.or(tcp),
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => Ok(()),
         }
     }
 
@@ -943,14 +950,17 @@ impl DatagramSocket for AutoTransport {
         let mut udp_batch = Vec::new();
         let mut tcp_batch = Vec::new();
         for (dst, payload) in batch {
-            let (send_udp, send_tcp, replay_tcp) = self.decide_outbound(*dst, payload);
-            if send_udp {
+            let route = self.decide_outbound(*dst, payload);
+            if route.udp {
                 udp_batch.push((*dst, payload.clone()));
             }
-            for pkt in replay_tcp {
-                tcp_batch.push((*dst, pkt));
-            }
-            if send_tcp {
+            if route.tcp {
+                tcp_batch.extend(
+                    route
+                        .tcp_catch_up
+                        .into_iter()
+                        .map(|earlier| (*dst, earlier)),
+                );
                 tcp_batch.push((*dst, payload.clone()));
             }
         }
@@ -1143,20 +1153,13 @@ fn spawn_auto_stagger_worker(
                 let mut next_deadline: Option<Instant> = None;
 
                 for (&destination, mode) in map.iter_mut() {
-                    if let PeerRaceMode::RacingUdp {
-                        first_attempt,
-                        tcp_kicked,
-                        initial_packets,
-                        ..
-                    } = mode
-                    {
-                        if *tcp_kicked {
+                    if let PeerRaceMode::RacingUdp(window) = mode {
+                        if window.tcp_kicked {
                             continue;
                         }
-                        let deadline = *first_attempt + stagger;
+                        let deadline = window.first_attempt + stagger;
                         if now >= deadline {
-                            *tcp_kicked = true;
-                            let replay = std::mem::take(initial_packets);
+                            let replay = window.kick_tcp();
                             if !replay.is_empty() {
                                 due.push((destination, replay));
                             }
@@ -3145,14 +3148,13 @@ mod tests {
 
     #[test]
     fn auto_transport_replays_multi_fragment_initial_burst_on_tcp_stagger() {
-        let mut buf_cap = Vec::new();
-        let mut idx_cap = Vec::new();
-        for n in 0..(AUTO_MAX_INITIAL_PACKETS + 15) {
+        let mut window = RaceWindow::start(Instant::now(), &sample_vallum_packet(0));
+        for n in 1..(AUTO_MAX_INITIAL_PACKETS + 15) {
             let mut pkt = sample_vallum_packet((n & 0xff) as u8);
             pkt[4..8].copy_from_slice(&(n as u32).to_be_bytes());
-            record_initial_packet(&mut buf_cap, &mut idx_cap, &pkt);
+            window.buffer(&pkt);
         }
-        assert_eq!(buf_cap.len(), AUTO_MAX_INITIAL_PACKETS);
+        assert_eq!(window.initial_packets.len(), AUTO_MAX_INITIAL_PACKETS);
 
         let blackhole_udp = UdpSocket::bind("127.0.0.1:0").expect("blackhole udp");
         blackhole_udp
