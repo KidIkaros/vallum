@@ -194,6 +194,30 @@ If neither exists, DNS is left to the host and `vallum-quick` says so.
 `vallum-quick attach <config> --dry-run` prints the commands the chosen backend
 would run, which is the fastest way to see which path you are on.
 
+### Loopback DNS proxy
+
+```toml
+[quick]
+dns = ["1.1.1.1"]
+dns_proxy = true
+```
+
+Instead of pointing the resolver straight at the tunnel's servers, `attach`
+starts a small UDP forwarder bound to `127.0.0.1:53` (as a child of
+`vallum-quick@<stem>.service`) and points the resolver at that. Queries still
+travel through the tunnel — the forwarder relays them to `[quick] dns` — but
+the proxy can answer on the host's behalf when the tunnel cannot: while the
+session is dead past the watchdog window, every `A` query is answered with
+`198.51.100.1`, the captive-portal address, so applications fail fast instead
+of hanging on a resolver that never replies. `AAAA` is answered `NODATA` while
+the tunnel is IPv4-only, and (with `[quick] allow_lan`) `.lan`/`.local` names
+still go to LAN resolvers.
+
+`detach` and `systemctl stop vallum-quick@<stem>` kill the proxy and restore
+the real resolver. Off by default: it claims loopback port 53, which a host
+running its own resolver (dnsmasq, bind) must not spare — if the port is
+taken, `attach` refuses and rolls back.
+
 ## Expiring a credential without a CA
 
 If you generated your own key, you can still attach a validity window:

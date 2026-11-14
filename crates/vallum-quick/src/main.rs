@@ -147,6 +147,10 @@ enum Action {
         /// Spoof captive-portal A queries to `198.51.100.1` (for Blocked/Lockdown state).
         #[arg(long)]
         captive_spoof: bool,
+        /// Daemon control socket to poll: toggle captive-spoofing with the
+        /// session's liveness (attach uses this; the CLI sets it statically).
+        #[arg(long)]
+        follow_session: Option<PathBuf>,
         /// Print the proxy plan without binding the socket.
         #[arg(long)]
         dry_run: bool,
@@ -206,10 +210,19 @@ fn main() -> std::process::ExitCode {
             config,
             listen,
             captive_spoof,
+            follow_session,
             dry_run,
         } => load_normalized(config)
             .map_err(Box::<dyn std::error::Error>::from)
-            .and_then(|loaded| dns::run_dns_proxy(&loaded, *listen, *captive_spoof, *dry_run)),
+            .and_then(|loaded| {
+                dns::run_dns_proxy(
+                    &loaded,
+                    *listen,
+                    *captive_spoof,
+                    follow_session.clone(),
+                    *dry_run,
+                )
+            }),
         Action::Save {
             config,
             output,
@@ -486,6 +499,7 @@ fn ensure_forwarding_and_nat(
 /// that names none, so callers pass `None` when the stem is unreadable.
 fn attach_host_side(
     config: &Config,
+    config_path: &Path,
     interface: &str,
     table: &str,
     unit: Option<&str>,
@@ -496,6 +510,14 @@ fn attach_host_side(
     // member namespace and the host keeps its own routes and resolver. Nothing
     // is applied here for the host, so nothing here can leak.
     if config.quick.app_class {
+        if config.quick.dns_proxy {
+            return Err(
+                "`app_class = true` tunnels only the member namespace, whose private \
+                 resolv.conf already names the tunnel's servers: `[quick] dns_proxy` \
+                 has no host resolver to take over there. Set one or the other"
+                    .into(),
+            );
+        }
         if let Err(error) = member::attach(config, interface, unit, dry_run) {
             undo(config, interface, table, dry_run);
             return Err(error);
@@ -514,18 +536,37 @@ fn attach_host_side(
 
     let effective_dns = config.quick.effective_dns_servers();
     if !effective_dns.is_empty() {
-        if let Err(error) = set_dns(
-            interface,
-            &effective_dns,
-            dns_domain(config).as_deref(),
-            dry_run,
-        ) {
-            undo(config, interface, table, dry_run);
-            return Err(format!(
-                "DNS configuration failed for `{interface}`: {error}; refusing to attach to prevent DNS leaks \
-                 (set `[quick] dns = []` if you manage DNS manually)"
+        // Proxy mode: the loopback forwarder is the resolver. It must own the
+        // port before the resolver points at it — a bind failure here is a
+        // plain DNS-configuration failure and takes the routes back out, so
+        // the host is never left resolving into a proxy that is not there.
+        let dns_result = (|| -> Result<(), String> {
+            if config.quick.dns_proxy {
+                let control = session::control_socket(config, config_path, interface);
+                dns::spawn_for_attach(config_path, interface, &control, dry_run)
+                    .map_err(|error| error.to_string())?;
+            }
+            let proxy_servers = if config.quick.dns_proxy {
+                vec!["127.0.0.1".to_owned()]
+            } else {
+                effective_dns.clone()
+            };
+            set_dns(
+                interface,
+                &proxy_servers,
+                dns_domain(config).as_deref(),
+                dry_run,
             )
-            .into());
+            .map_err(|error| {
+                format!(
+                    "DNS configuration failed for `{interface}`: {error}; refusing to attach \
+                     to prevent DNS leaks (set `[quick] dns = []` if you manage DNS manually)"
+                )
+            })
+        })();
+        if let Err(error) = dns_result {
+            undo(config, interface, table, dry_run);
+            return Err(error.into());
         }
     }
 
@@ -561,6 +602,9 @@ fn withdraw_host_side(
     }
 
     remove_routes(config, interface, table, dry_run);
+    if config.quick.dns_proxy {
+        dns::stop_for_detach(interface, dry_run);
+    }
     if !config.quick.effective_dns_servers().is_empty() {
         unset_dns(interface, dry_run)?;
     }
@@ -628,6 +672,7 @@ fn up_after_pre(
 
     attach_host_side(
         config,
+        config_path,
         interface,
         table,
         config_path.file_stem().and_then(|stem| stem.to_str()),
@@ -652,6 +697,9 @@ fn rollback(config: &Config, config_path: &Path, interface: &str, table: &str, d
     member::detach(interface, dry_run);
     if !config.quick.app_class {
         remove_routes(config, interface, table, dry_run);
+        if config.quick.dns_proxy {
+            dns::stop_for_detach(interface, dry_run);
+        }
         if !config.quick.effective_dns_servers().is_empty() {
             let _ = unset_dns(interface, dry_run);
         }
@@ -700,7 +748,15 @@ pub(crate) fn attach(
         wait_for_session(&config, config_path, &interface)?;
     }
 
-    attach_host_side(&config, &interface, &table, unit, dry_run, remove_routes)
+    attach_host_side(
+        &config,
+        config_path,
+        &interface,
+        &table,
+        unit,
+        dry_run,
+        remove_routes,
+    )
 }
 
 /// Remove what [`attach`] applied, leaving the daemon running.

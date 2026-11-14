@@ -125,6 +125,19 @@ pub struct Quick {
     /// `100.64.0.<bitmask>` (Mullvad §8.2 convention).
     #[serde(default)]
     pub content_blockers: Vec<String>,
+    /// Run a local loopback DNS proxy (bound to `127.0.0.1:53`) instead of
+    /// pointing the resolver straight at the tunnel's servers.
+    ///
+    /// `attach` starts the proxy as a child of `vallum-quick@<stem>.service`,
+    /// points the resolver at `127.0.0.1`, and records the pid in
+    /// `/run/vallum/<interface>.dns-proxy.pid`; `detach` and `systemctl stop`
+    /// kill it. While the session is dead past the watchdog window the proxy
+    /// answers `A` queries with the captive-portal address (`198.51.100.1`),
+    /// so apps see a blocked network instead of a resolver that times out.
+    /// Off by default: enabling it claims port 53 on loopback, which a host
+    /// running its own resolver (dnsmasq, bind) must not spare.
+    #[serde(default)]
+    pub dns_proxy: bool,
 }
 
 /// Server-side DNS content-blocker categories and their bit positions in the
@@ -1226,6 +1239,19 @@ size = 1400
         let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
         let with = with_outer_mtu(text, 1400);
         assert_eq!(with, text);
+    }
+
+    #[test]
+    fn dns_proxy_parses_and_defaults_to_off() {
+        // Off by default: enabling it claims loopback port 53, so a config
+        // that never mentions it must never turn it on.
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert!(!config.quick.dns_proxy);
+
+        let enabled = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[quick]\ndns_proxy = true\n\n[[peer]]\nname = \"p\"\n";
+        let config: Config = toml::from_str(enabled).unwrap();
+        assert!(config.quick.dns_proxy);
     }
 
     #[test]

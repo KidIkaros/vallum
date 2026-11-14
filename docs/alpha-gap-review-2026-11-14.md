@@ -42,13 +42,21 @@ lockdown, content-blocker resolver, loopback DNS proxy, MTU tuning, split tunnel
 
 Not built (ordered by alpha value, lowest effort first):
 
-1. **Wire `dns-proxy` into attach/up** (today it is a manual subcommand; leak protection needs
-   it started with the tunnel and `captive_spoof` driven by guard state).
+1. ~~**Wire `dns-proxy` into attach/up**~~ — **landed 2026-11-14**: `[quick] dns_proxy = true`
+   makes `attach`/`up` start the forwarder as a child of `vallum-quick@<stem>.service`
+   (pidfile `/run/vallum/<if>.dns-proxy.pid`), point the resolver at `127.0.0.1`, and kill it
+   on `detach`/`down`/`systemctl stop`; `captive_spoof` follows session liveness via the
+   control socket (dead past the watchdog window → `A` answered `198.51.100.1`).
 2. **Active leak checker** (Mullvad §9.8): periodic non-tunnel probe while connected.
 3. **Crash-persistent lockdown before `network-pre.target`** (Mullvad §9.4) — unit exists,
    needs a boot-time test.
 4. **Settings migration chain** (Mullvad §10.2): config versioning so alpha configs survive upgrades.
 5. TLS/QUIC `DATAGRAM` and Shadowsocks carriers; multihop; relay selector; API fronting (post-alpha).
+
+Verification note for item 1: forwarding relay exercised end-to-end in an unprivileged user
+namespace against a mock upstream; attach/detach dry-run plans checked; the pidfile
+spawn → SIGTERM → port-free lifecycle run against the real binary. Not yet exercised on a
+real two-host tunnel — fold it into the next `verify-remote.sh` run.
 
 ## Commitments (dated, verifiable)
 
