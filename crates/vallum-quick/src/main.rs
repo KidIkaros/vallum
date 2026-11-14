@@ -29,6 +29,7 @@ use vallum_config::{Config, ConfigError};
 
 mod dns;
 mod hooks;
+mod leak_check;
 mod member;
 mod routes;
 mod session;
@@ -155,6 +156,17 @@ enum Action {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run an active non-tunnel TTL=1 leak probe across physical default-route interfaces.
+    LeakCheck {
+        /// The configuration file.
+        config: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Print the probe plan without sending packets.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Export the running daemon as a config (via `vallum showconf`).
     Save {
         /// The configuration file, for its `control` path.
@@ -223,6 +235,11 @@ fn main() -> std::process::ExitCode {
                     *dry_run,
                 )
             }),
+        Action::LeakCheck {
+            config,
+            json,
+            dry_run,
+        } => leak_check::leak_check_cmd(config, *json, *dry_run),
         Action::Save {
             config,
             output,
@@ -602,6 +619,7 @@ fn withdraw_host_side(
     }
 
     remove_routes(config, interface, table, dry_run);
+    leak_check::remove_state(interface, dry_run);
     if config.quick.dns_proxy {
         dns::stop_for_detach(interface, dry_run);
     }

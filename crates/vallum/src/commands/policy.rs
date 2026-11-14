@@ -72,7 +72,7 @@ pub fn policy(args: &PolicyArgs) -> Result<(), Error> {
                 ));
             }
             if args.dry_run {
-                let rules = policy::ruleset(&config, &interface)?;
+                let rules = policy::effective_ruleset(&config, &interface)?;
                 if args.json {
                     emit(&json!({
                         "action": "on",

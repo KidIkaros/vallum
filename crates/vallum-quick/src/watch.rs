@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use vallum_config::Config;
 
 use crate::hooks::check_config_ownership;
+use crate::leak_check::{self, LeakVerdict};
 use crate::routes::{
     apply_blackhole_routes, apply_routes, plan_routes, read_plan, remove_routes, state_path,
 };
@@ -183,6 +184,20 @@ pub(crate) const DEAD_AFTER: Duration = Duration::from_secs(210);
 
 /// How often the watchdog asks the daemon whether the session is alive.
 pub(crate) const WATCH_POLL: Duration = Duration::from_secs(5);
+
+/// How often the watchdog runs the active non-tunnel leak probe while attached.
+const LEAK_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+fn leak_check_interval() -> Option<Duration> {
+    match std::env::var("VALLUM_LEAK_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs).max(WATCH_POLL)),
+        None => Some(LEAK_CHECK_INTERVAL),
+    }
+}
 
 fn dead_after() -> Duration {
     let configured = std::env::var("VALLUM_DEAD_AFTER_SECS")
@@ -372,6 +387,8 @@ pub(crate) fn watch(
     }
     let mut attached = read_plan(&state_path(&interface)).is_some();
     let mut degraded_since: Option<Instant> = None;
+    let leak_interval = leak_check_interval();
+    let mut last_leak_check: Option<Instant> = None;
 
     loop {
         if guarded {
@@ -419,6 +436,7 @@ pub(crate) fn watch(
                         match apply_routes(&config, &interface, table, false) {
                             Ok(()) => {
                                 attached = true;
+                                last_leak_check = None;
                                 eprintln!(
                                     "vallum-quick: {interface}: session is back and carrying — routes restored"
                                 );
@@ -430,6 +448,22 @@ pub(crate) fn watch(
                     }
                 }
                 Verdict::Hold => {}
+            }
+
+            if attached && !dry_run {
+                if let Some(interval) = leak_interval {
+                    if last_leak_check.is_none_or(|t| t.elapsed() >= interval) {
+                        let verdict = leak_check::run_active_leak_check(&config, &interface);
+                        leak_check::write_state(&interface, &verdict);
+                        if let LeakVerdict::Leaking { leaks } = verdict {
+                            eprintln!(
+                                "vallum-quick: {interface}: ACTIVE LEAK DETECTED: {}",
+                                leaks.join("; ")
+                            );
+                        }
+                        last_leak_check = Some(Instant::now());
+                    }
+                }
             }
         }
         sleep(WATCH_POLL);

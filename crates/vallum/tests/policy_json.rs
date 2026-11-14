@@ -165,3 +165,56 @@ fn a_split_tunnel_asked_for_on_is_a_refusal_even_with_json() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("split tunnel"), "{stderr}");
 }
+
+#[test]
+fn early_boot_lockdown_unit_and_dns_free_policy_on_succeed_before_network() {
+    let unit_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/vallum-guard@.service");
+    let unit = std::fs::read_to_string(&unit_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", unit_path.display()));
+    assert!(
+        unit.contains("Before=network-pre.target"),
+        "guard unit must order before network-pre.target"
+    );
+    assert!(
+        unit.contains("Wants=network-pre.target"),
+        "guard unit must pull in network-pre.target ordering"
+    );
+    assert!(
+        unit.contains("ExecStart=/usr/bin/vallum policy on --config /etc/vallum/%i.toml"),
+        "guard unit ExecStart must invoke `vallum policy on`"
+    );
+    assert!(
+        !unit
+            .lines()
+            .any(|l| !l.trim_start().starts_with('#') && l.contains("PartOf=vallum@%i.service")),
+        "guard unit must stay crash-persistent across daemon stops"
+    );
+
+    // At early boot (before network-pre.target), DNS is unavailable. With
+    // `[quick] policy = "lockdown"`, `vallum policy on` must still succeed
+    // and emit a fail-closed ruleset.
+    let lockdown_unresolvable = r#"
+[interface]
+name = "vallum-laptop"
+private_key = "k.key"
+addresses = ["10.7.0.2/32"]
+
+[quick]
+policy = "lockdown"
+
+[[peer]]
+name = "server"
+public_key = "vallum1:0003:aa:-"
+endpoint = "early-boot-unresolvable.invalid:51820"
+allowed_ips = ["0.0.0.0/0"]
+"#;
+    let config = scratch("early-boot-lockdown", lockdown_unresolvable);
+    let report = json(&run(&["policy", "on", "--dry-run", "--json"], &config));
+    assert_eq!(report["action"], "on");
+    let rules = report["ruleset"].as_str().unwrap();
+    assert!(
+        rules.contains("drop"),
+        "early-boot lockdown ruleset must fail closed: {rules}"
+    );
+}

@@ -14,13 +14,18 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use vallum_core::shaping::Machine;
 
+mod migrate;
 mod preset;
+pub use migrate::{migrate_toml, MigrationError, MigrationReport, CURRENT_SCHEMA_VERSION};
 pub use preset::ShapingPreset;
 
 /// A parsed configuration file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Configuration schema version (omitted = legacy v0, current = 1).
+    #[serde(default)]
+    pub schema_version: Option<u32>,
     /// The interface and the daemon's own identity.
     pub interface: Interface,
     /// The peers, in `[[peer]]` order.
@@ -731,16 +736,27 @@ impl Config {
         Ok(config)
     }
 
-    /// [`load`] with [`with_local_fwmark`] applied first: a full-tunnel
-    /// config minted before `fwmark` existed gains the local routing mark
-    /// in memory so clients that load a stale on-disk config still attach.
+    /// [`load`] with the settings migration chain ([`migrate_toml`]) and
+    /// [`with_local_fwmark`] applied first: legacy unversioned (`v0`) configs
+    /// upgrade cleanly in memory, while configs from a newer schema version
+    /// are refused explicitly.
     pub fn load_normalized(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+        let migrated = match migrate_toml(&text) {
+            Ok((out, _)) => out,
+            Err(MigrationError::Parse(_)) => text,
+            Err(err) => {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                });
+            }
+        };
         let config: Self =
-            toml::from_str(&with_local_fwmark(&text)).map_err(|source| ConfigError::Toml {
+            toml::from_str(&with_local_fwmark(&migrated)).map_err(|source| ConfigError::Toml {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -750,6 +766,18 @@ impl Config {
 
     /// Semantic checks TOML cannot express.
     fn validate(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(version) = self.schema_version {
+            if version > CURRENT_SCHEMA_VERSION {
+                return Err(ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: MigrationError::UnsupportedFutureVersion {
+                        found: version,
+                        supported: CURRENT_SCHEMA_VERSION,
+                    }
+                    .to_string(),
+                });
+            }
+        }
         if let Some(name) = &self.interface.name {
             validate_interface_name(name).map_err(|message| ConfigError::Invalid {
                 path: path.to_path_buf(),

@@ -47,10 +47,16 @@ Not built (ordered by alpha value, lowest effort first):
    (pidfile `/run/vallum/<if>.dns-proxy.pid`), point the resolver at `127.0.0.1`, and kill it
    on `detach`/`down`/`systemctl stop`; `captive_spoof` follows session liveness via the
    control socket (dead past the watchdog window → `A` answered `198.51.100.1`).
-2. **Active leak checker** (Mullvad §9.8): periodic non-tunnel probe while connected.
-3. **Crash-persistent lockdown before `network-pre.target`** (Mullvad §9.4) — unit exists,
-   needs a boot-time test.
-4. **Settings migration chain** (Mullvad §10.2): config versioning so alpha configs survive upgrades.
+2. ~~**Active leak checker** (Mullvad §9.8)~~ — **landed 2026-11-14**: `vallum-quick leak-check`
+   + periodic TTL=1 non-tunnel probe in `vallum-quick watch` (every 60s via
+   `VALLUM_LEAK_CHECK_SECS`), state persisted at `/run/vallum/<if>.leak-check`,
+   and surfaced in `vallum doctor` (`active_leak`).
+3. ~~**Crash-persistent lockdown before `network-pre.target`** (Mullvad §9.4)~~ — **verified 2026-11-14**:
+   `packaging/vallum-guard@.service` ordering (`Before=network-pre.target`, no `PartOf`) and
+   DNS-free `policy = "lockdown"` fallback pinned in `policy_json.rs`.
+4. ~~**Settings migration chain** (Mullvad §10.2)~~ — **landed 2026-11-14**: `schema_version`
+   + `vallum_config::migrate_toml` (`v0` -> `v1` canonicalizing legacy `failure_policy` aliases,
+   injecting `DEFAULT_FWMARK` for full-tunnel configs, and refusing future schema versions).
 5. TLS/QUIC `DATAGRAM` and Shadowsocks carriers; multihop; relay selector; API fronting (post-alpha).
 
 Verification note for item 1: forwarding relay exercised end-to-end in an unprivileged user

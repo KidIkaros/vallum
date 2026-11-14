@@ -442,6 +442,22 @@ fn ruleset_steps(config: &Config, interface: &str, rules: String) -> Vec<HostSte
     steps
 }
 
+/// Resolve the guard ruleset, falling back to [`lockdown_ruleset`] when
+/// `[quick] policy = "lockdown"` and endpoints cannot yet be resolved.
+///
+/// # Errors
+/// Propagates [`ruleset`]'s refusal when there is nothing safe to permit and
+/// lockdown mode is not active.
+pub fn effective_ruleset(config: &Config, interface: &str) -> Result<String, Error> {
+    match ruleset(config, interface) {
+        Ok(rules) => Ok(rules),
+        Err(_) if Mode::from_config(config) == Mode::Lockdown => {
+            Ok(lockdown_ruleset(config, interface))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// The steps that install the guard, including CVE-2019-14899 sysctl hardening
 /// for IPv4 policy routing (`src_valid_mark=1` and `arp_ignore=2`).
 ///
@@ -452,13 +468,7 @@ fn ruleset_steps(config: &Config, interface: &str, rules: String) -> Vec<HostSte
 /// Propagates [`ruleset`]'s refusal when there is nothing safe to permit and
 /// lockdown mode is not active.
 pub fn guard_steps(config: &Config, interface: &str) -> Result<Vec<HostStep>, Error> {
-    let rules = match ruleset(config, interface) {
-        Ok(rules) => rules,
-        Err(_) if Mode::from_config(config) == Mode::Lockdown => {
-            lockdown_ruleset(config, interface)
-        }
-        Err(error) => return Err(error),
-    };
+    let rules = effective_ruleset(config, interface)?;
     Ok(ruleset_steps(config, interface, rules))
 }
 

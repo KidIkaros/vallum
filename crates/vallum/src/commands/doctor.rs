@@ -288,6 +288,10 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         if let Some(route_check) = check_route_leak(args.config.as_deref(), resolved, tunnel_live) {
             checks.push(route_check);
         }
+        if let Some(active_check) = check_active_leak(args.config.as_deref(), resolved, tunnel_live)
+        {
+            checks.push(active_check);
+        }
         let rotating: Vec<&str> = resolved
             .peers
             .iter()
@@ -1178,6 +1182,75 @@ fn check_route_leak(
     Some(evaluate_route_leak(interface, &inputs))
 }
 
+fn evaluate_active_leak(status: &str, detail: &str) -> Check {
+    match status {
+        "clean" => Check::new("active_leak", Status::Pass, detail.to_owned()),
+        "leaking" => Check::new("active_leak", Status::Fail, detail.to_owned()),
+        _ => Check::new(
+            "active_leak",
+            Status::Warn,
+            format!("active leak probe inconclusive: {detail}"),
+        ),
+    }
+}
+
+fn check_active_leak(
+    config_path: Option<&Path>,
+    resolved: &crate::config::Resolved,
+    tunnel_live: bool,
+) -> Option<Check> {
+    if !tunnel_live {
+        return None;
+    }
+    let path = config_path?;
+    let cfg = Config::load(path).ok()?;
+    let full_tunnel = cfg.peers.iter().any(|peer| {
+        peer.allowed_ips
+            .iter()
+            .any(|cidr| cidr.trim() == "0.0.0.0/0" || cidr.trim() == "::/0")
+    });
+    if !full_tunnel {
+        return None;
+    }
+
+    let interface = resolved.interface_name.as_deref().unwrap_or("vallum0");
+    let state_file = Path::new("/run/vallum").join(format!("{interface}.leak-check"));
+    if let Ok(raw) = std::fs::read_to_string(&state_file) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let checked_at = val.get("checked_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            if now.saturating_sub(checked_at) <= 180 {
+                if let (Some(status), Some(detail)) = (
+                    val.get("status").and_then(|v| v.as_str()),
+                    val.get("detail").and_then(|v| v.as_str()),
+                ) {
+                    return Some(evaluate_active_leak(status, detail));
+                }
+            }
+        }
+    }
+
+    // No fresh watchdog verdict; ask vallum-quick to run a one-shot probe.
+    let quick_bin = if Path::new("/usr/bin/vallum-quick").exists() {
+        "/usr/bin/vallum-quick"
+    } else {
+        "vallum-quick"
+    };
+    let out = std::process::Command::new(quick_bin)
+        .args(["leak-check", "--json"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let val: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let status = val.get("status").and_then(|v| v.as_str())?;
+    let detail = val.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    Some(evaluate_active_leak(status, detail))
+}
+
 /// A server has to forward, or clients reach nothing but the server.
 fn check_forwarding(resolved: &crate::config::Resolved) -> Check {
     let has_v4 = resolved
@@ -1933,6 +2006,14 @@ mod tests {
             ),
             vec!["127.0.0.53".to_owned(), "1.1.1.1".to_owned()]
         );
+
+        let active_clean =
+            super::evaluate_active_leak("clean", "non-tunnel egress blocked on eth0(IPv4)");
+        assert_eq!(active_clean.status, super::Status::Pass);
+
+        let active_leak =
+            super::evaluate_active_leak("leaking", "IPv4 probe via `eth0` escaped host");
+        assert_eq!(active_leak.status, super::Status::Fail);
     }
 
     #[test]
