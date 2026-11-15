@@ -37,6 +37,7 @@ SKIP_REMOTE=""
 SKIP_ARM=""
 SKIP_FUZZ=""
 SKIP_STALE=""
+SKIP_DESKTOP=""
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 SIGN_KEY="${VALLUM_RELEASE_KEY:-$HOME/.config/vallum/release-signing-key}"
 while [ $# -gt 0 ]; do
@@ -62,6 +63,11 @@ while [ $# -gt 0 ]; do
             shift
             SKIP_STALE="${1:-}"
             [ -n "$SKIP_STALE" ] || { echo "--skip-stale needs a reason" >&2; exit 1; }
+            ;;
+        --skip-desktop)
+            shift
+            SKIP_DESKTOP="${1:-}"
+            [ -n "$SKIP_DESKTOP" ] || { echo "--skip-desktop needs a reason" >&2; exit 1; }
             ;;
         -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -323,6 +329,16 @@ if [ "$DRY" -eq 0 ]; then
     cp target/debian/*.deb dist/ 2>/dev/null || true
     cp crates/vallum/target/generate-rpm/*.rpm dist/ 2>/dev/null || true
     ok "the tarballs carry both binaries, all three units and the man pages"
+
+    if [ -n "$SKIP_DESKTOP" ]; then
+        printf '   skip  desktop bundle: %s\n' "$SKIP_DESKTOP"
+    elif command -v cargo-tauri >/dev/null 2>&1; then
+        say "packaging desktop (vallum-desktop)"
+        bash scripts/package-desktop.sh --bundles deb --out-dir dist
+        ok "staged vallum-desktop .deb"
+    else
+        fail "cargo-tauri not found for vallum-desktop bundle (or pass --skip-desktop \"reason\")"
+    fi
 
     say "sbom"
     cargo sbom --output-format spdx_json_2_3 > "dist/vallum-$tag-sbom.spdx.json"
