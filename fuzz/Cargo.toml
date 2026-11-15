@@ -83,3 +83,10 @@ path = "fuzz_targets/shaping.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "carrier_framing"
+path = "fuzz_targets/carrier_framing.rs"
+test = false
+doc = false
+bench = false

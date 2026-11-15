@@ -86,7 +86,7 @@ jobs:
           seconds=60
           if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
           failed=()
-          for target in message_parse handshake_decode replay shaping enroll_parse epoch_open segment_reassembly; do
+          for target in message_parse handshake_decode replay shaping enroll_parse epoch_open segment_reassembly carrier_framing; do
             mkdir -p "fuzz/corpus/$target"
             cp -n "fuzz/seeds/$target"/* "fuzz/corpus/$target"/ 2>/dev/null || true
             echo "=== $target (${seconds}s)"
