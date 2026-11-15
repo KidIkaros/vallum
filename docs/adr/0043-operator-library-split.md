@@ -20,26 +20,51 @@ An Android `VpnService` build (see `plan-packaging-desktop-android-2026-11-14.md
 cannot compile the daemon half (`tun2`, `netlink`, `seccompiler`, `nix`
 mounts), and a desktop `.deb` pays for it in size and build time.
 
+## Measured dependency graph (2026-11-15)
+
+Crate-internal imports per operator module, measured with `grep crate::`:
+
+| Module | Depends on |
+|---|---|
+| `entropy`, `bundle` | nothing |
+| `form`, `keys` (also `error`, `host`) | `keys` / `error`, `host` |
+| `config` | `error`, `keys`, `logging`, **`privileges`, `sandbox`, `tun`** |
+| `config_edit`, `guidance` | `keys` / `config` |
+| `uapi` | `keys`, `config::Carrier`, **`run::LoopStats`** |
+| `control` | `clock`, `config`, `keys`, `uapi`, **`net`, `run`** |
+| `enroll` | `config`, `entropy`, `keys`, `host`, **`commands`, `tls_quic`** |
+
+The first draft of this ADR called `uapi` "pure protocol" and proposed
+extracting it first. That was wrong: it needs `config::Carrier` and the
+daemon's `run::LoopStats`, and `config` itself reaches into `privileges`,
+`sandbox` and `tun`. No operator module can leave first; the daemon-only
+types they touch have to be untangled before any crate boundary is cut.
+
 ## Decision (proposed)
 
-Split along the seam the GUI already draws, in this order, each step shippable
-alone:
+Cut the dependencies, then the crates, each step shippable alone:
 
-1. `vallum-uapi`: `uapi` + `qr_frames` (smallest, no dependency on the rest).
-2. `vallum-operator`: `config`, `config_edit`, `keys`, `bundle`, `enroll`,
-   `control` (client), `guidance`, `form`, `entropy`, `host::{probes,paths}`.
-3. `vallum` keeps the daemon and re-exports both so `crate::` paths in
-   commands keep compiling during the move.
-4. `vallum-engine` (later, Android): the carriers and tunnel loop behind a
-   TUN-fd and a `protect(socket)` trait, with no netlink/nft/systemd.
+1. **Move the shared data types down.** `LoopStats` and `Carrier` (plain
+   data, no behaviour) move to `vallum-core` or `vallum-config`; the daemon
+   re-exports them. After this `uapi` no longer imports `run`.
+2. **Make `config` stop importing the daemon.** Whatever `config` takes from
+   `privileges`, `sandbox`, `tun` (validation helpers, constants) moves with
+   the data or is injected; `enroll`'s use of `commands` and `tls_quic` gets
+   the same treatment.
+3. **Then extract `vallum-operator`**: `config`, `config_edit`, `keys`,
+   `bundle`, `enroll`, `control` client, `uapi`, `qr_frames`, `guidance`,
+   `form`, `entropy`, `host::{probes,paths}`. The daemon keeps `run`, `tun`,
+   `hostnet`, `sandbox`, `privileges`, `policy` and the carriers, and
+   re-exports the operator crate so existing paths compile during the move.
+4. **`vallum-engine`** (Android): carriers and tunnel loop behind a TUN-fd
+   and a `protect(socket)` trait, with no netlink/nft/systemd.
 
-`net::mtu` (extracted in this change) is the first piece: the GUI's one `net`
-use is pure computation, so it moves with step 2 rather than dragging the
-carriers along.
+`net::mtu` (already extracted) is the GUI's one `net` use and is pure
+computation, so it moves with step 3 rather than dragging the carriers along.
 
 ## Why not do it now
 
-Step 2 moves modules that `commands/*`, `run`, and `control` import by
+Steps 1-3 move modules that `commands/*`, `run`, and `control` import by
 crate-relative path, plus their tests. That is a multi-commit change with
 a feature-matrix check on `wingman-vps` after each step, not something to
 land unreviewed beside a release.
