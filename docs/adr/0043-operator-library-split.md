@@ -1,6 +1,6 @@
 # 0043. Split the operator-facing library from the Linux daemon
 
-Status: proposed (not yet implemented)
+Status: steps 1-3 deferred; step 4 is the Android prerequisite (not yet scheduled)
 
 ## Context
 
@@ -62,12 +62,21 @@ Cut the dependencies, then the crates, each step shippable alone:
 `net::mtu` (already extracted) is the GUI's one `net` use and is pure
 computation, so it moves with step 3 rather than dragging the carriers along.
 
-## Why not do it now
+## Why steps 1-3 are deferred (2026-11-15)
 
-Steps 1-3 move modules that `commands/*`, `run`, and `control` import by
-crate-relative path, plus their tests. That is a multi-commit change with
-a feature-matrix check on `wingman-vps` after each step, not something to
-land unreviewed beside a release.
+Measured with `cargo tree -p vallum-gui -e normal`: the GUI has 504 unique
+dependencies, 48 of them Tauri/WebKit/GTK. The daemon-only crates it reaches
+through `vallum` (`tun2`, `netlink-*`, `seccompiler`, `quinn-proto`, `rcgen`)
+are a handful by comparison. Steps 1-3 touch about 147 `uapi`/`qr_frames` use
+sites plus `commands/*`, `run` and `control`, for a benefit that is small next
+to the Tauri weight.
+
+An Android `VpnService` app does not link the operator layer or `vallum-gui`;
+it needs the engine (step 4). Steps 1-3 therefore do not block Android.
+
+**Trigger to revisit steps 1-3:** a measured desktop problem, such as GUI
+build time or `.deb` size that a user or CI run actually complains about.
+Step 4 is scoped when the Android work starts.
 
 ## Gate for each step
 
