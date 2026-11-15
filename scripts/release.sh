@@ -36,6 +36,8 @@ UPLOAD=1
 SKIP_REMOTE=""
 SKIP_ARM=""
 SKIP_FUZZ=""
+SKIP_STALE=""
+MIN_FREE_GB="${MIN_FREE_GB:-15}"
 SIGN_KEY="${VALLUM_RELEASE_KEY:-$HOME/.config/vallum/release-signing-key}"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,6 +57,11 @@ while [ $# -gt 0 ]; do
             shift
             SKIP_FUZZ="${1:-}"
             [ -n "$SKIP_FUZZ" ] || { echo "--skip-fuzz needs a reason" >&2; exit 1; }
+            ;;
+        --skip-stale)
+            shift
+            SKIP_STALE="${1:-}"
+            [ -n "$SKIP_STALE" ] || { echo "--skip-stale needs a reason" >&2; exit 1; }
             ;;
         -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -89,6 +96,16 @@ fail() {
 ok() { printf '   ok    %s\n' "$*"; }
 
 say "preflight"
+
+# A full release builds two targets plus the gates; v1.7.0 prep once died with
+# `No space left on device` because target/debug had grown to 77 GB. Refuse
+# early, with the fix, rather than half-way through a build.
+free_kb=$(df -Pk "$root" | awk 'NR==2 {print $4}')
+if [ "$((free_kb / 1024 / 1024))" -lt "$MIN_FREE_GB" ]; then
+    fail "only $((free_kb / 1024 / 1024)) GiB free on the build volume (need $MIN_FREE_GB).
+   Reclaim: rm -rf target/debug fuzz/target   (or MIN_FREE_GB=<n> to override)"
+fi
+ok "$((free_kb / 1024 / 1024)) GiB free on the build volume"
 
 if [ -n "$(git status --porcelain)" ]; then
     git status --short >&2
@@ -127,6 +144,7 @@ fi
 # than silently standing in for this one, and a shrinking assertion count is a
 # signal that a gate got weaker.
 VERDICT_DIR="${VERDICT_DIR:-$PWD/.vallum-verdicts}"
+stale_gates=""
 if [ -d "$VERDICT_DIR" ]; then
     for vf in "$VERDICT_DIR"/*.json; do
         [ -e "$vf" ] || continue
@@ -143,10 +161,22 @@ if [ -d "$VERDICT_DIR" ]; then
         else
             printf '   stale %s ran on %s (%s assertions), not this commit\n' \
                 "$v_gate" "$(printf '%s' "$v_commit" | cut -c1-7)" "$v_assert"
+            stale_gates="$stale_gates $v_gate"
         fi
     done
 else
     printf '   note  no verdict records in %s\n' "$VERDICT_DIR"
+fi
+# A stale verdict used to print and pass, which made shipping on old evidence
+# the default. It is now a refusal; the skip is allowed but must be written down.
+if [ -n "$stale_gates" ]; then
+    if [ -n "$SKIP_STALE" ]; then
+        printf '   skip  stale verdicts (%s ): %s\n' "${stale_gates# }" "$SKIP_STALE"
+    else
+        fail "stale acceptance verdicts:$stale_gates.
+   Re-run them on this commit (scripts/accept-*.sh on wingman-vps),
+   or release anyway with: --skip-stale \"reason\" (record it in docs/qa/)"
+    fi
 fi
 
 # The signing key. Releases are only as trustworthy as the verification
