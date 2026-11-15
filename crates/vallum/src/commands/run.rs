@@ -184,9 +184,11 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
         resolved.carrier,
         resolved.listen,
         resolved.fwmark,
-        resolved.tcp_upgrade.as_deref(),
-        resolved.ss_psk.as_deref(),
-        resolved.tls_sni.as_deref(),
+        net::TransportOptions {
+            tcp_upgrade: resolved.tcp_upgrade.as_deref(),
+            ss_psk: resolved.ss_psk.as_deref(),
+            tls_sni: resolved.tls_sni.as_deref(),
+        },
     )?;
     let bound = socket.local_addr().unwrap_or(resolved.listen);
     let shared = Arc::new(SharedSocket::new(Arc::clone(&socket)));

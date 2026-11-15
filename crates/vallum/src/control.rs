@@ -552,9 +552,11 @@ fn apply(device: &mut Device, context: &mut ControlContext, set: Set) -> Result<
             context.carrier,
             address,
             desired_mark,
-            context.tcp_upgrade.as_deref(),
-            context.ss_psk.as_deref(),
-            context.tls_sni.as_deref(),
+            crate::net::TransportOptions {
+                tcp_upgrade: context.tcp_upgrade.as_deref(),
+                ss_psk: context.ss_psk.as_deref(),
+                tls_sni: context.tls_sni.as_deref(),
+            },
         ) {
             Ok(socket) => {
                 let bound = socket.local_addr().unwrap_or(address);

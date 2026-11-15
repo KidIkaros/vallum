@@ -108,6 +108,14 @@ pub fn bind_with_upgrade(
     bind_with_options(carrier, address, fwmark, tcp_upgrade, None)
 }
 
+/// Carrier-specific transport binding options.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TransportOptions<'a> {
+    pub tcp_upgrade: Option<&'a str>,
+    pub ss_psk: Option<&'a str>,
+    pub tls_sni: Option<&'a str>,
+}
+
 /// Bind the transport for `carrier` with optional HTTP/1.1 `Upgrade: vallum`
 /// `Host` header and optional `carrier = "ss"` pre-shared obfuscation key.
 pub fn bind_with_options(
@@ -117,18 +125,24 @@ pub fn bind_with_options(
     tcp_upgrade: Option<&str>,
     ss_psk: Option<&str>,
 ) -> io::Result<Arc<dyn DatagramSocket>> {
-    bind_with_transport_options(carrier, address, fwmark, tcp_upgrade, ss_psk, None)
+    bind_with_transport_options(
+        carrier,
+        address,
+        fwmark,
+        TransportOptions {
+            tcp_upgrade,
+            ss_psk,
+            tls_sni: None,
+        },
+    )
 }
 
-/// Bind the transport for `carrier` with full carrier-specific options
-/// (`tcp_upgrade`, `ss_psk`, and `tls_sni`).
+/// Bind the transport for `carrier` with full carrier-specific [`TransportOptions`].
 pub fn bind_with_transport_options(
     carrier: Carrier,
     address: SocketAddr,
     fwmark: u32,
-    tcp_upgrade: Option<&str>,
-    ss_psk: Option<&str>,
-    tls_sni: Option<&str>,
+    options: TransportOptions<'_>,
 ) -> io::Result<Arc<dyn DatagramSocket>> {
     Ok(match carrier {
         Carrier::Udp => Arc::new(UdpTransport::bind_with_fwmark(address, fwmark)?),
@@ -136,21 +150,55 @@ pub fn bind_with_transport_options(
         Carrier::Auto => Arc::new(AutoTransport::bind_with_upgrade(
             address,
             fwmark,
-            tcp_upgrade,
+            options.tcp_upgrade,
         )?),
         Carrier::Tcp => Arc::new(TcpTransport::bind_with_upgrade(
             address,
             fwmark,
-            tcp_upgrade,
+            options.tcp_upgrade,
         )?),
-        Carrier::Ss => Arc::new(SsTransport::bind_with_psk(address, fwmark, ss_psk)?),
+        Carrier::Ss => Arc::new(SsTransport::bind_with_psk(address, fwmark, options.ss_psk)?),
         Carrier::Tls => Arc::new(crate::tls_quic::TlsTransport::bind_with_options(
-            address, fwmark, tls_sni,
+            address,
+            fwmark,
+            options.tls_sni,
         )?),
         Carrier::Quic => Arc::new(crate::tls_quic::QuicTransport::bind_with_options(
-            address, fwmark, tls_sni,
+            address,
+            fwmark,
+            options.tls_sni,
         )?),
     })
+}
+
+/// Receive the next queued inbound datagram with a 250ms timeout so rebinds
+/// can wake a blocked reader loop.
+pub(crate) fn recv_queued(
+    inbound: &Mutex<mpsc::Receiver<(SocketAddr, Vec<u8>)>>,
+    buf: &mut [u8],
+    label: &str,
+) -> io::Result<(usize, SocketAddr)> {
+    let Ok(inbound) = inbound.lock() else {
+        return Err(io::Error::other(format!(
+            "{label} inbound queue is poisoned"
+        )));
+    };
+    // A timeout, not a block: the loop's reader compares the socket's
+    // generation on one, which is how a rebind reaches a blocked reader.
+    match inbound.recv_timeout(Duration::from_millis(250)) {
+        Ok((source, bytes)) => {
+            let n = bytes.len().min(buf.len());
+            buf[..n].copy_from_slice(&bytes[..n]);
+            Ok((n, source))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "no frame waiting"))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            format!("{label} closed"),
+        )),
+    }
 }
 
 /// Bind a [`UdpSocket`] with `SO_MARK` and PMTUD / don't-fragment options.
@@ -653,24 +701,7 @@ impl DatagramSocket for TcpTransport {
     }
 
     fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let Ok(inbound) = self.inbound.lock() else {
-            return Err(io::Error::other("carrier inbound queue is poisoned"));
-        };
-        // A timeout, not a block: the loop's reader compares the socket's
-        // generation on one, which is how a rebind reaches a blocked reader.
-        match inbound.recv_timeout(Duration::from_millis(250)) {
-            Ok((source, bytes)) => {
-                let n = bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&bytes[..n]);
-                Ok((n, source))
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "no frame waiting"))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(io::Error::new(io::ErrorKind::BrokenPipe, "carrier closed"))
-            }
-        }
+        recv_queued(&self.inbound, buf, "carrier")
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {

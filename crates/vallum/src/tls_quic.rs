@@ -286,26 +286,16 @@ impl TlsTransport {
         let (inbound_tx, inbound_rx) = mpsc::sync_channel::<(SocketAddr, Vec<u8>)>(CARRIER_QUEUE);
         let (outbound_tx, outbound_rx) = mpsc::sync_channel::<(SocketAddr, Vec<u8>)>(CARRIER_QUEUE);
 
-        spawn_tls_acceptor(
-            listener,
-            server_cfg,
-            Arc::clone(&closed),
-            Arc::clone(&peers),
-            inbound_tx.clone(),
-            Arc::clone(&inbound_dropped),
-            Arc::clone(&outbound_dropped),
-        );
-        spawn_tls_dispatcher(
-            outbound_rx,
-            client_cfg,
-            sni,
-            fwmark,
-            Arc::clone(&closed),
-            Arc::clone(&peers),
+        let bus = TlsPeerBus {
+            peers: Arc::clone(&peers),
             inbound_tx,
-            Arc::clone(&inbound_dropped),
-            Arc::clone(&outbound_dropped),
-        );
+            inbound_dropped: Arc::clone(&inbound_dropped),
+            outbound_dropped: Arc::clone(&outbound_dropped),
+            closed: Arc::clone(&closed),
+        };
+
+        spawn_tls_acceptor(listener, server_cfg, bus.clone());
+        spawn_tls_dispatcher(outbound_rx, client_cfg, sni, fwmark, bus);
 
         Ok(Self {
             local,
@@ -353,23 +343,7 @@ impl DatagramSocket for TlsTransport {
     }
 
     fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let Ok(inbound) = self.inbound.lock() else {
-            return Err(io::Error::other("tls inbound queue is poisoned"));
-        };
-        match inbound.recv_timeout(Duration::from_millis(250)) {
-            Ok((source, bytes)) => {
-                let n = bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&bytes[..n]);
-                Ok((n, source))
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "no frame waiting"))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "tls carrier closed",
-            )),
-        }
+        crate::net::recv_queued(&self.inbound, buf, "tls carrier")
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -377,65 +351,53 @@ impl DatagramSocket for TlsTransport {
     }
 }
 
-fn spawn_tls_acceptor(
-    listener: TcpListener,
-    server_cfg: Arc<ServerConfig>,
-    closed: Arc<AtomicBool>,
+#[derive(Clone)]
+struct TlsPeerBus {
     peers: Arc<Mutex<HashMap<SocketAddr, Arc<TlsPeerHandle>>>>,
     inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
     inbound_dropped: Arc<AtomicU64>,
     outbound_dropped: Arc<AtomicU64>,
-) {
+    closed: Arc<AtomicBool>,
+}
+
+fn spawn_tls_acceptor(listener: TcpListener, server_cfg: Arc<ServerConfig>, bus: TlsPeerBus) {
     let _ = thread::Builder::new()
         .name("vallum-tls-accept".to_owned())
         .spawn(move || loop {
             match listener.accept() {
                 Ok((stream, remote)) => {
-                    if closed.load(Ordering::Relaxed) {
+                    if bus.closed.load(Ordering::Relaxed) {
                         break;
                     }
                     let Ok(conn) = ServerConnection::new(Arc::clone(&server_cfg)) else {
                         continue;
                     };
-                    register_tls_peer(
-                        stream,
-                        remote,
-                        TlsConn::Server(conn),
-                        &peers,
-                        &inbound_tx,
-                        &inbound_dropped,
-                        &outbound_dropped,
-                        &closed,
-                    );
+                    register_tls_peer(stream, remote, TlsConn::Server(conn), &bus);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) if closed.load(Ordering::Relaxed) => break,
+                Err(_) if bus.closed.load(Ordering::Relaxed) => break,
                 Err(_) => thread::sleep(Duration::from_millis(50)),
             }
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_tls_dispatcher(
     outbound_rx: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     client_cfg: Arc<ClientConfig>,
     sni: String,
     fwmark: u32,
-    closed: Arc<AtomicBool>,
-    peers: Arc<Mutex<HashMap<SocketAddr, Arc<TlsPeerHandle>>>>,
-    inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
-    inbound_dropped: Arc<AtomicU64>,
-    outbound_dropped: Arc<AtomicU64>,
+    bus: TlsPeerBus,
 ) {
     let _ = thread::Builder::new()
         .name("vallum-tls-dispatch".to_owned())
         .spawn(move || {
             while let Ok((destination, bytes)) = outbound_rx.recv() {
-                if closed.load(Ordering::Relaxed) {
+                if bus.closed.load(Ordering::Relaxed) {
                     break;
                 }
                 let handle = {
-                    let existing = peers
+                    let existing = bus
+                        .peers
                         .lock()
                         .ok()
                         .and_then(|map| map.get(&destination).map(Arc::clone));
@@ -443,53 +405,39 @@ fn spawn_tls_dispatcher(
                         Some(h)
                     } else {
                         let Ok(stream) = dial(destination, fwmark) else {
-                            outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            bus.outbound_dropped.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
                         let Ok(server_name) = server_name_for(&sni) else {
-                            outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            bus.outbound_dropped.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
                         let Ok(conn) = ClientConnection::new(Arc::clone(&client_cfg), server_name)
                         else {
-                            outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            bus.outbound_dropped.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
-                        register_tls_peer(
-                            stream,
-                            destination,
-                            TlsConn::Client(conn),
-                            &peers,
-                            &inbound_tx,
-                            &inbound_dropped,
-                            &outbound_dropped,
-                            &closed,
-                        )
+                        register_tls_peer(stream, destination, TlsConn::Client(conn), &bus)
                     }
                 };
                 if let Some(h) = handle {
                     if h.outbound.try_send(bytes).is_err() {
-                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                        bus.outbound_dropped.fetch_add(1, Ordering::Relaxed);
                     } else {
                         wake_pipe(&h.wake);
                     }
                 } else {
-                    outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                    bus.outbound_dropped.fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn register_tls_peer(
     stream: TcpStream,
     remote: SocketAddr,
     conn: TlsConn,
-    peers: &Arc<Mutex<HashMap<SocketAddr, Arc<TlsPeerHandle>>>>,
-    inbound_tx: &mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
-    inbound_dropped: &Arc<AtomicU64>,
-    outbound_dropped: &Arc<AtomicU64>,
-    closed: &Arc<AtomicBool>,
+    bus: &TlsPeerBus,
 ) -> Option<Arc<TlsPeerHandle>> {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_nonblocking(true);
@@ -504,32 +452,18 @@ fn register_tls_peer(
         wake: Mutex::new(wake_tx),
         stream: stream_clone,
     });
-    if let Ok(mut map) = peers.lock() {
+    if let Ok(mut map) = bus.peers.lock() {
         map.insert(remote, Arc::clone(&handle));
     }
 
-    let peers_weak = Arc::clone(peers);
     let handle_ref = Arc::clone(&handle);
-    let inbound_tx = inbound_tx.clone();
-    let inbound_dropped = Arc::clone(inbound_dropped);
-    let outbound_dropped = Arc::clone(outbound_dropped);
-    let closed = Arc::clone(closed);
+    let peer_bus = bus.clone();
 
     let _ = thread::Builder::new()
         .name("vallum-tls-peer".to_owned())
         .spawn(move || {
-            run_tls_peer_loop(
-                stream,
-                remote,
-                conn,
-                peer_out_rx,
-                wake_rx,
-                inbound_tx,
-                inbound_dropped,
-                outbound_dropped,
-                closed,
-            );
-            if let Ok(mut map) = peers_weak.lock() {
+            run_tls_peer_loop(stream, remote, conn, peer_out_rx, wake_rx, &peer_bus);
+            if let Ok(mut map) = peer_bus.peers.lock() {
                 if map
                     .get(&remote)
                     .is_some_and(|current| Arc::ptr_eq(current, &handle_ref))
@@ -551,91 +485,36 @@ fn set_pipe_nonblocking(rx: &PipeReader) -> io::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_tls_peer_loop(
     mut stream: TcpStream,
     remote: SocketAddr,
     mut conn: TlsConn,
     outbound_rx: mpsc::Receiver<Vec<u8>>,
     mut wake_rx: PipeReader,
-    inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
-    inbound_dropped: Arc<AtomicU64>,
-    outbound_dropped: Arc<AtomicU64>,
-    closed: Arc<AtomicBool>,
+    bus: &TlsPeerBus,
 ) {
     let mut frames = FrameReader::new();
     let mut plain_buf = [0u8; 4096];
 
     loop {
-        if closed.load(Ordering::Relaxed) {
+        if bus.closed.load(Ordering::Relaxed) {
             break;
         }
         drain_pipe(&mut wake_rx);
 
-        while let Ok(bytes) = outbound_rx.try_recv() {
-            match frame(&bytes) {
-                Ok(framed) => {
-                    if conn.writer().write_all(&framed).is_err() {
-                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                }
-                Err(_) => {
-                    outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+        if !flush_tls_outbound(&mut stream, &mut conn, &outbound_rx, &bus.outbound_dropped) {
+            return;
         }
-
-        while conn.wants_write() {
-            match conn.write_tls(&mut stream) {
-                Ok(0) => return,
-                Ok(_) => continue,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return,
-            }
-        }
-
-        let mut eof = false;
-        loop {
-            match conn.read_tls(&mut stream) {
-                Ok(0) => {
-                    eof = true;
-                    break;
-                }
-                Ok(_) => {
-                    if conn.process_new_packets().is_err() {
-                        return;
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return,
-            }
-        }
-
-        loop {
-            match conn.reader().read(&mut plain_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    frames.push(&plain_buf[..n]);
-                    loop {
-                        match frames.next_frame() {
-                            Ok(Some(packet)) => {
-                                if inbound_tx.try_send((remote, packet)).is_err() {
-                                    inbound_dropped.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            Ok(None) => break,
-                            Err(_) => return,
-                        }
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => return,
-            }
-        }
-
+        let Some(eof) = pump_tls_inbound(
+            &mut stream,
+            remote,
+            &mut conn,
+            &mut frames,
+            &mut plain_buf,
+            bus,
+        ) else {
+            return;
+        };
         if eof {
             break;
         }
@@ -650,6 +529,89 @@ fn run_tls_peer_loop(
         #[cfg(not(target_os = "linux"))]
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn flush_tls_outbound(
+    stream: &mut TcpStream,
+    conn: &mut TlsConn,
+    outbound_rx: &mpsc::Receiver<Vec<u8>>,
+    outbound_dropped: &AtomicU64,
+) -> bool {
+    while let Ok(bytes) = outbound_rx.try_recv() {
+        match frame(&bytes) {
+            Ok(framed) => {
+                if conn.writer().write_all(&framed).is_err() {
+                    outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                    return false;
+                }
+            }
+            Err(_) => {
+                outbound_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    while conn.wants_write() {
+        match conn.write_tls(stream) {
+            Ok(0) => return false,
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+fn pump_tls_inbound(
+    stream: &mut TcpStream,
+    remote: SocketAddr,
+    conn: &mut TlsConn,
+    frames: &mut FrameReader,
+    plain_buf: &mut [u8],
+    bus: &TlsPeerBus,
+) -> Option<bool> {
+    let mut eof = false;
+    loop {
+        match conn.read_tls(stream) {
+            Ok(0) => {
+                eof = true;
+                break;
+            }
+            Ok(_) => {
+                if conn.process_new_packets().is_err() {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+
+    loop {
+        match conn.reader().read(plain_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                frames.push(&plain_buf[..n]);
+                loop {
+                    match frames.next_frame() {
+                        Ok(Some(packet)) => {
+                            if bus.inbound_tx.try_send((remote, packet)).is_err() {
+                                bus.inbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => return None,
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => return None,
+        }
+    }
+
+    Some(eof)
 }
 
 // ── QUIC v1 DATAGRAM Carrier ─────────────────────────────────────────────
@@ -732,18 +694,18 @@ impl QuicTransport {
             None,
         );
 
-        spawn_quic_worker(
+        spawn_quic_worker(QuicWorkerCtx {
             socket,
             endpoint,
-            quic_client_cfg,
+            client_cfg: quic_client_cfg,
             sni,
             wake_rx,
             inbound_tx,
             outbound_rx,
-            Arc::clone(&closed),
-            Arc::clone(&inbound_dropped),
-            Arc::clone(&outbound_dropped),
-        );
+            closed: Arc::clone(&closed),
+            inbound_dropped: Arc::clone(&inbound_dropped),
+            outbound_dropped: Arc::clone(&outbound_dropped),
+        });
 
         Ok(Self {
             local,
@@ -785,24 +747,7 @@ impl DatagramSocket for QuicTransport {
     }
 
     fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        let Ok(inbound) = self.inbound.lock() else {
-            return Err(io::Error::other("quic inbound queue is poisoned"));
-        };
-        match inbound.recv_timeout(Duration::from_millis(250)) {
-            Ok((source, bytes)) => {
-                let n = bytes.len().min(buf.len());
-                buf[..n].copy_from_slice(&bytes[..n]);
-                Ok((n, source))
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "no datagram waiting",
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "quic carrier closed",
-            )),
-        }
+        crate::net::recv_queued(&self.inbound, buf, "quic carrier")
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -810,186 +755,59 @@ impl DatagramSocket for QuicTransport {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_quic_worker(
+struct QuicWorkerCtx {
     socket: UdpSocket,
-    mut endpoint: Endpoint,
+    endpoint: Endpoint,
     client_cfg: QuicClientCfg,
     sni: String,
-    mut wake_rx: PipeReader,
+    wake_rx: PipeReader,
     inbound_tx: mpsc::SyncSender<(SocketAddr, Vec<u8>)>,
     outbound_rx: mpsc::Receiver<(SocketAddr, Vec<u8>)>,
     closed: Arc<AtomicBool>,
     inbound_dropped: Arc<AtomicU64>,
     outbound_dropped: Arc<AtomicU64>,
-) {
+}
+
+struct QuicWorkerState {
+    conns: HashMap<ConnectionHandle, Connection>,
+    addr_to_handle: HashMap<SocketAddr, ConnectionHandle>,
+    handle_to_addr: HashMap<ConnectionHandle, SocketAddr>,
+    pending: HashMap<ConnectionHandle, VecDeque<Bytes>>,
+    recv_buf: Vec<u8>,
+    resp_buf: Vec<u8>,
+    tx_buf: Vec<u8>,
+}
+
+impl QuicWorkerState {
+    fn new() -> Self {
+        Self {
+            conns: HashMap::new(),
+            addr_to_handle: HashMap::new(),
+            handle_to_addr: HashMap::new(),
+            pending: HashMap::new(),
+            recv_buf: vec![0u8; 65_535],
+            resp_buf: Vec::with_capacity(2048),
+            tx_buf: Vec::with_capacity(2048),
+        }
+    }
+}
+
+fn spawn_quic_worker(mut ctx: QuicWorkerCtx) {
     let _ = thread::Builder::new()
         .name("vallum-quic-io".to_owned())
         .spawn(move || {
-            let mut conns: HashMap<ConnectionHandle, Connection> = HashMap::new();
-            let mut addr_to_handle: HashMap<SocketAddr, ConnectionHandle> = HashMap::new();
-            let mut handle_to_addr: HashMap<ConnectionHandle, SocketAddr> = HashMap::new();
-            let mut pending: HashMap<ConnectionHandle, VecDeque<Bytes>> = HashMap::new();
-            let mut recv_buf = [0u8; 65_535];
-            let mut resp_buf = Vec::with_capacity(2048);
-            let mut tx_buf = Vec::with_capacity(2048);
+            let mut state = QuicWorkerState::new();
 
             loop {
-                if closed.load(Ordering::Relaxed) {
+                if ctx.closed.load(Ordering::Relaxed) {
                     break;
                 }
-                drain_pipe(&mut wake_rx);
+                drain_pipe(&mut ctx.wake_rx);
                 let now = Instant::now();
 
-                loop {
-                    match socket.recv_from(&mut recv_buf) {
-                        Ok((n, remote)) => {
-                            resp_buf.clear();
-                            let Some(event) = endpoint.handle(
-                                now,
-                                remote,
-                                None,
-                                None,
-                                BytesMut::from(&recv_buf[..n]),
-                                &mut resp_buf,
-                            ) else {
-                                continue;
-                            };
-                            match event {
-                                DatagramEvent::NewConnection(incoming) => {
-                                    resp_buf.clear();
-                                    if let Ok((handle, conn)) =
-                                        endpoint.accept(incoming, now, &mut resp_buf, None)
-                                    {
-                                        conns.insert(handle, conn);
-                                        addr_to_handle.insert(remote, handle);
-                                        handle_to_addr.insert(handle, remote);
-                                    } else if !resp_buf.is_empty() {
-                                        let _ = socket.send_to(&resp_buf, remote);
-                                    }
-                                }
-                                DatagramEvent::ConnectionEvent(handle, ev) => {
-                                    if let Some(conn) = conns.get_mut(&handle) {
-                                        conn.handle_event(ev);
-                                    }
-                                }
-                                DatagramEvent::Response(transmit) => {
-                                    let _ = socket.send_to(&resp_buf, transmit.destination);
-                                }
-                            }
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    }
-                }
-
-                while let Ok((dest, bytes)) = outbound_rx.try_recv() {
-                    let handle = if let Some(&h) = addr_to_handle.get(&dest) {
-                        Some(h)
-                    } else {
-                        match endpoint.connect(now, client_cfg.clone(), dest, &sni) {
-                            Ok((h, conn)) => {
-                                conns.insert(h, conn);
-                                addr_to_handle.insert(dest, h);
-                                handle_to_addr.insert(h, dest);
-                                Some(h)
-                            }
-                            Err(_) => None,
-                        }
-                    };
-                    let Some(h) = handle else {
-                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    };
-                    let Some(conn) = conns.get_mut(&h) else {
-                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    };
-                    let payload = Bytes::from(bytes);
-                    if conn.is_handshaking() {
-                        let q = pending.entry(h).or_default();
-                        if q.len() >= QUIC_PENDING_CAP {
-                            q.pop_front();
-                            outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                        }
-                        q.push_back(payload);
-                    } else if conn.datagrams().send(payload, true).is_err() {
-                        outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-
-                let mut terminated = Vec::new();
-                let mut earliest_timeout: Option<Instant> = None;
-
-                for (&handle, conn) in &mut conns {
-                    if let Some(deadline) = conn.poll_timeout() {
-                        if deadline <= now {
-                            conn.handle_timeout(now);
-                        }
-                    }
-
-                    while let Some(ev) = conn.poll() {
-                        match ev {
-                            QuicEvent::HandshakeDataReady | QuicEvent::Connected => {
-                                if !conn.is_handshaking() {
-                                    if let Some(mut queue) = pending.remove(&handle) {
-                                        while let Some(pkt) = queue.pop_front() {
-                                            if conn.datagrams().send(pkt, true).is_err() {
-                                                outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            QuicEvent::DatagramReceived => {
-                                let remote = handle_to_addr.get(&handle).copied();
-                                while let Some(dgram) = conn.datagrams().recv() {
-                                    if let Some(src) = remote {
-                                        if inbound_tx.try_send((src, dgram.to_vec())).is_err() {
-                                            inbound_dropped.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                }
-                            }
-                            QuicEvent::ConnectionLost { .. } => {
-                                terminated.push(handle);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    while let Some(ev) = conn.poll_endpoint_events() {
-                        if let Some(con_ev) = endpoint.handle_event(handle, ev) {
-                            conn.handle_event(con_ev);
-                        }
-                    }
-
-                    loop {
-                        tx_buf.clear();
-                        let Some(transmit) = conn.poll_transmit(now, 8, &mut tx_buf) else {
-                            break;
-                        };
-                        let _ = socket.send_to(&tx_buf, transmit.destination);
-                    }
-
-                    if let Some(t) = conn.poll_timeout() {
-                        earliest_timeout = Some(match earliest_timeout {
-                            Some(cur) => cur.min(t),
-                            None => t,
-                        });
-                    }
-                }
-
-                for h in terminated {
-                    conns.remove(&h);
-                    pending.remove(&h);
-                    if let Some(addr) = handle_to_addr.remove(&h) {
-                        if addr_to_handle.get(&addr) == Some(&h) {
-                            addr_to_handle.remove(&addr);
-                        }
-                    }
-                }
+                drain_quic_udp(&mut ctx, &mut state, now);
+                drain_quic_outbound(&mut ctx, &mut state, now);
+                let earliest_timeout = step_quic_connections(&mut ctx, &mut state, now);
 
                 let wait = earliest_timeout
                     .map(|t| t.saturating_duration_since(Instant::now()))
@@ -997,11 +815,177 @@ fn spawn_quic_worker(
                     .min(Duration::from_millis(250));
 
                 #[cfg(target_os = "linux")]
-                poll_two_fds(&socket, false, &wake_rx, Some(wait));
+                poll_two_fds(&ctx.socket, false, &ctx.wake_rx, Some(wait));
                 #[cfg(not(target_os = "linux"))]
                 thread::sleep(wait.min(Duration::from_millis(5)));
             }
         });
+}
+
+fn drain_quic_udp(ctx: &mut QuicWorkerCtx, state: &mut QuicWorkerState, now: Instant) {
+    loop {
+        match ctx.socket.recv_from(&mut state.recv_buf) {
+            Ok((n, remote)) => {
+                state.resp_buf.clear();
+                let Some(event) = ctx.endpoint.handle(
+                    now,
+                    remote,
+                    None,
+                    None,
+                    BytesMut::from(&state.recv_buf[..n]),
+                    &mut state.resp_buf,
+                ) else {
+                    continue;
+                };
+                match event {
+                    DatagramEvent::NewConnection(incoming) => {
+                        state.resp_buf.clear();
+                        if let Ok((handle, conn)) =
+                            ctx.endpoint
+                                .accept(incoming, now, &mut state.resp_buf, None)
+                        {
+                            state.conns.insert(handle, conn);
+                            state.addr_to_handle.insert(remote, handle);
+                            state.handle_to_addr.insert(handle, remote);
+                        } else if !state.resp_buf.is_empty() {
+                            let _ = ctx.socket.send_to(&state.resp_buf, remote);
+                        }
+                    }
+                    DatagramEvent::ConnectionEvent(handle, ev) => {
+                        if let Some(conn) = state.conns.get_mut(&handle) {
+                            conn.handle_event(ev);
+                        }
+                    }
+                    DatagramEvent::Response(transmit) => {
+                        let _ = ctx.socket.send_to(&state.resp_buf, transmit.destination);
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+fn drain_quic_outbound(ctx: &mut QuicWorkerCtx, state: &mut QuicWorkerState, now: Instant) {
+    while let Ok((dest, bytes)) = ctx.outbound_rx.try_recv() {
+        let handle = if let Some(&h) = state.addr_to_handle.get(&dest) {
+            Some(h)
+        } else {
+            match ctx
+                .endpoint
+                .connect(now, ctx.client_cfg.clone(), dest, &ctx.sni)
+            {
+                Ok((h, conn)) => {
+                    state.conns.insert(h, conn);
+                    state.addr_to_handle.insert(dest, h);
+                    state.handle_to_addr.insert(h, dest);
+                    Some(h)
+                }
+                Err(_) => None,
+            }
+        };
+        let Some(h) = handle else {
+            ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        let Some(conn) = state.conns.get_mut(&h) else {
+            ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        let payload = Bytes::from(bytes);
+        if conn.is_handshaking() {
+            let q = state.pending.entry(h).or_default();
+            if q.len() >= QUIC_PENDING_CAP {
+                q.pop_front();
+                ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            q.push_back(payload);
+        } else if conn.datagrams().send(payload, true).is_err() {
+            ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn step_quic_connections(
+    ctx: &mut QuicWorkerCtx,
+    state: &mut QuicWorkerState,
+    now: Instant,
+) -> Option<Instant> {
+    let mut terminated = Vec::new();
+    let mut earliest_timeout: Option<Instant> = None;
+
+    for (&handle, conn) in &mut state.conns {
+        if let Some(deadline) = conn.poll_timeout() {
+            if deadline <= now {
+                conn.handle_timeout(now);
+            }
+        }
+
+        while let Some(ev) = conn.poll() {
+            match ev {
+                QuicEvent::HandshakeDataReady | QuicEvent::Connected => {
+                    if !conn.is_handshaking() {
+                        if let Some(mut queue) = state.pending.remove(&handle) {
+                            while let Some(pkt) = queue.pop_front() {
+                                if conn.datagrams().send(pkt, true).is_err() {
+                                    ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+                QuicEvent::DatagramReceived => {
+                    let remote = state.handle_to_addr.get(&handle).copied();
+                    while let Some(dgram) = conn.datagrams().recv() {
+                        if let Some(src) = remote {
+                            if ctx.inbound_tx.try_send((src, dgram.to_vec())).is_err() {
+                                ctx.inbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                QuicEvent::ConnectionLost { .. } => {
+                    terminated.push(handle);
+                }
+                _ => {}
+            }
+        }
+
+        while let Some(ev) = conn.poll_endpoint_events() {
+            if let Some(con_ev) = ctx.endpoint.handle_event(handle, ev) {
+                conn.handle_event(con_ev);
+            }
+        }
+
+        loop {
+            state.tx_buf.clear();
+            let Some(transmit) = conn.poll_transmit(now, 8, &mut state.tx_buf) else {
+                break;
+            };
+            let _ = ctx.socket.send_to(&state.tx_buf, transmit.destination);
+        }
+
+        if let Some(t) = conn.poll_timeout() {
+            earliest_timeout = Some(match earliest_timeout {
+                Some(cur) => cur.min(t),
+                None => t,
+            });
+        }
+    }
+
+    for h in terminated {
+        state.conns.remove(&h);
+        state.pending.remove(&h);
+        if let Some(addr) = state.handle_to_addr.remove(&h) {
+            if state.addr_to_handle.get(&addr) == Some(&h) {
+                state.addr_to_handle.remove(&addr);
+            }
+        }
+    }
+
+    earliest_timeout
 }
 
 #[cfg(test)]
