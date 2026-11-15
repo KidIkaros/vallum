@@ -51,30 +51,25 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 mkdir -p "$OUT_DIR"
 staged=0
 
-deb_src="target/release/bundle/deb/Vallum Desktop_${version}_amd64.deb"
-if [ -f "$deb_src" ]; then
-    deb_dst="$OUT_DIR/vallum-desktop_${version}_amd64.deb"
-    cp "$deb_src" "$deb_dst"
-    echo "staged: $deb_dst"
+stage_one() {
+    local src=$1 dst=$2
+    [ -f "$src" ] || return 0
+    cp "$src" "$dst"
+    echo "staged: $dst"
     staged=$((staged + 1))
-fi
+}
+
+stage_one "target/release/bundle/deb/Vallum Desktop_${version}_amd64.deb" \
+    "$OUT_DIR/vallum-desktop_${version}_amd64.deb"
 
 for rpm_src in "target/release/bundle/rpm/Vallum Desktop-${version}-1."*.rpm; do
     [ -f "$rpm_src" ] || continue
     arch=${rpm_src##*.}
-    rpm_dst="$OUT_DIR/vallum-desktop-${version}-1.${arch}.rpm"
-    cp "$rpm_src" "$rpm_dst"
-    echo "staged: $rpm_dst"
-    staged=$((staged + 1))
+    stage_one "$rpm_src" "$OUT_DIR/vallum-desktop-${version}-1.${arch}.rpm"
 done
 
-app_src="target/release/bundle/appimage/Vallum Desktop_${version}_amd64.AppImage"
-if [ -f "$app_src" ]; then
-    app_dst="$OUT_DIR/vallum-desktop_${version}_amd64.AppImage"
-    cp "$app_src" "$app_dst"
-    echo "staged: $app_dst"
-    staged=$((staged + 1))
-fi
+stage_one "target/release/bundle/appimage/Vallum Desktop_${version}_amd64.AppImage" \
+    "$OUT_DIR/vallum-desktop_${version}_amd64.AppImage"
 
 [ "$staged" -gt 0 ] || {
     echo "package-desktop: no desktop bundles found under target/release/bundle" >&2

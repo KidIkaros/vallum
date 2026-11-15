@@ -923,35 +923,14 @@ fn step_quic_connections(
             }
         }
 
-        while let Some(ev) = conn.poll() {
-            match ev {
-                QuicEvent::HandshakeDataReady | QuicEvent::Connected => {
-                    if !conn.is_handshaking() {
-                        if let Some(mut queue) = state.pending.remove(&handle) {
-                            while let Some(pkt) = queue.pop_front() {
-                                if conn.datagrams().send(pkt, true).is_err() {
-                                    ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    }
-                }
-                QuicEvent::DatagramReceived => {
-                    let remote = state.handle_to_addr.get(&handle).copied();
-                    while let Some(dgram) = conn.datagrams().recv() {
-                        if let Some(src) = remote {
-                            if ctx.inbound_tx.try_send((src, dgram.to_vec())).is_err() {
-                                ctx.inbound_dropped.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-                QuicEvent::ConnectionLost { .. } => {
-                    terminated.push(handle);
-                }
-                _ => {}
-            }
-        }
+        handle_quic_conn_events(
+            ctx,
+            &mut state.pending,
+            &state.handle_to_addr,
+            handle,
+            conn,
+            &mut terminated,
+        );
 
         while let Some(ev) = conn.poll_endpoint_events() {
             if let Some(con_ev) = ctx.endpoint.handle_event(handle, ev) {
@@ -986,6 +965,45 @@ fn step_quic_connections(
     }
 
     earliest_timeout
+}
+
+fn handle_quic_conn_events(
+    ctx: &QuicWorkerCtx,
+    pending: &mut HashMap<ConnectionHandle, VecDeque<Bytes>>,
+    handle_to_addr: &HashMap<ConnectionHandle, SocketAddr>,
+    handle: ConnectionHandle,
+    conn: &mut Connection,
+    terminated: &mut Vec<ConnectionHandle>,
+) {
+    while let Some(ev) = conn.poll() {
+        match ev {
+            QuicEvent::HandshakeDataReady | QuicEvent::Connected => {
+                if !conn.is_handshaking() {
+                    if let Some(mut queue) = pending.remove(&handle) {
+                        while let Some(pkt) = queue.pop_front() {
+                            if conn.datagrams().send(pkt, true).is_err() {
+                                ctx.outbound_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+            }
+            QuicEvent::DatagramReceived => {
+                let remote = handle_to_addr.get(&handle).copied();
+                while let Some(dgram) = conn.datagrams().recv() {
+                    if let Some(src) = remote {
+                        if ctx.inbound_tx.try_send((src, dgram.to_vec())).is_err() {
+                            ctx.inbound_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            QuicEvent::ConnectionLost { .. } => {
+                terminated.push(handle);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
