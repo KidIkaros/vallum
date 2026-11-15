@@ -19,8 +19,15 @@ TimeoutStartSec=60s
 # CAP_DAC_OVERRIDE is not decoration: the daemon publishes its control socket
 # 0600 to the tunnel's owner, and the session gate has to read it. Root without
 # the capability is just a user the socket does not belong to.
-AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE
+#
+# CAP_SYS_ADMIN is required only by `app_class`: creating the member namespace
+# is `unshare(CLONE_NEWNET | CLONE_NEWNS)`, which no lesser capability grants.
+# A host-tunnel unit never calls it; app_class moves the tunnel device into the
+# member namespace (ADR-0023), and without this the holder fails with
+# `unshare: Operation not permitted` (found in dogfood, 2026-11-15 — the gates
+# exercise app-class under their own root, never under this unit's sandbox).
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE CAP_SYS_ADMIN
 NoNewPrivileges=true
 PrivateTmp=true
 
