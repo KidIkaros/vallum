@@ -48,3 +48,4 @@ land unreviewed beside a release.
 
 `cargo tree -p vallum-gui` shows none of `tun2`, `netlink-*`, `seccompiler`
 after step 2 (the number to record in `docs/qa/`), and the existing
+`scripts/gui-smoke.sh` and `accept-*` gates pass on `wingman-vps`.
