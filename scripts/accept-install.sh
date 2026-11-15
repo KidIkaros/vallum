@@ -19,6 +19,8 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 NAME=${NAME:-vallum-accept}
 PEER=${PEER:-accept1}
 VPS=${VPS:-wingman-vps}
+TUNNEL_IP=${TUNNEL_IP:-10.7.0.1}
+CONTROL_SOCK=${CONTROL_SOCK:-/run/vallum/vallum0.sock}
 LOG=${LOG:-$(mktemp -t accept-install.XXXXXX)}
 
 TICKET_DIR=$(mktemp -d -t accept-install.XXXXXX)
@@ -110,13 +112,26 @@ say "does the tunnel carry (ICMP to the server's tunnel address)"
 # 51820 is UDP: a /dev/tcp probe there fails by construction and reads as a
 # dead tunnel. Ping the tunnel address, which the client's on-link prefix
 # routes into the interface.
-PING=$(docker exec "$NAME" bash -c 'ping -c3 -W3 10.7.0.1 2>&1 | tail -2')
+PING=$(docker exec "$NAME" bash -c "ping -c3 -W3 $TUNNEL_IP 2>&1 | tail -2")
 echo "$PING" | sed 's/^/   /'
 ASSERTIONS=$((ASSERTIONS + 1))
 echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry (no 0% packet loss)"
 
 say "the server's view of this device"
-ssh "$VPS" "sudo -n /usr/bin/vallum show --control /run/vallum/vallum0.sock 2>/dev/null | grep -A3 '$PEER' | head -6"
+ssh "$VPS" "sudo -n /usr/bin/vallum show --control $CONTROL_SOCK 2>/dev/null | grep -A3 '$PEER' | head -6"
+
+say "hand command three: vallum uninstall --purge"
+docker exec "$NAME" /usr/bin/vallum uninstall --purge >/dev/null 2>&1 \
+    || FAILED="${FAILED:+$FAILED; }vallum uninstall --purge failed"
+ASSERTIONS=$((ASSERTIONS + 1))
+if docker exec "$NAME" test -e /usr/bin/vallum -o -e /usr/bin/vallum-quick -o -d /etc/vallum; then
+    FAILED="${FAILED:+$FAILED; }vallum uninstall --purge left binaries or /etc/vallum behind"
+fi
+ASSERTIONS=$((ASSERTIONS + 1))
+if docker exec "$NAME" systemctl is-active --quiet "vallum@$PEER" 2>/dev/null; then
+    FAILED="${FAILED:+$FAILED; }vallum@$PEER still active after uninstall"
+fi
+say "uninstall --purge: clean (0 binaries, 0 /etc/vallum, 0 active units)"
 
 echo
 # The gate returns an exit code. Printing a FAIL line and exiting 0 is how this
