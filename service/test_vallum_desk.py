@@ -483,6 +483,130 @@ class CodePlanTests(DeskTestCase):
             self.desk.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
 
 
+class DevicesTests(DeskTestCase):
+    """One account token carries several devices: a ticket minted through
+    /api/devices binds the account's plan, the cap is enforced under race,
+    and revocation splits into per-device and per-account."""
+
+    def _token(self):
+        _, payload = self.signup()
+        return payload["token"]
+
+    def test_an_account_adds_a_device_and_gets_a_ticket(self):
+        token = self._token()
+        code, payload = self.desk.add_device({"token": token, "name": "laptop"})
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["ticket"].startswith("vallum1-join:"))
+        self.assertEqual(payload["peer"], "u0002-laptop")
+        rows = self.desk.db.execute(
+            "SELECT peer FROM peers WHERE status='active' ORDER BY peer").fetchall()
+        self.assertEqual([r["peer"] for r in rows], ["u0001-friend", "u0002-laptop"])
+
+    def test_the_device_ticket_binds_the_accounts_plan(self):
+        _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
+        _, signup_payload = self.signup(code=minted["code"], name="member")
+        code, payload = self.desk.add_device(
+            {"token": signup_payload["token"], "name": "laptop"})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["plan"], "plus")
+        self.assertEqual(payload["bytes_cap"], 5000)
+
+    def test_a_device_against_an_unknown_token_is_refused(self):
+        code, payload = self.desk.add_device({"token": "nope", "name": "laptop"})
+        self.assertEqual(code, 404)
+        self.assertEqual(self.daemon.minted, [])
+
+    def test_a_device_against_a_revoked_account_is_refused(self):
+        token = self._token()
+        peer = self.daemon.minted[0]
+        self.desk.admin("/api/admin/revoke-account",
+                        {"admin_token": "admin-secret", "peer": peer})
+        code, payload = self.desk.add_device({"token": token, "name": "laptop"})
+        self.assertEqual(code, 403)
+
+    def test_the_device_cap_is_a_ceiling(self):
+        self.desk.config.device_cap = 2
+        token = self._token()
+        code, _ = self.desk.add_device({"token": token, "name": "laptop"})
+        self.assertEqual(code, 200)
+        code, payload = self.desk.add_device({"token": token, "name": "phone"})
+        self.assertEqual(code, 429)
+        self.assertIn("device limit", payload["error"])
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 2)
+
+    def test_the_cap_holds_under_a_race(self):
+        self.desk.config.device_cap = 2
+        token = self._token()
+        results = []
+        threads = [threading.Thread(
+            target=lambda n: results.append(
+                self.desk.add_device({"token": token, "name": n})[0]),
+            args=(f"dev-{i}",)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(results), [200, 429])
+        self.assertEqual(
+            self.desk.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 2)
+
+    def test_devices_share_the_account_byte_pool(self):
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        self.daemon._counters = {"u0001-friend": 600, "u0002-laptop": 600}
+        actions = self.desk.sweep_once()
+        self.assertEqual(actions[0]["reason"], "overquota")
+        self.assertEqual(sorted(self.daemon.removed), ["u0001-friend", "u0002-laptop"])
+        row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
+        self.assertEqual(row["status"], "overquota")
+
+    def test_per_device_revoke_keeps_the_account(self):
+        token = self._token()
+        _, device = self.desk.add_device({"token": token, "name": "laptop"})
+        code, _ = self.desk.admin("/api/admin/revoke",
+                                  {"admin_token": "admin-secret", "peer": device["peer"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.daemon.removed, ["u0002-laptop"])
+        row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
+        self.assertEqual(row["status"], "active")
+        _, status = self.desk.status(token)
+        self.assertEqual(status["peers"], ["u0001-friend"])
+
+    def test_account_revoke_removes_every_device(self):
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        code, _ = self.desk.admin("/api/admin/revoke-account",
+                                  {"admin_token": "admin-secret", "peer": "u0001-friend"})
+        self.assertEqual(code, 200)
+        self.assertEqual(sorted(self.daemon.removed), ["u0001-friend", "u0002-laptop"])
+        row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
+        self.assertEqual(row["status"], "revoked")
+        rows = self.desk.db.execute("SELECT status FROM peers").fetchall()
+        self.assertTrue(all(r["status"] == "removed" for r in rows))
+
+    def test_a_never_redeemed_device_ticket_is_swept_clean(self):
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        self.daemon.missing_peers = ["u0002-laptop"]
+        self.desk.db.execute("UPDATE accounts SET expires='2000-01-01'")
+        actions = self.desk.sweep_once()
+        self.assertEqual(actions[0]["reason"], "expired")
+        self.assertNotIn("error", actions[0])
+        row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
+        self.assertEqual(row["status"], "expired")
+
+    def test_a_failed_device_mint_leaves_no_orphan_row(self):
+        token = self._token()
+        self.daemon._refuse = True
+        code, _ = self.desk.add_device({"token": token, "name": "laptop"})
+        self.assertEqual(code, 502)
+        self.assertEqual(
+            self.desk.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
+
+
 class AdminTests(DeskTestCase):
 
     def test_a_wrong_admin_token_is_refused(self):

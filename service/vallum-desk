@@ -223,6 +223,7 @@ class DeskConfig:
     open_trial_bytes: int = 5 * 1024 * 1024 * 1024   # 5 GiB anonymous trial
     max_active_accounts: int = 200                   # the /24 holds 253
     signup_ip_day_limit: int = 3                     # signups per IP per day
+    device_cap: int = 5                              # devices per account
 
 
 # ---------------------------------------------------------------- the desk
@@ -381,6 +382,52 @@ class Desk:
     def _trial_expiry(self):
         return self._expiry_for(self.config.trial_days)
 
+    # -- devices ----------------------------------------------------------
+
+    def add_device(self, body):
+        """A second (third…) device on an existing account: the bearer token
+        authenticates, and the new peer's ticket binds the account's plan —
+        same expiry, same shared byte pool."""
+        token = body.get("token") or ""
+        account = self.db.execute(
+            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        if not account:
+            return 404, {"error": "unknown account token"}
+        if account["status"] != "active":
+            return 403, {"error": f"account is {account['status']} — "
+                                  "devices can only join an active account"}
+        label = (body.get("name") or "").strip()[:40]
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
+            return 400, {"error": "name must be lowercase letters/digits/hyphens"}
+        # The cap check and the peers row are one locked step — the row IS
+        # the reservation, so a racing request counts it. The daemon call
+        # stays outside the lock: a subprocess under a mutex serializes the
+        # desk, and a failed mint deletes the reservation after the fact.
+        with self.lock:
+            live = self.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE account_id=? AND status='active'",
+                (account["id"],)).fetchone()[0]
+            if live == 0 and account["peer"]:
+                live = 1  # a pre-migration row: the legacy column IS the device
+            if live >= self.config.device_cap:
+                return 429, {"error": "device limit — an account carries at most "
+                                      f"{self.config.device_cap} devices; remove one first"}
+            peer = self._next_peer_name(label)
+            self._insert_peer(account["id"], peer, label)
+        try:
+            ticket = self.daemon.mint_ticket(peer)
+        except RuntimeError as error:
+            with self.lock:
+                self.db.execute("DELETE FROM peers WHERE peer=?", (peer,))
+            return 502, {"error": f"the daemon refused the enrolment: {error}"}
+        with self.lock:
+            still = self.db.execute(
+                "SELECT 1 FROM peers WHERE peer=? AND status='active'", (peer,)).fetchone()
+        if not still:
+            return 409, {"error": "the account was revoked while the ticket was minting"}
+        return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
+                     "expires": account["expires"], "bytes_cap": account["bytes_cap"]}
+
     @staticmethod
     def _now():
         return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -493,6 +540,7 @@ class Desk:
             "/api/admin/adopt": self._adopt_peer,
             "/api/admin/plan": self._set_plan,
             "/api/admin/revoke": self._revoke_peer,
+            "/api/admin/revoke-account": self._revoke_account,
             "/api/admin/peers": self._list_peers,
             "/api/admin/sweep": self._run_sweep,
         }
@@ -560,18 +608,34 @@ class Desk:
         return 200, {"peer": peer, "updated": [c.split("=")[0] for c in columns]}
 
     def _revoke_peer(self, body):
+        """Per-device: one peer goes, the account survives — its other
+        devices keep their tunnel and its plan keeps running."""
         peer = body.get("peer")
-        account = self._account_for_peer(peer)
-        if not account:
+        if not self._account_for_peer(peer):
             return 404, {"error": "unknown peer"}
         try:
             self.daemon.remove(peer)
         except RuntimeError as error:
-            return 502, {"error": str(error)}
+            if "no peer named" not in str(error):
+                return 502, {"error": str(error)}
+            # Never created — a ticket minted but never redeemed is already
+            # gone; mark the row and move on.
         with self.lock:
             self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
-            self.db.execute("UPDATE accounts SET status='revoked' WHERE id=?", (account["id"],))
         return 200, {"revoked": peer}
+
+    def _revoke_account(self, body):
+        """Per-account: every device goes first, then the account is marked —
+        the same removal-first order and retry semantics as the sweep."""
+        peer = body.get("peer")
+        account = self._account_for_peer(peer)
+        if not account:
+            return 404, {"error": "unknown peer"}
+        used = sum(self.daemon.counters().get(p, 0) for p in self._peers_of(account))
+        action = self._revoke(account, "revoked", used)
+        if "error" in action:
+            return 502, action
+        return 200, {"revoked": account["peer"], "peers": action["peers"]}
 
     def _list_peers(self, body):
         rows = self.db.execute(
@@ -727,6 +791,8 @@ def make_handler(desk):
                     else:
                         self._send_html(error_page(payload.get("error", "")), status=code)
                     return
+                elif self.path == "/api/devices":
+                    code, payload = desk.add_device(body)
                 elif self.path.startswith("/api/admin/"):
                     code, payload = desk.admin(self.path, body)
                 else:
@@ -767,6 +833,8 @@ def parse_args(argv=None):
                         help="capacity ceiling: the peer table is a /24")
     parser.add_argument("--signup-ip-day-limit", type=int, default=3,
                         help="anonymous signups per IP per day (0 = unlimited)")
+    parser.add_argument("--device-cap", type=int, default=5,
+                        help="devices per account (default 5)")
     parser.add_argument("--cli", default="vallum")
     return parser.parse_args(argv)
 
@@ -802,6 +870,7 @@ def main(argv=None):
         open_trial_bytes=args.open_trial_bytes,
         max_active_accounts=args.max_active_accounts,
         signup_ip_day_limit=args.signup_ip_day_limit,
+        device_cap=args.device_cap,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
     threading.Thread(target=desk.sweep, daemon=True).start()
