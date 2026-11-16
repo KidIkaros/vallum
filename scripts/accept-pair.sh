@@ -77,14 +77,25 @@ if [ "$BACKEND" = namespaces ]; then
         fi
     fi
     printf '%s\n' "$NS_OUT"
+    # A failed escalation's error is kept visible: "sudo: a password is
+    # required" otherwise gets swallowed and the run reads like a pure
+    # namespace failure.
+    if [ "$NS_RC" -ne 0 ] && [ "${NS_ASSERT2:-0}" -le "$NS_ASSERT" ] && [ -n "${NS_OUT2:-}" ]; then
+        printf '%s\n' "$NS_OUT2" | tail -5 | sed 's/^/   [escalated] /'
+    fi
     # the delegated gate's own checks are the assertions it made
     ASSERTIONS=$NS_ASSERT
     if [ "$NS_RC" -eq 0 ]; then
         echo "== PASS - a server and a client, in namespaces, handshook and carried"
         exit 0
     fi
-    echo "== FAIL - the namespace pair did not pass (and sudo was not available)"
-    exit 1
+    if command -v docker >/dev/null 2>&1; then
+        echo "[pair] namespaces unavailable - falling back to docker"
+        BACKEND=docker
+    else
+        echo "== FAIL - the namespace pair did not pass (unprivileged and escalated)"
+        exit 1
+    fi
 fi
 echo "[pair] backend: docker"
 
