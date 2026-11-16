@@ -6,10 +6,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "user: $(id)"
-          echo "sudo binary: $(command -v sudo || echo MISSING)"
-          sudo -n true 2>&1; echo "sudo -n rc: $?"
-          unshare -Urn true 2>&1; echo "unshare rc: $?"
-          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || true
-          sysctl kernel.unprivileged_userns_clone 2>&1 || true
-          command -v docker && docker version --format '{{.Server.Version}}' 2>&1 || echo "no docker"
+          set +e
+          echo "user: $(id -un)"
+          sudo -n unshare -Urn true 2>&1; echo "sudo unshare rc: $?"
+          sudo -n ip netns add probe-ns 2>&1; echo "ip netns rc: $?"
+          sudo -n ip netns del probe-ns 2>/dev/null
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1
+          docker version --format 'server {{.Server.Version}}' 2>&1; echo "docker rc: $?"
+          sudo -n docker version --format 'sudo docker server {{.Server.Version}}' 2>&1; echo "sudo docker rc: $?"
