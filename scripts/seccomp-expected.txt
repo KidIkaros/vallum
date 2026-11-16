@@ -1,0 +1,133 @@
+# The daemon's expected syscall needs, x86_64 — one name per line.
+#
+# This file is the oracle `scripts/seccomp-trace.sh` cannot get from the
+# binary under test. The trace check reads the allow-list back out of the
+# binary (`vallum sandbox --names`) and diffs what the daemon did against it —
+# but the filter and that check read the *same* list, so an entry missing from
+# `crates/vallum/src/sandbox.rs` is missing from both sides of the comparison
+# and the defect is invisible by construction. `linkat` shipped that way: the
+# control-plane publication path needed it, no trace produced it, and the first
+# live `enforce` run died on it (docs/proof/seccomp.md §3).
+#
+# This list is written by hand, against the audit in docs/proof/seccomp.md —
+# the traced set plus the entries the exercise cannot reach but the code is
+# known to need (TCP teardown's `shutdown`, the control socket's `linkat`,
+# startup-only thread and libc-fallback calls). The check is bidirectional:
+# an entry missing from the binary is a path the daemon dies on in enforce
+# mode; an entry in the binary but not here is a privilege no review
+# justified. A drift either way fails the gate and is reconciled by a human,
+# not by regenerating this file from the binary — that would put the defect
+# back on both sides.
+#
+# Names are x86_64. aarch64 reaches the same operations through the `*at`
+# variants its table kept (docs/proof/seccomp.md §5.5); the check enforces
+# this list on x86_64 only.
+
+# The tunnel: one descriptor read/write per packet.
+read
+write
+pread64
+close
+
+# The datagram carrier.
+recvfrom
+sendto
+sendmmsg
+
+# The stream carrier: dials and marks after the drop; `shutdown` is the
+# deliberate teardown the exercise stops short of — it rests on the code, not
+# on a trace.
+socket
+connect
+shutdown
+setsockopt
+getsockopt
+getsockname
+getpeername
+
+# The control plane: publishes its socket by hard-linking a chmodded staging
+# file — `linkat` is what `fs::hard_link` issues.
+bind
+listen
+accept4
+linkat
+
+# Filesystem on what is already open or already named: staging, publication,
+# cleanup. x86_64 keeps the old non-`at` calls; aarch64's table does not.
+unlink
+unlinkat
+mkdir
+rmdir
+rename
+chmod
+fchmod
+getdents64
+readlink
+readlinkat
+access
+faccessat2
+
+# Statistics on what is already open.
+fstat
+statx
+newfstatat
+fstatfs
+statfs
+
+# Threads: every reader and writer starts after the drop.
+clone
+clone3
+futex
+set_robust_list
+rseq
+sched_getaffinity
+sched_yield
+gettid
+set_tid_address
+
+# Waiting: the loop sleeps on the clock; the stream carrier polls.
+poll
+ppoll
+clock_nanosleep
+nanosleep
+clock_gettime
+restart_syscall
+
+# Signals: handlers are installed after the drop.
+rt_sigaction
+rt_sigprocmask
+rt_sigreturn
+sigaltstack
+tgkill
+
+# The allocator, for the life of the process.
+mmap
+munmap
+mprotect
+mremap
+madvise
+brk
+
+# Entropy, for every handshake and every rekey.
+getrandom
+
+# Knowing what this process is, and saying so.
+getpid
+getppid
+getuid
+geteuid
+getgid
+getegid
+getcwd
+prctl
+prlimit64
+arch_prctl
+capget
+fcntl
+ioctl
+dup2
+pipe2
+
+# Shutdown.
+exit
+exit_group

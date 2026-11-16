@@ -314,6 +314,45 @@ traced=$(wc -l < "$W/traced.txt")
 # A trace that saw only `exit` means it attached to a dying process, which would
 # pass the diff below for the wrong reason.
 [ "$traced" -ge 8 ] || die "the trace saw only $traced distinct syscalls; strace attached too late or the daemon died"
+
+# The independent oracle. `allowed.txt` is read back out of the binary under
+# test, and the filter and this check read the same list — an entry missing
+# from `sandbox.rs` is missing from both sides of the trace diff and the
+# defect is invisible by construction. The expectation in
+# `scripts/seccomp-expected.txt` is written by hand, so a drift in either
+# direction is a named failure: an expected call missing from the binary is a
+# path the daemon dies on in enforce mode; an allowed call missing from the
+# expectation is a privilege no review justified.
+EXPECTED="$ROOT/scripts/seccomp-expected.txt"
+if [ "$(uname -m)" = "x86_64" ]; then
+    [ -f "$EXPECTED" ] || die "the expectation file $EXPECTED is gone — it is the oracle, not an input"
+    grep -vE '^[[:space:]]*(#|$)' "$EXPECTED" | sort -u > "$W/expected.txt"
+    expected_count=$(wc -l < "$W/expected.txt")
+    [ "$expected_count" -ge 60 ] \
+        || die "the expectation holds only $expected_count calls; it is the whole reviewed list, not a sample"
+    comm -23 "$W/expected.txt" "$W/allowed.txt" > "$W/missing-from-filter.txt"
+    comm -13 "$W/expected.txt" "$W/allowed.txt" > "$W/missing-from-expectation.txt"
+    if [ -s "$W/missing-from-filter.txt" ]; then
+        echo "== FAIL: the daemon needs these and the filter no longer names them:" >&2
+        sed 's/^/     /' "$W/missing-from-filter.txt" >&2
+        echo "   Restore them in crates/vallum/src/sandbox.rs — in enforce mode the" >&2
+        echo "   daemon dies on the first one a real path takes." >&2
+        KEEP=1
+        exit 1
+    fi
+    if [ -s "$W/missing-from-expectation.txt" ]; then
+        echo "== FAIL: the filter allows calls the expectation does not name:" >&2
+        sed 's/^/     /' "$W/missing-from-expectation.txt" >&2
+        echo "   Each is a privilege no review justified — justify it in" >&2
+        echo "   scripts/seccomp-expected.txt or remove it from sandbox.rs." >&2
+        KEEP=1
+        exit 1
+    fi
+    echo "== oracle: the binary's $(wc -l < "$W/allowed.txt")-entry list matches the hand-written expectation"
+else
+    echo "== oracle: skipped on $(uname -m) — the expectation is written against x86_64 (docs/proof/seccomp.md §5.5)"
+fi
+
 comm -23 "$W/traced.txt" "$W/allowed.txt" > "$W/unknown.txt"
 
 echo "== udp leg: $(wc -l < "$W/traced-udp.txt") syscalls; tcp leg: $(wc -l < "$W/traced-tcp.txt")"
