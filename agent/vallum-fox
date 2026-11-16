@@ -43,67 +43,88 @@ domain_of() { printf '%s' "$1" | sed -E 's#^[a-z]+://##; s#[:/].*$##; s#^www\.##
 
 budget_file() { mkdir -p "$STATE_DIR"; printf '%s/budget.json' "$STATE_DIR"; }
 
-budget_init() {
-    [ -s "$(budget_file)" ] && return 0
-    printf '{"domains": {}, "day": "%s", "day_count": 0}\n' "$(date -u +%F)" > "$(budget_file)"
-}
+# The budget engine: one program, one file, one place that knows the JSON's
+# shape. It was five embedded scripts each re-opening the same file — the
+# shape was duplicated five times, and two of them (budget_limit,
+# budget_interval) were left calling nothing at all.
+#
+#   budget admit <domain> <max_wait> <default_hourly> <default_interval>
+#   budget set   <domain> <hourly> <interval>
+#   budget list
+budget() {
+    local action=$1; shift
+    python3 - "$(budget_file)" "$action" "$@" <<'PY'
+import json, os, sys, time, datetime
 
-budget_roll_day() {
-    python3 - "$(budget_file)" <<'PY'
-import json, sys, datetime
-p = sys.argv[1]
-d = json.load(open(p))
-today = datetime.date.today().isoformat()
-if d.get("day") != today:
-    d["day"], d["day_count"] = today, 0
-    for v in d["domains"].values():
-        v["hour_count"], v["hour_start"] = 0, 0
-    json.dump(d, open(p, "w"))
-PY
-}
+path, action = sys.argv[1], sys.argv[2]
+argv = sys.argv[3:]
 
-budget_limit() { # domain → hourly limit (config override or default)
-    python3 - "$(budget_file)" "$1" "$DEFAULT_HOURLY" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-print(d["domains"].get(sys.argv[2], {}).get("hourly", int(sys.argv[3])))
-PY
-}
+def load():
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {"domains": {}, "day": datetime.date.today().isoformat(), "day_count": 0}
+    with open(path) as f:
+        return json.load(f)
 
-budget_interval() {
-    python3 - "$(budget_file)" "$1" "$BUDGET_DEFAULT_INTERVAL" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-print(d["domains"].get(sys.argv[2], {}).get("min_interval", float(sys.argv[3])))
+def save(d):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, path)
+
+def roll_day(d):
+    """A new UTC day resets the daily count and the hourly windows."""
+    today = datetime.date.today().isoformat()
+    if d.get("day") != today:
+        d["day"], d["day_count"] = today, 0
+        for v in d["domains"].values():
+            v["hour_count"], v["hour_start"] = 0, 0
+    return d
+
+if action == "admit":
+    domain, max_wait, default_hourly, default_interval = (
+        argv[0], float(argv[1]), int(argv[2]), float(argv[3]))
+    d = roll_day(load())
+    v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
+    now = time.time()
+    if v["hour_start"] == 0 or now - v["hour_start"] >= 3600:
+        v["hour_start"], v["hour_count"] = now, 0
+    limit = int(v.get("hourly") or default_hourly)
+    if v["hour_count"] >= limit:
+        print(f"BUDGET_EXHAUSTED {domain} {v['hour_count']}/{limit} this hour "
+              "— the agent must stop, not retry", file=sys.stderr)
+        sys.exit(3)
+    wait = float(v.get("min_interval", default_interval)) - (now - v.get("last", 0))
+    if wait > 0:
+        if wait > max_wait:
+            print(f"BUDGET_RATE {domain}: next request allowed in {wait:.0f}s — over the pace cap",
+                  file=sys.stderr)
+            sys.exit(3)
+        time.sleep(wait)
+    v["last"] = time.time()
+    v["hour_count"] += 1
+    d["day_count"] = d.get("day_count", 0) + 1
+    save(d)
+elif action == "set":
+    domain, hourly, interval = argv[0], argv[1], argv[2]
+    d = roll_day(load())
+    v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
+    v["hourly"] = int(hourly)
+    v["min_interval"] = float(interval)
+    save(d)
+    print(f"{domain}: hourly={v['hourly']} min_interval={v['min_interval']}s")
+elif action == "count":
+    print(roll_day(load()).get("day_count", 0))
+elif action == "list":
+    print(json.dumps(roll_day(load()), indent=2))
+else:
+    print(f"unknown budget action: {action}", file=sys.stderr)
+    sys.exit(2)
 PY
 }
 
 budget_admit() { # url → waits out the min-interval, refuses over the hourly cap
-    budget_init; budget_roll_day
     local domain; domain=$(domain_of "$1")
-    python3 - "$(budget_file)" "$domain" "$BUDGET_MAX_WAIT" <<'PY'
-import json, sys, time
-p, domain, max_wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
-d = json.load(open(p))
-v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
-now = time.time()
-if v["hour_start"] == 0 or now - v["hour_start"] >= 3600:
-    v["hour_start"], v["hour_count"] = now, 0
-limit = int(v.get("hourly", 0)) or None
-if limit and v["hour_count"] >= limit:
-    print(f"BUDGET_EXHAUSTED {domain} {v['hour_count']}/{limit} this hour — the agent must stop, not retry", file=sys.stderr)
-    sys.exit(3)
-wait = v.get("min_interval", 0) - (now - v.get("last", 0))
-if wait > 0:
-    if wait > max_wait:
-        print(f"BUDGET_RATE {domain}: next request allowed in {wait:.0f}s — over the pace cap", file=sys.stderr)
-        sys.exit(3)
-    time.sleep(wait)
-v["last"] = time.time()
-v["hour_count"] += 1
-d["day_count"] = d.get("day_count", 0) + 1
-json.dump(d, open(p, "w"))
-PY
+    budget admit "$domain" "$BUDGET_MAX_WAIT" "$DEFAULT_HOURLY" "$BUDGET_DEFAULT_INTERVAL"
 }
 
 # --- browser ---------------------------------------------------------------
@@ -173,8 +194,17 @@ cmd_egress() {
     local member_ip host_ip
     member_ip=$(cmd_egress_quiet)
     host_ip=$(curl -4 -sm10 https://ifconfig.me 2>/dev/null || printf 'unreachable')
-    printf 'agent egress:  %s\nhost egress:   %s\nseparated:     %s\n' \
-        "$member_ip" "$host_ip" "$([ "$member_ip" != "$host_ip" ] && echo yes || echo NO — LEAK)"
+    printf 'agent egress:  %s\nhost egress:   %s\n' "$member_ip" "$host_ip"
+    if [ "$member_ip" = "unreachable" ]; then
+        # A diagnostic that reports "separated" while the subject is absent is
+        # the worst kind of green: the lane is DOWN (fail-closed, by design),
+        # and that is a different state from "separated".
+        printf 'lane state:    DOWN — the agent tunnel is unreachable (fail-closed, no host fallback)\n'
+    elif [ "$member_ip" != "$host_ip" ]; then
+        printf 'separated:     yes\n'
+    else
+        printf 'separated:     NO — LEAK: the agent is riding the host identity\n'
+    fi
 }
 
 config_interface() {
@@ -194,31 +224,27 @@ cmd_status() {
         "$(systemctl is-active "vallum-quick@$iface" 2>/dev/null)"
     printf 'egress:    '; cmd_egress
     printf 'budget:    %s requests today, %s/hour default, %ss min pace\n' \
-        "$(python3 -c "import json,sys; print(json.load(open('$(budget_file)')).get('day_count',0))" 2>/dev/null || echo 0)" \
+        "$(budget count 2>/dev/null || echo 0)" \
         "$DEFAULT_HOURLY" "$BUDGET_DEFAULT_INTERVAL"
 }
 
 cmd_budget() {
-    budget_init
     case "${1:-list}" in
         set)
-            [ $# -ge 2 ] || die "usage: vallum-fox budget set <domain> [hourly=N] [interval=S]"
-            local domain=$2; shift 2
-            python3 - "$(budget_file)" "$domain" "${1:-}" "${2:-}" <<'PY'
-import json, sys
-p, domain = sys.argv[1], sys.argv[2]
-d = json.load(open(p))
-v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
-for arg in sys.argv[3:]:
-    if arg.startswith("hourly="):
-        v["hourly"] = int(arg[7:])
-    elif arg.startswith("interval="):
-        v["min_interval"] = float(arg[9:])
-json.dump(d, open(p, "w"))
-print(f"{domain}: hourly={v.get('hourly', 'default')} min_interval={v.get('min_interval', 'default')}s")
-PY
+            [ $# -ge 2 ] || die "usage: vallum-fox budget set <domain> hourly=N interval=S"
+            local domain=$2 hourly interval
+            hourly=""; interval=""
+            for arg in "$@"; do
+                case "$arg" in
+                    hourly=*) hourly=${arg#hourly=} ;;
+                    interval=*) interval=${arg#interval=} ;;
+                esac
+            done
+            [ -n "$hourly" ] || hourly=$DEFAULT_HOURLY
+            [ -n "$interval" ] || interval=$BUDGET_DEFAULT_INTERVAL
+            budget set "$domain" "$hourly" "$interval"
             ;;
-        list) python3 -m json.tool "$(budget_file)" ;;
+        list) budget list ;;
         *) die "usage: vallum-fox budget [set <domain> hourly=N interval=S | list]" ;;
     esac
 }

@@ -97,21 +97,25 @@ class Vallum:
         return m.group(0)
 
     def counters(self):
-        """peer → (tx_bytes, rx_bytes) from the daemon's published snapshot."""
-        out = self._run("show")
-        peers, current, tx = {}, None, 0
-        for line in out.splitlines():
-            line = line.strip()
-            if line.startswith("peer "):
-                current = line.split()[1]
-            m = re.match(r"(tx_bytes|rx_bytes)=(\d+)", line)
-            if m and current:
-                if m.group(1) == "tx_bytes":
-                    tx = int(m.group(2))
-                else:
-                    peers[current] = peers.get(current, (0, 0))
-                    peers[current] = (tx, int(m.group(2)))
-        return peers
+        """peer name → bytes used, from the daemon's JSON snapshot.
+
+        The JSON is the stable source: the text rendering keys peers by
+        fingerprint (`peer f4235695f9fb (laptop-bundle)`), so a text scrape
+        silently matched nothing — and a quota that never matches is a quota
+        that never fires, which is the income feature quietly doing nothing.
+        """
+        out = self._run("show", "--json")
+        try:
+            doc = json.loads(out)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"the daemon's JSON snapshot did not parse: {e}") from e
+        usage = {}
+        for peer in doc.get("peers", []):
+            name = peer.get("name")
+            if not name:
+                continue
+            usage[name] = int(peer.get("tx_bytes", 0)) + int(peer.get("rx_bytes", 0))
+        return usage
 
     def remove(self, peer):
         self._run("peer", "remove", peer)
@@ -178,10 +182,10 @@ class Desk:
         row = self.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
         if not row:
             return 404, {"error": "unknown account token"}
-        counters = self.vallum.counters().get(row["peer"], (0, 0))
+        counters = self.vallum.counters().get(row["peer"], 0)
         return 200, {"peer": row["peer"], "plan": row["plan"], "status": row["status"],
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
-                     "bytes_used": counters[0] + counters[1]}
+                     "bytes_used": counters}
 
     # -- enforcement sweep ----------------------------------------------
 
@@ -192,7 +196,7 @@ class Desk:
         today = datetime.date.today().isoformat()
         counters = self.vallum.counters()
         for row in self.db.execute("SELECT * FROM accounts WHERE status='active'").fetchall():
-            used = sum(counters.get(row["peer"], (0, 0)))
+            used = counters.get(row["peer"], 0)
             reason = None
             # Inclusive: an account whose expiry is today is already expired.
             if row["expires"] <= today:
@@ -247,6 +251,29 @@ class Desk:
                                 (code, datetime.datetime.utcnow().isoformat(timespec="seconds")))
                 self.db.commit()
             return 200, {"code": code, "note": "hand to one user; consumed on signup"}
+        if path == "/api/admin/adopt":
+            # Adopt a peer that already exists on the server into the desk:
+            # an operator migrating a live deployment onto the service, or a
+            # device enrolled before the desk was running. The peer is not
+            # re-created; it becomes an account the desk can enforce.
+            peer = body.get("peer")
+            if not peer:
+                return 400, {"error": "peer is required"}
+            row = self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone()
+            if row:
+                return 409, {"error": "that peer is already an account"}
+            label = (body.get("label") or peer)[:40]
+            now = datetime.datetime.utcnow()
+            expires = (now + datetime.timedelta(days=self.args.trial_days)).date().isoformat()
+            token = secrets.token_hex(16)
+            with self.lock:
+                self.db.execute(
+                    "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (peer, label, token, "adopted", "trial", now.isoformat(timespec="seconds"),
+                     expires, int(body.get("bytes_cap", self.args.trial_bytes)), "active"))
+            return 200, {"peer": peer, "token": token, "expires": expires,
+                         "bytes_cap": int(body.get("bytes_cap", self.args.trial_bytes))}
         if path == "/api/admin/plan":
             # The income seam: a plan is a row, so a paid tier is data. Set a
             # cap, an expiry, or mark an account paid — no code change.

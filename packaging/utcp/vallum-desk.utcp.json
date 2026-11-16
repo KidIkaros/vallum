@@ -211,6 +211,54 @@
           }
         ]
       }
+    },
+    {
+      "name": "vallum_desk_adopt",
+      "description": "Adopt a peer that already exists on the server into the desk \u2014 an operator migrating a live deployment onto the service, or a device enrolled before the desk was running. The peer is not re-created; it becomes an account the desk can enforce.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's admin endpoint, e.g. http://127.0.0.1:8400/api/admin/adopt."
+          },
+          "admin_token": {
+            "type": "string",
+            "description": "The desk's admin token (a secret)."
+          },
+          "peer": {
+            "type": "string",
+            "description": "The peer name on the server."
+          },
+          "bytes_cap": {
+            "type": "integer",
+            "description": "Byte cap for the period (0 uses the desk default)."
+          }
+        },
+        "required": [
+          "url",
+          "admin_token",
+          "peer",
+          "bytes_cap"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "admin"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"bytes_cap\":UTCP_ARG_bytes_cap_UTCP_END}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
     }
   ]
 }

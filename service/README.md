@@ -59,8 +59,10 @@ until then the operator (or a friend) reaches it over SSH:
 | `POST /api/signup {code,name}` | invite code | mint + return a join ticket |
 | `GET /api/status?token=T` | account token | plan, expiry, bytes used |
 | `POST /api/admin/code {admin_token}` | admin | mint an invite code |
+| `POST /api/admin/adopt {admin_token,peer}` | admin | adopt an existing peer as an account (migrating a live deployment) |
 | `POST /api/admin/revoke {admin_token,peer}` | admin | revoke + remove a peer |
 | `GET /api/admin/peers {admin_token}` | admin | list accounts |
+| `POST /api/admin/sweep {admin_token}` | admin | enforce expiry and quotas now |
 
 Defaults: 14-day trial, 50 GiB byte cap, sweep every 5 min. All overridable
 on the command line; plans are rows, so paid tiers are data, not code.
