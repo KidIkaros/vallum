@@ -444,6 +444,38 @@ class AccountPageTests(HttpTests):
         self.assertEqual(status, 404)
         self.assertNotIn(other_peer, self.daemon.removed)
 
+    def test_the_ticket_page_emits_the_deep_link_and_the_number(self):
+        status, page = self.post("/signup", "name=form-user",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        payload = self.desk.db.execute("SELECT token FROM accounts").fetchone()
+        token = payload["token"]
+        from urllib.parse import quote
+        expected = (f"vallum://join?ticket={quote('vallum1-join:203.0.113.9:51922/u0001-form-use/deadbeef/token/fingerprint', safe='')}"
+                    f"&account={token}")
+        self.assertIn(expected, page)
+        # The URI is fired by script — the token must never sit in an href
+        # or another attribute a prefetcher or Referer header would carry.
+        import re
+        for href in re.findall(r'href="([^"]*)"', page):
+            self.assertNotIn(token, href)
+
+    def test_the_ticket_page_names_the_account_number(self):
+        status, page = self.post("/signup", "name=form-user",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertIn("account number", page)
+        self.assertIn(token, page)
+
+    def test_the_signup_json_carries_the_deep_link(self):
+        status, body = self.post("/api/signup", '{"name":"json-user"}',
+                                 "application/json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertTrue(payload["connect"].startswith("vallum://join?ticket="))
+        self.assertIn(f"&account={payload['token']}", payload["connect"])
+
     def test_the_add_device_form_mints_a_bound_ticket(self):
         token = self._token()
         status, _, page = self.post_headers(

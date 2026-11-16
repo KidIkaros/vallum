@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""vallum-uri — the x-scheme-handler target for vallum:// URIs.
+
+A browser-opened `vallum://join?ticket=…&account=…` arrives here as
+argv[1]. The URI is validated byte-strictly, then enrolment runs:
+
+    vallum join -          (the ticket arrives on stdin)
+    VALLUM_ACCOUNT=<token> (the account number rides the environment)
+
+Nothing secret ever sits on a command line — argv is world-readable in
+ps; stdin and a same-uid environment are not. And nothing is ever
+shell-evaluated: the URI is parsed, not executed.
+
+Usage: vallum-uri 'vallum://join?ticket=<urlencoded>&account=<hex>'
+"""
+
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+
+# The `vallum1-join:` grammar, byte-strict (enroll.rs JoinTicket::parse):
+#   <host>:<port>/<name>/<32-hex invite id>/<32-hex token>/<even hex fp>
+TICKET = re.compile(
+    r"vallum1-join:[^\s/:]+:\d{1,5}"      # host:port
+    r"/[A-Za-z0-9._-]{1,32}"              # name
+    r"/[0-9a-fA-F]{32}"                   # invite id
+    r"/(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{4}(?:-[0-9a-fA-F]{4}){7})"  # token, bare or dashed
+    r"/(?:[0-9a-fA-F]{2}){4,}$")          # fingerprint, >=8 hex chars
+ACCOUNT = re.compile(r"[0-9a-f]{32}$")    # the desk's token_hex(16)
+
+
+def parse_uri(uri):
+    """The URI's ticket and account token, or a refusal. Strictness here is
+    the boundary between 'a browser asked' and 'a browser got root to run
+    vallum': the shape is all that is trusted, and it is checked fully."""
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "vallum":
+        raise ValueError("not a vallum:// URI")
+    if parsed.netloc not in ("join", "") and parsed.path not in ("join", "/join"):
+        raise ValueError("unknown action — only vallum://join is served")
+    fields = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    ticket = fields.get("ticket", [""])[0]
+    account = fields.get("account", [""])[0]
+    if not TICKET.fullmatch(ticket):
+        raise ValueError("the ticket is not a vallum1-join: ticket")
+    if not ACCOUNT.fullmatch(account):
+        raise ValueError("the account number is 32 hex characters")
+    return ticket, account
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 1:
+        print("usage: vallum-uri 'vallum://join?ticket=<t>&account=<token>'",
+              file=sys.stderr)
+        return 2
+    try:
+        ticket, account = parse_uri(argv[0])
+    except ValueError as error:
+        print(f"vallum-uri: refused — {error}", file=sys.stderr)
+        return 2
+    env = dict(os.environ, VALLUM_ACCOUNT=account)
+    result = subprocess.run(
+        ["vallum", "join", "-"], input=ticket, env=env, text=True)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

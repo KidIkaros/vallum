@@ -474,6 +474,33 @@ install_docs() {
             "$(dest /usr/local/lib/vallum/vallum-desk-admin)"
         run ln -sf /usr/local/lib/vallum/vallum-desk-admin "$(dest /usr/local/sbin/vallum-desk-admin)"
     fi
+    # The vallum:// scheme handler: a browser Connect click becomes a
+    # `vallum join` with the ticket on stdin and the account number in the
+    # environment — nothing secret on a command line.
+    uri_source=""
+    for candidate in "$SOURCE_DIR/vallum-uri" "$(dirname "$0")/../service/vallum-uri" \
+        "service/vallum-uri" "packaging/vallum-uri"; do
+        if [ -f "$candidate" ]; then
+            uri_source=$candidate
+            break
+        fi
+    done
+    if [ -n "$uri_source" ]; then
+        run install -D -m 0755 "$uri_source" "$(dest /usr/local/lib/vallum/vallum-uri)"
+    fi
+    if [ -f "packaging/vallum-uri.desktop" ]; then
+        run install -D -m 0644 "packaging/vallum-uri.desktop" \
+            "$(dest /usr/share/applications/vallum-uri.desktop)"
+        run update-desktop-database "$(dest /usr/share/applications)" 2>/dev/null || true
+        # Scheme→handler binding is a per-user desktop setting; register it
+        # for the invoking user when a session is reachable, else the
+        # MimeType entry alone still resolves on most desktops.
+        if [ -n "${SUDO_USER:-}" ]; then
+            run su - "$SUDO_USER" -c \
+                "xdg-mime default vallum-uri.desktop x-scheme-handler/vallum" \
+                2>/dev/null || true
+        fi
+    fi
     # The console's privileged path and the full-tunnel deploy scripts ship
     # with the product: without them the plan-before-apply panel is a button
     # that prints a sudo error (see the premortem, 2026-11-11).
@@ -593,7 +620,8 @@ uninstall() {
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
     run rm -f /usr/local/lib/vallum/vallum-desk /usr/local/lib/vallum/vallum-desk-admin \
-        /usr/local/sbin/vallum-desk-admin
+        /usr/local/lib/vallum/vallum-uri /usr/local/sbin/vallum-desk-admin \
+        /usr/share/applications/vallum-uri.desktop
     run systemctl disable vallum-cleanup 2>/dev/null || true
     run rm -f "$UNIT_DIR/vallum-cleanup.service"
     run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"

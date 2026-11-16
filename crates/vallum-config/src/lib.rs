@@ -41,6 +41,9 @@ pub struct Config {
     /// See [`Enroll`].
     #[serde(default)]
     pub enroll: Enroll,
+    /// See [`Account`].
+    #[serde(default)]
+    pub account: Account,
 }
 
 /// The `[quick]` table: OS-level work done by `vallum-quick`, never the daemon.
@@ -767,6 +770,21 @@ impl ShapingSpec {
     }
 }
 
+/// The `[account]` table: the desk's bearer credential, recorded at join.
+///
+/// `vallum join` writes this when the enrolment carried a desk account
+/// (`VALLUM_ACCOUNT`); the daemon ignores it — accounts are the desk's
+/// concern (ADR-0045). `deny_unknown_fields` means a binary older than
+/// this field refuses a config that carries it: that is the documented
+/// compatibility cost, and it is why the join only writes the table when
+/// a token was actually supplied.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Account {
+    /// The account number — the desk's 32-hex bearer token.
+    pub token: Option<String>,
+}
+
 /// The `[log]` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -1142,6 +1160,30 @@ pub fn with_local_fwmark(config_text: &str) -> String {
     }
 }
 
+/// Record the desk's account number in `config_text` as `[account] token`.
+///
+/// The token is the bearer credential for the desk's account surface; it
+/// rides into the sealed config (0600, the same custody as the key) —
+/// never a command line, where `ps` could read it. Idempotent: a config
+/// already carrying `[account]` is left alone, and text that does not
+/// parse is returned untouched for the caller's own parse to report.
+#[must_use]
+pub fn with_account_token(config_text: &str, token: &str) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.account.token.is_some() {
+        return config_text.to_owned();
+    }
+    let mut out = String::with_capacity(config_text.len() + token.len() + 24);
+    out.push_str(config_text);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("\n[account]\ntoken = \"{token}\"\n"));
+    out
+}
+
 /// Insert `outer_mtu` into `[interface]` of `config_text` if not already present.
 ///
 /// Preserves surrounding comments and fields. If the text does not parse or
@@ -1417,6 +1459,27 @@ size = 1400
         let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\nouter_mtu = 1200\n\n[[peer]]\nname = \"p\"\n";
         let with = with_outer_mtu(text, 1400);
         assert_eq!(with, text);
+    }
+
+    #[test]
+    fn with_account_token_records_the_desk_credential() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_account_token(text, "0123456789abcdef0123456789abcdef");
+        let parsed: Config = toml::from_str(&with).unwrap();
+        assert_eq!(
+            parsed.account.token.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn with_account_token_is_idempotent_and_absent_by_default() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert!(parsed.account.token.is_none());
+        let once = with_account_token(text, "0123456789abcdef0123456789abcdef");
+        let twice = with_account_token(&once, "ffffffffffffffffffffffffffffffff");
+        assert_eq!(once, twice);
     }
 
     #[test]

@@ -84,6 +84,8 @@ done
 # reads a release tarball from one directory.
 copy_one "service/vallum-desk"
 copy_one "service/vallum-desk-admin"
+copy_one "service/vallum-uri"
+copy_one "packaging/vallum-uri.desktop"
 
 # The completions are generated from the release binary and are gitignored, so
 # they are build artifacts: an empty one ships a shell that completes nothing.

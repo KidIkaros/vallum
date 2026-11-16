@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Vallum Connect
+Comment=Enrol this device from a vallum://join link
+Exec=/usr/local/lib/vallum/vallum-uri %u
+MimeType=x-scheme-handler/vallum;
+NoDisplay=true
+Terminal=true
+Categories=Network;

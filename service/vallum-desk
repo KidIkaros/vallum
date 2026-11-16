@@ -346,7 +346,7 @@ class Desk:
                 self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
                                 (code, self._now(), peer))
         return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
-                     "bytes_cap": cap,
+                     "bytes_cap": cap, "connect": connect_uri(ticket, token),
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
                                "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
                                " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
@@ -427,7 +427,8 @@ class Desk:
         if not still:
             return 409, {"error": "the account was revoked while the ticket was minting"}
         return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
-                     "expires": account["expires"], "bytes_cap": account["bytes_cap"]}
+                     "expires": account["expires"], "bytes_cap": account["bytes_cap"],
+                     "connect": connect_uri(ticket, token)}
 
     def voucher(self, body):
         """A code's payload applied to an existing account — Mullvad's
@@ -798,6 +799,14 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 </form>"""
 
 
+def connect_uri(ticket, token):
+    """vallum://join?ticket=<t>&account=<token> — the webpage→client bridge.
+    The ticket is URL-encoded; the account token rides the URI, never the
+    enrolment wire (ADR-0044)."""
+    from urllib.parse import quote
+    return f"vallum://join?ticket={quote(ticket, safe='')}&account={token}"
+
+
 def ticket_page(payload, operator="vallum desk"):
     """The one place the ticket is shown. No script, no storage: what the
     visitor copies is what they keep."""
@@ -808,10 +817,17 @@ def ticket_page(payload, operator="vallum desk"):
     gib = payload.get("bytes_cap", 0) // (1024 ** 3)
     manage = (f"""<form method="post" action="/account">
 <input type="hidden" name="token" value="{token}">
-<button>Manage this account</button></form>
-<p><small>Your account number is carried with that button — save the page
-or the number itself if you want the account later.</small></p>"""
+<button>Manage this account</button></form>"""
               if token else "")
+    connect = ""
+    if payload.get("ticket") and token:
+        # Fired by script, never an href: a link attribute would leak the
+        # token to prefetchers and Referer headers.
+        connect = f"""
+<p><button id="connect">Connect this device</button></p>
+<script>document.getElementById("connect").onclick = function() {{
+  window.location = {json.dumps(connect_uri(payload["ticket"], token))};
+}};</script>"""
     return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
@@ -820,6 +836,9 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 <p>Shown once. Copy it now — the desk does not keep it.
 Peer <code>{peer}</code>, trial until {expires} or {gib} GiB.</p>
 <pre>{ticket}</pre>
+{connect}
+<p>Your account number: <code>{token}</code> — the only credential this
+account ever has. Save it; the desk does not send it anywhere else.</p>
 <ol>
 <li>{INSTALL_BLURB}</li>
 <li><p>Join:</p><pre>sudo vallum join '&lt;ticket&gt;'</pre>

@@ -1046,6 +1046,21 @@ fn place_config_in(
     // there, and the tunnel refuses to start with a file-not-found.
     config_text = vallum_config::with_local_private_key(&config_text, &format!("{name}.key"));
 
+    // A desk enrolment carries the account number in the environment
+    // (VALLUM_ACCOUNT, set by vallum-uri) — never argv, where `ps` shows it.
+    // It lands in the sealed config under [account], in the key's custody.
+    if let Some(account) = std::env::var_os("VALLUM_ACCOUNT") {
+        let account = account.to_string_lossy();
+        let hex_ok = account.len() == 32
+            && account.chars().all(|c| c.is_ascii_hexdigit());
+        if !hex_ok {
+            return Err(Error::Usage(
+                "VALLUM_ACCOUNT is the desk's 32-hex account number".to_owned(),
+            ));
+        }
+        config_text = vallum_config::with_account_token(&config_text, &account);
+    }
+
     // Probe path MTU to the server endpoint. If a reduced-MTU link (PPPoE, DS-Lite)
     // is measured, configure `interface.outer_mtu` so large payloads do not hang.
     if !endpoint.is_empty() && endpoint != "?" {
