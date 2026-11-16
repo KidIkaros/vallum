@@ -45,7 +45,7 @@ cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$RUNDIR"
 }
-trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-full-tunnel "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-full-tunnel "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 
 say "container with its own netns (host routing untouched by construction)"
 docker rm -f "$NAME" >/dev/null 2>&1

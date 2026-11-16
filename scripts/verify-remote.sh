@@ -135,7 +135,8 @@ TRANSPORTS="bundle ssh token"
 TARGET=""
 
 say(){ printf '── %s\n' "$*"; }
-ok(){ printf '   ok    %s\n' "$*"; }
+ok(){ ASSERTIONS=$((ASSERTIONS+1)); printf '   ok    %s\n' "$*"; }
+ASSERTIONS=0
 fail(){ printf '   FAIL  %s\n' "$*"; }
 bad(){ printf '   FAIL  %s\n' "$*"; exit 1; }
 note(){ printf '   note  %s\n' "$*"; }
@@ -1561,13 +1562,27 @@ else
 fi
 
 # The stamp scripts/release.sh requires. It lives outside the repository and
-# names the commit it proved, so an old pass cannot vouch for a new tree.
+# names the commit it proved, so an old pass cannot vouch for a new tree. The
+# record is structured rather than a bare hash: it names the remote host, the
+# time, the operator and a hash of this script, because a two-host claim the
+# artefact does not encode is a claim the artefact cannot back.
 STAMP=$(verified_stamp)
 mkdir -p "$(dirname "$STAMP")"
-printf '%s\n' "$(git rev-parse HEAD)" > "$STAMP"
+cat > "$STAMP" <<EOF
+{
+  "commit": "$(git rev-parse HEAD)",
+  "remote_host": "$TARGET",
+  "namespaced": $([ "$NAMESPACED" = 1 ] && echo true || echo false),
+  "assertions": $ASSERTIONS,
+  "invoked_by": "$(id -un 2>/dev/null || echo unknown)@$(hostname 2>/dev/null || echo unknown)",
+  "script_sha256": "$(sha256sum "$0" 2>/dev/null | cut -d' ' -f1)",
+  "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
 chown -R "${SUDO_USER:-root}" "$(dirname "$STAMP")" 2>/dev/null
+VERDICT_TARGET="$TARGET" "$(dirname "$0")/verdict.sh" verify-remote passed "$ASSERTIONS" "$0"
 if [ "$NAMESPACED" = 1 ]; then
-    say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced)"
+    say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced, $ASSERTIONS assertions)"
 else
-    say "recorded $(git rev-parse --short HEAD) as verified on two hosts"
+    say "recorded $(git rev-parse --short HEAD) as verified on two hosts ($ASSERTIONS assertions)"
 fi

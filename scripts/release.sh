@@ -137,8 +137,20 @@ ok "CHANGELOG.md documents $version"
 stamp="${XDG_STATE_HOME:-$HOME/.local/state}/vallum/remote-verified"
 if [ -n "$SKIP_REMOTE" ]; then
     printf '   skip  two-host verification: %s\n' "$SKIP_REMOTE"
-elif [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$(git rev-parse HEAD)" ]; then
-    ok "two hosts verified this commit"
+elif [ -f "$stamp" ]; then
+    # The stamp is structured since 2026-11: a JSON record naming the commit,
+    # the remote host, the operator and the gate script's hash. A bare-hash
+    # stamp from before that still counts — it was the format that ran.
+    stamp_commit=$(sed -n 's/.*"commit": *"\([0-9a-f]\{40\}\)".*/\1/p' "$stamp" | head -1)
+    [ -z "$stamp_commit" ] && stamp_commit=$(cat "$stamp")
+    if [ "$stamp_commit" = "$(git rev-parse HEAD)" ]; then
+        stamp_host=$(sed -n 's/.*"remote_host": *"\([^"]*\)".*/\1/p' "$stamp" | head -1)
+        ok "two hosts verified this commit${stamp_host:+ (remote: $stamp_host)}"
+    else
+        fail "no scripts/verify-remote.sh pass recorded for $(git rev-parse --short HEAD).
+   Run: sudo ./scripts/verify-remote.sh <ssh-host>
+   Or release anyway with: --skip-remote \"reason\""
+    fi
 else
     fail "no scripts/verify-remote.sh pass recorded for $(git rev-parse --short HEAD).
    Run: sudo ./scripts/verify-remote.sh <ssh-host>
@@ -148,9 +160,17 @@ fi
 # The recorded verdicts. Each gate's verdict names the commit it ran against and
 # how many assertions it made, so a verdict from an older tree is VISIBLE rather
 # than silently standing in for this one, and a shrinking assertion count is a
-# signal that a gate got weaker.
+# signal that a gate got weaker. A verdict that vouches for THIS commit must
+# also verify: verdict.sh signs each record with the release key, and a passing
+# verdict without a valid SSH signature could have been written by hand —
+# evidence that can be forged is evidence of nothing.
 VERDICT_DIR="${VERDICT_DIR:-$PWD/.vallum-verdicts}"
 stale_gates=""
+verdict_signed() {
+    [ -f "$1.sig" ] && [ -f packaging/allowed_signers ] && \
+        ssh-keygen -Y verify -f packaging/allowed_signers -n file \
+            -I vallum-release -s "$1.sig" < "$1" >/dev/null 2>&1
+}
 if [ -d "$VERDICT_DIR" ]; then
     for vf in "$VERDICT_DIR"/*.json; do
         [ -e "$vf" ] || continue
@@ -160,7 +180,8 @@ if [ -d "$VERDICT_DIR" ]; then
         v_assert=$(sed -n 's/.*"assertions": \([0-9]*\).*/\1/p' "$vf")
         if [ "$v_commit" = "$(git rev-parse HEAD)" ]; then
             if [ "$v_status" = passed ]; then
-                ok "$v_gate passed this commit ($v_assert assertions)"
+                verdict_signed "$vf" || fail "$v_gate's verdict is unsigned or its signature does not verify — a hand-written record is not evidence"
+                ok "$v_gate passed this commit ($v_assert assertions, signed)"
             else
                 fail "$v_gate recorded a FAILED verdict for this commit"
             fi

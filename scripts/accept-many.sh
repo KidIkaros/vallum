@@ -44,7 +44,7 @@ cleanup() {
     done
     rm -rf "$RUNDIR"
 }
-trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-many "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-many "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 
 server_rss_kb() {
     ssh "$VPS" 'pid=$(systemctl show -p MainPID --value vallum@vallum0); awk "/VmRSS/ {print \$2}" /proc/$pid/status' 2>/dev/null

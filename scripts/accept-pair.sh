@@ -20,7 +20,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # The verdict trap is installed FIRST: the backend dispatch below can exit
 # before anything else runs, and a gate that records nothing is the rot mode
 # this whole mechanism exists to end.
-trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-pair "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-pair "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 ASSERTIONS=0
 
 # Used from the first build check on: a helper is defined before its caller,

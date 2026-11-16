@@ -20,7 +20,7 @@ ok()  { ASSERTIONS=$((ASSERTIONS + 1)); printf '   ok    %s\n' "$*"; }
 cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1 || true
 }
-trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-desktop "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-desktop "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 
 if [ -z "$DEB" ]; then
     DEB=$(ls -1t dist/vallum-desktop_*_amd64.deb 2>/dev/null | head -1 || true)

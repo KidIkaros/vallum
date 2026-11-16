@@ -199,9 +199,9 @@ fi
 echo
 if [ "$FAILURES" -eq 0 ]; then
     echo "== PASS - the installer produced what the manifests promise, and touched nothing else"
-    scripts/verdict.sh accept-install-layout passed 4
+    scripts/verdict.sh accept-install-layout passed 4 "$0"
     exit 0
 fi
 echo "== FAIL - $FAILURES check(s) failed"
-scripts/verdict.sh accept-install-layout failed "$FAILURES"
+scripts/verdict.sh accept-install-layout failed "$FAILURES" "$0"
 exit 1

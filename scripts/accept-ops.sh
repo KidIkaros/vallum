@@ -16,7 +16,7 @@
 #
 set -uo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-ops "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; command -v cleanup >/dev/null 2>&1 && cleanup; "$REPO/scripts/verdict.sh" accept-ops "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 ASSERTIONS=0
 
 say() { echo "[ops] $*"; }

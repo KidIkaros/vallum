@@ -33,7 +33,7 @@ cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1
     rm -rf "$TICKET_DIR"
 }
-trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-install "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}"' EXIT
+trap 'rc=$?; cleanup; "$REPO/scripts/verdict.sh" accept-install "$([ "$rc" -eq 0 ] && echo passed || echo failed)" "${ASSERTIONS:-0}" "$0"' EXIT
 
 say "starting a clean systemd container (own netns, not --network=host)"
 docker rm -f "$NAME" >/dev/null 2>&1
