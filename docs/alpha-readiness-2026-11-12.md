@@ -338,19 +338,27 @@ These are recorded because they are real and not yet fixed. Nothing here is a
 release blocker by itself; each is a place where the product is less than the
 documentation implies.
 
-1. **The token path cannot carry a peer's DNS, PSK or shaping.** The responder
+1. **PARTLY FIXED 2026-11-16 — the token path now carries DNS.** The responder
+   hands `client_config` the server's own `[quick] dns` (`peer_dns` in
+   `commands/peer.rs`), so a ticket-enrolled device is told what to resolve
+   through instead of getting a full tunnel with no resolver — which leaked
+   every query to the local network. Two tests pin it. PSK and shaping are
+   still not carried: those remain open below.
+
+   **The token path cannot carry a peer's DNS, PSK or shaping.** The responder
    creates the peer record from the invite alone, and an invite carries none of
    those. The file path can, because the operator is present. The fix is to
    carry the operator's options in the invite; the analysis is in
    `docs/wireguard-comparison.md`.
 
-2. **The ticket's host:port is derived three ways** — `[enroll].port`, else the
-   *endpoint* port + 1 (`crates/vallum/src/commands/peer.rs:788`), else the
-   *listen* port + 1 (`crates/vallum/src/enroll.rs:764`), and the TUI's
-   `join_target` uses the listen port (`crates/vallum/src/enroll.rs:620`). On a
-   server whose `public_endpoint` port differs from its `listen` port, a ticket
-   minted by `peer invite` points at a port where nothing is listening, and the
-   join times out with a generic message.
+2. **CLOSED 2026-11-16 (verified, not assumed).** The three derivations now
+   agree: `peer invite` builds the ticket from `commands/server.rs::enroll_port`
+   (the same function the responder binds with), which prefers `[enroll].port`
+   and otherwise uses `listen + 1` — with guards that refuse an ephemeral
+   `listen` and any port below 1024. The TUI's `join_target` uses the same
+   preference. `enroll_port`'s three tests and
+   `join_target_uses_listen_port_plus_one_when_public_endpoint_port_differs`
+   pin the divergent case. The finding described the tree before `f566b58`.
 
 3. **The seccomp check's oracle is the artefact it checks.**
    `scripts/seccomp-trace.sh` reads the allowed list back out of the binary

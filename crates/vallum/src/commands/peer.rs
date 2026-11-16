@@ -708,13 +708,18 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     };
 
     let (endpoint, source) = bundle_endpoint(None, &server, &args.config)?;
+    // The resolver this server expects its peers to use. It used to be `&[]`,
+    // so every ticket-enrolled device got a full tunnel and NO resolver: its
+    // queries went to whatever the OS had, outside the tunnel. A VPN that
+    // leaks DNS is a VPN that leaks the list of sites its user visited.
+    let dns = peer_dns(&args.config);
     let config_text = client_config(
         &args.name,
         &addresses,
         &server.networks,
         &server.public_line,
         &endpoint,
-        &[],
+        &dns,
         None,
         shaping_preset(args.shaping.as_deref())?,
     );
@@ -2176,6 +2181,15 @@ fn widen_to_tunnel(addresses: &[String], networks: &[String]) -> Vec<String> {
 // into a struct would rename arguments at six call sites without shortening the
 // list, and this is a pure string builder — there is no state to encapsulate.
 #[allow(clippy::too_many_arguments)]
+/// The DNS servers a peer enrolled by ticket should be handed: whatever the
+/// server's own `[quick] dns` says, which is the operator's statement about
+/// what their peers resolve through. Empty when the operator has not said.
+fn peer_dns(config_path: &Path) -> Vec<String> {
+    vallum_config::Config::load(config_path)
+        .map(|config| config.quick.effective_dns_servers())
+        .unwrap_or_default()
+}
+
 fn client_config(
     name: &str,
     addresses: &[String],
@@ -2309,6 +2323,40 @@ fn elide(text: &str, width: usize) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A device that enrols by ticket must be told what to resolve through.
+    /// It used to be handed an empty list and a full tunnel, which leaks every
+    /// query to the local network's resolver.
+    #[test]
+    fn a_ticket_enrolled_device_is_told_which_resolver_to_use() {
+        let dir = std::env::temp_dir().join(format!("vallum-peer-dns-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k.key\"\nlisten = \"0.0.0.0:51921\"\n\
+             [quick]\ndns = [\"10.99.90.1\"]\n",
+        )
+        .unwrap();
+        assert_eq!(peer_dns(&path), vec!["10.99.90.1".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_that_names_no_resolver_hands_out_none() {
+        let dir = std::env::temp_dir().join(format!("vallum-peer-dns2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"k.key\"\n",
+        )
+        .unwrap();
+        assert!(peer_dns(&path).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_bare_address_becomes_a_host_prefix() {
