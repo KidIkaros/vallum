@@ -357,11 +357,12 @@ documentation implies.
    reached through the tunnel, so it does not leak, and it needs no new
    service, no second statement of an address, and no cache to operate.
 
-   **The token path cannot carry a peer's DNS, PSK or shaping.** The responder
-   creates the peer record from the invite alone, and an invite carries none of
-   those. The file path can, because the operator is present. The fix is to
-   carry the operator's options in the invite; the analysis is in
-   `docs/wireguard-comparison.md`.
+   **CLOSED 2026-11-16 — the token path now carries DNS, PSK and shaping.**
+   `22459c4` adds optional `psk`/`shaping` fields to the invite (serde defaults
+   keep old invites parseable), `peer invite` takes `--psk`/`--shaping`, and the
+   responder threads them into the peer record and the sealed client config —
+   the same things `--psk`/`--shaping` do in the file path. Two tests pin the
+   end-to-end behaviour.
 
 2. **CLOSED 2026-11-16 (verified, not assumed).** The three derivations now
    agree: `peer invite` builds the ticket from `commands/server.rs::enroll_port`
@@ -372,25 +373,26 @@ documentation implies.
    `join_target_uses_listen_port_plus_one_when_public_endpoint_port_differs`
    pin the divergent case. The finding described the tree before `f566b58`.
 
-3. **The seccomp check's oracle is the artefact it checks.**
-   `scripts/seccomp-trace.sh` reads the allowed list back out of the binary
-   under test and diffs the trace against it — and both the filter and the
-   check read the same list from `crates/vallum/src/sandbox.rs`. A syscall
-   missing from the source is missing from both sides of the comparison, so the
-   defect is invisible by construction. The check needs an independently
-   written expectation.
+3. **CLOSED 2026-11-16.** `1e4c56a` adds `scripts/seccomp-expected.txt`, a
+   hand-written x86_64 expectation authored from `docs/proof/seccomp.md`'s
+   categorization. `seccomp-trace.sh` now diffs the binary's allow-list against
+   it in both directions (a missing expected syscall fails; an unexpected
+   allowed syscall fails), then keeps the original trace-vs-allow-list
+   comparison. Other architectures skip the oracle — the list is
+   x86_64-specific — and keep the trace comparison.
 
-4. **The release gate's two-host evidence is a bare hash in a home directory**
-   (`~/.local/state/vallum/remote-verified`), with no host, no timestamp and no
-   proof that two hosts ran. The two-host property is asserted in the script's
-   own closing message and not encoded in the artefact the gate reads. The
-   `--skip-remote "reason"` bypass also contradicts the script's header, which
-   says a tree that never crossed two hosts is "a refusal, not a warning".
+4. **CLOSED 2026-11-16.** `0473d8c`: the stamp is now a structured record —
+   commit, `remote_host`, `namespaced`, assertion count, the invoking
+   operator@host, a hash of `verify-remote.sh`, and a UTC timestamp — so the
+   two-host property is encoded in the artefact, not just asserted in prose.
+   `release.sh` reads the commit from either format, so a pre-change bare-hash
+   stamp is not stranded. The `--skip-remote "reason"` bypass remains
+   documented, not silent.
 
-5. **A verdict file can be written by hand.** `scripts/verdict.sh` is a writer;
-   a JSON file with the current commit and `"status": "passed"` satisfies
-   `release.sh` exactly as a real run would. There is no signature, no producer
-   identity, and no hash of the gate script that produced it. The verdicts are
-   gitignored, so they are local evidence — and local evidence that anyone can
-   forge is evidence of nothing.
+5. **CLOSED 2026-11-16.** `0473d8c`: `verdict.sh` signs each record with the
+   release key (`ssh-keygen -Y sign`, the same key and `packaging/allowed_signers`
+   trust anchor as release assets), and records the producer and a hash of the
+   gate script that ran. `release.sh` refuses a this-commit `passed` verdict
+   whose signature does not verify — a hand-written record is no longer
+   evidence.
 

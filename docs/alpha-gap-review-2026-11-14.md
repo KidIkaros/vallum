@@ -16,11 +16,14 @@ pinned toolchain (rustc 1.100.0).
 
 ## Release blockers (alpha cannot ship until these are closed)
 
-1. **No version decision / tag.** Tree is `1.6.5` (CHANGELOG) but the last tag is `v1.6.4`;
-   `release.sh --dry-run` refuses until a signed tag sits at HEAD. Owner: operator. Decision needed.
-2. **Hosted CI never run on current HEAD.** Runs for Wave 6 were still queued at review time.
-3. **Repository is private.** Gates prove the product works; none make it reachable.
-4. **Two-host gate (`verify-remote.sh`) has not been re-run since Wave 4–6.** The stamp is for an older commit.
+1. ~~**No version decision / tag.**~~ — `v1.7.0` tagged and released 2026-11-15.
+2. **Hosted CI never run on a public tree.** Self-hosted runs are green on
+   `eb2ebf3` and earlier; `ubuntu-latest` minutes only exist once the repo is
+   public. Pending the flip.
+3. **Repository is private.** Gates prove the product works; none make it
+   reachable. Pending the flip (2026-11-16).
+4. **Two-host gate (`verify-remote.sh`) being re-run with `--clean-remote`**
+   against the live VPS on 2026-11-16, stamping the final HEAD.
 
 ## Pre-publication hygiene (publication-checklist §2, still open)
 
@@ -30,10 +33,23 @@ pinned toolchain (rustc 1.100.0).
 
 ## Open findings carried from the premortem (alpha-readiness §"Open findings")
 
-Unchanged: token invite cannot carry DNS/PSK/shaping; ticket host:port derived three ways;
-seccomp check's oracle is the artifact it checks; two-host evidence is a bare hash; verdict
-files are forgeable. None is a blocker alone; each should either be fixed or stated in the
-release notes ("say what is true").
+**Status 2026-11-16 — all four selected findings closed:**
+
+- ~~token invite cannot carry DNS/PSK/shaping~~ — DNS landed earlier; PSK and shaping
+  landed in `22459c4` (`peer invite --psk/--shaping`, serde-compatible invite fields,
+  responder threads them into the peer record and the sealed client config).
+- ~~seccomp check's oracle is the artifact it checks~~ — `1e4c56a` adds
+  `scripts/seccomp-expected.txt`, a hand-written x86_64 expectation; the gate now
+  fails on drift in either direction between the binary's allow-list and the file.
+- ~~two-host evidence is a bare hash~~ — `0473d8c`: `remote-verified` is now a
+  structured record (commit, remote_host, namespaced, assertions, operator,
+  script hash, timestamp); `release.sh` reads the commit from either format.
+- ~~verdict files are forgeable~~ — `0473d8c`: `verdict.sh` signs each record with
+  the release key (`ssh-keygen -Y`); `release.sh` refuses a this-commit `passed`
+  verdict whose signature does not verify against `packaging/allowed_signers`.
+
+Still open: ticket host:port is derived three ways. Not a blocker; either fix or
+state in the release notes ("say what is true").
 
 ## Mullvad parity: what we still lack
 
