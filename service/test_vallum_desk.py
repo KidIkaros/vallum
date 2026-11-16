@@ -50,6 +50,8 @@ class FakeDaemon(desk_module.Daemon):
     def remove(self, peer):
         if self._refuse_remove:
             raise RuntimeError("the daemon said no")
+        if peer in getattr(self, "missing_peers", ()):
+            raise RuntimeError(f"vallum: no peer named `{peer}`")
         self.removed.append(peer)
 
 
@@ -206,6 +208,19 @@ class EnforcementTests(DeskTestCase):
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
         self.assertEqual(self.account_row(peer)["status"], "expired")
         self.assertEqual(self.daemon.removed, [peer])
+
+    def test_a_peer_that_was_never_created_marks_the_account_without_retrying(self):
+        # A ticket minted but never redeemed leaves no peer to remove: "no
+        # peer named" is the goal state already holding, not a failure, and a
+        # row that retries it forever would never finish sweeping.
+        _, signup_payload = self.signup()
+        peer = signup_payload["peer"]
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+        self.daemon.missing_peers = {peer}
+        action = self.desk.sweep_once()[0]
+        self.assertNotIn("error", action)
+        self.assertEqual(action["reason"], "expired")
+        self.assertEqual(self.account_row(peer)["status"], "expired")
 
 
 class OnDemandTests(DeskTestCase):

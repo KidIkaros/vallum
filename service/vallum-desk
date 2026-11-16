@@ -265,6 +265,9 @@ class Desk:
                                 (code, self._now(), peer))
         return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
                      "bytes_cap": cap,
+                     "install": "curl -fsSL -o /tmp/vallum-install.sh "
+                               "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
+                               " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
                      "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
 
     def _signup_limit_left(self, client_ip):
@@ -346,9 +349,13 @@ class Desk:
         try:
             self.daemon.remove(peer)
         except RuntimeError as error:
-            action["error"] = str(error)
-            print(f"desk: could not remove {peer}; will retry: {error}")
-            return action
+            if "no peer named" not in str(error):
+                action["error"] = str(error)
+                print(f"desk: could not remove {peer}; will retry: {error}")
+                return action
+            # A peer that was never created — a ticket minted but never
+            # redeemed — is already gone: the goal state holds, and leaving the
+            # row active would retry a removal that can never succeed.
         with self.lock:
             self.db.execute("UPDATE accounts SET status=? WHERE peer=?", (reason, peer))
         print(f"desk: removed {peer} ({reason}, {used} bytes)")
@@ -471,6 +478,14 @@ def _esc(text):
     return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
+INSTALL_BLURB = """<p><b>Don't have the client yet?</b>
+<pre>curl -fsSL -o /tmp/vallum-install.sh \\
+  https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh
+sudo bash /tmp/vallum-install.sh --from-release --install-only</pre>
+Linux + systemd; the release signature verifies itself before anything is
+installed. Source and docs: <a href="https://github.com/KidIkaros/vallum">github.com/KidIkaros/vallum</a>.</p>"""
+
+
 def index_page(open_signup):
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
@@ -479,10 +494,12 @@ def index_page(open_signup):
              "An invite code gets you a join ticket; your key never leaves "
              "your machine.")
     return f"""<!doctype html><title>vallum desk</title>
-<style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}
-input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}</style>
+<style>body{{font:16px/1.6 system-ui;max-width:36em;margin:10vh auto;padding:0 1em}}
+input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}
+pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
 <h1>vallum desk</h1>
 <p>Self-service enrolment for this Vallum server. {intro}</p>
+{INSTALL_BLURB}
 <form method="post" action="/signup">
 {code_field}
 <label>device name<br><input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
@@ -494,15 +511,22 @@ def ticket_page(payload):
     """The one place the ticket is shown. No script, no storage: what the
     visitor copies is what they keep."""
     ticket = _esc(payload.get("ticket", ""))
-    how = _esc(payload.get("how", ""))
     peer = _esc(payload.get("peer", ""))
+    expires = _esc(payload.get("expires", ""))
+    gib = payload.get("bytes_cap", 0) // (1024 ** 3)
     return f"""<!doctype html><title>your join ticket</title>
 <style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
 <h1>Your join ticket</h1>
-<p>Shown once. Copy it now — the desk does not keep it.</p>
+<p>Shown once. Copy it now — the desk does not keep it.
+Peer <code>{peer}</code>, trial until {expires} or {gib} GiB.</p>
 <pre>{ticket}</pre>
-<p>{how}</p>"""
+<ol>
+<li>{INSTALL_BLURB}</li>
+<li><p>Join:</p><pre>sudo vallum join '&lt;ticket&gt;'</pre>
+<p>Paste the ticket between the quotes. To keep it out of shell history:
+<code>sudo vallum join -</code> reads it from stdin.</p></li>
+</ol>"""
 
 
 def error_page(message):
