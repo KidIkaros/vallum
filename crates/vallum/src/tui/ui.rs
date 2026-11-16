@@ -193,8 +193,49 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App, compact: bool) {
     });
 
     let mut first_row = vec![status_badge, Span::raw(" ")];
-    for tab in tabs {
-        first_row.extend(tab);
+    // The tab strip gets ONE row, always. It used to wrap, and the header's
+    // height is fixed — so a machine with enough interfaces pushed the device
+    // line (listen address, suite, fwmark) out of the panel entirely. The
+    // device state is why this panel exists; the strip is navigation, and the
+    // selected tab names its position ("[3/7]") whether the rest are drawn.
+    let width_of = |spans: &[Span<'_>]| -> usize {
+        spans.iter().map(|span| span.content.chars().count()).sum()
+    };
+    let budget = main_area.width.saturating_sub(2) as usize; // panel borders
+    let used = width_of(&first_row);
+    let widths: Vec<usize> = tabs.iter().map(|tab| width_of(tab)).collect();
+    let marker = 12; // room for " +N more "
+    let selected = app.selected.min(tabs.len().saturating_sub(1));
+    let visible: Vec<usize> = if used + widths.iter().sum::<usize>() <= budget {
+        (0..tabs.len()).collect()
+    } else {
+        // A window around the selection: forward first, then backward, never
+        // past the marker's room.
+        let available = budget.saturating_sub(used + marker);
+        let mut chosen = vec![selected];
+        let mut width = widths.get(selected).copied().unwrap_or(0);
+        let mut next = selected + 1;
+        while next < tabs.len() && width + widths[next] <= available {
+            width += widths[next];
+            chosen.push(next);
+            next += 1;
+        }
+        let mut prev = selected;
+        while prev > 0 && width + widths[prev - 1] <= available {
+            prev -= 1;
+            width += widths[prev];
+            chosen.insert(0, prev);
+        }
+        chosen
+    };
+    for index in &visible {
+        first_row.extend(tabs[*index].iter().cloned());
+    }
+    if visible.len() < tabs.len() {
+        first_row.push(Span::styled(
+            format!(" +{} more ", tabs.len() - visible.len()),
+            t.muted(),
+        ));
     }
     if let Some(egress) = egress {
         first_row.push(egress);

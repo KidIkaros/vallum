@@ -240,6 +240,52 @@ fn dashboard_shows_dataplane_status_without_control_implementation_flags() {
     assert!(!text.contains("can_set"));
 }
 
+/// The header's height is fixed, so the tab strip must fit in one row. It used
+/// to wrap: on a machine with enough interfaces the strip took three rows and
+/// pushed the device line — the listen address, suite and fwmark — out of the
+/// panel. The device state is why the panel exists, so the strip truncates
+/// ("+N more") and the selected tab always keeps its place.
+#[test]
+fn the_device_line_survives_a_crowded_tab_strip() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut interfaces = Vec::new();
+    for index in 0..8 {
+        let name = format!("vallum-tunnel-{index}");
+        let mut interface = super::app::Interface::new(
+            name.clone(),
+            None,
+            std::path::PathBuf::from(format!("/run/vallum/{name}.sock")),
+        );
+        interface.set_device(DeviceView {
+            interface: name,
+            listen: "0.0.0.0:51921".to_owned(),
+            suite: "0x0003".to_owned(),
+            ..DeviceView::default()
+        });
+        interfaces.push(interface);
+    }
+    let mut app = App::new(interfaces);
+    app.selected = 7; // the last tab must stay visible too
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw dashboard");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        text.contains("listen 0.0.0.0:51921"),
+        "the device line must never be clipped by the tab strip:\n{text}"
+    );
+    assert!(text.contains("+"), "a truncated strip says how many it hid");
+    assert!(text.contains("[8/8]"), "the selected tab keeps its place");
+}
+
 #[test]
 fn the_guard_pill_appears_only_when_full_tunnel_is_armed() {
     use ratatui::{backend::TestBackend, Terminal};
