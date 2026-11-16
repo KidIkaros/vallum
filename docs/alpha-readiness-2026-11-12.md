@@ -396,3 +396,39 @@ documentation implies.
    whose signature does not verify — a hand-written record is no longer
    evidence.
 
+
+## Verdict, 2026-11-16: the bar is met — with the caveats named
+
+The bar above was: a machine that is not the operator's can install it, join it,
+and be served — and someone else can run the same validation and get the same
+answer. Every clause now has an artefact:
+
+- **A stranger can get the code and the client.** `git clone` over anonymous
+  HTTPS builds the workspace (including the public `origin-crypto-sdk`
+  dependency); `install.sh --from-release` fetches the signed v1.7.0 tarball
+  with no token and no `gh`; `ssh-keygen -Y verify` against the committed
+  `allowed_signers` passes and the tarball checksum matches the signed sums.
+- **A stranger can join and be served.** `desk.wingman.gold` (Caddy →
+  `vallum-desk@vallumrc`, open signup) hands a visitor the install command and
+  mints a real join ticket. Proven from outside on 2026-11-16: anonymous
+  `/api/signup` → `vallum setup --join` → a working full-tunnel config
+  (`10.99.90.8/32` via `107.175.238.82:51921`, pushed DNS), the peer visible
+  server-side and then revoked. The ticket page now also tells the visitor how
+  to get `vallum` — the earlier version handed out a command for a binary the
+  stranger did not have.
+- **The validation is reproducible.** All gates are in the tree and runnable;
+  verdicts are signed and commit-bound; the remote stamp names the host, the
+  script hash, and the assertion count.
+- **Hosted CI is green on the public repo.** `ci.yml` (all six jobs) and
+  `fuzz.yml` passed on `ubuntu-latest` at `f7771e6`. The hosted image refuses
+  unprivileged user namespaces even for root (Ubuntu 26.04 AppArmor), so
+  `accept-pair` now falls back to its docker backend and `e2e-netns.sh` runs a
+  plain `unshare -n` when already root.
+
+What is still true, and must stay said: the PQ suite via `origin-crypto-sdk`
+is `EXPERIMENTAL — NOT FOR PRODUCTION USE` and has had no external audit; the
+remote gate's structured stamp is bound to `a426d82` (later commits are desk,
+e2e, and packaging work — a release gate on a newer tag needs a restamp);
+`release.yml`'s tag preflight has not yet run on the hosted runner; and the
+roadmap's owed items stand — outside deployments, external review, an audit of
+the experimental crypto, and a second maintainer.

@@ -24,6 +24,19 @@
   per-IP signup bound honours `X-Forwarded-For` behind the loopback front.
 - **Packaging ships the desk.** `vallum-desk` and `vallum-desk@.service` are
   included in tarballs and found by `install.sh` across all layouts.
+- **The desk hands a stranger the client, not just a ticket.** The signup and
+  ticket pages on `desk.wingman.gold` now carry the release install command
+  and the repo link, the JSON signup payload returns an `install` field, and
+  the ticket page spells out `vallum join '<ticket>'` (or `join -` on stdin).
+  The revocation sweep also treats "no peer named" as already-removed, so a
+  ticket that was minted but never redeemed cannot retry `peer remove`
+  forever.
+- **The repository is public and hosted CI is green.** `ci.yml` and
+  `fuzz.yml` run on `ubuntu-latest` since the flip (first green run:
+  `f7771e6`). GitHub's hosted image refuses unprivileged user namespaces
+  (AppArmor), so `e2e-netns.sh` uses a plain `unshare -n` when it already
+  runs as root, and `accept-pair.sh` falls back to its docker backend when
+  namespaces and the sudo escalation both fail.
 
 ## 1.7.0 — 2026-11-14
 

@@ -37,11 +37,17 @@ token is read-only.
 
 What a private repository cannot prove:
 
-- [ ] After the flip, a **hosted run of `ci.yml` is green on `main`** — the
+- [x] After the flip, a **hosted run of `ci.yml` is green on `main`** — the
       roadmap's criterion, and the point where the runner wiring is actually
-      exercised for the first time.
-- [ ] `fuzz.yml`'s weekly schedule (`cron: '17 4 * * 0'`, 900 s per target) is
-      green on the hosted runner, and the 60 s smoke on a PR.
+      exercised for the first time. First green hosted run: `f7771e6`
+      (2026-11-16), all six jobs on `ubuntu-latest`. The hosted image
+      (Ubuntu 26.04) refuses unprivileged user namespaces even for root —
+      `accept-pair` now falls back to its docker backend when namespaces
+      and the sudo escalation both fail.
+- [x] `fuzz.yml`'s weekly schedule (`cron: '17 4 * * 0'`, 900 s per target) is
+      green on the hosted runner, and the 60 s smoke on a PR. The push-mode
+      run on `f7771e6` is green; the cron schedule itself first fires the
+      coming Sunday.
 - [ ] `release.yml`'s tag preflight is green on the hosted runner (a tag push is
       trusted input either way).
 
@@ -86,12 +92,17 @@ Already true — run them as the regression test, not as a to-do:
 
 Not settled by editing a file:
 
-- [ ] **History scan**, not just the tip:
+- [x] **History scan**, not just the tip:
       `git log -p | grep -nE "(BEGIN [A-Z ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|_secret *=|passphrase *=)"`.
       Anything hit is rotated **before** the flip; a rewritten history is a
-      separate, later decision.
-- [ ] The signing key used for releases is in no commit and no workflow — only
+      separate, later decision. **Clean (2026-11-16):** the only hits are a
+      `CookieSecret::new(&[2u8; 32])` test fixture — a type name matching
+      `_secret *=`, not credential material.
+- [x] The signing key used for releases is in no commit and no workflow — only
       its public half (`packaging/vallum-release.pub`, `allowed_signers`) is.
+      Verified 2026-11-16: `git ls-files` holds no key file, history holds no
+      PEM/OpenSSH block, and the one workflow mention is the key's *path* in a
+      comment.
 - [x] **The shipped binaries, not just the tree.** `v1.6.3` shipped the build
       machine's layout — 288 `/home/…` strings in `vallum`, 43 in `vallum-quick`
       — because `file!()` literals survive `strip = "symbols"`. `scripts/release.sh`
@@ -105,11 +116,15 @@ Not settled by editing a file:
       ```
 
       The measurement itself: `docs/dogfood/2026-11-05-release-1.6.4.md` §2.
-- [ ] Spot-check the proof and dogfood documents for hostnames or addresses that
+- [x] Spot-check the proof and dogfood documents for hostnames or addresses that
       are not documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`,
       `203.0.113.0/24`): `git grep -nE "([0-9]{1,3}\.){3}[0-9]{1,3}" docs/proof docs/dogfood`.
-- [ ] `contrib/telemetry/` posts to `http://127.0.0.1:8428` — local, nothing
-      internal named. Leave as is; re-check if the default ever changes.
+      **Clean (2026-11-16):** only `224.0.0.0/4` (multicast, intentional),
+      `1.1.1.1` (public resolver in a DNS example), and `192.168.1.1`
+      (RFC1918 home-router example) — no operator infrastructure named.
+- [x] `contrib/telemetry/` posts to `http://127.0.0.1:8428` — local, nothing
+      internal named. Verified 2026-11-16. Leave as is; re-check if the
+      default ever changes.
 
 ## 3. Text that assumes a private repository (scrubbed)
 
@@ -123,9 +138,12 @@ repository is private in the comments.
 - [x] `grep -rn --exclude=publication-checklist.md "GH_TOKEN" docs README.md`
       returns only fork guidance ("a private fork"), never an instruction as if
       the main repository needed it.
-- [ ] The install command in the README and quickstart works in a shell with no
+- [x] The install command in the README and quickstart works in a shell with no
       `GH_TOKEN` and no `gh` — testable only after the flip, since it is the
-      anonymous download that changes.
+      anonymous download that changes. **Verified 2026-11-16:** the v1.7.0
+      tarball, `SHA256SUMS`, `.sig`, and `allowed_signers` all fetched over
+      plain HTTPS anonymously; `ssh-keygen -Y verify` passed and the tarball
+      checksum matched the signed sums.
 
 ## 4. What a stranger must be able to do
 
@@ -176,15 +194,18 @@ So these are post-flip steps, and they need the flip to be safe already:
 
 ## 6. The claim publication does not make
 
-- [ ] The README's sentence about `origin-crypto-sdk` — `EXPERIMENTAL — NOT FOR
-      PRODUCTION USE`, no external audit — stays exactly as it is. Publishing
-      invites the review; it does not substitute for it.
-- [ ] Numbers quoted anywhere are measured or marked unmeasured (`CONTEXT.md`'s
-      rule). A public audience checks arithmetic.
-- [ ] `docs/roadmap.md`'s "A public repository" row is updated to say it happened,
+- [x] The README's sentence about `origin-crypto-sdk` — `EXPERIMENTAL — NOT FOR
+      PRODUCTION USE`, no external audit — stays exactly as it is (README.md's
+      Audit Status row; verified 2026-11-16). Publishing invites the review;
+      it does not substitute for it.
+- [x] Numbers quoted anywhere are measured or marked unmeasured (`CONTEXT.md`'s
+      rule). Quoted figures name their source (`vallum bench` in
+      requirements.md, the redteam write-ups) or state plainly that no load
+      test produced one. A public audience checks arithmetic.
+- [x] `docs/roadmap.md`'s "A public repository" row is updated to say it happened,
       with what is still owed: outside deployments, external review, an audit,
       a second maintainer.
-- [ ] Nothing anywhere claims "production ready" in the abstract. The roadmap's
+- [x] Nothing anywhere claims "production ready" in the abstract. The roadmap's
       seven conditions are the definition; the audit is the eighth thing a
       reviewer will ask about and it is not in the tree.
 
