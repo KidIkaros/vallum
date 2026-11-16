@@ -42,7 +42,7 @@ import { UserKeyCard, UserPreferencesPanel } from "@/components/UserIdentity"
 import { ROLE_META, useUserPrefs } from "@/lib/userPrefs"
 import { CopyButton } from "@/components/Copy"
 import { FirstRun, SocketUnreadable } from "@/components/FirstRun"
-import { JoinNetworkDialog, SetupServerDialog } from "@/components/OnboardingDialogs"
+import { JoinNetworkDialog, JoinUriBridge, SetupServerDialog } from "@/components/OnboardingDialogs"
 import { Button } from "@/components/ui/button"
 import { PacketPipelineFlow, TunnelFlowMap } from "@/components/DataFlow"
 import { TopTalkers, type PeerRate } from "@/components/TopTalkers"
@@ -1428,6 +1428,7 @@ export default function App() {
 
   return (
     <div className={`mx-auto flex min-h-svh max-w-7xl flex-col gap-4 p-4 sm:p-6 ${comfortable ? "comfortable" : ""}`}>
+      <JoinUriBridge />
       <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
         <div className="flex items-center gap-3">
           <RampartSeal />

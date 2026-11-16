@@ -53,6 +53,110 @@ pub struct JoinFields {
     pub ticket: String,
     pub ssh_target: String,
     pub name: String,
+    /// A `vallum://join` deep link's desk account token — 32 lowercase hex.
+    /// Empty on a plain ticket join; carried to `vallum join` over the same
+    /// stdin channel as the ticket (env dies at the pkexec boundary).
+    pub account: String,
+}
+
+/// A parsed `vallum://join` deep link — what the desk's Connect button emits.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct JoinUriIntent {
+    pub ticket: String,
+    pub account: String,
+    /// host:port from the ticket, for the confirm dialog's "where to" line.
+    pub endpoint: String,
+}
+
+/// Parse a `vallum://join?ticket=<t>&account=<token>` URI byte-strictly —
+/// the same grammar `service/vallum-uri` enforces, so the GUI accepts
+/// exactly what the baseline handler would (enroll.rs JoinTicket::parse).
+pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
+    let rest = uri
+        .strip_prefix("vallum://")
+        .ok_or("not a vallum:// URI")?;
+    let (action, query) = rest
+        .split_once('?')
+        .ok_or("missing ?ticket=…&account=… query")?;
+    if action != "join" {
+        return Err("unknown action — only vallum://join is served".to_owned());
+    }
+    let mut ticket = "";
+    let mut account = "";
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err("malformed query parameter".to_owned());
+        };
+        match key {
+            "ticket" => ticket = value,
+            "account" => account = value,
+            _ => return Err(format!("unknown parameter `{key}`")),
+        }
+    }
+    let ticket = url_decode(ticket);
+    let account = url_decode(account);
+    if account.len() != 32 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("the account number is 32 hex characters".to_owned());
+    }
+    // vallum1-join:<host>:<port>/<name>/<32-hex id>/<token>/<fp>
+    let body = ticket
+        .strip_prefix("vallum1-join:")
+        .ok_or("the ticket is not a vallum1-join: ticket")?;
+    let (endpoint, fields) = body
+        .split_once('/')
+        .ok_or("the ticket is not a vallum1-join: ticket")?;
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .filter(|(h, _)| !h.is_empty())
+        .ok_or("the ticket is not a vallum1-join: ticket")?;
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err("the ticket is not a vallum1-join: ticket".to_owned());
+    }
+    let fields: Vec<&str> = fields.split('/').collect();
+    let [name, id, token, fp] = fields[..] else {
+        return Err("the ticket is not a vallum1-join: ticket".to_owned());
+    };
+    let endpoint = endpoint.to_owned();
+    let name_ok = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let hex32 = |s: &str| s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit());
+    let token_ok = hex32(token)
+        || (token.len() == 39
+            && token
+                .split('-')
+                .all(|g| g.len() == 4 && g.chars().all(|c| c.is_ascii_hexdigit())));
+    let fp_ok = fp.len() >= 8 && fp.len() % 2 == 0 && fp.chars().all(|c| c.is_ascii_hexdigit());
+    if !(name_ok && hex32(id) && token_ok && fp_ok) {
+        return Err("the ticket is not a vallum1-join: ticket".to_owned());
+    }
+    Ok(JoinUriIntent {
+        ticket,
+        account,
+        endpoint,
+    })
+}
+
+/// Percent-decode a URI query value (+ is NOT space inside this grammar —
+/// tickets carry no spaces, so a literal + is passed through untouched).
+fn url_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The fields of the server initialization wizard.
@@ -1516,6 +1620,42 @@ mod config_tests {
             extract_join_ticket(&format!("sudo vallum join {valid_ticket}")).unwrap(),
             valid_ticket
         );
+
+        // vallum:// deep links — the same grammar service/vallum-uri enforces.
+        let ticket = "vallum1-join:vpn.example.com:51821/lap-top/0123456789abcdef0123456789abcdef\
+                      /0123-4567-89ab-cdef-0123-4567-89ab-cdef/0123456789abcdef0123";
+        let uri = format!(
+            "vallum://join?ticket={}&account={}",
+            ticket.replace(':', "%3A").replace('/', "%2F"),
+            "f".repeat(32)
+        );
+        let intent = parse_join_uri(&uri).unwrap();
+        assert_eq!(intent.ticket, ticket);
+        assert_eq!(intent.account, "f".repeat(32));
+        assert_eq!(intent.endpoint, "vpn.example.com:51821");
+
+        assert!(parse_join_uri("https://join?x=1").is_err());
+        assert!(parse_join_uri("vallum://enroll?ticket=x&account=x").is_err());
+        assert!(parse_join_uri("vallum://join").is_err());
+        assert!(parse_join_uri("vallum://join?ticket=x&account=x&evil=1").is_err());
+        assert!(parse_join_uri(
+            "vallum://join?ticket=vallum1-join%3Abad&account=0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+        assert!(parse_join_uri(&format!(
+            "vallum://join?ticket={}&account=nothex",
+            ticket.replace(':', "%3A").replace('/', "%2F")
+        ))
+        .is_err());
+        assert!(parse_join_uri(&format!(
+            "vallum://join?ticket={}&account={}",
+            "vallum1-join:vpn.example.com:51821/lap-top/0123456789abcdef0123456789abcdef\
+             /0123456789abcdef0123456789abcdef/0123456789abcde"
+                .replace(':', "%3A")
+                .replace('/', "%2F"),
+            "f".repeat(32)
+        ))
+        .is_err()); // odd-length fingerprint refused
 
         assert!(validate_ssh_target("").is_err());
         assert!(validate_ssh_target("-oProxyCommand=evil").is_err());

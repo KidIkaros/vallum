@@ -2,9 +2,10 @@
 Name=Vallum
 GenericName=Post-Quantum VPN Tunnel Control
 Comment=Operations cockpit for the Vallum L3 post-quantum tunnel
-Exec=vallum-gui
+Exec=vallum-gui %u
 Icon=vallum-gui
 Terminal=false
 Type=Application
+MimeType=x-scheme-handler/vallum;
 Categories=Network;Security;System;
 Keywords=vpn;tunnel;post-quantum;security;

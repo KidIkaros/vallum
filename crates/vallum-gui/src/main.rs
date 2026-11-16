@@ -31,8 +31,8 @@ use serde::Serialize;
 use tauri::{Emitter, State};
 
 use actions::{
-    BundleOut, Done, InterfaceFields, InviteFields, JoinFields, KeyOut, MtuTuneOut, PeerFields,
-    QrFrame, ServerSetupFields,
+    BundleOut, Done, InterfaceFields, InviteFields, JoinFields, JoinUriIntent, KeyOut, MtuTuneOut,
+    PeerFields, QrFrame, ServerSetupFields,
 };
 use snapshot::Snapshot;
 
@@ -371,7 +371,20 @@ fn join_network_at(console: &Arc<Console>, fields: &JoinFields) -> Result<Done, 
         run_ops_with_stdin(&args, None)?
     } else {
         let ticket = actions::extract_join_ticket(&fields.ticket)?;
-        run_ops_with_stdin(&["join"], Some(ticket))?
+        // A desk account token rides the same stdin channel as the ticket —
+        // `vallum-ops join` reads it as a second line and exports it for
+        // `vallum join` as VALLUM_ACCOUNT. Env cannot cross sudo/pkexec, and
+        // argv would put the credential in ps.
+        let account = fields.account.trim();
+        let stdin_payload = if account.is_empty() {
+            ticket.to_owned()
+        } else {
+            if account.len() != 32 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("the account number is 32 hex characters".to_owned());
+            }
+            format!("{ticket}\n{account}")
+        };
+        run_ops_with_stdin(&["join"], Some(&stdin_payload))?
     };
     if console.current_socket().is_none() {
         if let Some(found) = discover_socket() {
@@ -1537,10 +1550,40 @@ fn ping_peer(console: State<'_, Arc<Console>>, address: String) -> serde_json::V
     )
 }
 
+/// A `vallum://join?ticket=…&account=…` URI the desktop handed us on
+/// launch (the .desktop file owns the scheme when the GUI is installed).
+/// Held once: the UI takes it on first render, shows the confirm surface
+/// or the refusal, and the store returns empty forever after.
+static PENDING_JOIN_URI: std::sync::Mutex<Option<Result<JoinUriIntent, String>>> =
+    std::sync::Mutex::new(None);
+
+/// The deep link the desktop opened us with, once. `{"intent": …}` when the
+/// URI parsed, `{"refusal": …}` when a malformed one arrived (refused
+/// visibly, never enrolled), `null` when nothing is pending.
+#[tauri::command]
+fn take_join_uri_intent() -> serde_json::Value {
+    take_pending_join_uri()
+}
+
+/// The shared take: Tauri command and the HTTP transport's `/api/join-uri`.
+pub(crate) fn take_pending_join_uri() -> serde_json::Value {
+    match PENDING_JOIN_URI.lock().unwrap().take() {
+        None => serde_json::Value::Null,
+        Some(Ok(intent)) => serde_json::json!({ "intent": intent }),
+        Some(Err(refusal)) => serde_json::json!({ "refusal": refusal }),
+    }
+}
+
 fn main() {
     // `--serve`: the console over localhost HTTP instead of a webview. The
     // same UI, the same commands, for machines whose WebKitGTK cannot render.
     let args: Vec<String> = std::env::args().collect();
+    // The .desktop Exec carries `%u`: a vallum:// URI arrives as argv[1].
+    // Parsed here (never executed); the UI picks it up via take_join_uri_intent.
+    if let Some(uri) = args.iter().find(|arg| arg.starts_with("vallum://")) {
+        let parsed = actions::parse_join_uri(uri);
+        *PENDING_JOIN_URI.lock().unwrap() = Some(parsed);
+    }
     if args.iter().any(|arg| arg == "--serve") {
         let port = args
             .iter()
@@ -1604,6 +1647,7 @@ fn main() {
             save_runtime,
             tune_mtu,
             join_network,
+            take_join_uri_intent,
             setup_server,
             close_enrollment,
             suggestions,

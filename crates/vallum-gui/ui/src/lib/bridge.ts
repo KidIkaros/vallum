@@ -191,6 +191,23 @@ export function preflight(): Promise<Preflight> {
   return http<Preflight>("/api/preflight")
 }
 
+/** A vallum://join deep link the desktop opened the console with. */
+export interface JoinUriIntent {
+  ticket: string
+  account: string
+  endpoint: string
+}
+
+/** Take the pending vallum:// URI the app was launched with — one-shot.
+ *  { intent } → show the confirm surface; { refusal } → a malformed URI
+ *  arrived and was refused; null → nothing pending. */
+export type JoinUriTake = { intent: JoinUriIntent } | { refusal: string } | null
+
+export function takeJoinUriIntent(): Promise<JoinUriTake> {
+  if (IN_TAURI) return invoke<JoinUriTake>("take_join_uri_intent")
+  return http<JoinUriTake>("/api/join-uri")
+}
+
 export interface PingResult {
   address: string
   interface?: string

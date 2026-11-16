@@ -300,6 +300,13 @@ fn handle(
         return Ok(());
     }
 
+    // The deep link the desktop opened us with, once — same payload as the
+    // Tauri take_join_uri_intent command ({"intent"} / {"refusal"} / null).
+    if request.path == "/api/join-uri" {
+        json(&mut stream, "200 OK", &crate::take_pending_join_uri());
+        return Ok(());
+    }
+
     if request.path == "/api/ping" && request.method == "POST" {
         let Some(socket) = console.known_socket() else {
             json(

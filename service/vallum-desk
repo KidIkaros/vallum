@@ -236,7 +236,10 @@ class Desk:
         self.config = config
         self.daemon = daemon
         self.db = open_database(config.state)
-        self.lock = threading.Lock()
+        # Reentrant: helpers hold it for their own statements, and a caller
+        # may already hold it when calling them — every self.db access runs
+        # under it, since one sqlite3.Connection is not concurrent-safe.
+        self.lock = threading.RLock()
         self.signups_today = {}  # ip → (day, count): anonymous signups per IP
 
     # -- inputs ---------------------------------------------------------
@@ -264,9 +267,10 @@ class Desk:
         the legacy `accounts.peer` column is the fallback for a row written
         before the backfill — and still populated on new rows, so older
         readers keep working during the expand."""
-        rows = self.db.execute(
-            "SELECT peer FROM peers WHERE account_id=? AND status='active'",
-            (account["id"],)).fetchall()
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT peer FROM peers WHERE account_id=? AND status='active'",
+                (account["id"],)).fetchall()
         if rows:
             return [row["peer"] for row in rows]
         return [account["peer"]] if account["peer"] else []
@@ -274,18 +278,20 @@ class Desk:
     def _account_for_peer(self, peer):
         """The account a device peer belongs to, via the relation — falling
         back to the legacy column for a pre-migration shape."""
-        row = self.db.execute(
-            "SELECT a.* FROM accounts a JOIN peers p ON p.account_id=a.id "
-            "WHERE p.peer=?", (peer,)).fetchone()
-        if row:
-            return row
-        return self.db.execute(
-            "SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
+        with self.lock:
+            row = self.db.execute(
+                "SELECT a.* FROM accounts a JOIN peers p ON p.account_id=a.id "
+                "WHERE p.peer=?", (peer,)).fetchone()
+            if row:
+                return row
+            return self.db.execute(
+                "SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
 
     def _insert_peer(self, account_id, peer, label):
-        self.db.execute(
-            "INSERT INTO peers (account_id, peer, label, created, status) "
-            "VALUES (?,?,?,?,?)", (account_id, peer, label, self._now(), "active"))
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO peers (account_id, peer, label, created, status) "
+                "VALUES (?,?,?,?,?)", (account_id, peer, label, self._now(), "active"))
 
     # -- signup ---------------------------------------------------------
 
@@ -372,7 +378,9 @@ class Desk:
         interface-name ceiling, so the counter leads: u0001-friend, u0002-friend.
         The counter counts *peers*, not accounts — an account may hold
         several devices."""
-        next_id = self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM peers").fetchone()[0]
+        with self.lock:
+            next_id = self.db.execute(
+                "SELECT COALESCE(MAX(id),0)+1 FROM peers").fetchone()[0]
         return f"u{next_id:04d}-{label[:8]}"[:24]
 
     @staticmethod
@@ -390,21 +398,22 @@ class Desk:
         authenticates, and the new peer's ticket binds the account's plan —
         same expiry, same shared byte pool."""
         token = body.get("token") or ""
-        account = self.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
-        if not account:
-            return 404, {"error": "unknown account token"}
-        if account["status"] != "active":
-            return 403, {"error": f"account is {account['status']} — "
-                                  "devices can only join an active account"}
         label = (body.get("name") or "").strip()[:40]
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
             return 400, {"error": "name must be lowercase letters/digits/hyphens"}
-        # The cap check and the peers row are one locked step — the row IS
-        # the reservation, so a racing request counts it. The daemon call
-        # stays outside the lock: a subprocess under a mutex serializes the
-        # desk, and a failed mint deletes the reservation after the fact.
+        # The lookup, cap check, and the peers row are one locked step —
+        # the row IS the reservation, so a racing request counts it, and a
+        # racing read on the shared connection never interleaves. The
+        # daemon call stays outside the lock: a subprocess under a mutex
+        # serializes the desk, and a failed mint deletes the reservation.
         with self.lock:
+            account = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            if not account:
+                return 404, {"error": "unknown account token"}
+            if account["status"] != "active":
+                return 403, {"error": f"account is {account['status']} — "
+                                      "devices can only join an active account"}
             live = self.db.execute(
                 "SELECT COUNT(*) FROM peers WHERE account_id=? AND status='active'",
                 (account["id"],)).fetchone()[0]
@@ -437,17 +446,17 @@ class Desk:
         grow the shared cap, its label replaces the plan; consumed bytes
         stay consumed. The burn and the apply are one locked step."""
         token = body.get("token") or ""
-        account = self.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
-        if not account:
-            return 404, {"error": "unknown account token"}
-        if account["status"] != "active":
-            return 403, {"error": f"account is {account['status']} — "
-                                  "only an active account redeems a code"}
         code = (body.get("code") or "").strip()
         if not code:
             return 400, {"error": "code is required"}
         with self.lock:
+            account = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            if not account:
+                return 404, {"error": "unknown account token"}
+            if account["status"] != "active":
+                return 403, {"error": f"account is {account['status']} — "
+                                      "only an active account redeems a code"}
             known = self.db.execute(
                 "SELECT used_by, days, bytes, plan FROM codes WHERE code=?",
                 (code,)).fetchone()
@@ -489,13 +498,14 @@ class Desk:
     def account(self, token):
         """The full account view the page and its JSON share: the plan row,
         the shared-pool numbers, and every device with its own status."""
-        row = self.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
-        if not row:
-            return 404, {"error": "unknown account token"}
-        devices = [dict(r) for r in self.db.execute(
-            "SELECT peer, label, status, created FROM peers "
-            "WHERE account_id=? ORDER BY id", (row["id"],)).fetchall()]
+        with self.lock:
+            row = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            if not row:
+                return 404, {"error": "unknown account token"}
+            devices = [dict(r) for r in self.db.execute(
+                "SELECT peer, label, status, created FROM peers "
+                "WHERE account_id=? ORDER BY id", (row["id"],)).fetchall()]
         if not devices and row["peer"]:
             devices = [{"peer": row["peer"], "label": row["label"],
                         "status": "active", "created": row["created"]}]
@@ -512,14 +522,15 @@ class Desk:
         """The account owner's per-device revoke: the bearer token must own
         the peer. Same removal-first order as the admin path."""
         token = body.get("token") or ""
-        account = self.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
-        if not account:
-            return 404, {"error": "unknown account token"}
         peer = body.get("peer")
-        owned = self.db.execute(
-            "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
-            (account["id"], peer)).fetchone()
+        with self.lock:
+            account = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            if not account:
+                return 404, {"error": "unknown account token"}
+            owned = self.db.execute(
+                "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
+                (account["id"], peer)).fetchone()
         if not owned and peer != account["peer"]:
             return 404, {"error": "unknown device"}
         try:
@@ -538,7 +549,9 @@ class Desk:
     # -- status ---------------------------------------------------------
 
     def status(self, token):
-        row = self.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        with self.lock:
+            row = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
         if not row:
             return 404, {"error": "unknown account token"}
         peers = self._peers_of(row)
@@ -560,8 +573,10 @@ class Desk:
         actions = []
         today = datetime.date.today().isoformat()
         counters = self.daemon.counters()
-        for row in self.db.execute(
-                "SELECT * FROM accounts WHERE status='active'").fetchall():
+        with self.lock:
+            active = self.db.execute(
+                "SELECT * FROM accounts WHERE status='active'").fetchall()
+        for row in active:
             used = sum(counters.get(peer, 0) for peer in self._peers_of(row))
             reason = self._breach_reason(row, used, today)
             if reason:
@@ -743,21 +758,24 @@ class Desk:
         return 200, {"revoked": account["peer"], "peers": action["peers"]}
 
     def _list_peers(self, body):
-        rows = self.db.execute(
-            "SELECT peer,label,plan,status,expires,bytes_cap FROM accounts").fetchall()
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT peer,label,plan,status,expires,bytes_cap FROM accounts").fetchall()
         return 200, {"peers": [dict(row) for row in rows]}
 
     def _list_devices(self, body):
-        rows = self.db.execute(
-            "SELECT p.peer, p.label AS device, p.status, p.created, "
-            "a.label AS account, a.plan AS account_plan "
-            "FROM peers p JOIN accounts a ON a.id=p.account_id ORDER BY p.id").fetchall()
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT p.peer, p.label AS device, p.status, p.created, "
+                "a.label AS account, a.plan AS account_plan "
+                "FROM peers p JOIN accounts a ON a.id=p.account_id ORDER BY p.id").fetchall()
         return 200, {"devices": [dict(row) for row in rows]}
 
     def _list_codes(self, body):
-        rows = self.db.execute(
-            "SELECT code, created, used_by, days, bytes, plan "
-            "FROM codes ORDER BY created").fetchall()
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT code, created, used_by, days, bytes, plan "
+                "FROM codes ORDER BY created").fetchall()
         return 200, {"codes": [dict(row) for row in rows]}
 
     def _run_sweep(self, body):

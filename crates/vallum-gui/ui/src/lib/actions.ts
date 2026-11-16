@@ -60,6 +60,8 @@ export interface JoinFields {
   ticket: string
   ssh_target: string
   name: string
+  /** Desk account token from a vallum://join deep link (32 hex, optional). */
+  account?: string
 }
 
 export const joinNetwork = (fields: JoinFields) =>

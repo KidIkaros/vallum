@@ -119,8 +119,18 @@ full-tunnel)
     exec bash "$LIB/go-full-tunnel.sh" "$target_iface"
     ;;
 join)
-    # Redeem a vallum1-join:... ticket passed on stdin.
-    exec /usr/bin/vallum join -
+    # Redeem a vallum1-join:... ticket passed on stdin. Line 1 is the
+    # ticket; an optional line 2 is the desk account token, re-exported as
+    # VALLUM_ACCOUNT for `vallum join` to seal into the config. The token
+    # rides stdin because the caller's env dies at sudo/pkexec, and argv
+    # would put the credential in ps.
+    IFS= read -r join_ticket
+    IFS= read -r join_account || join_account=""
+    if [ -n "$join_account" ]; then
+        printf '%s\n' "$join_ticket" | VALLUM_ACCOUNT="$join_account" /usr/bin/vallum join -
+    else
+        printf '%s\n' "$join_ticket" | /usr/bin/vallum join -
+    fi
     ;;
 setup-remote)
     # Enrol this client over SSH against a remote Vallum server.

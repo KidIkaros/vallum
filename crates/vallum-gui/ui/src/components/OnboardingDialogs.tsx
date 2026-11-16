@@ -19,7 +19,12 @@ import {
   type JoinFields,
   type ServerSetupFields,
 } from "@/lib/actions"
-import { preflight, type Preflight } from "@/lib/bridge"
+import {
+  preflight,
+  takeJoinUriIntent,
+  type JoinUriIntent,
+  type Preflight,
+} from "@/lib/bridge"
 import { formatError, nameProblem } from "@/lib/validate"
 
 // First-contact onboarding: join a network as a client (ticket or SSH
@@ -352,6 +357,91 @@ export function SetupServerDialog({ blocked }: { blocked?: string }) {
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** The vallum://join bridge: when the desktop hands the console a deep link
+ *  (the .desktop file owns the scheme), it arrives as a pending intent the
+ *  backend parsed at launch. This component takes it once on mount and
+ *  opens a confirm surface — the endpoint and account are shown before
+ *  anything enrols; a malformed URI is refused visibly instead. */
+export function JoinUriBridge() {
+  const [intent, setIntent] = useState<JoinUriIntent | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [checked, setChecked] = useState(false)
+
+  useEffect(() => {
+    takeJoinUriIntent()
+      .then((take) => {
+        if (take && "intent" in take) setIntent(take.intent)
+        else if (take && "refusal" in take)
+          toast.error(`vallum:// link refused — ${take.refusal}`, {
+            description: "Use Join network… and paste the invite ticket instead.",
+            duration: 10000,
+          })
+      })
+      .catch(() => {})
+      .finally(() => setChecked(true))
+  }, [])
+
+  if (!checked || intent === null) return null
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) setIntent(null)
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle className="text-base font-semibold">
+            Connect this device?
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            A Vallum webpage opened this link. Enrolling writes the device&apos;s
+            config and starts the tunnel — nothing happens until you confirm.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="border-border/60 bg-background/40 flex flex-col gap-1.5 rounded-lg border px-3 py-2.5 font-mono text-xs">
+          <div className="flex justify-between gap-3">
+            <span className="micro">server</span>
+            <span className="text-foreground">{intent.endpoint}</span>
+          </div>
+          <div className="flex justify-between gap-3">
+            <span className="micro">account</span>
+            <span className="text-foreground">…{intent.account.slice(-8)}</span>
+          </div>
+        </div>
+        <DialogFooter showCloseButton>
+          <Button
+            id="join-uri-confirm"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true)
+              joinNetwork({
+                mode: "ticket",
+                ticket: intent.ticket,
+                ssh_target: "",
+                name: "",
+                account: intent.account,
+              })
+                .then((done) => {
+                  toast.success(done.message)
+                  setIntent(null)
+                })
+                .catch((error) =>
+                  toast.error(formatError(error), { duration: 10000 }),
+                )
+                .finally(() => setBusy(false))
+            }}
+          >
+            {busy ? "Enrolling…" : "Connect & enrol"}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )

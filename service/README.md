@@ -184,6 +184,39 @@ curl -X POST https://desk.example.com/api/voucher \
 #   → cap grows to 300 GiB; the code is burned
 ```
 
+## The Connect button — vallum:// deep links
+
+Every ticket-bearing response (`signup`, `devices`) carries a `connect` URI,
+and the ticket page renders it as a Connect button:
+
+```
+vallum://join?ticket=<url-encoded ticket>&account=<account number>
+```
+
+The page fires it with `window.location` — never an `href`, where prefetch
+and Referer would carry the credential. Two handlers can receive the
+scheme, and the desktop picks by which `.desktop` files exist:
+
+- **`vallum-uri` (baseline, ships everywhere).** Validates the URI
+  byte-strictly — the `vallum1-join:` grammar for the ticket, 32 hex for
+  the account — then runs `vallum join -`: the ticket on stdin, the
+  account in `VALLUM_ACCOUNT`. Nothing secret is ever an argv member, and
+  nothing is shell-evaluated. `vallum join` seals the account into the
+  config's `[account]` table, in the key's 0600 custody.
+- **`vallum-gui` (takeover when installed).** Its desktop entry also owns
+  `x-scheme-handler/vallum`; the mimeapps default decides between the two.
+  The GUI parses the URI at launch, shows a confirm surface (server
+  endpoint, account number tail), and enrols through `vallum-ops join` —
+  the account rides a second stdin line because pkexec strips env.
+  Without the GUI the baseline handler keeps working; installing the GUI
+  is the only switch.
+
+`[account]` is desk metadata — the daemon ignores it — and it is gated by
+`deny_unknown_fields`: a `vallum` binary older than the field refuses a
+config that carries it. Keep a current client on deep-link machines.
+Linux is the registered platform today; the macOS/Windows story is the
+Tauri bundle's file-association config when those ports ship.
+
 ## Security notes — the parts an operator must hear
 
 - **The account number is a bearer credential.** It never travels a URL —
