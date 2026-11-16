@@ -423,37 +423,32 @@ item can be picked up independently in order after any interruption:
   workflow was deleted; `docs/proof/platforms.md` now states that the daemon on
   macOS is unverified.
 - **A code-based KEM.** ADR-0012 defers it until there is a reason.
-- **A public repository.** Held deliberately until production readiness is real,
-  which from here is a checkable condition rather than a feeling: the seven
-  conditions above closed, a hosted run of `ci.yml`, `fuzz.yml` and
-  `release.yml` green on `main`, and one install path a stranger can follow
-  (`scripts/install.sh` from source today; an artifact once the next item stops
-  being deferred). Each condition, and the checks that prove it, is written down
-  in [`publication-checklist.md`](publication-checklist.md). What publication is
-  meant to produce is the part the private repository cannot: outside
-  deployments and review, which are what the audit and the `experimental-pq`
-  status wait on, and a second maintainer. Status: the
-  workflows now choose their runner by repository visibility — self-hosted while
-  private, `ubuntu-latest` once public, which is also what keeps a stranger's
-  pull request off a machine of ours (`.github/workflows/ci.yml`'s header) — so
-  publication is no longer blocked on billing. What is still unproved is the
-  first hosted run on `main`: GitHub refused hosted minutes on the private plan
-  ("recent account payments have failed or your spending limit needs to be
-  increased"), and free minutes for a public repository cannot be tested from
-  here.
-  Every job's commands pass locally via `scripts/verify.sh`, and the first run
-  whose jobs actually start is what proves the hosted wiring. One unexplained
-  failure stands between here and a confident first run: `e2e-netns.sh` failed
-  once in ten on the dual-stack `/32`+`/128` address check, during a parallel
-  `cargo test --workspace`. It has not recurred in sixteen full runs since (ten
-  under CPU load, six beside a concurrent `cargo test --workspace`), nor in 500
-  daemon startups under load asserting both addresses immediately after `tunnel
-  up`; the daemon assigns and ACKs each address before it logs that line, so the
-  failure should be impossible, which is the reason to keep watching it rather
-  than explain it away. The gate now dumps the interface state, the daemon pid
-  and the log tail when any of those four checks fails, and reads the addresses
-  back from the daemon (`vallum show --control --dump`) so a recurrence says
-  which witness disagrees instead of leaving a line in a CI log.
+- ~~**A public repository.**~~ — **public 2026-11-16.** Held deliberately until
+  the gates were real, which they are: the seven conditions are closed,
+  `verify-remote.sh --clean-remote` passed against the live VPS on `a426d82`
+  (43 assertions, three enrolment transports, outage/recovery, signed verdict),
+  and the stranger path is proven anonymously — bare `git clone` + `cargo
+  build` succeeds and the v1.7.0 release assets download and verify against
+  `allowed_signers` with no credentials. The hosted `ci.yml`/`fuzz.yml` runs on
+  `main` are the last unproved item and are being watched now. Post-flip
+  settings are on: branch protection (PR + `test`/`install`/`acceptance` +
+  CODEOWNERS review), private vulnerability reporting, secret scanning with
+  push protection, Dependabot alerts and security updates.
+  What publication was meant to produce is still owed: outside deployments,
+  external review, an audit of `origin-crypto-sdk` (still `EXPERIMENTAL — NOT
+  FOR PRODUCTION USE`), and a second maintainer.
+  One unexplained failure stands between here and a confident first hosted run:
+  `e2e-netns.sh` failed once in ten on the dual-stack `/32`+`/128` address
+  check, during a parallel `cargo test --workspace`. It has not recurred in
+  sixteen full runs since (ten under CPU load, six beside a concurrent
+  `cargo test --workspace`), nor in 500 daemon startups under load asserting
+  both addresses immediately after `tunnel up`; the daemon assigns and ACKs
+  each address before it logs that line, so the failure should be impossible,
+  which is the reason to keep watching it rather than explain it away. The gate
+  now dumps the interface state, the daemon pid and the log tail when any of
+  those four checks fails, and reads the addresses back from the daemon
+  (`vallum show --control --dump`) so a recurrence says which witness disagrees
+  instead of leaving a line in a CI log.
 - **Publishing a version.** The tag marks a tree. It becomes worth doing when
   someone needs an artifact, not before.
 

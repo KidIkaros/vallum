@@ -129,13 +129,16 @@ repository is private in the comments.
 
 ## 4. What a stranger must be able to do
 
-- [ ] **Install without credentials.** `curl -fsSL -o /tmp/vallum-install.sh …/scripts/install.sh && sudo bash /tmp/vallum-install.sh --from-release --install-only`
-      resolves the release anonymously and verifies `SHA256SUMS.sig` against the
-      key embedded in the script.
-- [ ] **Build from a bare clone.** `git clone … && cargo build` works with no
-      sibling checkout, because `origin-crypto-sdk` is a git dependency pinned to
-      tag `v0.7.4` and **that repository is already public** (verified: it is).
-      Do not unpublish the SDK without repinning to crates.io first.
+- [x] **Install without credentials** (verified anonymously 2026-11-16):
+      the `latest` release endpoint resolves unauthenticated (v1.7.0),
+      `SHA256SUMS.sig` verifies against `allowed_signers`, and the x86_64
+      tarball's sha256 matches the signed sums. The `install.sh --from-release`
+      mechanics are exactly this chain plus `sudo` for the file install.
+- [x] **Build from a bare clone** (verified anonymously 2026-11-16):
+      `git clone --depth 1 … && cargo build -p vallum -p vallum-quick` finishes
+      clean with no credentials — `origin-crypto-sdk` resolves from the public
+      repo pinned to tag `v0.7.4`. Do not unpublish the SDK without repinning
+      to crates.io first.
 - [ ] **Follow one page** — [quickstart](quickstart.md) — from prerequisites to a
       verified tunnel, with the enrolment path chosen by what the client can
       reach.
@@ -153,15 +156,18 @@ Verified today: the protection API answers `403` with
 *"Upgrade to GitHub Pro or make this repository public to enable this feature."*
 So these are post-flip steps, and they need the flip to be safe already:
 
-- [ ] Branch protection on `main`: require a pull request, require the `ci` job,
-      dismiss stale approvals, require `CODEOWNERS` review.
-- [ ] **Private vulnerability reporting enabled**, then open
-      `SECURITY.md`'s own instruction and confirm the Security → Advisories →
-      Report a vulnerability button appears. Without it the policy points at
-      nothing.
-- [ ] Secret scanning and push protection on (free on public repositories).
-- [ ] Dependabot alerts on, and check that its PRs land on the hosted runner —
-      they are `pull_request` events like any other (§1 again).
+- [x] Branch protection on `main` (2026-11-16): require a pull request, require
+      `test (stable)`, `test (1.95.0)`, `install`, `acceptance` (`audit` is not
+      required — it refuses fork PRs by design), dismiss stale approvals,
+      require `CODEOWNERS` review; no force pushes, no branch deletion.
+- [x] **Private vulnerability reporting enabled** (2026-11-16, via
+      `PUT /repos/KidIkaros/vallum/private-vulnerability-reporting`). The
+      Security → Advisories → Report a vulnerability button now exists.
+- [x] Secret scanning and push protection on (2026-11-16,
+      `security_and_analysis`: both `enabled`).
+- [x] Dependabot alerts on and security-update PRs enabled (2026-11-16); its
+      first PRs were already running minutes after the flip — they are
+      `pull_request` events and land on the hosted runner (§1 again).
 - [ ] Decide whether outside contributors need a DCO/sign-off; if yes, add it to
       `CONTRIBUTING.md` **before** the first outside PR, not after.
 

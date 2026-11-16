@@ -293,7 +293,7 @@ Full detail in [`docs/roadmap.md`](docs/roadmap.md).
 
 - **Tri-Hybrid KEM**: Combines classical `X25519` with post-quantum `sntrup761` and `ML-KEM-768`. Breaking confidentiality requires compromising all three algorithms.
 - **Reachability & Transport**: `udp` by default alongside zero-overhead LWO obfuscation + handshake length jitter (`carrier = "lwo"`), happy-eyeballs 500ms LWO-to-TCP racing (`carrier = "auto"`), and framed TCP fallback (`carrier = "tcp"`) supporting HTTP/1.1 `101 Switching Protocols` reverse-proxy upgrades (`/_vallum` behind Caddy/Nginx TLS `:443`), paired with AEAD padding and Maybenot-style traffic shaping ([ADR-0026](docs/adr/0026-censorship-resistance.md), [ADR-0042](docs/adr/0042-layer4-tls-and-adaptive-mtu.md)).
-- **Audit Status**: Post-quantum algorithms utilize `origin-crypto-sdk` (`EXPERIMENTAL`). Formal audits are ongoing; deployers should evaluate threat models accordingly.
+- **Audit Status**: Post-quantum algorithms utilize `origin-crypto-sdk` (`EXPERIMENTAL — NOT FOR PRODUCTION USE`). No external audit has been performed; deployers should evaluate threat models accordingly ([security model](docs/security-model.md)).
 
 ### Reverse-Proxy TLS `:443` Example (Caddy)
 ```caddyfile
