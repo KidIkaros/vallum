@@ -17,6 +17,8 @@ set -euo pipefail
 CONFIG="${VALLUM_FOX_CONFIG:-/etc/vallum/vallum-agent.toml}"
 QUICK="${VALLUM_FOX_QUICK:-/usr/bin/vallum-quick}"
 MEMBER_NAME="${VALLUM_FOX_MEMBER:-agent}"
+BROWSER="${VALLUM_FOX_BROWSER:-}"   # a browser binary; default: auto-download chrome-headless-shell
+CDP_PORT="${VALLUM_FOX_CDP_PORT:-9222}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vallum-fox"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vallum-fox"
 BROWSER_URL_BASE="https://storage.googleapis.com/chrome-for-testing-public"
@@ -107,6 +109,14 @@ PY
 # --- browser ---------------------------------------------------------------
 
 ensure_browser() {
+    # An explicit browser wins (any Chromium-family binary speaks CDP; Firefox
+    # works for fetch/dl but not the CDP commands). Default: auto-download
+    # chrome-headless-shell so a fresh machine needs no browser installed.
+    if [ -n "$BROWSER" ]; then
+        command -v "$BROWSER" >/dev/null || [ -x "$BROWSER" ] || die "VALLUM_FOX_BROWSER='$BROWSER' is not a runnable browser"
+        printf '%s' "$BROWSER"
+        return 0
+    fi
     local bin="$CACHE_DIR/chrome-headless-shell-linux64/chrome-headless-shell"
     [ -x "$bin" ] && { printf '%s' "$bin"; return 0; }
     mkdir -p "$CACHE_DIR"
@@ -213,6 +223,32 @@ PY
     esac
 }
 
+cmd_cdp() {
+    # A persistent member browser with CDP bound to the tunnel address: the
+    # host (or any of the operator's machines) drives it over the tunnel via
+    # ws://<tunnel-ip>:<port>. Blocks — run it backgrounded. The control
+    # channel rides the tunnel and dies with it, fail-closed like everything
+    # else here. Budget applies to pages the driver navigates, not to CDP.
+    local bin; bin=$(ensure_browser)
+    local iface_ip
+    # The member namespace knows its own address — no privileged config read.
+    iface_ip=$(member ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}') \
+        || die "cannot read the tunnel address from $CONFIG"
+    [ -n "$iface_ip" ] || die "no tunnel address in $CONFIG"
+    mkdir -p "$STATE_DIR/chrome-profile"
+    say "member browser with CDP on ws://$iface_ip:$CDP_PORT — drive it from the host over the tunnel"
+    # Chrome refuses to bind its DevTools socket off loopback, so chrome listens
+    # on 127.0.0.1 inside the namespace and socat exposes it on the tunnel
+    # address — reachable only through the tunnel, so the control channel dies
+    # with it, fail-closed like everything else here.
+    member bash -c "
+        $bin --headless --no-sandbox --disable-gpu \
+            --remote-debugging-port=$CDP_PORT \
+            --user-data-dir=$STATE_DIR/chrome-profile \"$@\" >/dev/null 2>&1 &
+        socat TCP-LISTEN:$CDP_PORT,bind=$iface_ip,fork,reuseaddr TCP:127.0.0.1:$CDP_PORT
+    "
+}
+
 # --- setup -----------------------------------------------------------------
 
 cmd_setup() {
@@ -264,6 +300,41 @@ INSTALL
     say "setup complete — the agent's web identity is now this machine's tunnel, separate from yours"
 }
 
+cmd_adopt() {
+    # Friend flow: after `vallum join <ticket>` adopted a server-issued config,
+    # turn THAT config into the agent lane — app_class, tunnel DNS, member
+    # sudoers rule. No SSH to any server; the ticket was the access grant.
+    local conf="${1:-}"
+    [ -n "$conf" ] || conf=$(ls /etc/vallum/*.toml 2>/dev/null | grep -v bak | head -1)
+    [ -n "$conf" ] || die "no joined config found under /etc/vallum — run \`vallum join <ticket>\` first"
+    local stem; stem=$(basename "$conf" .toml)
+    say "adopting $conf (interface stem '$stem') as the agent lane"
+    cat > "$STATE_DIR/adopt.sh" <<ADOPT
+#!/bin/bash
+set -e
+python3 - "$conf" <<'PY'
+import re, sys
+p = sys.argv[1]
+t = open(p).read()
+if "[quick]" not in t:
+    t += "\n[quick]\n"
+if "app_class" not in t:
+    t = t.replace("[quick]", '[quick]\napp_class = true\ndns = ["1.1.1.1", "1.0.0.1"]', 1)
+open(p, "w").write(t)
+print("config patched: app_class on, tunnel DNS set")
+PY
+printf '%s ALL=(root) NOPASSWD: $QUICK app *\n' "\${SUDO_USER:-$USER}" > /etc/sudoers.d/vallum-app-member
+visudo -cf /etc/sudoers.d/vallum-app-member
+systemctl daemon-reload
+systemctl restart "vallum@$stem.service" "vallum-quick@$stem.service"
+echo ADOPT_DONE
+ADOPT
+    if command -v pkexec >/dev/null; then pkexec bash "$STATE_DIR/adopt.sh"; else sudo bash "$STATE_DIR/adopt.sh"; fi
+    export VALLUM_FOX_CONFIG="$conf"
+    sleep 8
+    cmd_status
+}
+
 # --- dispatch --------------------------------------------------------------
 
 cmd="${1:-}"; [ -n "$cmd" ] || { cmd_status; exit 0; }
@@ -276,7 +347,9 @@ case "$cmd" in
     egress) cmd_egress ;;
     status) cmd_status ;;
     budget) cmd_budget "$@" ;;
+    cdp) cmd_cdp "$@" ;;
+    adopt) cmd_adopt "$@" ;;
     setup) cmd_setup "$@" ;;
     help|-h|--help) sed -n '2,12p' "$0" ;;
-    *) die "unknown command '$cmd' — try fetch|dump|shot|dl|egress|status|budget|setup" ;;
+    *) die "unknown command '$cmd' — try fetch|dump|shot|dl|egress|status|budget|cdp|adopt|setup" ;;
 esac
