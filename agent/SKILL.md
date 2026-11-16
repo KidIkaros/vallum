@@ -1,9 +1,22 @@
 ---
 name: vallum-fox
-description: Browse the web through a Vallum per-app tunnel — separate agent identity, rate-budgeted, fail-closed. Use when a browsing task should not touch the operator's own network identity, or when download volume could earn a ban.
+version: 1.0.0
+author: Vallum + Hermes Agent
+license: Apache-2.0
+description: Agent web browsing on a separate IP via Vallum tunnel.
+metadata:
+  hermes:
+    tags: [vallum, agent-browsing, tunnel, rate-limiting]
+    related_skills: [vallum-operations, dogfood]
 ---
 
 # vallum-fox — agent web access on its own identity
+
+## When to Use
+
+Use this lane when a web task carries agent-volume risk: many fetches, file
+downloads, scraping-adjacent work, anything where a ban on the operator's
+identity would be annoying. Do not use it for ordinary single-page lookups.
 
 `vallum-fox` runs web access through a Vallum per-app tunnel (ADR-0023): the
 browser/fetcher executes inside a member namespace whose only route is the
