@@ -302,7 +302,8 @@ class Desk:
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
             return 400, {"error": "name must be lowercase letters/digits/hyphens"}
         with self.lock:
-            known = (self.db.execute("SELECT used_by FROM codes WHERE code=?", (code,)).fetchone()
+            known = (self.db.execute(
+                "SELECT used_by, days, bytes, plan FROM codes WHERE code=?", (code,)).fetchone()
                      if code else None)
             if code:
                 if known and known["used_by"]:
@@ -318,14 +319,22 @@ class Desk:
                 ticket = self.daemon.mint_ticket(peer)
             except RuntimeError as error:
                 return 502, {"error": f"the daemon refused the enrolment: {error}"}
-            expires = self._trial_expiry()
-            cap = self.config.trial_bytes if code else self.config.open_trial_bytes
+            # A code may carry a plan payload (days/bytes/plan); a payload-less
+            # code — minted bare, or from the operator's file — means the trial.
+            if known and (known["days"] or known["bytes"] or known["plan"]):
+                expires = self._expiry_for(known["days"] or self.config.trial_days)
+                cap = known["bytes"] or self.config.trial_bytes
+                plan = known["plan"] or "trial"
+            else:
+                expires = self._trial_expiry()
+                cap = self.config.trial_bytes if code else self.config.open_trial_bytes
+                plan = "trial"
             token = secrets.token_hex(16)
             origin = code if code else "open"
             cursor = self.db.execute(
                 "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (peer, label, token, origin, "trial", self._now(), expires, cap, "active"))
+                (peer, label, token, origin, plan, self._now(), expires, cap, "active"))
             self._insert_peer(cursor.lastrowid, peer, label)
             if not code:
                 self._count_signup(client_ip)
@@ -364,9 +373,13 @@ class Desk:
         next_id = self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM peers").fetchone()[0]
         return f"u{next_id:04d}-{label[:8]}"[:24]
 
-    def _trial_expiry(self):
+    @staticmethod
+    def _expiry_for(days):
         return (datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(days=self.config.trial_days)).date().isoformat()
+                + datetime.timedelta(days=days)).date().isoformat()
+
+    def _trial_expiry(self):
+        return self._expiry_for(self.config.trial_days)
 
     @staticmethod
     def _now():
@@ -485,11 +498,19 @@ class Desk:
         }
 
     def _mint_code(self, body):
+        """Mint a single-use invite code. The code may carry a plan payload —
+        days, a byte cap, a plan label — which a signup presenting the code
+        lands instead of the trial defaults."""
         code = secrets.token_hex(8)
+        days = body.get("days")
+        cap = body.get("bytes")
+        plan = body.get("plan")
         with self.lock:
-            self.db.execute("INSERT OR REPLACE INTO codes (code, created) VALUES (?,?)",
-                            (code, self._now()))
-        return 200, {"code": code, "note": "hand to one user; consumed on signup"}
+            self.db.execute(
+                "INSERT INTO codes (code, created, days, bytes, plan) VALUES (?,?,?,?,?)",
+                (code, self._now(), days, cap, plan))
+        return 200, {"code": code, "days": days, "bytes": cap, "plan": plan,
+                     "note": "hand to one user; consumed on signup"}
 
     def _adopt_peer(self, body):
         """Register a peer that already exists on the server as an account: an

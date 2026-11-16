@@ -10,6 +10,7 @@ against a fake daemon — the `Daemon` port is what makes that possible.
 """
 
 import dataclasses
+import datetime
 import importlib.util
 import os
 import sqlite3
@@ -432,6 +433,54 @@ class PeersRelationTests(DeskTestCase):
         self.desk.sweep_once()
         row = self.desk.db.execute("SELECT status FROM peers WHERE peer=?", (peer,)).fetchone()
         self.assertEqual(row["status"], "removed")
+
+
+class CodePlanTests(DeskTestCase):
+    """A minted code carries a plan — days, a byte cap, a label — and a
+    signup that presents the code lands the payload instead of the trial."""
+
+    def test_minting_a_code_with_a_payload_stores_it(self):
+        status, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
+        self.assertEqual(status, 200)
+        row = self.desk.db.execute(
+            "SELECT days, bytes, plan FROM codes WHERE code=?", (minted["code"],)).fetchone()
+        self.assertEqual((row["days"], row["bytes"], row["plan"]), (30, 5000, "plus"))
+
+    def test_a_payload_code_signup_lands_the_codes_plan(self):
+        _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
+        status, payload = self.signup(code=minted["code"], name="member")
+        self.assertEqual(status, 200)
+        row = self.desk.db.execute(
+            "SELECT * FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+        self.assertEqual(row["plan"], "plus")
+        self.assertEqual(row["bytes_cap"], 5000)
+        expected = (datetime.datetime.now(datetime.timezone.utc)
+                    + datetime.timedelta(days=30)).date().isoformat()
+        self.assertEqual(row["expires"], expected)
+
+    def test_a_payload_less_code_still_lands_the_trial(self):
+        _, minted = self.desk._mint_code({})
+        status, payload = self.signup(code=minted["code"], name="trial-friend")
+        self.assertEqual(status, 200)
+        row = self.desk.db.execute(
+            "SELECT * FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+        self.assertEqual(row["plan"], "trial")
+        self.assertEqual(row["bytes_cap"], 1000)
+
+    def test_a_code_redeems_once_even_under_a_race(self):
+        _, minted = self.desk._mint_code({})
+        results = []
+        threads = [threading.Thread(
+            target=lambda n: results.append(
+                self.desk.signup({"code": minted["code"], "name": n})[0]),
+            args=(f"racer-{i}",)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(results), [200, 403])
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
 
 
 class AdminTests(DeskTestCase):
