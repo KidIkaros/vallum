@@ -2206,6 +2206,13 @@ fn peer_dns(config_path: &Path) -> Vec<String> {
     config.quick.effective_dns_servers()
 }
 
+// Eight parameters, all of them facts about one config: the peer's name, the
+// addresses and networks it was given, the server's line, the endpoint, the
+// resolvers, the PSK and the shaping preset. They travel together and nothing
+// here is optional, so a struct would be ceremony around a formatter that is
+// called from two places — but the clump is real, and the day a ninth appears
+// it becomes one.
+#[allow(clippy::too_many_arguments)]
 fn client_config(
     name: &str,
     addresses: &[String],
