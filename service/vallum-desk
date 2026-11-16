@@ -598,6 +598,8 @@ class Desk:
             "/api/admin/revoke": self._revoke_peer,
             "/api/admin/revoke-account": self._revoke_account,
             "/api/admin/peers": self._list_peers,
+            "/api/admin/devices": self._list_devices,
+            "/api/admin/codes": self._list_codes,
             "/api/admin/sweep": self._run_sweep,
         }
 
@@ -697,6 +699,19 @@ class Desk:
         rows = self.db.execute(
             "SELECT peer,label,plan,status,expires,bytes_cap FROM accounts").fetchall()
         return 200, {"peers": [dict(row) for row in rows]}
+
+    def _list_devices(self, body):
+        rows = self.db.execute(
+            "SELECT p.peer, p.label AS device, p.status, p.created, "
+            "a.label AS account, a.plan AS account_plan "
+            "FROM peers p JOIN accounts a ON a.id=p.account_id ORDER BY p.id").fetchall()
+        return 200, {"devices": [dict(row) for row in rows]}
+
+    def _list_codes(self, body):
+        rows = self.db.execute(
+            "SELECT code, created, used_by, days, bytes, plan "
+            "FROM codes ORDER BY created").fetchall()
+        return 200, {"codes": [dict(row) for row in rows]}
 
     def _run_sweep(self, body):
         return 200, {"actions": self.sweep_once()}

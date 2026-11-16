@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Tests for vallum-desk-admin — the operator CLI — against a live desk
+on an ephemeral port with the fake daemon underneath, so each test
+proves the CLI actually reached the right endpoint.
+
+    python3 -m unittest service.test_vallum_desk_admin
+"""
+
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import ThreadingHTTPServer
+from importlib.machinery import SourceFileLoader
+
+SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def load(module_name, filename):
+    spec = importlib.util.spec_from_loader(
+        module_name, SourceFileLoader(module_name, os.path.join(SERVICE_DIR, filename)))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+desk_module = load("vallum_desk", "vallum-desk")
+admin_module = load("vallum_desk_admin", "vallum-desk-admin")
+sys.path.insert(0, SERVICE_DIR)
+from test_vallum_desk import FakeDaemon  # noqa: E402  (same service dir)
+
+
+class AdminCliTests(unittest.TestCase):
+    """The CLI end-to-end over HTTP — the mapping is what can rot."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.token_file = os.path.join(self.tempdir.name, "admin-token")
+        with open(self.token_file, "w") as f:
+            f.write("admin-secret\n")
+        codes = os.path.join(self.tempdir.name, "codes.txt")
+        with open(codes, "w") as f:
+            f.write("friend-code-1\n")
+        config = desk_module.DeskConfig(
+            state=os.path.join(self.tempdir.name, "desk.sqlite"),
+            codes=codes, admin_token="admin-secret",
+            trial_days=14, trial_bytes=1000, sweep_secs=300,
+            config="/etc/vallum/server.toml", bind="127.0.0.1", port=0)
+        self.daemon = FakeDaemon()
+        self.desk = Desk = desk_module.Desk(config, self.daemon)
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), desk_module.make_handler(Desk))
+        self.addCleanup(self.server.shutdown)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def cli(self, *argv):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            admin_module.main([
+                "--desk", self.url, "--admin-token-file", self.token_file, *argv])
+        # The serving desk's request log goes to stdout too; it is not the
+        # CLI's output, so it stays out of what the tests assert on.
+        return "\n".join(line for line in out.getvalue().splitlines()
+                         if not line.startswith("desk:"))
+
+    def signup(self, code="friend-code-1"):
+        status, payload = self.desk.signup({"name": "friend", "code": code})
+        assert status == 200
+        return payload
+
+    def test_mint_code_carries_the_payload_args(self):
+        out = self.cli("mint-code", "--days", "30", "--gib", "2", "--plan", "plus")
+        code = out.splitlines()[0].strip()
+        row = self.desk.db.execute(
+            "SELECT days, bytes, plan FROM codes WHERE code=?", (code,)).fetchone()
+        self.assertEqual((row["days"], row["bytes"], row["plan"]),
+                         (30, 2 * 1024 ** 3, "plus"))
+
+    def test_accounts_lists_the_accounts(self):
+        self.signup()
+        out = self.cli("accounts")
+        self.assertIn("u0001-friend", out)
+        self.assertIn("trial", out)
+
+    def test_devices_lists_each_account_device(self):
+        payload = self.signup()
+        self.desk.add_device({"token": payload["token"], "name": "laptop"})
+        out = self.cli("devices")
+        self.assertIn("u0001-friend", out)
+        self.assertIn("u0002-laptop", out)
+
+    def test_codes_lists_minted_codes(self):
+        self.cli("mint-code")
+        out = self.cli("codes")
+        row = self.desk.db.execute("SELECT code FROM codes").fetchone()
+        self.assertIn(row["code"], out)
+
+    def test_json_mode_emits_parseable_output(self):
+        self.signup()
+        out = self.cli("--json", "accounts")
+        payload = json.loads(out)
+        self.assertEqual(payload["peers"][0]["peer"], "u0001-friend")
+
+    def test_set_plan_changes_the_account_row(self):
+        self.signup()
+        self.cli("set-plan", "--peer", "u0001-friend",
+                 "--plan", "plus", "--bytes-cap", "9000")
+        row = self.desk.db.execute("SELECT plan, bytes_cap FROM accounts").fetchone()
+        self.assertEqual((row["plan"], row["bytes_cap"]), ("plus", 9000))
+
+    def test_revoke_removes_one_device(self):
+        self.signup()
+        self.cli("revoke", "--peer", "u0001-friend")
+        self.assertEqual(self.daemon.removed, ["u0001-friend"])
+
+    def test_revoke_account_removes_every_device(self):
+        payload = self.signup()
+        self.desk.add_device({"token": payload["token"], "name": "laptop"})
+        self.cli("revoke", "--peer", "u0001-friend", "--account")
+        self.assertEqual(sorted(self.daemon.removed), ["u0001-friend", "u0002-laptop"])
+
+    def test_sweep_runs_an_enforcement_pass(self):
+        self.signup()
+        self.desk.db.execute("UPDATE accounts SET expires='2000-01-01'")
+        self.cli("sweep")
+        self.assertEqual(self.daemon.removed, ["u0001-friend"])
+
+    def test_a_bad_token_surfaces_the_desks_refusal(self):
+        with open(self.token_file, "w") as f:
+            f.write("wrong\n")
+        with self.assertRaises(SystemExit) as raised:
+            self.cli("accounts")
+        self.assertIn("bad admin token", str(raised.exception))
+
+    def test_an_unreachable_desk_reports_the_connection_error(self):
+        with self.assertRaises(SystemExit) as raised:
+            admin_module.main(["--desk", "http://127.0.0.1:1",
+                               "--admin-token-file", self.token_file, "accounts"])
+        self.assertIn("cannot reach", str(raised.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

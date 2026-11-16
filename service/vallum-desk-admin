@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""vallum-desk-admin — the operator's front end for the enrolment desk.
+
+Wraps the desk's /api/admin/* so nobody hand-curls JSON. The admin token
+comes from the token file (the desk's own convention), never argv — a
+token on a command line is a token in ps and shell history.
+
+    vallum-desk-admin mint-code --days 30 --gib 200 --plan plus
+    vallum-desk-admin accounts --json
+    vallum-desk-admin revoke --peer u0007-laptop          # one device
+    vallum-desk-admin revoke --peer u0007-laptop --account # the whole account
+    vallum-desk-admin sweep
+"""
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_TOKEN_FILE = "/etc/vallum/desk-admin-token"
+DEFAULT_DESK = "http://127.0.0.1:8400"
+
+
+def read_token(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError as error:
+        raise SystemExit(f"vallum-desk-admin: cannot read {path}: {error}")
+
+
+def call(desk, path, token, body=None):
+    payload = {"admin_token": token, **(body or {})}
+    request = urllib.request.Request(
+        f"{desk}{path}", data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read()).get("error", error.reason)
+        except Exception:
+            detail = error.reason
+        raise SystemExit(f"vallum-desk-admin: desk refused ({error.code}): {detail}")
+    except urllib.error.URLError as error:
+        raise SystemExit(f"vallum-desk-admin: cannot reach {desk}: {error.reason}")
+
+
+def show(result, as_json, table=None):
+    """JSON for scripts; a light table for humans."""
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return
+    if table:
+        key, columns = table
+        rows = result.get(key, [])
+        if not rows:
+            print("(none)")
+            return
+        widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows))
+                  for c in columns}
+        print("  ".join(c.ljust(widths[c]) for c in columns))
+        for row in rows:
+            print("  ".join(str(row.get(c, "") or "").ljust(widths[c]) for c in columns))
+        return
+    print(json.dumps(result, indent=2))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="vallum-desk-admin",
+        description="the Vallum desk's operator CLI — wraps /api/admin/*")
+    parser.add_argument("--desk", default=DEFAULT_DESK,
+                        help=f"desk base URL (default {DEFAULT_DESK})")
+    parser.add_argument("--admin-token-file", default=DEFAULT_TOKEN_FILE,
+                        help=f"admin token file (default {DEFAULT_TOKEN_FILE})")
+    parser.add_argument("--json", action="store_true", help="raw JSON output")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    mint = sub.add_parser("mint-code", help="mint a single-use invite code")
+    mint.add_argument("--days", type=int, help="plan payload: days granted")
+    mint.add_argument("--bytes", type=int, help="plan payload: byte cap granted")
+    mint.add_argument("--gib", type=int, help="plan payload: cap in GiB")
+    mint.add_argument("--plan", help="plan payload: plan label granted")
+
+    sub.add_parser("accounts", help="list accounts")
+    sub.add_parser("devices", help="list device peers across accounts")
+    sub.add_parser("codes", help="list invite codes and their payloads")
+
+    plan = sub.add_parser("set-plan", help="change an account's plan row")
+    plan.add_argument("--peer", required=True)
+    plan.add_argument("--bytes-cap", type=int)
+    plan.add_argument("--expires")
+    plan.add_argument("--paid-until")
+    plan.add_argument("--plan")
+    plan.add_argument("--status",
+                      choices=("active", "expired", "overquota", "revoked"))
+
+    revoke = sub.add_parser("revoke",
+                            help="remove a device; --account removes them all")
+    revoke.add_argument("--peer", required=True)
+    revoke.add_argument("--account", action="store_true",
+                        help="revoke the whole account, every device")
+
+    adopt = sub.add_parser("adopt", help="register an existing daemon peer")
+    adopt.add_argument("--peer", required=True)
+    adopt.add_argument("--label")
+    adopt.add_argument("--bytes-cap", type=int)
+
+    sub.add_parser("sweep", help="run one enforcement pass now")
+
+    args = parser.parse_args(argv)
+    token = read_token(args.admin_token_file)
+
+    if args.command == "mint-code":
+        body = {"days": args.days, "plan": args.plan,
+                "bytes": args.bytes if args.bytes is not None
+                else (args.gib * 1024 ** 3 if args.gib else None)}
+        result = call(args.desk, "/api/admin/code", token, body)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(result["code"])
+            if any(result.get(k) for k in ("days", "bytes", "plan")):
+                print(f"  plan payload: days={result['days']} "
+                      f"bytes={result['bytes']} plan={result['plan']}")
+            print(f"  {result['note']}")
+    elif args.command == "accounts":
+        show(call(args.desk, "/api/admin/peers", token), args.json,
+             ("peers", ["peer", "label", "plan", "status", "expires", "bytes_cap"]))
+    elif args.command == "devices":
+        show(call(args.desk, "/api/admin/devices", token), args.json,
+             ("devices", ["peer", "device", "status", "account", "account_plan"]))
+    elif args.command == "codes":
+        show(call(args.desk, "/api/admin/codes", token), args.json,
+             ("codes", ["code", "used_by", "days", "bytes", "plan"]))
+    elif args.command == "set-plan":
+        body = {"peer": args.peer}
+        for key, arg in (("bytes_cap", args.bytes_cap), ("expires", args.expires),
+                         ("paid_until", args.paid_until), ("plan", args.plan),
+                         ("status", args.status)):
+            if arg is not None:
+                body[key] = arg
+        show(call(args.desk, "/api/admin/plan", token, body), args.json)
+    elif args.command == "revoke":
+        path = "/api/admin/revoke-account" if args.account else "/api/admin/revoke"
+        show(call(args.desk, path, token, {"peer": args.peer}), args.json)
+    elif args.command == "adopt":
+        body = {"peer": args.peer, "label": args.label, "bytes_cap": args.bytes_cap}
+        show(call(args.desk, "/api/admin/adopt", token,
+                  {k: v for k, v in body.items() if v is not None}), args.json)
+    elif args.command == "sweep":
+        show(call(args.desk, "/api/admin/sweep", token), args.json,
+             ("actions", ["peer", "reason", "bytes", "error"]))
+
+
+if __name__ == "__main__":
+    main()
