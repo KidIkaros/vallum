@@ -1,0 +1,15 @@
+name: runner-probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "user: $(id)"
+          echo "sudo binary: $(command -v sudo || echo MISSING)"
+          sudo -n true 2>&1; echo "sudo -n rc: $?"
+          unshare -Urn true 2>&1; echo "unshare rc: $?"
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || true
+          sysctl kernel.unprivileged_userns_clone 2>&1 || true
+          command -v docker && docker version --format '{{.Server.Version}}' 2>&1 || echo "no docker"
