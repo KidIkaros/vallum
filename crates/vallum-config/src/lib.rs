@@ -272,6 +272,17 @@ pub struct Enroll {
     /// Optional TLS SNI / certificate hostname used when `front_tls` is enabled.
     #[serde(default)]
     pub front_sni: Option<String>,
+    /// The resolvers a device that enrols by ticket is told to use.
+    ///
+    /// A different question from `[quick] dns`: that one is what THIS host
+    /// resolves through (and, when a server runs `vallum-quick dns-proxy`,
+    /// the upstreams it forwards to). A peer must not be handed the server's
+    /// upstreams — it cannot reach them, and it must not resolve locally — so
+    /// it is handed the server's address inside the tunnel, where a resolver
+    /// answers. Empty means the peers are told nothing, which is what a
+    /// server with no resolver has to say.
+    #[serde(default)]
+    pub peer_dns: Vec<String>,
 }
 
 /// Which transport the tunnel's packets travel in.

@@ -373,6 +373,15 @@ pub struct InitArgs {
     #[arg(long, value_name = "ADDR")]
     pub dns: Vec<String>,
 
+    /// The resolver peers are told to use (`[enroll] peer_dns`). Normally this
+    /// host's address inside the tunnel, where `vallum-dns@` answers. Repeatable.
+    ///
+    /// A different question from `--dns`: that one is what THIS host resolves
+    /// through (on a server, the resolver's upstreams). A peer handed those is
+    /// pointed at addresses it cannot reach.
+    #[arg(long, value_name = "ADDR")]
+    pub peer_dns: Vec<String>,
+
     /// The user to drop to after the interface and socket are open.
     #[arg(long, value_name = "USER")]
     pub user: Option<String>,
@@ -545,6 +554,13 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
                 // The responder listens on the next port up; open it too, or the
                 // feature exists but nothing can reach it.
                 steps.extend(hostnet::plan_port(&host, port.saturating_add(1)));
+            }
+            // A peer-facing resolver answers on the tunnel interface, and only
+            // there. Without this rule the resolver is running, the peers are
+            // told to use it, and every query times out — a DNS failure with
+            // no cause visible from either side.
+            if !args.peer_dns.is_empty() {
+                steps.extend(hostnet::plan_tunnel_service(&host, 53, &interface));
             }
         }
         if !args.no_nat {
@@ -811,6 +827,15 @@ fn write_config(
     body.push_str("table = \"auto\"\n");
     if args.enroll {
         body.push_str("\n[enroll]\nenabled = true\n");
+        if !args.peer_dns.is_empty() {
+            let list = args
+                .peer_dns
+                .iter()
+                .map(|server| format!("\"{server}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!("peer_dns = [{list}]\n"));
+        }
     }
 
     if args.dry_run {
@@ -1224,6 +1249,7 @@ mod tests {
             endpoint: Some("vpn.example.com:51820".to_owned()),
             control: None,
             dns: Vec::new(),
+            peer_dns: Vec::new(),
             user: None,
             no_nat: true,
             no_firewall: true,
@@ -1254,6 +1280,7 @@ mod tests {
             endpoint: Some("vpn.example.com".to_owned()),
             control: None,
             dns: vec!["1.1.1.1".to_owned()],
+            peer_dns: Vec::new(),
             user: None,
             no_nat: true,
             no_firewall: true,

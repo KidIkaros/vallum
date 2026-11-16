@@ -345,6 +345,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
         endpoint,
         control: None,
         dns: Vec::new(),
+        peer_dns: Vec::new(),
         user: None,
         no_nat: false,
         no_firewall: false,

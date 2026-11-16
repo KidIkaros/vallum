@@ -410,7 +410,7 @@ install_binaries() {
 install_docs() {
     local unit
     for unit in vallum@.service vallum-guard@.service vallum-quick@.service \
-        vallum-quick-watch@.service vallum-enroll@.service \
+        vallum-quick-watch@.service vallum-enroll@.service vallum-dns@.service \
         vallum-cleanup.service \
         vallum-desk@.service \
         vallum-metrics.service vallum-metrics.timer; do
@@ -575,7 +575,7 @@ uninstall() {
     run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-guard@.service" \
         "$UNIT_DIR/vallum-quick@.service" "$UNIT_DIR/vallum-desk@.service" \
         "$UNIT_DIR/vallum-quick-watch@.service" \
-        "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
+        "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-dns@.service" "$UNIT_DIR/vallum-metrics.service" \
         "$UNIT_DIR/vallum-metrics.timer"
     # The tmpfiles entry goes with the package; the directory it creates is
     # /run, which is cleared at boot, so there is nothing else to remove.
