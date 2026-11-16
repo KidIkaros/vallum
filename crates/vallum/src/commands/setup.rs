@@ -1003,6 +1003,31 @@ fn place_config(
     } else {
         PathBuf::from(".")
     };
+    place_config_in(
+        name,
+        config_text,
+        secret,
+        address,
+        endpoint,
+        server_address,
+        &directory,
+    )
+}
+
+/// `place_config` with the destination named, so a test can watch what lands
+/// on disk without changing the process's working directory.
+#[allow(clippy::too_many_arguments)]
+fn place_config_in(
+    name: &str,
+    config_text: &str,
+    secret: &crate::keys::SecretFile,
+    address: &str,
+    endpoint: &str,
+    server_address: Option<&str>,
+    directory: &Path,
+) -> Result<(), Error> {
+    let root = nix::unistd::Uid::effective().is_root();
+    let directory = directory.to_path_buf();
     std::fs::create_dir_all(&directory).map_err(|source| Error::IoPath {
         action: "create",
         path: directory.clone(),
@@ -1014,6 +1039,10 @@ fn place_config(
     // `fwmark` is this machine's routing detail: a server released before the
     // field existed hands back a config that would refuse to attach.
     let mut config_text = vallum_config::with_local_fwmark(config_text);
+    // The server named the key after the PEER; the file is named after this
+    // machine's `--name`. Without this the config points at a key that is not
+    // there, and the tunnel refuses to start with a file-not-found.
+    config_text = vallum_config::with_local_private_key(&config_text, &format!("{name}.key"));
 
     // Probe path MTU to the server endpoint. If a reduced-MTU link (PPPoE, DS-Lite)
     // is measured, configure `interface.outer_mtu` so large payloads do not hang.
@@ -1484,6 +1513,43 @@ fn confirm(question: &str, default: bool) -> Result<bool, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// `vallum join --name X` renames the key file to `X.key`, so the config
+    /// must name `X.key` too. It used to keep the server's peer-named path
+    /// (`u0009-….key`), and the tunnel then refused to start with a
+    /// file-not-found — found by signing up for a tunnel through the desk.
+    #[test]
+    fn a_named_join_points_the_config_at_the_key_beside_it() {
+        let dir = std::env::temp_dir().join(format!("vallum-join-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let server_text = "[interface]\nname = \"vallum-u0009\"\nprivate_key = \"u0009-redeem-t.key\"\naddress = \"10.99.90.7/32\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:00:-\"\nallowed_ips = [\"10.99.90.0/24\"]\n";
+        let secret = crate::keys::new_secret(3, false, [7u8; 32]);
+        place_config_in(
+            "desk-client",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "198.51.100.10:51921",
+            None,
+            &dir,
+        )
+        .unwrap();
+        let written = std::fs::read_to_string(dir.join("desk-client.toml")).unwrap();
+        assert!(
+            written.contains("private_key = \"desk-client.key\""),
+            "the config must name the key that was written beside it:\n{written}"
+        );
+        assert!(
+            !written.contains("u0009-redeem-t.key"),
+            "the peer-named path must be gone"
+        );
+        assert!(
+            dir.join("desk-client.key").exists(),
+            "the key file must exist under the new name"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// An existing `<name>.toml` + `<name>.key` pair means "already enrolled":
     /// `setup --remote` must not generate a second identity over the first —

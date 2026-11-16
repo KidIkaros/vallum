@@ -12,7 +12,10 @@ against a fake daemon — the `Daemon` port is what makes that possible.
 import importlib.util
 import os
 import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
 from importlib.machinery import SourceFileLoader
 
 DESK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vallum-desk")
@@ -214,6 +217,59 @@ class OnDemandTests(DeskTestCase):
     def test_closed_mode_still_refuses_without_a_code(self):
         code, payload = self.desk.signup({"name": "walk-in"}, client_ip="198.51.100.9")
         self.assertEqual(code, 403)
+
+
+class HttpTests(DeskTestCase):
+    """The wire, not just the logic: a bad body is answered, never dropped."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.open_signup = True
+        self.server = desk_module.ThreadingHTTPServer(("127.0.0.1", 0), desk_module.make_handler(self.desk))
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def post(self, path, body, content_type):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=body.encode(),
+            headers={"Content-Type": content_type}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode()
+
+    def test_the_index_needs_no_script(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
+            page = r.read().decode()
+        self.assertEqual(r.status, 200)
+        self.assertNotIn("<script", page)
+        self.assertNotIn('name="code"', page)  # open mode: no invite field
+
+    def test_the_form_path_answers_with_a_ticket_page(self):
+        status, page = self.post("/signup", "name=form-user", "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("Your join ticket", page)
+        self.assertIn("vallum1-join:", page)
+
+    def test_a_json_body_sent_as_a_form_is_named_as_the_mistake(self):
+        # curl -d sends form-encoding by default; the desk must say so rather
+        # than report "bad admin token" for a body it never parsed.
+        status, page = self.post("/api/admin/sweep", '{"admin_token":"x"}',
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 500)
+        self.assertIn("application/json", page)
+
+    def test_the_json_api_still_works(self):
+        status, body = self.post("/api/signup", '{"name":"json-user"}', "application/json")
+        self.assertEqual(status, 200)
+        self.assertIn("vallum1-join:", body)
 
 
 class AdminTests(DeskTestCase):

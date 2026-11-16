@@ -112,8 +112,13 @@ class DaemonCli(Daemon):
         self.config, self.cli = config, cli
 
     def _run(self, *args):
-        out = subprocess.run([self.cli, *args, "--config", self.config],
-                             capture_output=True, text=True, timeout=60)
+        try:
+            out = subprocess.run([self.cli, *args, "--config", self.config],
+                                 capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            # The desk holds its lock across this call: an unbounded wait would
+            # wedge every other request behind one stuck daemon.
+            raise RuntimeError(f"vallum {' '.join(args[:2])}: no answer within 60s")
         if out.returncode != 0:
             raise RuntimeError(f"vallum {' '.join(args[:2])}: {out.stderr.strip()[:200]}")
         return out.stdout
@@ -512,7 +517,14 @@ def make_handler(desk):
             raw = self.rfile.read(length) or b""
             if "application/x-www-form-urlencoded" in (self.headers.get("Content-Type") or ""):
                 from urllib.parse import parse_qs
-                return {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+                fields = {k: v[0] for k, v in parse_qs(raw.decode(), keep_blank_values=True).items()}
+                # curl's `-d` sends form-encoding by default: a JSON body that
+                # arrives this way parses as one key with an empty value and
+                # then fails with a misleading "bad admin token". Say what it is.
+                if len(fields) == 1 and next(iter(fields)).lstrip().startswith("{"):
+                    raise ValueError("this looks like a JSON body sent as a form — "
+                                     "send it with Content-Type: application/json")
+                return fields
             try:
                 return json.loads(raw or "{}")
             except json.JSONDecodeError:
@@ -538,8 +550,8 @@ def make_handler(desk):
             self._send(code, payload)
 
         def do_POST(self):
-            body = self._body()
             try:
+                body = self._body()
                 if self.path == "/api/signup":
                     code, payload = desk.signup(body, self.client_address[0])
                 elif self.path == "/signup":
