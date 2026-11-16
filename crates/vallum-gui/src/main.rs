@@ -1567,7 +1567,11 @@ fn take_join_uri_intent() -> serde_json::Value {
 
 /// The shared take: Tauri command and the HTTP transport's `/api/join-uri`.
 pub(crate) fn take_pending_join_uri() -> serde_json::Value {
-    match PENDING_JOIN_URI.lock().unwrap().take() {
+    match PENDING_JOIN_URI
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
         None => serde_json::Value::Null,
         Some(Ok(intent)) => serde_json::json!({ "intent": intent }),
         Some(Err(refusal)) => serde_json::json!({ "refusal": refusal }),
@@ -1582,7 +1586,9 @@ fn main() {
     // Parsed here (never executed); the UI picks it up via take_join_uri_intent.
     if let Some(uri) = args.iter().find(|arg| arg.starts_with("vallum://")) {
         let parsed = actions::parse_join_uri(uri);
-        *PENDING_JOIN_URI.lock().unwrap() = Some(parsed);
+        *PENDING_JOIN_URI
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(parsed);
     }
     if args.iter().any(|arg| arg == "--serve") {
         let port = args
