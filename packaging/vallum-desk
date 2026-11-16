@@ -290,6 +290,14 @@ class Desk:
                 fields.append("paid_until=?"); values.append(str(body["paid_until"]))
             if "plan" in body:
                 fields.append("plan=?"); values.append(str(body["plan"]))
+            if "status" in body:
+                # Reinstating an account is a row change, not a new verb: a
+                # quota that fired on a mis-set cap leaves the peer revoked,
+                # and the operator's way back is the same one that set it.
+                status = str(body["status"])
+                if status not in ("active", "expired", "overquota", "revoked"):
+                    return 400, {"error": "status must be active|expired|overquota|revoked"}
+                fields.append("status=?"); values.append(status)
             if not fields:
                 return 400, {"error": "nothing to change"}
             with self.lock:
