@@ -237,7 +237,7 @@ jobs:
         with:
           path: vallum
 
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: vallum
@@ -294,7 +294,7 @@ jobs:
         with:
           path: vallum
 
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       - uses: taiki-e/install-action@cargo-deb
 
@@ -333,7 +333,7 @@ jobs:
         with:
           path: vallum
 
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       - name: The acceptance pair
         working-directory: vallum
@@ -367,7 +367,7 @@ jobs:
       # A toolchain step is not optional here: `audit-check` fails at "unable to
       # locate executable file: cargo" if the image ships none, and naming the
       # toolchain keeps this job independent of the image's Rust version.
-      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: dtolnay/rust-toolchain@1.120.0
 
       # `cargo audit`, not `rustsec/audit-check`. The action reports the audit on
       # stdout and then writes a GitHub check run; on this repository that write
