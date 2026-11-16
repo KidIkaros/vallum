@@ -259,55 +259,13 @@ applies the `[quick]` table — routes, DNS, and your hooks — once the interfa
 exists, which is why it is a separate unit: the daemon's sandbox is not widened
 to let it write `/etc/resolv.conf` or run a shell.
 
-## A resolver for your peers
-
-A VPN that hands a peer a full tunnel and no resolver does not protect that
-peer's DNS: the queries go to whatever the local network offers, outside the
-tunnel. The server can answer them itself, on its address inside the tunnel.
-
-Two settings, deliberately separate, because they answer different questions:
-
-```toml
-[quick]
-# What THIS host resolves through. On a server running the resolver below,
-# these are the upstreams it forwards to.
-dns = ["1.1.1.1", "9.9.9.9"]
-
-[enroll]
-enabled = true
-# What PEERS are told to resolve through: this server, inside the tunnel.
-# A peer handed `[quick] dns` would be pointed at addresses it cannot reach.
-peer_dns = ["10.99.90.1"]
-```
-
-Then run the resolver, bound to the address peers were told:
-
-```bash
-# /etc/vallum/<interface>.dns.env
-VALLUM_DNS_LISTEN=10.99.90.1:53
-
-sudo -S -p '' systemctl enable --now vallum-dns@<interface>
-```
-
-The unit defaults to `127.0.0.1:53`: a deployment that has not said where to
-answer must not become an open resolver on a public address. `vallum-dns`
-ships with the deb, the rpm and `install.sh`.
-
-Verify from a peer, through the tunnel:
-
-```bash
-dig +short @10.99.90.1 example.com
-```
-
-A device that enrols by ticket is told this resolver automatically
-(`[enroll] peer_dns` is carried into the config the responder writes), so the
-on-demand path does not leak either.
-
 ## What this does not do
 
-- **No DNS resolver by default.** `vallum-dns@` runs one when you enable it;
-  without `[enroll] peer_dns`, peers are told nothing and use the host's
-  resolver.
+- **No DNS resolver.** `--dns` pushes a resolver to clients; it does not run one
+  (ADR-0013). Point it at a resolver your peers can reach through the tunnel —
+  a public one, or an unbound/dnsmasq on this host if you want to run one.
+  Clients route their queries through the tunnel, so a pushed resolver is
+  reached from inside it, not around it.
 - **No high availability.** One host, one interface. Two servers with the same
   subnet is a routing problem, not a supported configuration.
 - **No control plane.** There is no API that issues configs. See

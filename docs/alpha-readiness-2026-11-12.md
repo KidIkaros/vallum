@@ -340,10 +340,22 @@ documentation implies.
 
 1. **PARTLY FIXED 2026-11-16 — the token path now carries DNS.** The responder
    hands `client_config` the server's own `[quick] dns` (`peer_dns` in
-   `commands/peer.rs`), so a ticket-enrolled device is told what to resolve
-   through instead of getting a full tunnel with no resolver — which leaked
-   every query to the local network. Two tests pin it. PSK and shaping are
-   still not carried: those remain open below.
+   `commands/peer.rs`), which is exactly what `--dns` sets and what ADR-0013
+   calls "pushes a resolver; it does not run one". A ticket-enrolled device is
+   now told what to resolve through instead of getting a full tunnel and no
+   resolver — which leaked every query to the local network. Two tests pin it.
+   PSK and shaping are still not carried: those remain open below.
+
+   **A deviation, recorded:** the first attempt at this built a server-side
+   resolver (`vallum-dns@`, a `[enroll] peer_dns` field, a firewall rule for
+   53/udp on the tunnel interface) and ran it on the deployment. ADR-0013 says
+   plainly "No DNS resolver. `--dns` pushes a resolver; it does not run one",
+   and the deployment docs already define `--dns` as one field written to
+   `[quick] dns` and pushed to clients. The resolver, the second field, the
+   unit and the firewall rule were reverted; what remains is the one-line gap
+   fix above. The recorded design was right: a pushed public resolver is
+   reached through the tunnel, so it does not leak, and it needs no new
+   service, no second statement of an address, and no cache to operate.
 
    **The token path cannot carry a peer's DNS, PSK or shaping.** The responder
    creates the peer record from the invite alone, and an invite carries none of

@@ -508,82 +508,6 @@ fn plan_active_firewall(state: &HostState, port: u16, interface: &str) -> Vec<Ho
     }
 }
 
-/// Open a service that only peers may reach: `port/udp` on the tunnel
-/// interface, and nowhere else.
-///
-/// The resolver is the case this exists for. `plan_port` opens a port to the
-/// world, which is right for the tunnel's own UDP port and wrong for a
-/// resolver: an open resolver on a public address is an abuse vector, and a
-/// resolver reachable only from the tunnel is the whole point. The rule is
-/// scoped to the interface, so a peer can ask and the internet cannot.
-#[must_use]
-pub fn plan_tunnel_service(state: &HostState, port: u16, interface: &str) -> Vec<HostStep> {
-    match state.firewall {
-        Firewall::Ufw => vec![HostStep::Run {
-            summary: format!("allow UDP {port} on {interface} only (ufw)"),
-            program: "ufw".to_owned(),
-            args: vec![
-                "allow".to_owned(),
-                "in".to_owned(),
-                "on".to_owned(),
-                interface.to_owned(),
-                "to".to_owned(),
-                "any".to_owned(),
-                "port".to_owned(),
-                port.to_string(),
-                "proto".to_owned(),
-                "udp".to_owned(),
-            ],
-            stdin: None,
-            ignore_failure: false,
-        }],
-        Firewall::Firewalld => vec![
-            HostStep::Run {
-                summary: format!("allow UDP {port} on {interface} only (firewalld)"),
-                program: "firewall-cmd".to_owned(),
-                args: vec![
-                    "--permanent".to_owned(),
-                    format!("--add-rich-rule=rule family=\"ipv4\" inbound-interface name=\"{interface}\" port port={port} protocol=udp accept"),
-                ],
-                stdin: None,
-                ignore_failure: true,
-            },
-            HostStep::Run {
-                summary: "reload firewalld".to_owned(),
-                program: "firewall-cmd".to_owned(),
-                args: vec!["--reload".to_owned()],
-                stdin: None,
-                ignore_failure: false,
-            },
-        ],
-        Firewall::Nftables => {
-            if !state.input_drop {
-                return Vec::new();
-            }
-            vec![HostStep::Run {
-                summary: format!("allow UDP {port} on {interface} only (nftables)"),
-                program: "nft".to_owned(),
-                args: vec![
-                    "add".to_owned(),
-                    "rule".to_owned(),
-                    "inet".to_owned(),
-                    "filter".to_owned(),
-                    "input".to_owned(),
-                    "iifname".to_owned(),
-                    format!("\"{interface}\""),
-                    "udp".to_owned(),
-                    "dport".to_owned(),
-                    port.to_string(),
-                    "accept".to_owned(),
-                ],
-                stdin: None,
-                ignore_failure: false,
-            }]
-        }
-        Firewall::None => Vec::new(),
-    }
-}
-
 /// Install the masquerade rule for the tunnel's own subnets.
 ///
 /// The table is Vallum's own (`inet vallum`), so it can be replaced wholesale on
@@ -745,35 +669,6 @@ pub fn apply(steps: &[HostStep], dry_run: bool) -> Result<Vec<String>, Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    /// A peer-facing resolver must be reachable from the tunnel and from
-    /// nowhere else: `allow 53/udp` is an open resolver on the public address,
-    /// which is an abuse vector, and no rule at all is a resolver nobody can
-    /// use. The rule has to name the interface.
-    #[test]
-    fn a_tunnel_service_is_opened_on_the_interface_and_nowhere_else() {
-        let steps = plan_tunnel_service(&state(Firewall::Ufw), 53, "vallum0");
-        let args = match &steps[0] {
-            HostStep::Run { args, .. } => args.join(" "),
-            other => panic!("expected a run step, got {other:?}"),
-        };
-        assert_eq!(args, "allow in on vallum0 to any port 53 proto udp");
-        assert!(
-            !args.contains("allow 53/udp"),
-            "a bare port open is the bug"
-        );
-    }
-
-    #[test]
-    fn an_nftables_tunnel_service_matches_the_interface() {
-        let steps = plan_tunnel_service(&state(Firewall::Nftables), 53, "vallum0");
-        let args = match &steps[0] {
-            HostStep::Run { args, .. } => args.join(" "),
-            other => panic!("expected a run step, got {other:?}"),
-        };
-        assert!(args.contains("iifname"), "{args}");
-        assert!(args.contains("vallum0"), "{args}");
-    }
 
     fn state(firewall: Firewall) -> HostState {
         HostState {

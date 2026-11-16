@@ -2181,29 +2181,14 @@ fn widen_to_tunnel(addresses: &[String], networks: &[String]) -> Vec<String> {
 // into a struct would rename arguments at six call sites without shortening the
 // list, and this is a pure string builder — there is no state to encapsulate.
 #[allow(clippy::too_many_arguments)]
-/// The DNS servers a peer enrolled by ticket should be handed.
-///
-/// `[enroll] peer_dns` is the operator's statement about what their PEERS
-/// resolve through — normally the server's address inside the tunnel, where a
-/// resolver answers. `[quick] dns` is what this host resolves through, and on
-/// a server running `dns-proxy` it is the upstreams the proxy forwards to:
-/// handing those to a peer would point it at addresses it cannot reach. So
-/// `peer_dns` wins, and `[quick] dns` is only the fallback for a deployment
-/// where the two are the same list.
+/// The DNS servers a peer enrolled by ticket should be handed: the same
+/// `[quick] dns` the file path already writes, which is what `--dns` set and
+/// what ADR-0013 means by "pushes a resolver; it does not run one". The ticket
+/// path passed an empty list, which is the recorded gap this closes.
 fn peer_dns(config_path: &Path) -> Vec<String> {
-    let Ok(config) = vallum_config::Config::load(config_path) else {
-        return Vec::new();
-    };
-    if !config.enroll.peer_dns.is_empty() {
-        return config
-            .enroll
-            .peer_dns
-            .iter()
-            .map(|entry| entry.trim().to_owned())
-            .filter(|entry| !entry.is_empty())
-            .collect();
-    }
-    config.quick.effective_dns_servers()
+    vallum_config::Config::load(config_path)
+        .map(|config| config.quick.effective_dns_servers())
+        .unwrap_or_default()
 }
 
 // Eight parameters, all of them facts about one config: the peer's name, the
@@ -2360,26 +2345,6 @@ mod tests {
             &path,
             "[interface]\nname = \"vallum0\"\nprivate_key = \"k.key\"\nlisten = \"0.0.0.0:51921\"\n\
              [quick]\ndns = [\"10.99.90.1\"]\n",
-        )
-        .unwrap();
-        assert_eq!(peer_dns(&path), vec!["10.99.90.1".to_owned()]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The two lists answer different questions: `[quick] dns` is what this
-    /// host resolves through (on a server, the proxy's upstreams); `peer_dns`
-    /// is what a peer is told. A peer handed the upstreams cannot reach them.
-    #[test]
-    fn the_peer_resolver_wins_over_the_hosts_own_upstreams() {
-        let dir = std::env::temp_dir().join(format!("vallum-peer-dns3-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("server.toml");
-        std::fs::write(
-            &path,
-            "[interface]\nname = \"vallum0\"\nprivate_key = \"k.key\"\n\
-             [quick]\ndns = [\"1.1.1.1\"]\n\
-             [enroll]\npeer_dns = [\"10.99.90.1\"]\n",
         )
         .unwrap();
         assert_eq!(peer_dns(&path), vec!["10.99.90.1".to_owned()]);
