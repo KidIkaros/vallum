@@ -1,0 +1,216 @@
+{
+  "manual_version": "1.0.0",
+  "utcp_version": "1.0.1",
+  "title": "Vallum enrolment desk (self-service signup, plans, enforcement)",
+  "tools": [
+    {
+      "name": "vallum_desk_signup",
+      "description": "Self-service enrolment against a Vallum desk: an invite code becomes a join ticket and a peer on the server. The ticket is a secret \u2014 hand it to the device, never log it.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's signup endpoint, e.g. http://127.0.0.1:8400/api/signup."
+          },
+          "code": {
+            "type": "string",
+            "description": "A single-use invite code from the operator."
+          },
+          "name": {
+            "type": "string",
+            "description": "Device name to enrol under (lowercase letters, digits, hyphens)."
+          }
+        },
+        "required": [
+          "url",
+          "code",
+          "name"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"code\":\"UTCP_ARG_code_UTCP_END\",\"name\":\"UTCP_ARG_name_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_desk_status",
+      "description": "Read an account's standing from the desk: plan, expiry, byte cap, bytes used.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's status endpoint, e.g. http://127.0.0.1:8400/api/status."
+          },
+          "token": {
+            "type": "string",
+            "description": "The account token returned at signup."
+          }
+        },
+        "required": [
+          "url",
+          "token"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS 'UTCP_ARG_url_UTCP_END?token=UTCP_ARG_token_UTCP_END'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_desk_mint_code",
+      "description": "Mint a single-use invite code on the desk \u2014 the operator's closed-alpha handout.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's admin endpoint, e.g. http://127.0.0.1:8400/api/admin/code."
+          },
+          "admin_token": {
+            "type": "string",
+            "description": "The desk's admin token (a secret)."
+          }
+        },
+        "required": [
+          "url",
+          "admin_token"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "admin"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_desk_set_plan",
+      "description": "Set an account's plan on the desk: byte cap and expiry. A paid tier is a row, not code.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's admin endpoint, e.g. http://127.0.0.1:8400/api/admin/plan."
+          },
+          "admin_token": {
+            "type": "string",
+            "description": "The desk's admin token (a secret)."
+          },
+          "peer": {
+            "type": "string",
+            "description": "The peer name on the server."
+          },
+          "bytes_cap": {
+            "type": "integer",
+            "description": "Byte cap for the period (0 keeps the current cap)."
+          },
+          "expires": {
+            "type": "string",
+            "description": "Expiry date, YYYY-MM-DD."
+          }
+        },
+        "required": [
+          "url",
+          "admin_token",
+          "peer",
+          "bytes_cap",
+          "expires"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "admin"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"bytes_cap\":UTCP_ARG_bytes_cap_UTCP_END,\"expires\":\"UTCP_ARG_expires_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_desk_sweep",
+      "description": "Run the desk's enforcement sweep now: expire and de-quota accounts, removing their peers from the server.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's admin endpoint, e.g. http://127.0.0.1:8400/api/admin/sweep."
+          },
+          "admin_token": {
+            "type": "string",
+            "description": "The desk's admin token (a secret)."
+          }
+        },
+        "required": [
+          "url",
+          "admin_token"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "admin"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    }
+  ]
+}

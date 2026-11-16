@@ -1,6 +1,21 @@
-# Vallum UTCP (Universal Tool Calling Protocol) Manual
+# Vallum UTCP (Universal Tool Calling Protocol) Manuals
 
-This directory contains the **Universal Tool Calling Protocol (UTCP)** manual for Vallum: [`vallum.utcp.json`](vallum.utcp.json).
+This directory contains the **Universal Tool Calling Protocol** manuals for
+Vallum:
+
+| Manual | Describes | Tools |
+|---|---|---|
+| `vallum.utcp.json` | the `vallum` binary itself | 28 |
+| `vallum-fox.utcp.json` | the agent lane (`agent/vallum-fox`) | 8 |
+| `vallum-desk.utcp.json` | the enrolment desk's HTTP endpoints | 5 |
+
+Each is a published surface with the same discipline: every tool carries a
+`tool_call_template`, every placeholder is a **required** input (an optional
+one is substituted as an empty string), every input is read by a placeholder,
+and — for the fox manual — every subcommand it names exists in the shipped
+script. `crates/vallum/tests/utcp_manual.rs` holds the binary's manual
+against the binary; `crates/vallum/tests/utcp_lane_manuals.rs` holds the lane
+and desk manuals against the same rules and against the script.
 
 ## Why UTCP for Vallum?
 
@@ -39,6 +54,30 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_server_init` | `vallum server init --config <file> --json` | Provision this host as a server: keys, units, port, forwarding, masquerade. |
 | `vallum_server_teardown_plan` | `vallum server teardown --config <file> --dry-run` | Print what teardown would remove. No root needed. |
 | `vallum_server_teardown` | `vallum server teardown --config <file>` | Reverse `server init`: units, NAT, firewall, sysctl. Keeps the config and key. |
+
+## The agent lane and the desk (their own manuals)
+
+| Tool | CLI Command | Purpose |
+|---|---|---|
+| `vallum_fox_fetch` | `vallum-fox fetch <url>` | Fetch a page through the agent's own tunnel identity, budgeted. |
+| `vallum_fox_dump` | `vallum-fox dump <url>` | Rendered DOM from a headless browser inside the tunnel. |
+| `vallum_fox_shot` | `vallum-fox shot <url> <abs.png>` | Screenshot through the tunnel. |
+| `vallum_fox_dl` | `vallum-fox dl <url> <abs-file>` | Download with budget accounting. |
+| `vallum_fox_egress` | `vallum-fox egress` | Agent IP vs host IP — the separation check. |
+| `vallum_fox_status` | `vallum-fox status` | Device, units, separation, budget spent. |
+| `vallum_fox_budget_set` / `vallum_fox_budget_list` | `vallum-fox budget …` | Per-domain request caps (the volume governor). |
+| `vallum_desk_signup` | `POST <desk>/api/signup` | Invite code → join ticket + peer (self-service). |
+| `vallum_desk_status` | `GET <desk>/api/status?token=` | Plan, expiry, bytes used. |
+| `vallum_desk_mint_code` | `POST <desk>/api/admin/code` | Mint a single-use invite code. |
+| `vallum_desk_set_plan` | `POST <desk>/api/admin/plan` | Set a cap or expiry — a paid tier is a row. |
+| `vallum_desk_sweep` | `POST <desk>/api/admin/sweep` | Enforce expiry and quotas now. |
+
+The fox tools wrap the `vallum-fox` CLI (`agent/`), which drives a per-app
+tunnel: the agent's traffic egresses with the tunnel's identity, a dead tunnel
+refuses the request instead of falling back to the host network, and every
+request passes a per-domain budget. The desk tools talk to `vallum-desk`
+(`packaging/vallum-desk`), the self-service enrolment layer an operator runs to offer
+access on their own server.
 
 ### Activation
 

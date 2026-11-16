@@ -1,0 +1,28 @@
+[Unit]
+Description=Vallum enrolment desk (self-service signups, quotas, revocation)
+Documentation=man:vallum-desk(8)
+After=vallum@%i.service
+PartOf=vallum@%i.service
+
+[Service]
+# Root is required: the desk talks to the daemon through the 0600 control
+# socket and runs peer operations (`peer invite/remove`) against the config.
+# It binds 127.0.0.1 by default — expose it only behind a TLS reverse proxy.
+ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk --config /etc/vallum/%i.toml --bind 127.0.0.1 --port 8400
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# /run/vallum is where the daemon's enrolment tokens are written — the desk
+# mints them through the CLI, so the runtime dir must be writable. Without it
+# `peer invite` fails with "Read-only file system".
+#
+# /etc/ufw is the daemon's firewall step: `peer invite` opens the enrolment
+# port through ufw, and a read-only /etc/ufw makes that step fail, which the
+# daemon reports as a refused enrolment. The desk runs as root anyway; the
+# operator's own firewall policy is unchanged by this path existing.
+ReadWritePaths=/etc/vallum /var/lib/vallum /run/vallum /etc/ufw
+
+[Install]
+WantedBy=multi-user.target

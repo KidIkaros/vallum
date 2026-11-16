@@ -1,0 +1,270 @@
+{
+  "manual_version": "1.0.0",
+  "utcp_version": "1.0.1",
+  "title": "Vallum agent lane (vallum-fox): browsing on a separate identity",
+  "tools": [
+    {
+      "name": "vallum_fox_fetch",
+      "description": "Fetch a URL through the agent's own tunnel identity (per-app tunnel, ADR-0023): the site sees the tunnel's IP, never the operator's, and a dead tunnel refuses the request instead of falling back to the host network. Rate-budgeted per domain \u2014 a refusal means the agent stops, not retries.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Absolute http/https URL."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "budget"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox fetch UTCP_ARG_url_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_dump",
+      "description": "Render a page in a headless browser inside the agent's tunnel and return its DOM (for JavaScript-rendered pages).",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Absolute http/https URL."
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "browser"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox dump UTCP_ARG_url_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_shot",
+      "description": "Screenshot a page rendered inside the agent's tunnel. The output path must be absolute and outside /tmp: the member namespace's /tmp is private and dies with the unit.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Absolute http/https URL."
+          },
+          "output_png": {
+            "type": "string",
+            "description": "Absolute path for the PNG."
+          }
+        },
+        "required": [
+          "url",
+          "output_png"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "browser"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox shot UTCP_ARG_url_UTCP_END UTCP_ARG_output_png_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_dl",
+      "description": "Download a file through the agent's tunnel identity, with the per-domain budget accounted.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Absolute http/https URL."
+          },
+          "output_file": {
+            "type": "string",
+            "description": "Absolute path to write to."
+          }
+        },
+        "required": [
+          "url",
+          "output_file"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "budget"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox dl UTCP_ARG_url_UTCP_END UTCP_ARG_output_file_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_egress",
+      "description": "Report the agent's egress IP and the host's, and whether they are separated. 'separated: NO' is a leak: agent traffic is riding the operator's identity.",
+      "inputs": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "diagnostics"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox egress",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_status",
+      "description": "Agent lane status: the device, its units, egress separation, and the budget consumed today.",
+      "inputs": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "diagnostics"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox status",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_budget_set",
+      "description": "Set the per-domain request budget for the agent lane: hourly cap and minimum seconds between requests. Lowering a cap is the operator's call; an agent must never raise it.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The domain the budget applies to."
+          },
+          "hourly": {
+            "type": "integer",
+            "description": "Requests allowed per hour for this domain."
+          },
+          "interval": {
+            "type": "integer",
+            "description": "Minimum seconds between requests to this domain."
+          }
+        },
+        "required": [
+          "domain",
+          "hourly",
+          "interval"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "budget"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox budget set UTCP_ARG_domain_UTCP_END hourly=UTCP_ARG_hourly_UTCP_END interval=UTCP_ARG_interval_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_fox_budget_list",
+      "description": "List the agent lane's per-domain budgets and today's request count.",
+      "inputs": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "agent",
+        "budget"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum-fox budget list",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    }
+  ]
+}

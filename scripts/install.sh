@@ -412,6 +412,7 @@ install_docs() {
     for unit in vallum@.service vallum-guard@.service vallum-quick@.service \
         vallum-quick-watch@.service vallum-enroll@.service \
         vallum-cleanup.service \
+        vallum-desk@.service \
         vallum-metrics.service vallum-metrics.timer; do
         if [ -f "$SOURCE_DIR/$unit" ]; then
             run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
@@ -441,6 +442,14 @@ install_docs() {
             run install -D -m 0755 "$SOURCE_DIR/$tool" "$(dest /usr/local/sbin/$tool)"
         fi
     done
+    # The enrolment desk: the self-service layer (service/README.md). It is
+    # optional at runtime — nothing starts it until the operator enables it —
+    # but it ships with the product so an operator never has to assemble it.
+    if [ -f "packaging/vallum-desk" ]; then
+        run install -D -m 0755 "packaging/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
+    elif [ -f "$SOURCE_DIR/vallum-desk" ]; then
+        run install -D -m 0755 "$SOURCE_DIR/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
+    fi
     # The console's privileged path and the full-tunnel deploy scripts ship
     # with the product: without them the plan-before-apply panel is a button
     # that prints a sudo error (see the premortem, 2026-11-11).
@@ -559,11 +568,12 @@ uninstall() {
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
+    run rm -f /usr/local/lib/vallum/vallum-desk
     run systemctl disable vallum-cleanup 2>/dev/null || true
     run rm -f "$UNIT_DIR/vallum-cleanup.service"
     run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"
     run rm -f "$UNIT_DIR/vallum@.service" "$UNIT_DIR/vallum-guard@.service" \
-        "$UNIT_DIR/vallum-quick@.service" \
+        "$UNIT_DIR/vallum-quick@.service" "$UNIT_DIR/vallum-desk@.service" \
         "$UNIT_DIR/vallum-quick-watch@.service" \
         "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
         "$UNIT_DIR/vallum-metrics.timer"
