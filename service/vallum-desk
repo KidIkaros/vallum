@@ -44,10 +44,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
-    peer       TEXT UNIQUE NOT NULL,      -- daemon peer name (u0001 style)
+    peer       TEXT UNIQUE NOT NULL,      -- first/legacy device name (expand step; the relation is `peers`)
     label      TEXT NOT NULL,             -- the name the user chose
     token      TEXT UNIQUE NOT NULL,      -- account token: status/auth
     code       TEXT NOT NULL,             -- invite code consumed
@@ -58,14 +60,43 @@ CREATE TABLE IF NOT EXISTS accounts (
     status     TEXT NOT NULL DEFAULT 'active',  -- active|expired|overquota|revoked
     paid_until TEXT
 );
+CREATE TABLE IF NOT EXISTS peers (
+    id         INTEGER PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    peer       TEXT UNIQUE NOT NULL,      -- daemon peer name (u0001 style)
+    label      TEXT NOT NULL,             -- the device name the user chose
+    created    TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'active'   -- active|removed
+);
 CREATE TABLE IF NOT EXISTS codes (
     code     TEXT PRIMARY KEY,
     created  TEXT NOT NULL,
-    used_by  TEXT                       -- peer name once consumed
+    used_by  TEXT,                        -- peer name once consumed
+    days     INTEGER,                     -- plan payload: days granted (NULL = trial defaults)
+    bytes    INTEGER,                     -- plan payload: byte cap granted
+    plan     TEXT                         -- plan payload: plan label granted
 );
 """
 
 ACCOUNT_STATUSES = ("active", "expired", "overquota", "revoked")
+
+
+def _migrate_v0(conn):
+    """v0 → v1: the pre-version schema gains the peers relation and the
+    codes' plan payload, and every existing account.peer becomes a peers row.
+
+    ADD COLUMN has no IF NOT EXISTS in sqlite, so column presence is checked
+    instead — a fresh database (created at v1) and a legacy one both arrive
+    here with user_version 0 and must both survive the pass.
+    """
+    code_columns = {row[1] for row in conn.execute("PRAGMA table_info(codes)")}
+    for column, kind in (("days", "INTEGER"), ("bytes", "INTEGER"), ("plan", "TEXT")):
+        if column not in code_columns:
+            conn.execute(f"ALTER TABLE codes ADD COLUMN {column} {kind}")
+    conn.execute(
+        "INSERT INTO peers (account_id, peer, label, created, status) "
+        "SELECT id, peer, label, created, 'active' FROM accounts "
+        "WHERE NOT EXISTS (SELECT 1 FROM peers WHERE peers.peer = accounts.peer)")
 
 
 def open_database(path):
@@ -75,7 +106,16 @@ def open_database(path):
     # next request's SELECT miss a row that was plainly in the file.
     conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        conn.close()
+        raise RuntimeError(
+            f"desk database is version {version}; this build speaks {SCHEMA_VERSION} "
+            "— refusing to run a schema it does not know")
     conn.executescript(SCHEMA)
+    if version == 0:
+        _migrate_v0(conn)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
 
@@ -215,6 +255,36 @@ class Desk:
     def domain_of(self, url):
         return re.sub(r"^[a-z]+://", "", url.split("/")[0]).split(":")[0].lower()
 
+    # -- the peers relation ----------------------------------------------
+
+    def _peers_of(self, account):
+        """The account's device peer names. The peers table is the relation;
+        the legacy `accounts.peer` column is the fallback for a row written
+        before the backfill — and still populated on new rows, so older
+        readers keep working during the expand."""
+        rows = self.db.execute(
+            "SELECT peer FROM peers WHERE account_id=? AND status='active'",
+            (account["id"],)).fetchall()
+        if rows:
+            return [row["peer"] for row in rows]
+        return [account["peer"]] if account["peer"] else []
+
+    def _account_for_peer(self, peer):
+        """The account a device peer belongs to, via the relation — falling
+        back to the legacy column for a pre-migration shape."""
+        row = self.db.execute(
+            "SELECT a.* FROM accounts a JOIN peers p ON p.account_id=a.id "
+            "WHERE p.peer=?", (peer,)).fetchone()
+        if row:
+            return row
+        return self.db.execute(
+            "SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
+
+    def _insert_peer(self, account_id, peer, label):
+        self.db.execute(
+            "INSERT INTO peers (account_id, peer, label, created, status) "
+            "VALUES (?,?,?,?,?)", (account_id, peer, label, self._now(), "active"))
+
     # -- signup ---------------------------------------------------------
 
     def signup(self, body, client_ip="unknown"):
@@ -252,10 +322,11 @@ class Desk:
             cap = self.config.trial_bytes if code else self.config.open_trial_bytes
             token = secrets.token_hex(16)
             origin = code if code else "open"
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (peer, label, token, origin, "trial", self._now(), expires, cap, "active"))
+            self._insert_peer(cursor.lastrowid, peer, label)
             if not code:
                 self._count_signup(client_ip)
             elif known:
@@ -287,8 +358,10 @@ class Desk:
 
     def _next_peer_name(self, label):
         """Peer names share their first eight characters on the kernel's
-        interface-name ceiling, so the counter leads: u0001-friend, u0002-friend."""
-        next_id = self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM accounts").fetchone()[0]
+        interface-name ceiling, so the counter leads: u0001-friend, u0002-friend.
+        The counter counts *peers*, not accounts — an account may hold
+        several devices."""
+        next_id = self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM peers").fetchone()[0]
         return f"u{next_id:04d}-{label[:8]}"[:24]
 
     def _trial_expiry(self):
@@ -305,8 +378,11 @@ class Desk:
         row = self.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
         if not row:
             return 404, {"error": "unknown account token"}
-        used = self.daemon.counters().get(row["peer"], 0)
-        return 200, {"peer": row["peer"], "plan": row["plan"], "status": row["status"],
+        peers = self._peers_of(row)
+        counters = self.daemon.counters()
+        used = sum(counters.get(peer, 0) for peer in peers)
+        return 200, {"peer": peers[0] if peers else row["peer"], "peers": peers,
+                     "plan": row["plan"], "status": row["status"],
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
                      "bytes_used": used}
 
@@ -323,9 +399,10 @@ class Desk:
         counters = self.daemon.counters()
         for row in self.db.execute(
                 "SELECT * FROM accounts WHERE status='active'").fetchall():
-            reason = self._breach_reason(row, counters.get(row["peer"], 0), today)
+            used = sum(counters.get(peer, 0) for peer in self._peers_of(row))
+            reason = self._breach_reason(row, used, today)
             if reason:
-                actions.append(self._revoke(row["peer"], reason, counters.get(row["peer"], 0)))
+                actions.append(self._revoke(row, reason, used))
         return actions
 
     @staticmethod
@@ -337,28 +414,36 @@ class Desk:
             return "overquota"
         return None
 
-    def _revoke(self, peer, reason, used):
-        """Remove the peer first, then mark the account.
+    def _revoke(self, account, reason, used):
+        """Remove the account's peers first, then mark the account.
 
         The removal is what makes the revocation real, so a failed removal must
         leave the row active: the sweep only visits active accounts, and a row
         marked revoked while its peer still answers is a live peer that is no
         longer enforced and never retried.
         """
-        action = {"peer": peer, "reason": reason, "bytes": used}
-        try:
-            self.daemon.remove(peer)
-        except RuntimeError as error:
-            if "no peer named" not in str(error):
-                action["error"] = str(error)
-                print(f"desk: could not remove {peer}; will retry: {error}")
-                return action
-            # A peer that was never created — a ticket minted but never
-            # redeemed — is already gone: the goal state holds, and leaving the
-            # row active would retry a removal that can never succeed.
+        peers = self._peers_of(account)
+        action = {"peer": account["peer"], "peers": peers, "reason": reason, "bytes": used}
+        failed = []
+        for peer in peers:
+            try:
+                self.daemon.remove(peer)
+            except RuntimeError as error:
+                if "no peer named" not in str(error):
+                    failed.append(peer)
+                    print(f"desk: could not remove {peer}; will retry: {error}")
+                    continue
+                # A peer that was never created — a ticket minted but never
+                # redeemed — is already gone: the goal state holds, and leaving
+                # the row active would retry a removal that can never succeed.
+            with self.lock:
+                self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
+        if failed:
+            action["error"] = f"peers still live: {', '.join(failed)}"
+            return action
         with self.lock:
-            self.db.execute("UPDATE accounts SET status=? WHERE peer=?", (reason, peer))
-        print(f"desk: removed {peer} ({reason}, {used} bytes)")
+            self.db.execute("UPDATE accounts SET status=? WHERE id=?", (reason, account["id"]))
+        print(f"desk: removed {', '.join(peers) or account['peer']} ({reason}, {used} bytes)")
         return action
 
     def sweep(self):
@@ -413,24 +498,26 @@ class Desk:
         peer = body.get("peer")
         if not peer:
             return 400, {"error": "peer is required"}
-        if self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+        if self._account_for_peer(peer):
             return 409, {"error": "that peer is already an account"}
         label = (body.get("label") or peer)[:40]
         token = secrets.token_hex(16)
         expires = self._trial_expiry()
         cap = int(body.get("bytes_cap") or self.config.trial_bytes)
         with self.lock:
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (peer, label, token, "adopted", "trial", self._now(), expires, cap, "active"))
+            self._insert_peer(cursor.lastrowid, peer, label)
         return 200, {"peer": peer, "token": token, "expires": expires, "bytes_cap": cap}
 
     def _set_plan(self, body):
         """A plan is a row: cap, expiry, plan name, or status. A paid tier is
         data, and reinstating a mis-quota'd account is the same change."""
         peer = body.get("peer")
-        if not self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+        account = self._account_for_peer(peer)
+        if not account:
             return 404, {"error": "unknown peer"}
         columns, values = [], []
         for column, key in (("bytes_cap", "bytes_cap"), ("expires", "expires"),
@@ -447,20 +534,22 @@ class Desk:
         if not columns:
             return 400, {"error": "nothing to change"}
         with self.lock:
-            self.db.execute(f"UPDATE accounts SET {', '.join(columns)} WHERE peer=?",
-                            (*values, peer))
+            self.db.execute(f"UPDATE accounts SET {', '.join(columns)} WHERE id=?",
+                            (*values, account["id"]))
         return 200, {"peer": peer, "updated": [c.split("=")[0] for c in columns]}
 
     def _revoke_peer(self, body):
         peer = body.get("peer")
-        if not self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+        account = self._account_for_peer(peer)
+        if not account:
             return 404, {"error": "unknown peer"}
         try:
             self.daemon.remove(peer)
         except RuntimeError as error:
             return 502, {"error": str(error)}
         with self.lock:
-            self.db.execute("UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
+            self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
+            self.db.execute("UPDATE accounts SET status='revoked' WHERE id=?", (account["id"],))
         return 200, {"revoked": peer}
 
     def _list_peers(self, body):

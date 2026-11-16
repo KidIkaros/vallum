@@ -9,8 +9,10 @@ against a fake daemon — the `Daemon` port is what makes that possible.
     python3 -m unittest discover -s service -p 'test_*.py'
 """
 
+import dataclasses
 import importlib.util
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -338,6 +340,98 @@ class HttpTests(DeskTestCase):
         other = {"X-Forwarded-For": "198.51.100.10"}
         self.assertEqual(
             self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
+
+
+class MigrationTests(DeskTestCase):
+    """The schema's forward path: a pre-version database becomes v1."""
+
+    def legacy_db(self):
+        """A database the way the alpha desk wrote it: accounts with an
+        inline `peer` column, codes with no payload, no peers table, and no
+        `user_version` to say so."""
+        path = os.path.join(self.tempdir.name, "legacy.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE accounts (
+                id INTEGER PRIMARY KEY, peer TEXT UNIQUE NOT NULL,
+                label TEXT NOT NULL, token TEXT UNIQUE NOT NULL,
+                code TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'trial',
+                created TEXT NOT NULL, expires TEXT NOT NULL,
+                bytes_cap INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active', paid_until TEXT);
+            CREATE TABLE codes (code TEXT PRIMARY KEY,
+                created TEXT NOT NULL, used_by TEXT);
+            INSERT INTO accounts (peer,label,token,code,created,expires,bytes_cap,status)
+                VALUES ('u0001-old','old-friend','tok-1','legacy','2026-11-01',
+                        '2027-01-01',1000,'active'),
+                       ('u0002-old','older','tok-2','legacy','2026-11-02',
+                        '2027-01-01',1000,'expired');
+        """)
+        conn.close()
+        return path
+
+    def test_a_pre_version_database_migrates_forward(self):
+        config = dataclasses.replace(self.config, state=self.legacy_db())
+        desk = Desk(config, self.daemon)
+        self.addCleanup(desk.db.close)
+        version = desk.db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertEqual(version, 1)
+        rows = desk.db.execute("SELECT peer, status FROM peers ORDER BY peer").fetchall()
+        self.assertEqual([r["peer"] for r in rows], ["u0001-old", "u0002-old"])
+        # The legacy column stays populated — the expand step keeps old
+        # readers working while the contract is still ahead of us.
+        accounts = desk.db.execute("SELECT peer FROM accounts ORDER BY peer").fetchall()
+        self.assertEqual([a["peer"] for a in accounts], ["u0001-old", "u0002-old"])
+        columns = {r[1] for r in desk.db.execute("PRAGMA table_info(codes)")}
+        self.assertTrue({"days", "bytes", "plan"} <= columns)
+
+    def test_a_database_newer_than_this_build_is_refused(self):
+        path = os.path.join(self.tempdir.name, "newer.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript(desk_module.SCHEMA)
+        conn.execute("PRAGMA user_version=99")
+        conn.close()
+        config = dataclasses.replace(self.config, state=path)
+        with self.assertRaises(RuntimeError):
+            Desk(config, self.daemon)
+
+
+class PeersRelationTests(DeskTestCase):
+    """Every reader consults the peers relation, not the legacy column."""
+
+    def test_signup_writes_the_peer_row_and_keeps_the_legacy_column(self):
+        _, payload = self.signup()
+        account = self.desk.db.execute("SELECT * FROM accounts").fetchone()
+        peer = self.desk.db.execute(
+            "SELECT * FROM peers WHERE account_id=?", (account["id"],)).fetchone()
+        self.assertIsNotNone(peer)
+        self.assertEqual(peer["peer"], payload["peer"])
+        self.assertEqual(peer["status"], "active")
+        self.assertEqual(account["peer"], payload["peer"])
+
+    def test_the_relation_falls_back_to_the_legacy_column(self):
+        _, payload = self.signup()
+        self.desk.db.execute("DELETE FROM peers")
+        code, status = self.desk.status(payload["token"])
+        self.assertEqual(code, 200)
+        self.assertEqual(status["peer"], payload["peer"])
+
+    def test_adopting_writes_the_peers_row(self):
+        self.desk.admin("/api/admin/adopt",
+                        {"admin_token": "admin-secret", "peer": "existing-peer"})
+        row = self.desk.db.execute(
+            "SELECT * FROM peers WHERE peer='existing-peer'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["status"], "active")
+
+    def test_revoking_marks_the_peers_row_removed(self):
+        _, payload = self.signup()
+        peer = payload["peer"]
+        self.desk.db.execute(
+            "UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+        self.desk.sweep_once()
+        row = self.desk.db.execute("SELECT status FROM peers WHERE peer=?", (peer,)).fetchone()
+        self.assertEqual(row["status"], "removed")
 
 
 class AdminTests(DeskTestCase):
