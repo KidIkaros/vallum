@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **Invites can carry the operator's PSK and shaping.** `vallum peer invite
+  --psk [--shaping <preset>]` now records the options in the invite, and the
+  enrolment responder applies them exactly as `peer add --psk/--shaping` does:
+  the PSK is generated and stored server-side (`clients/<name>.psk`) and sealed
+  into the client config, and a named shaping preset is written into the
+  client's `[[peer.shaping]]` tables. Old invite files still parse.
+- **Release evidence is signed and structured.** `scripts/verdict.sh` signs
+  each gate verdict with the release key (`ssh-keygen -Y`), recording the
+  producer and a hash of the gate script; `release.sh` refuses a this-commit
+  `passed` verdict whose signature does not verify. `verify-remote.sh`'s
+  `remote-verified` stamp is now a structured record (commit, remote host,
+  assertion count, operator, script hash, timestamp) instead of a bare hash.
+- **The seccomp gate has an independent oracle.** `scripts/seccomp-expected.txt`
+  is a hand-written x86_64 syscall expectation; `seccomp-trace.sh` now fails if
+  the binary's allow-list drifts from it in either direction, in addition to
+  the trace-vs-allow-list check.
+- **Desk hardening.** `vallum-desk` mints tickets via `peer invite --json`
+  instead of scraping human output; the revocation sweep removes the peer
+  before marking the account (a failed removal stays active and retries); the
+  per-IP signup bound honours `X-Forwarded-For` behind the loopback front.
+- **Packaging ships the desk.** `vallum-desk` and `vallum-desk@.service` are
+  included in tarballs and found by `install.sh` across all layouts.
+
 ## 1.7.0 — 2026-11-14
 
 - **New obfuscated & encrypted transport carriers (`ss`, `tls`, `quic`).**
