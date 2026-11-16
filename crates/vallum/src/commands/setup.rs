@@ -1051,8 +1051,7 @@ fn place_config_in(
     // It lands in the sealed config under [account], in the key's custody.
     if let Some(account) = std::env::var_os("VALLUM_ACCOUNT") {
         let account = account.to_string_lossy();
-        let hex_ok = account.len() == 32
-            && account.chars().all(|c| c.is_ascii_hexdigit());
+        let hex_ok = account.len() == 32 && account.chars().all(|c| c.is_ascii_hexdigit());
         if !hex_ok {
             return Err(Error::Usage(
                 "VALLUM_ACCOUNT is the desk's 32-hex account number".to_owned(),

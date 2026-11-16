@@ -72,9 +72,7 @@ pub struct JoinUriIntent {
 /// the same grammar `service/vallum-uri` enforces, so the GUI accepts
 /// exactly what the baseline handler would (enroll.rs JoinTicket::parse).
 pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
-    let rest = uri
-        .strip_prefix("vallum://")
-        .ok_or("not a vallum:// URI")?;
+    let rest = uri.strip_prefix("vallum://").ok_or("not a vallum:// URI")?;
     let (action, query) = rest
         .split_once('?')
         .ok_or("missing ?ticket=…&account=… query")?;
