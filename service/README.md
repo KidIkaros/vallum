@@ -46,6 +46,46 @@ vallum-fox adopt                   (config becomes the agent lane)
   keeps `plan`/`paid_until`/`bytes_cap` on the account row so a billing
   webhook only ever updates a row.
 
+## On-demand access (public signup)
+
+Closed alpha is the default: signup needs an invite code. To open the desk to
+anyone, opt in at deployment time — never in code:
+
+```sh
+# /etc/vallum/desk.env  (read by vallum-desk@.service)
+VALLUM_DESK_EXTRA_ARGS=--open-signup --open-trial-bytes 5368709120 \
+    --max-active-accounts 200 --signup-ip-day-limit 3
+```
+
+Every anonymous axis is bounded, because the peer table is a /24 — a ceiling,
+not a formality:
+
+| Bound | Default | Why |
+|---|---|---|
+| anonymous trial bytes | 5 GiB | bandwidth is the operator's cost |
+| active accounts | 200 | the /24 holds 253 peers |
+| signups per IP per day | 3 | one visitor cannot fill the table |
+| trial days | 14 | shared with closed mode |
+
+The page needs no JavaScript (a plain form POST to `/signup` returns an HTML
+ticket page), so it survives a strict CSP. Agents keep `/api/signup` and its
+JSON. Tickets are shown once and the vhost sends `Cache-Control: no-store`.
+
+## Public front (Caddy, any web server)
+
+```caddyfile
+desk.example.com {
+    import security-headers            # if your Caddyfile defines one
+    header Cache-Control "no-store"
+    header X-Robots-Tag "noindex"
+    reverse_proxy 127.0.0.1:8400
+}
+```
+
+Add the host to any exit-notice/fallback catch-all's exclusion list, validate
+(`caddy validate`), then reload — a reload, not a restart, so other sites on
+the same server never drop. The desk itself stays bound to loopback.
+
 ## Closed-alpha operation
 
 ```sh

@@ -165,6 +165,13 @@ class DeskConfig:
     bind: str
     port: int
     cli: str = "vallum"
+    # On-demand access: signup without an invite code, bounded on every axis
+    # an anonymous visitor can push on. The peer table is a /24 — a ceiling,
+    # not a formality — so capacity, not politeness, is what stops a crawl.
+    open_signup: bool = False
+    open_trial_bytes: int = 5 * 1024 * 1024 * 1024   # 5 GiB anonymous trial
+    max_active_accounts: int = 200                   # the /24 holds 253
+    signup_ip_day_limit: int = 3                     # signups per IP per day
 
 
 # ---------------------------------------------------------------- the desk
@@ -177,6 +184,7 @@ class Desk:
         self.daemon = daemon
         self.db = open_database(config.state)
         self.lock = threading.Lock()
+        self.signups_today = {}  # ip → (day, count): anonymous signups per IP
 
     # -- inputs ---------------------------------------------------------
 
@@ -198,41 +206,70 @@ class Desk:
 
     # -- signup ---------------------------------------------------------
 
-    def signup(self, body):
-        """An invite code becomes a join ticket and an account."""
+    def signup(self, body, client_ip="unknown"):
+        """An invite code — or, in open mode, nothing — becomes a join ticket
+        and an account. Anonymous signup is bounded per IP and by capacity."""
         code = (body.get("code") or "").strip()
         label = (body.get("name") or "").strip()[:40]
-        if not code:
+        if not code and not self.config.open_signup:
             return 403, {"error": "unknown invite code — this desk is invite-only"}
+        if not code:
+            limit = self._signup_limit_left(client_ip)
+            if limit is not None and limit <= 0:
+                return 429, {"error": "too many signups from this address today — "
+                                      "come back tomorrow or ask the operator"}
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
             return 400, {"error": "name must be lowercase letters/digits/hyphens"}
         with self.lock:
-            known = self.db.execute(
-                "SELECT used_by FROM codes WHERE code=?", (code,)).fetchone()
-            if known and known["used_by"]:
-                return 403, {"error": "invite code already used"}
-            if not known and code not in self.file_codes():
-                return 403, {"error": "unknown invite code — this desk is invite-only"}
+            known = (self.db.execute("SELECT used_by FROM codes WHERE code=?", (code,)).fetchone()
+                     if code else None)
+            if code:
+                if known and known["used_by"]:
+                    return 403, {"error": "invite code already used"}
+                if not known and code not in self.file_codes():
+                    return 403, {"error": "unknown invite code — this desk is invite-only"}
+            active = self.db.execute(
+                "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0]
+            if active >= self.config.max_active_accounts:
+                return 503, {"error": "this desk is at capacity — ask the operator"}
             peer = self._next_peer_name(label)
             try:
                 ticket = self.daemon.mint_ticket(peer)
             except RuntimeError as error:
                 return 502, {"error": f"the daemon refused the enrolment: {error}"}
             expires = self._trial_expiry()
+            cap = self.config.trial_bytes if code else self.config.open_trial_bytes
             token = secrets.token_hex(16)
+            origin = code if code else "open"
             self.db.execute(
                 "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (peer, label, token, code, "trial", self._now(), expires,
-                 self.config.trial_bytes, "active"))
-            if known:
+                (peer, label, token, origin, "trial", self._now(), expires, cap, "active"))
+            if not code:
+                self._count_signup(client_ip)
+            elif known:
                 self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (peer, code))
             else:
                 self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
                                 (code, self._now(), peer))
         return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
-                     "bytes_cap": self.config.trial_bytes,
+                     "bytes_cap": cap,
                      "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
+
+    def _signup_limit_left(self, client_ip):
+        """How many anonymous signups this IP has left today (None = no limit)."""
+        limit = self.config.signup_ip_day_limit
+        if limit <= 0:
+            return None
+        day, count = self.signups_today.get(client_ip, ("", 0))
+        today = datetime.date.today().isoformat()
+        return 0 if day == today and count >= limit else limit - count
+
+    def _count_signup(self, client_ip):
+        day, count = self.signups_today.get(client_ip, ("", 0))
+        today = datetime.date.today().isoformat()
+        fresh = count + 1 if day == today else 1
+        self.signups_today[client_ip] = (today, fresh)
 
     def _next_peer_name(self, label):
         """Peer names share their first eight characters on the kernel's
@@ -413,23 +450,48 @@ class Desk:
 
 # ---------------------------------------------------------------- HTTP
 
-PAGE = """<!doctype html><title>vallum desk</title>
-<style>body{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}
-input,button{font:inherit;padding:.4em .6em}button{cursor:pointer}</style>
+def _esc(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def index_page(open_signup):
+    code_field = "" if open_signup else (
+        '<label>invite code<br><input name="code" required></label><br><br>')
+    intro = ("A device name gets you a join ticket; your key never leaves "
+             "your machine." if open_signup else
+             "An invite code gets you a join ticket; your key never leaves "
+             "your machine.")
+    return f"""<!doctype html><title>vallum desk</title>
+<style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}
+input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}</style>
 <h1>vallum desk</h1>
-<p>Self-service enrolment for this Vallum server. An invite code gets you a
-join ticket; your key never leaves your machine.</p>
-<form onsubmit="go(event)">
-<label>invite code<br><input name=code required></label><br><br>
-<label>device name<br><input name=name pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
+<p>Self-service enrolment for this Vallum server. {intro}</p>
+<form method="post" action="/signup">
+{code_field}
+<label>device name<br><input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
 <button>Get my join ticket</button>
-</form><pre id=out></pre>
-<script>
-async function go(e){e.preventDefault();const f=new FormData(e.target);
-const r=await fetch('/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},
-body:JSON.stringify({code:f.get('code'),name:f.get('name')})});
-const j=await r.json();out.textContent=r.ok?j.ticket+'\n\n'+j.how:j.error;}
-</script>"""
+</form>"""
+
+
+def ticket_page(payload):
+    """The one place the ticket is shown. No script, no storage: what the
+    visitor copies is what they keep."""
+    ticket = _esc(payload.get("ticket", ""))
+    how = _esc(payload.get("how", ""))
+    peer = _esc(payload.get("peer", ""))
+    return f"""<!doctype html><title>your join ticket</title>
+<style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
+pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
+<h1>Your join ticket</h1>
+<p>Shown once. Copy it now — the desk does not keep it.</p>
+<pre>{ticket}</pre>
+<p>{how}</p>"""
+
+
+def error_page(message):
+    return f"""<!doctype html><title>signup failed</title>
+<style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}</style>
+<h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>"""
 
 
 def make_handler(desk):
@@ -447,22 +509,25 @@ def make_handler(desk):
 
         def _body(self):
             length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) or b""
+            if "application/x-www-form-urlencoded" in (self.headers.get("Content-Type") or ""):
+                from urllib.parse import parse_qs
+                return {k: v[0] for k, v in parse_qs(raw.decode()).items()}
             try:
-                return json.loads(self.rfile.read(length) or "{}")
+                return json.loads(raw or "{}")
             except json.JSONDecodeError:
                 return {}
 
-        def _page(self):
-            body = PAGE.encode()
-            self.send_response(200)
+        def _send_html(self, body, status=200):
+            self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(body.encode())
 
         def do_GET(self):
             if self.path == "/":
-                self._page()
+                self._send_html(index_page(desk.config.open_signup))
                 return
             if self.path.startswith("/api/status?"):
                 from urllib.parse import parse_qs, urlparse
@@ -476,7 +541,16 @@ def make_handler(desk):
             body = self._body()
             try:
                 if self.path == "/api/signup":
-                    code, payload = desk.signup(body)
+                    code, payload = desk.signup(body, self.client_address[0])
+                elif self.path == "/signup":
+                    # The no-script path: a plain form post, answered with a
+                    # page. Agents keep /api/signup and its JSON.
+                    code, payload = desk.signup(body, self.client_address[0])
+                    if code == 200:
+                        self._send_html(ticket_page(payload))
+                    else:
+                        self._send_html(error_page(payload.get("error", "")), status=code)
+                    return
                 elif self.path.startswith("/api/admin/"):
                     code, payload = desk.admin(self.path, body)
                 else:
@@ -509,6 +583,14 @@ def parse_args(argv=None):
     parser.add_argument("--trial-bytes", type=int, default=50 * 1024 * 1024 * 1024,
                         help="50 GiB default")
     parser.add_argument("--sweep-secs", type=int, default=300)
+    parser.add_argument("--open-signup", action="store_true",
+                        help="on-demand access: signup without an invite code")
+    parser.add_argument("--open-trial-bytes", type=int, default=5 * 1024 * 1024 * 1024,
+                        help="byte cap for anonymous trials (default 5 GiB)")
+    parser.add_argument("--max-active-accounts", type=int, default=200,
+                        help="capacity ceiling: the peer table is a /24")
+    parser.add_argument("--signup-ip-day-limit", type=int, default=3,
+                        help="anonymous signups per IP per day (0 = unlimited)")
     parser.add_argument("--cli", default="vallum")
     return parser.parse_args(argv)
 
@@ -540,6 +622,10 @@ def main(argv=None):
         bind=args.bind,
         port=args.port,
         cli=args.cli,
+        open_signup=args.open_signup,
+        open_trial_bytes=args.open_trial_bytes,
+        max_active_accounts=args.max_active_accounts,
+        signup_ip_day_limit=args.signup_ip_day_limit,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
     threading.Thread(target=desk.sweep, daemon=True).start()

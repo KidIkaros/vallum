@@ -8,7 +8,11 @@ PartOf=vallum@%i.service
 # Root is required: the desk talks to the daemon through the 0600 control
 # socket and runs peer operations (`peer invite/remove`) against the config.
 # It binds 127.0.0.1 by default — expose it only behind a TLS reverse proxy.
-ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk --config /etc/vallum/%i.toml --bind 127.0.0.1 --port 8400
+# On-demand access is a deployment choice, not a default: the operator opts in
+# with VALLUM_DESK_EXTRA_ARGS in /etc/vallum/desk.env (e.g.
+# "--open-signup --open-trial-bytes 5368709120 --max-active-accounts 200").
+EnvironmentFile=-/etc/vallum/desk.env
+ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk --config /etc/vallum/%i.toml --bind 127.0.0.1 --port 8400 $VALLUM_DESK_EXTRA_ARGS
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

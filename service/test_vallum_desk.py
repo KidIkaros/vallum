@@ -168,6 +168,54 @@ class EnforcementTests(DeskTestCase):
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
 
 
+class OnDemandTests(DeskTestCase):
+    """Open signup: no invite code, bounded per IP and by capacity."""
+
+    def open_desk(self):
+        self.config.open_signup = True
+        self.config.open_trial_bytes = 500
+        self.config.max_active_accounts = 2
+        self.config.signup_ip_day_limit = 2
+
+    def test_open_mode_signs_up_without_a_code(self):
+        self.open_desk()
+        code, payload = self.desk.signup({"name": "walk-in"}, client_ip="198.51.100.9")
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["bytes_cap"], 500)  # the smaller anonymous trial
+
+    def test_open_mode_still_honours_invite_codes_at_the_full_cap(self):
+        self.open_desk()
+        code, payload = self.signup()  # friend-code-1, cap is trial_bytes=1000
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["bytes_cap"], 1000)
+
+    def test_anonymous_signups_are_limited_per_ip_per_day(self):
+        self.open_desk()
+        self.config.max_active_accounts = 10  # capacity is a separate test
+        first = self.desk.signup({"name": "a"}, client_ip="198.51.100.9")
+        second = self.desk.signup({"name": "b"}, client_ip="198.51.100.9")
+        third = self.desk.signup({"name": "c"}, client_ip="198.51.100.9")
+        self.assertEqual(first[0], 200)
+        self.assertEqual(second[0], 200)
+        self.assertEqual(third[0], 429)
+        # a different address is not affected by this one's history
+        other = self.desk.signup({"name": "d"}, client_ip="198.51.100.10")
+        self.assertEqual(other[0], 200)
+
+    def test_capacity_is_a_ceiling_not_a_formality(self):
+        self.open_desk()
+        for n in range(2):
+            self.assertEqual(
+                self.desk.signup({"name": f"filler{n}"}, client_ip=f"198.51.100.{n}")[0], 200)
+        code, payload = self.desk.signup({"name": "one-too-many"}, client_ip="198.51.100.9")
+        self.assertEqual(code, 503)
+        self.assertIn("capacity", payload["error"])
+
+    def test_closed_mode_still_refuses_without_a_code(self):
+        code, payload = self.desk.signup({"name": "walk-in"}, client_ip="198.51.100.9")
+        self.assertEqual(code, 403)
+
+
 class AdminTests(DeskTestCase):
 
     def test_a_wrong_admin_token_is_refused(self):
