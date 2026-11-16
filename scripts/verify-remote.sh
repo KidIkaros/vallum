@@ -194,14 +194,47 @@ fi
 # command substitution whose output becomes remote script lines — a comment
 # reading `ufw allow` ran ufw on this machine and sent its usage text to the
 # target's shell. No backticks inside an rsh argument: quote words with ' or ".
+# One TCP connection carries every call: the run makes well over a hundred
+# short SSH invocations, and the burst pattern is exactly what a remote
+# rate-limiter (sshd MaxStartups, a host-side firewall, a provider edge)
+# turns into intermittent "Connection timed out" mid-run. The master is
+# opened once below and cleaned up in cleanup(); rsh/rscp only ride it.
+SSH_MUX_DIR=$(mktemp -d -t vallum-verify-mux.XXXXXX)
+SSH_MUX="$SSH_MUX_DIR/sock"
+SSH_OPTS=(-o BatchMode=yes -o "ControlPath=$SSH_MUX" -o ControlMaster=no)
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     OWNER_HOME=$(eval echo "~$SUDO_USER")
-    rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh -o BatchMode=yes "$TARGET" "$@"; }
-    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -q "$@"; }
+    # The control socket lives where the invoking user can write it.
+    chown "$SUDO_USER" "$SSH_MUX_DIR"
+    rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -q -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 else
-    rsh() { ssh -o BatchMode=yes "$TARGET" "$@"; }
-    rscp() { scp -q "$@"; }
+    rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+    rscp() { scp -q -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 fi
+
+# The persistent connection all rsh/rscp calls multiplex onto. Opened after
+# the sudo check proves the keys work; ControlPersist keeps it warm through
+# the quiet stretches so the outage leg never pays a reconnect.
+ssh_mux_open() {
+    local -a open_opts=(-o BatchMode=yes -o ControlMaster=yes
+        -o "ControlPath=$SSH_MUX" -o ControlPersist=yes -MNf)
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${open_opts[@]}" "$TARGET"
+    else
+        ssh "${open_opts[@]}" "$TARGET"
+    fi
+}
+
+ssh_mux_close() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+        sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" \
+            ssh -o "ControlPath=$SSH_MUX" -O exit "$TARGET" >/dev/null 2>&1
+    else
+        ssh -o "ControlPath=$SSH_MUX" -O exit "$TARGET" >/dev/null 2>&1
+    fi
+    rm -rf "$SSH_MUX_DIR"
+}
 
 CLIENT_PID=""
 REMOTE_STARTED=0
@@ -285,9 +318,11 @@ cleanup() {
         fail "the commit was NOT recorded as verified: the host was left unrestored"
         exit 1
     fi
+    ssh_mux_close
     ok "both ends restored"
 }
 kept() {
+    ssh_mux_close
     say "kept (--keep) — nothing was cleaned up"
     echo "   remote daemon   $TARGET, UDP $PORT, config $REMOTE_DIR/server.toml"
     echo "   remote files    $REMOTE_DIR and /usr/bin/vallum{,-quick}"
@@ -303,6 +338,9 @@ VALLUM=$(cd "$(dirname "$VALLUM")" && pwd)/$(basename "$VALLUM")
 QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 
 say "remote checks ($TARGET)"
+# The multiplexed control connection — one handshake for the whole run,
+# so the hundred-plus rsh calls below never trip a remote rate limit.
+ssh_mux_open || bad "cannot open an SSH control connection to $TARGET"
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
 # The difference between "the host has no such table" and "we could not read it"
 # matters: the cleanup deletes `inet vallum`, so a table we failed to save is a
