@@ -262,6 +262,14 @@ pub struct Invite {
     pub public_line: Option<String>,
     #[serde(default)]
     pub config: Option<String>,
+    /// The operator's options, carried in the invite: a ticket otherwise hands
+    /// the device a peer record built from the invite alone, and neither a
+    /// preshared key nor a shaping preset could ever reach it. Both default to
+    /// absent so invites minted before this change still parse.
+    #[serde(default)]
+    pub psk: bool,
+    #[serde(default)]
+    pub shaping: Option<String>,
 }
 
 impl Invite {
@@ -580,6 +588,8 @@ pub fn issue_invite(
     name: &str,
     ttl_secs: u64,
     expect_public_line: Option<String>,
+    psk: bool,
+    shaping: Option<String>,
 ) -> Result<(Token, String, PathBuf), Error> {
     if !valid_name(name) {
         return Err(Error::Usage(format!(
@@ -597,6 +607,8 @@ pub fn issue_invite(
         expect_public_line,
         public_line: None,
         config: None,
+        psk,
+        shaping,
     };
     let dir = run_dir();
     std::fs::create_dir_all(&dir).map_err(|source| Error::IoPath {
@@ -961,7 +973,8 @@ impl EnrollResponderState {
             public_key_file: None,
             address: None,
             keepalive: None,
-            shaping: None,
+            shaping: invite.shaping.clone(),
+            psk: invite.psk,
             no_apply: false,
             json: true,
         }) {
@@ -1533,6 +1546,8 @@ mod tests {
                 expect_public_line: None,
                 public_line: None,
                 config: None,
+                psk: false,
+                shaping: None,
             },
             token,
         )
@@ -1854,8 +1869,34 @@ mod tests {
     }
 
     #[test]
+    fn the_invite_carries_the_operators_options() {
+        // The responder builds the peer record from the invite alone, so the
+        // options must survive the serde round trip — and invites minted
+        // before the fields existed must still parse, with the options off.
+        let (invite, _) = invite();
+        let mut with_options = invite.clone();
+        with_options.psk = true;
+        with_options.shaping = Some("balanced".to_owned());
+        let parsed: Invite =
+            serde_json::from_str(&serde_json::to_string(&with_options).unwrap()).unwrap();
+        assert!(parsed.psk);
+        assert_eq!(parsed.shaping.as_deref(), Some("balanced"));
+
+        let old_format = serde_json::json!({
+            "version": INVITE_VERSION,
+            "id": invite.id,
+            "name": invite.name,
+            "token_hex": invite.token_hex,
+            "expires": invite.expires,
+        });
+        let parsed: Invite = serde_json::from_value(old_format).unwrap();
+        assert!(!parsed.psk);
+        assert_eq!(parsed.shaping, None);
+    }
+
+    #[test]
     fn a_name_with_path_characters_is_rejected() {
-        assert!(issue_invite("vallum0", "../etc", 60, None).is_err());
+        assert!(issue_invite("vallum0", "../etc", 60, None, false, None).is_err());
         assert!(!valid_name("a/b"));
         assert!(!valid_name(""));
         assert!(valid_name("laptop-1.home"));

@@ -140,29 +140,35 @@ fn invite_peer(app: &mut App, form: &super::app::Form) -> FormResult {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| interface_name.clone());
-    let (token, id, path) =
-        match crate::enroll::issue_invite(&interface_name, name, ttl_mins * 60, pinned.clone()) {
-            Ok(ok) => ok,
-            Err(error) => {
-                // The console cannot write the root-owned runtime dir or read the
-                // 0600 config: mint through the privileged dispatcher instead, which
-                // also starts the UDP 51821 responder and its firewall rule.
-                let ttl = ttl_mins.to_string();
-                let mut args = vec!["invite", name, ttl.as_str(), stem.as_str()];
-                if let Some(pin) = pinned.as_deref() {
-                    args.push(pin);
-                }
-                let output = run_privileged(&args, None)
-                    .map_err(|ops_error| form_error(None, format!("{error}\n{ops_error}")))?;
-                let Some(ticket) = output
-                    .split_whitespace()
-                    .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
-                else {
-                    return Err(form_error(None, error.to_string()));
-                };
-                return show_invite(app, name, ticket, &stem);
+    let (token, id, path) = match crate::enroll::issue_invite(
+        &interface_name,
+        name,
+        ttl_mins * 60,
+        pinned.clone(),
+        false,
+        None,
+    ) {
+        Ok(ok) => ok,
+        Err(error) => {
+            // The console cannot write the root-owned runtime dir or read the
+            // 0600 config: mint through the privileged dispatcher instead, which
+            // also starts the UDP 51821 responder and its firewall rule.
+            let ttl = ttl_mins.to_string();
+            let mut args = vec!["invite", name, ttl.as_str(), stem.as_str()];
+            if let Some(pin) = pinned.as_deref() {
+                args.push(pin);
             }
-        };
+            let output = run_privileged(&args, None)
+                .map_err(|ops_error| form_error(None, format!("{error}\n{ops_error}")))?;
+            let Some(ticket) = output
+                .split_whitespace()
+                .find(|token| token.starts_with("vallum1-join:") && token.len() > 40)
+            else {
+                return Err(form_error(None, error.to_string()));
+            };
+            return show_invite(app, name, ticket, &stem);
+        }
+    };
     let (host_port, fp) = if let Some(device) = app.current_device() {
         let config = app
             .current()

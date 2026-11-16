@@ -562,6 +562,10 @@ pub struct EnrollArgs {
     #[arg(long, value_name = "SECS")]
     pub keepalive: Option<u16>,
 
+    /// Generate a preshared key and store it next to the config.
+    #[arg(long)]
+    pub psk: bool,
+
     /// Emit a named shaping preset into the device's config (see `peer add`).
     #[arg(long, value_name = "PRESET")]
     pub shaping: Option<String>,
@@ -668,7 +672,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
                 endpoint: None,
                 keepalive: args.keepalive,
                 pin_endpoint: false,
-                psk: false,
+                psk: args.psk,
                 dns: Vec::new(),
                 shaping: args.shaping.clone(),
                 forget_key: false,
@@ -713,6 +717,16 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
     // queries went to whatever the OS had, outside the tunnel. A VPN that
     // leaks DNS is a VPN that leaks the list of sites its user visited.
     let dns = peer_dns(&args.config);
+    // The preshared key `add` just wrote to a file, read back so the device's
+    // config carries the same secret through the sealed answer. An existing
+    // peer's key is read the same way, so a re-enrolment answers identically.
+    let psk_hex = file
+        .peers()
+        .into_iter()
+        .find(|peer| peer.name == args.name)
+        .map(|peer| read_psk(&peer, &file.directory()))
+        .transpose()?
+        .flatten();
     let config_text = client_config(
         &args.name,
         &addresses,
@@ -720,7 +734,7 @@ pub(crate) fn enroll_report(args: &EnrollArgs) -> Result<Enrolled, Error> {
         &server.public_line,
         &endpoint,
         &dns,
-        None,
+        psk_hex.as_deref(),
         shaping_preset(args.shaping.as_deref())?,
     );
 
@@ -757,6 +771,14 @@ pub struct InviteArgs {
     /// A file holding the device's public line.
     #[arg(long, value_name = "FILE")]
     pub public_key_file: Option<PathBuf>,
+
+    /// Generate a preshared key for the device at enrolment (see `peer add`).
+    #[arg(long)]
+    pub psk: bool,
+
+    /// Emit a named shaping preset into the device's config (see `peer add`).
+    #[arg(long, value_name = "PRESET")]
+    pub shaping: Option<String>,
 
     /// How long the invite lives, in minutes.
     #[arg(long, value_name = "MINUTES", default_value = "15")]
@@ -828,8 +850,17 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
             args.config.display()
         )));
     }
-    let (token, id, path) =
-        crate::enroll::issue_invite(&interface, &args.name, args.ttl * 60, expect)?;
+    // The invite carries the operator's options to the responder, so a bad
+    // preset name must fail here — not when the device asks for its config.
+    shaping_preset(args.shaping.as_deref())?;
+    let (token, id, path) = crate::enroll::issue_invite(
+        &interface,
+        &args.name,
+        args.ttl * 60,
+        expect,
+        args.psk,
+        args.shaping.clone(),
+    )?;
     let server_fingerprint = fingerprint(&server.public_line);
     let host = endpoint
         .rsplit_once(':')
@@ -903,6 +934,12 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
         args.name,
         args.ttl
     );
+    match (args.psk, &args.shaping) {
+        (true, Some(preset)) => say!("   enrols with a preshared key and `{preset}` shaping"),
+        (true, None) => say!("   enrols with a preshared key"),
+        (false, Some(preset)) => say!("   enrols with `{preset}` shaping"),
+        (false, None) => {}
+    }
     say!();
     say!("   on the client:");
     say!("      sudo vallum join -");
@@ -968,6 +1005,8 @@ fn invites(args: &InvitesArgs) -> Result<(), Error> {
                     "id": inv.id,
                     "pinned": inv.expect_public_line.is_some(),
                     "spent": inv.public_line.is_some(),
+                    "psk": inv.psk,
+                    "shaping": inv.shaping,
                     "expires_in_secs": inv.expires.saturating_sub(now),
                 })
             })
@@ -2546,6 +2585,82 @@ mod tests {
         let error = ensure_no_overlap(&file, "laptop", &["10.7.0.2/32".to_owned()]).unwrap_err();
         assert!(error.to_string().contains("overlaps"));
         ensure_no_overlap(&file, "laptop", &["10.7.0.3/32".to_owned()]).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The enrolment the responder performs is built from the invite alone,
+    /// so an invite that cannot carry the operator's options hands the device
+    /// a peer record with no preshared key and no shaping. Both now travel in
+    /// the invite, and the sealed answer carries them to the device.
+    #[test]
+    fn an_enrolled_device_gets_the_psk_and_shaping_the_invite_asked_for() {
+        let dir = std::env::temp_dir().join(format!("vallum-peer-enroll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A real server key: `load_server` expands it the way the responder does.
+        keys::save_secret(
+            &dir.join("server.key"),
+            &keys::new_secret(0x0003, true, [0x11; 32]),
+        )
+        .unwrap();
+        let path = dir.join("vallum0.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nname = \"vallum0\"\nprivate_key = \"server.key\"\n\
+             address = \"10.7.0.1/24\"\nlisten = \"0.0.0.0:51921\"\n\
+             public_endpoint = \"203.0.113.10:51820\"\n",
+        )
+        .unwrap();
+
+        // The device's public line, minted the way `keygen` + `pubkey` would.
+        let device = keys::new_secret(0x0003, true, [0x77; 32]);
+        let suite = SdkSuite::from_id(3).unwrap();
+        let line = keys::encode_public(3, &keys::identity(&suite, &device).unwrap().to_peer());
+
+        let report = enroll_report(&EnrollArgs {
+            name: "laptop".to_owned(),
+            config: path.clone(),
+            public_key: Some(line),
+            public_key_file: None,
+            address: None,
+            keepalive: None,
+            psk: true,
+            shaping: Some("balanced".to_owned()),
+            no_apply: true,
+            json: true,
+        })
+        .unwrap();
+
+        // The device is handed the key inline (the answer is sealed) and the
+        // preset as `[[peer.shaping]]` tables.
+        assert!(
+            report.config.contains("preshared_key = \""),
+            "config:\n{}",
+            report.config
+        );
+        assert!(
+            report.config.contains("[[peer.shaping]]"),
+            "config:\n{}",
+            report.config
+        );
+        // The server holds the same secret in a file, not inline in the config.
+        let file = ConfigFile::load(&path).unwrap();
+        let peer = file
+            .peers()
+            .into_iter()
+            .find(|p| p.name == "laptop")
+            .unwrap();
+        assert!(peer.has_psk);
+        assert_eq!(
+            peer.preshared_key_file.as_deref(),
+            Some("clients/laptop.psk")
+        );
+        let on_disk = std::fs::read_to_string(dir.join("clients/laptop.psk")).unwrap();
+        assert!(
+            report.config.contains(on_disk.trim()),
+            "the device was handed a different key than the server holds"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

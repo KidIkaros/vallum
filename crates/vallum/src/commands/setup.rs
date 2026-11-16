@@ -405,6 +405,8 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
                     config: init.config.clone(),
                     public_key: None,
                     public_key_file: None,
+                    psk: false,
+                    shaping: None,
                     ttl: 15,
                     json: false,
                 },

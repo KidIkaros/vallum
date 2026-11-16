@@ -523,7 +523,8 @@ pub fn invite(
         }
     };
     let (token, id, path) =
-        enroll::issue_invite(interface, name, minutes * 60, pinned).map_err(invite_privileged)?;
+        enroll::issue_invite(interface, name, minutes * 60, pinned, false, None)
+            .map_err(invite_privileged)?;
     let loaded = config.and_then(|path| Config::load(path).ok());
     let target = enroll::join_target(loaded.as_ref(), listen);
     // A ticket that says `<server>` cannot be redeemed. Refusing here costs one

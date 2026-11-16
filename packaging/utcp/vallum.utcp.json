@@ -858,7 +858,7 @@
     },
     {
       "name": "vallum_peer_invite",
-      "description": "Mint a single-use enrolment ticket so a device can join without SSH. The returned `ticket` is what the device runs: `vallum join <ticket>`. It expires after `ttl_minutes` and works once. The `token` is a secret — pass it to the device, never into a log or a transcript.",
+      "description": "Mint a single-use enrolment ticket so a device can join without SSH. The returned `ticket` is what the device runs: `vallum join <ticket>`. It expires after `ttl_minutes` and works once. The `token` is a secret — pass it to the device, never into a log or a transcript. Shell-only flags this template cannot express: `--psk` (the invite mints a preshared key at enrolment), `--shaping PRESET` (the device's config gets a named shaping preset), `--public-key`/`--public-key-file` (pin the invite to one device key).",
       "inputs": {
         "type": "object",
         "properties": {
