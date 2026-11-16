@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# vallum-fox — agent web access through a Vallum per-app tunnel (ADR-0023).
+#
+# The agent's web traffic rides a dedicated tunnel device inside a member
+# namespace: it egresses with the tunnel's identity, never the host's; a dead
+# tunnel refuses to launch rather than leaking; and every request passes a
+# per-domain budget so agent volume cannot earn its identity a ban.
+#
+# Setup (once per machine):   vallum-fox setup [ssh-host]
+# Usage:                      vallum-fox fetch|dump|shot|dl|egress|status|budget
+#
+# Reproducible: everything machine-specific lives in the config this script's
+# `setup` generates; nothing here assumes a particular server, peer or path.
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+CONFIG="${VALLUM_FOX_CONFIG:-/etc/vallum/vallum-agent.toml}"
+QUICK="${VALLUM_FOX_QUICK:-/usr/bin/vallum-quick}"
+MEMBER_NAME="${VALLUM_FOX_MEMBER:-agent}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vallum-fox"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vallum-fox"
+BROWSER_URL_BASE="https://storage.googleapis.com/chrome-for-testing-public"
+BUDGET_DEFAULT_HOURLY="${VALLUM_FOX_HOURLY:-60}"
+BUDGET_DEFAULT_INTERVAL="${VALLUM_FOX_INTERVAL:-5}"
+BUDGET_MAX_WAIT="${VALLUM_FOX_MAX_WAIT:-30}"
+DEFAULT_HOURLY=$(printf '%s' "$BUDGET_DEFAULT_HOURLY")
+
+die() { printf 'vallum-fox: %s\n' "$*" >&2; exit 1; }
+say() { printf 'vallum-fox: %s\n' "$*"; }
+
+member() {
+    # Run a command inside the member namespace. Fails closed: when the tunnel
+    # is down, `vallum-quick app` itself refuses — nothing here can fall back
+    # to the host's network, and this script must not try.
+    sudo -n "$QUICK" app "$CONFIG" "$MEMBER_NAME" -- "$@"
+}
+
+domain_of() { printf '%s' "$1" | sed -E 's#^[a-z]+://##; s#[:/].*$##; s#^www\.##' | tr 'A-Z' 'a-z'; }
+
+# --- budget ----------------------------------------------------------------
+
+budget_file() { mkdir -p "$STATE_DIR"; printf '%s/budget.json' "$STATE_DIR"; }
+
+budget_init() {
+    [ -s "$(budget_file)" ] && return 0
+    printf '{"domains": {}, "day": "%s", "day_count": 0}\n' "$(date -u +%F)" > "$(budget_file)"
+}
+
+budget_roll_day() {
+    python3 - "$(budget_file)" <<'PY'
+import json, sys, datetime
+p = sys.argv[1]
+d = json.load(open(p))
+today = datetime.date.today().isoformat()
+if d.get("day") != today:
+    d["day"], d["day_count"] = today, 0
+    for v in d["domains"].values():
+        v["hour_count"], v["hour_start"] = 0, 0
+    json.dump(d, open(p, "w"))
+PY
+}
+
+budget_limit() { # domain → hourly limit (config override or default)
+    python3 - "$(budget_file)" "$1" "$DEFAULT_HOURLY" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d["domains"].get(sys.argv[2], {}).get("hourly", int(sys.argv[3])))
+PY
+}
+
+budget_interval() {
+    python3 - "$(budget_file)" "$1" "$BUDGET_DEFAULT_INTERVAL" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d["domains"].get(sys.argv[2], {}).get("min_interval", float(sys.argv[3])))
+PY
+}
+
+budget_admit() { # url → waits out the min-interval, refuses over the hourly cap
+    budget_init; budget_roll_day
+    local domain; domain=$(domain_of "$1")
+    python3 - "$(budget_file)" "$domain" "$BUDGET_MAX_WAIT" <<'PY'
+import json, sys, time
+p, domain, max_wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
+d = json.load(open(p))
+v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
+now = time.time()
+if v["hour_start"] == 0 or now - v["hour_start"] >= 3600:
+    v["hour_start"], v["hour_count"] = now, 0
+limit = int(v.get("hourly", 0)) or None
+if limit and v["hour_count"] >= limit:
+    print(f"BUDGET_EXHAUSTED {domain} {v['hour_count']}/{limit} this hour — the agent must stop, not retry", file=sys.stderr)
+    sys.exit(3)
+wait = v.get("min_interval", 0) - (now - v.get("last", 0))
+if wait > 0:
+    if wait > max_wait:
+        print(f"BUDGET_RATE {domain}: next request allowed in {wait:.0f}s — over the pace cap", file=sys.stderr)
+        sys.exit(3)
+    time.sleep(wait)
+v["last"] = time.time()
+v["hour_count"] += 1
+d["day_count"] = d.get("day_count", 0) + 1
+json.dump(d, open(p, "w"))
+PY
+}
+
+# --- browser ---------------------------------------------------------------
+
+ensure_browser() {
+    local bin="$CACHE_DIR/chrome-headless-shell-linux64/chrome-headless-shell"
+    [ -x "$bin" ] && { printf '%s' "$bin"; return 0; }
+    mkdir -p "$CACHE_DIR"
+    local ver
+    ver=$(curl -sm10 https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['channels']['Stable']['version'])") \
+        || die "cannot resolve a Chrome for Testing version; is the network up?"
+    say "downloading chrome-headless-shell $ver (first run only)"
+    curl -s -o "$CACHE_DIR/chs.zip" "$BROWSER_URL_BASE/$ver/linux64/chrome-headless-shell-linux64.zip"
+    python3 -c "import zipfile; zipfile.ZipFile('$CACHE_DIR/chs.zip').extractall('$CACHE_DIR')"
+    rm -f "$CACHE_DIR/chs.zip"
+    chmod +x "$bin"
+    printf '%s' "$bin"
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_fetch() {
+    [ $# -ge 1 ] || die "usage: vallum-fox fetch <url> [output-file]"
+    local url=$1 out=${2:--}
+    budget_admit "$url"
+    member curl -4 -sL --max-time 45 -o "$out" -w "HTTP %{http_code} · %{size_download} bytes · via $(cmd_egress_quiet)" "$url"
+}
+
+cmd_dl() {
+    [ $# -ge 2 ] || die "usage: vallum-fox dl <url> <output-file>"
+    budget_admit "$url"
+    member curl -4 -sL --max-time 600 -o "$2" -w "HTTP %{http_code} · %{size_download} bytes\n" "$1"
+}
+
+cmd_dump() {
+    [ $# -ge 1 ] || die "usage: vallum-fox dump <url>"
+    local url=$1
+    budget_admit "$url"
+    local bin; bin=$(ensure_browser)
+    member "$bin" --headless --no-sandbox --disable-gpu --dump-dom --timeout=20000 "$url" 2>/dev/null
+}
+
+cmd_shot() {
+    [ $# -ge 2 ] || die "usage: vallum-fox shot <url> <output.png>"
+    local url=$1
+    case "$2" in /*) true ;; *) die "output must be an absolute path outside /tmp (member /tmp is private)" ;; esac
+    budget_admit "$url"
+    local bin; bin=$(ensure_browser)
+    member "$bin" --headless --no-sandbox --disable-gpu --screenshot="$2" \
+        --window-size=1280,800 --timeout=25000 --virtual-time-budget=8000 "$url" 2>/dev/null \
+        || die "screenshot failed (see journalctl -u vallum-quick@$(config_interface))"
+    say "wrote $2"
+}
+
+cmd_egress_quiet() { member curl -4 -sm10 https://ifconfig.me 2>/dev/null || printf 'unreachable'; }
+
+cmd_egress() {
+    local member_ip host_ip
+    member_ip=$(cmd_egress_quiet)
+    host_ip=$(curl -4 -sm10 https://ifconfig.me 2>/dev/null || printf 'unreachable')
+    printf 'agent egress:  %s\nhost egress:   %s\nseparated:     %s\n' \
+        "$member_ip" "$host_ip" "$([ "$member_ip" != "$host_ip" ] && echo yes || echo NO — LEAK)"
+}
+
+config_interface() {
+    # The config is 0600 root on a real deployment: read it if we can, else ask
+    # sudo, else fall back to the file's stem (the unit instance is the stem).
+    sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$CONFIG" 2>/dev/null | head -1 \
+        || sudo -n sed -n 's/^name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$CONFIG" 2>/dev/null | head -1 \
+        || basename "$CONFIG" .toml
+}
+
+cmd_status() {
+    local iface; iface=$(config_interface)
+    [ -n "$iface" ] || die "no interface name in $CONFIG"
+    printf 'device:    %s (%s)\n' "$iface" "$CONFIG"
+    printf 'unit:      daemon=%s quick=%s\n' \
+        "$(systemctl is-active "vallum@$iface" 2>/dev/null)" \
+        "$(systemctl is-active "vallum-quick@$iface" 2>/dev/null)"
+    printf 'egress:    '; cmd_egress
+    printf 'budget:    %s requests today, %s/hour default, %ss min pace\n' \
+        "$(python3 -c "import json,sys; print(json.load(open('$(budget_file)')).get('day_count',0))" 2>/dev/null || echo 0)" \
+        "$DEFAULT_HOURLY" "$BUDGET_DEFAULT_INTERVAL"
+}
+
+cmd_budget() {
+    budget_init
+    case "${1:-list}" in
+        set)
+            [ $# -ge 2 ] || die "usage: vallum-fox budget set <domain> [hourly=N] [interval=S]"
+            local domain=$2; shift 2
+            python3 - "$(budget_file)" "$domain" "${1:-}" "${2:-}" <<'PY'
+import json, sys
+p, domain = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+v = d["domains"].setdefault(domain, {"hour_count": 0, "hour_start": 0, "last": 0})
+for arg in sys.argv[3:]:
+    if arg.startswith("hourly="):
+        v["hourly"] = int(arg[7:])
+    elif arg.startswith("interval="):
+        v["min_interval"] = float(arg[9:])
+json.dump(d, open(p, "w"))
+print(f"{domain}: hourly={v.get('hourly', 'default')} min_interval={v.get('min_interval', 'default')}s")
+PY
+            ;;
+        list) python3 -m json.tool "$(budget_file)" ;;
+        *) die "usage: vallum-fox budget [set <domain> hourly=N interval=S | list]" ;;
+    esac
+}
+
+# --- setup -----------------------------------------------------------------
+
+cmd_setup() {
+    local ssh_host=${1:-}
+    [ -n "$ssh_host" ] || die "usage: vallum-fox setup <ssh-alias-of-server> [peer-name] [server-config-path]"
+    local peer=${2:-agent-$(hostname -s | tr -cd 'a-z0-9' | head -c 8)}
+    local server_conf=${3:-}
+    local lab="$STATE_DIR/enroll"
+    mkdir -p "$lab"
+    local vallum_bin; vallum_bin=$(command -v vallum || die "install Vallum first (scripts/install.sh)")
+    say "1/5 key on this device (never leaves it)"
+    "$vallum_bin" keygen --output "$lab/agent.key" >/dev/null
+    "$vallum_bin" pubkey --private-key "$lab/agent.key" > "$lab/agent.pub"
+    say "2/5 enrolling peer '$peer' on the server ($ssh_host)"
+    [ -n "$server_conf" ] || server_conf=$(ssh "$ssh_host" "sudo ls /etc/vallum/*.toml | grep -v bak | head -1")
+    ssh "$ssh_host" "scp -q $lab/agent.pub root@$ssh_host:/tmp/ 2>/dev/null || true; sudo vallum peer add $peer --config $server_conf --public-key-file /tmp/agent.pub --client-config-out /tmp/agent-client.toml --no-apply && sudo chmod 644 /tmp/agent-client.toml"
+    scp -q "$ssh_host:/tmp/agent-client.toml" "$lab/agent-client.toml"
+    say "3/5 writing the app_class config"
+    python3 - "$lab/agent-client.toml" "$lab/vallum-agent.toml" "$lab/agent.key" <<'PY'
+import sys
+src, dst, key = sys.argv[1:4]
+t = open(src).read()
+import re
+t = re.sub(r'private_key\s*=\s*"[^"]*"', f'private_key = "{key}"', t, count=1)
+if "[quick]" not in t:
+    t += '\n[quick]\n'
+if "app_class" not in t:
+    t = t.replace("[quick]", '[quick]\napp_class = true\ndns = ["1.1.1.1", "1.0.0.1"]', 1)
+open(dst, "w").write(t)
+PY
+    say "4/5 privileged install — one polkit/sudo prompt: config, key, and a sudoers rule for member launches only"
+    cat > "$lab/fox-install.sh" <<INSTALL
+#!/bin/bash
+set -e
+install -m 600 $lab/agent.key /etc/vallum/agent.key
+install -m 600 $lab/vallum-agent.toml /etc/vallum/vallum-agent.toml
+chown root:root /etc/vallum/agent.key /etc/vallum/vallum-agent.toml
+printf '%s ALL=(root) NOPASSWD: $QUICK app *\n' "\${SUDO_USER:-$USER}" > /etc/sudoers.d/vallum-app-member
+visudo -cf /etc/sudoers.d/vallum-app-member
+systemctl daemon-reload
+echo INSTALL_DONE
+INSTALL
+    if command -v pkexec >/dev/null; then pkexec bash "$lab/fox-install.sh"; else sudo bash "$lab/fox-install.sh"; fi
+    say "5/5 apply the peer on the server and start the device"
+    ssh "$ssh_host" "sudo systemctl restart \$(basename "$server_conf" .toml | sed 's/^vallum/vallum@/').service 2>/dev/null || sudo systemctl restart vallum@\$(basename "$server_conf" .toml).service"
+    sudo -n /usr/bin/systemctl start "vallum@vallum-agent.service" "vallum-quick@vallum-agent.service"
+    sleep 8
+    cmd_status
+    say "setup complete — the agent's web identity is now this machine's tunnel, separate from yours"
+}
+
+# --- dispatch --------------------------------------------------------------
+
+cmd="${1:-}"; [ -n "$cmd" ] || { cmd_status; exit 0; }
+shift
+case "$cmd" in
+    fetch) cmd_fetch "$@" ;;
+    dl) cmd_dl "$@" ;;
+    dump) cmd_dump "$@" ;;
+    shot) cmd_shot "$@" ;;
+    egress) cmd_egress ;;
+    status) cmd_status ;;
+    budget) cmd_budget "$@" ;;
+    setup) cmd_setup "$@" ;;
+    help|-h|--help) sed -n '2,12p' "$0" ;;
+    *) die "unknown command '$cmd' — try fetch|dump|shot|dl|egress|status|budget|setup" ;;
+esac
