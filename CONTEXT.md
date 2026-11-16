@@ -100,6 +100,10 @@ Two calls that followed, and their status:
 | **Datagram** | The unit the carrier sends: one sealed packet in one UDP datagram. The canonical **outbound** noun — never "packet" | `vallum-tunnel` carriers, `docs/proof/transport.md` |
 | **Packet** | The unit the tunnel reads from, and delivers to, the TUN interface. The canonical **inbound** noun. "Received" is reserved for socket-level kernel counters (`RcvbufErrors`), never for deliveries | `vallum-tunnel::device`, `docs/proof/transport.md` |
 | **Control socket** | The daemon's unix socket that the console and the TUI read. **Silent** = it answered nothing; **retained** = the last snapshot that did answer, still on screen and marked as such; **unmanaged** = a daemon answers with no systemd unit behind it. Not "offline" — that is a network word | `crates/vallum-gui`, `crates/vallum/src/tui` |
+| **Desk** | The self-service layer: an HTTP service on loopback that turns a signup into an account and a join ticket. A *third party* on the machine interface (ADR-0044) — it calls the CLI and the daemon cannot see it. Not "the control plane", which ADR-0013 refused | `service/vallum-desk`, **ADR-0044** |
+| **Account** | The desk's record of one enrolled peer: its plan, byte cap, expiry and status. The daemon has no concept of it — the account is the service's, and the peer is the tunnel's | `service/vallum-desk` |
+| **Plan** | A row, not code: a byte cap, an expiry, a paid-until, a status. A paid tier is a plan, and the sweep enforces it against the peer's counters | `service/vallum-desk`, `POST /api/admin/plan` |
+| **Invite code** | A single-use code the desk accepts in place of the operator. In open mode it is optional and anonymous signups are bounded per IP and by capacity | `service/vallum-desk` |
 | **Privilege boundary** | The config file is a privilege boundary *because of hooks*: a hook string runs as root. Only hook execution escalates — routes and DNS from a user's own config are not a boundary. Hook-bearing configs must be root-owned, 0600 | `vallum-quick/hooks.rs` |
 
 ## Conventions worth not re-deriving
