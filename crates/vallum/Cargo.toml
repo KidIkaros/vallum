@@ -83,7 +83,7 @@ seccompiler = "0.5"
 # a v6 address needs netlink; these crates provide it without `unsafe` in
 # Vallum's own code.
 netlink-packet-core = "0.9"
-netlink-packet-route = "0.33"
+netlink-packet-route = "0.34"
 netlink-sys = "0.9"
 # `IP_MTU_DISCOVER = DO` for IPv4, which neither nix nor socket2 exposes. Safe
 # wrappers, so the `unsafe_code = "forbid"` invariant survives.
