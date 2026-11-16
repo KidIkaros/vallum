@@ -18,10 +18,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn manual(name: &str) -> Value {
-    let path = format!(
-        "{}/../../packaging/utcp/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../packaging/utcp/{name}", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).expect("read the manual");
     serde_json::from_str(&text).expect("the manual must be valid JSON")
 }
@@ -135,7 +132,9 @@ fn every_fox_subcommand_exists_in_the_script() {
             .lines()
             .any(|line| line.trim_start().starts_with(&format!("{subcommand})")));
         if !implemented {
-            problems.push(format!("{name}: `{subcommand}` is not a verb in agent/vallum-fox"));
+            problems.push(format!(
+                "{name}: `{subcommand}` is not a verb in agent/vallum-fox"
+            ));
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -157,5 +156,8 @@ fn the_fox_script_runs_and_prints_its_usage() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("vallum-fox"), "usage text missing: {stdout}");
+    assert!(
+        stdout.contains("vallum-fox"),
+        "usage text missing: {stdout}"
+    );
 }
