@@ -139,11 +139,14 @@ repository is private in the comments.
       clean with no credentials — `origin-crypto-sdk` resolves from the public
       repo pinned to tag `v0.7.4`. Do not unpublish the SDK without repinning
       to crates.io first.
-- [ ] **Follow one page** — [quickstart](quickstart.md) — from prerequisites to a
+- [x] **Follow one page** — [quickstart](quickstart.md) — from prerequisites to a
       verified tunnel, with the enrolment path chosen by what the client can
-      reach.
-- [ ] **Verify what they downloaded**: release assets include `SHA256SUMS`,
-      `SHA256SUMS.sig`, `allowed_signers` and the SBOM (`v1.6.3` has all four).
+      reach. Every command in it was exercised by the 2026-11-16
+      `verify-remote --clean-remote` run (all three transports); whether a
+      stranger finds it *readable* is what "outside deployments" will tell us.
+- [x] **Verify what they downloaded** (verified anonymously 2026-11-16): v1.7.0
+      assets include `SHA256SUMS`, `SHA256SUMS.sig`, `allowed_signers` and the
+      SBOM; the signature verifies and the x86_64 tarball's sum matches.
 - [x] Community files exist and are current: `CONTRIBUTING.md`,
       `CODE_OF_CONDUCT.md`, `CHANGELOG.md`, `CODEOWNERS`,
       `.github/PULL_REQUEST_TEMPLATE.md`, `.github/ISSUE_TEMPLATE/`,
