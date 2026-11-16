@@ -484,6 +484,51 @@ class Desk:
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
                      "plan": row["plan"]}
 
+    def account(self, token):
+        """The full account view the page and its JSON share: the plan row,
+        the shared-pool numbers, and every device with its own status."""
+        row = self.db.execute(
+            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        if not row:
+            return 404, {"error": "unknown account token"}
+        devices = [dict(r) for r in self.db.execute(
+            "SELECT peer, label, status, created FROM peers "
+            "WHERE account_id=? ORDER BY id", (row["id"],)).fetchall()]
+        if not devices and row["peer"]:
+            devices = [{"peer": row["peer"], "label": row["label"],
+                        "status": "active", "created": row["created"]}]
+        counters = self.daemon.counters()
+        live = [d["peer"] for d in devices if d["status"] == "active"]
+        return 200, {
+            "peer": row["peer"], "label": row["label"], "plan": row["plan"],
+            "status": row["status"], "expires": row["expires"],
+            "paid_until": row["paid_until"], "bytes_cap": row["bytes_cap"],
+            "bytes_used": sum(counters.get(peer, 0) for peer in live),
+            "devices": devices}
+
+    def remove_device(self, body):
+        """The account owner's per-device revoke: the bearer token must own
+        the peer. Same removal-first order as the admin path."""
+        token = body.get("token") or ""
+        account = self.db.execute(
+            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        if not account:
+            return 404, {"error": "unknown account token"}
+        peer = body.get("peer")
+        owned = self.db.execute(
+            "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
+            (account["id"], peer)).fetchone()
+        if not owned and peer != account["peer"]:
+            return 404, {"error": "unknown device"}
+        try:
+            self.daemon.remove(peer)
+        except RuntimeError as error:
+            if "no peer named" not in str(error):
+                return 502, {"error": str(error)}
+        with self.lock:
+            self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
+        return 200, {"removed": peer}
+
     @staticmethod
     def _now():
         return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -758,7 +803,14 @@ def ticket_page(payload):
     ticket = _esc(payload.get("ticket", ""))
     peer = _esc(payload.get("peer", ""))
     expires = _esc(payload.get("expires", ""))
+    token = _esc(payload.get("token", ""))
     gib = payload.get("bytes_cap", 0) // (1024 ** 3)
+    manage = (f"""<form method="post" action="/account">
+<input type="hidden" name="token" value="{token}">
+<button>Manage this account</button></form>
+<p><small>Your account number is carried with that button — save the page
+or the number itself if you want the account later.</small></p>"""
+              if token else "")
     return f"""<!doctype html><title>your join ticket</title>
 <style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
@@ -771,13 +823,72 @@ Peer <code>{peer}</code>, trial until {expires} or {gib} GiB.</p>
 <li><p>Join:</p><pre>sudo vallum join '&lt;ticket&gt;'</pre>
 <p>Paste the ticket between the quotes. To keep it out of shell history:
 <code>sudo vallum join -</code> reads it from stdin.</p></li>
-</ol>"""
+</ol>
+{manage}"""
 
 
 def error_page(message):
     return f"""<!doctype html><title>signup failed</title>
 <style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}</style>
 <h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>"""
+
+
+ACCOUNT_STYLE = ("<style>body{font:16px/1.6 system-ui;max-width:44em;margin:8vh auto;"
+                 "padding:0 1em}input,button{font:inherit;padding:.4em .6em}"
+                 "table{border-collapse:collapse}td,th{padding:.3em .8em .3em 0;"
+                 "text-align:left}pre{white-space:pre-wrap;word-break:break-all;"
+                 "padding:1em;border:1px solid #888}</style>")
+
+
+def account_shell_page():
+    """Where the account number goes. The token is a credential: it enters
+    by POST body or not at all — never the URL."""
+    return f"""<!doctype html><title>vallum account</title>{ACCOUNT_STYLE}
+<h1>Your account</h1>
+<p>Your account number came with your join ticket. It is the only
+credential — treat it like a password.</p>
+<form method="post" action="/account">
+<label>account number<br><input name="token" required></label><br><br>
+<button>Open my account</button>
+</form>"""
+
+
+def account_page(view, token, notice=""):
+    """The "my account" surface: plan, the shared byte pool, every device —
+    and the forms that act on them. The token rides hidden inputs, in POST
+    bodies, never the URL."""
+    devices = "".join(
+        f"<tr><td>{_esc(d['label'])}</td><td><code>{_esc(d['peer'])}</code></td>"
+        f"<td>{_esc(d['status'])}</td><td>"
+        + (f"""<form method="post" action="/account/revoke" style="display:inline">
+<input type="hidden" name="token" value="{_esc(token)}">
+<input type="hidden" name="peer" value="{_esc(d['peer'])}">
+<button>remove</button></form>""" if d["status"] == "active" else "")
+        + "</td></tr>" for d in view["devices"])
+    used_gib = view["bytes_used"] / (1024 ** 3)
+    cap_gib = view["bytes_cap"] / (1024 ** 3)
+    banner = f"<p><b>{_esc(notice)}</b></p>" if notice else ""
+    return f"""<!doctype html><title>vallum account</title>{ACCOUNT_STYLE}
+<h1>{_esc(view['label'])}</h1>{banner}
+<p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
+expires {_esc(view['expires'])} · {used_gib:.2f} / {cap_gib:.1f} GiB used
+(shared across devices).</p>
+<h2>Devices</h2>
+<table><tr><th>name</th><th>peer</th><th>status</th><th></th></tr>{devices}</table>
+<h3>Add a device</h3>
+<form method="post" action="/account/device">
+<input type="hidden" name="token" value="{_esc(token)}">
+<label>device name <input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label>
+<button>Get a join ticket</button>
+</form>
+<h3>Have a code?</h3>
+<form method="post" action="/account/voucher">
+<input type="hidden" name="token" value="{_esc(token)}">
+<label>code <input name="code" required></label>
+<button>Apply</button>
+</form>
+<p><small>Your account number: <code>{_esc(token)}</code> — keep it safe;
+it is the only credential.</small></p>"""
 
 
 def make_handler(desk):
@@ -829,10 +940,14 @@ def make_handler(desk):
                     return hop
             return direct
 
-        def _send_html(self, body, status=200):
+        def _send_html(self, body, status=200, private=False):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            if private:
+                # Bearer-authed pages must not be cached or crawled.
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Robots-Tag", "noindex")
             self.end_headers()
             self.wfile.write(body.encode())
 
@@ -840,13 +955,17 @@ def make_handler(desk):
             if self.path == "/":
                 self._send_html(index_page(desk.config.open_signup))
                 return
-            if self.path.startswith("/api/status?"):
-                from urllib.parse import parse_qs, urlparse
-                query = parse_qs(urlparse(self.path).query)
-                code, payload = desk.status((query.get("token") or [""])[0])
-            else:
-                code, payload = 404, {"error": "no such endpoint"}
-            self._send(code, payload)
+            if self.path == "/account":
+                self._send_html(account_shell_page())
+                return
+            if self.path.startswith("/api/status"):
+                # The token used to ride this URL — into proxy access logs.
+                # It travels POST bodies now; refuse the old shape.
+                self._send(410, {"error": "the token no longer travels the URL — "
+                                          "POST it in the body: POST /api/status "
+                                          '{"token": "..."}'})
+                return
+            self._send(404, {"error": "no such endpoint"})
 
         def do_POST(self):
             try:
@@ -864,8 +983,60 @@ def make_handler(desk):
                     return
                 elif self.path == "/api/devices":
                     code, payload = desk.add_device(body)
+                elif self.path == "/api/devices/revoke":
+                    code, payload = desk.remove_device(body)
                 elif self.path == "/api/voucher":
                     code, payload = desk.voucher(body)
+                elif self.path == "/api/status":
+                    code, payload = desk.status(body.get("token") or "")
+                elif self.path == "/api/account":
+                    code, payload = desk.account(body.get("token") or "")
+                elif self.path == "/account":
+                    # The account page, no-script: the token arrives in the
+                    # form body, never the URL.
+                    code, view = desk.account(body.get("token") or "")
+                    if code == 200:
+                        self._send_html(account_page(view, body["token"]), private=True)
+                    else:
+                        self._send_html(error_page(view.get("error", "")),
+                                        status=code, private=True)
+                    return
+                elif self.path == "/account/device":
+                    code, payload = desk.add_device(body)
+                    if code == 200:
+                        # The page needs the token for its manage-account
+                        # form; the caller sent it, so this is no new echo.
+                        payload["token"] = body.get("token")
+                        self._send_html(ticket_page(payload), private=True)
+                    else:
+                        self._send_html(error_page(payload.get("error", "")),
+                                        status=code, private=True)
+                    return
+                elif self.path == "/account/revoke":
+                    code, payload = desk.remove_device(body)
+                    notice = (f"removed {payload['removed']}" if code == 200
+                              else payload.get("error", "remove failed"))
+                    view_code, view = desk.account(body.get("token") or "")
+                    if view_code != 200:
+                        self._send_html(error_page(view.get("error", "")),
+                                        status=view_code, private=True)
+                    else:
+                        self._send_html(account_page(view, body.get("token", ""), notice),
+                                        status=code, private=True)
+                    return
+                elif self.path == "/account/voucher":
+                    code, payload = desk.voucher(body)
+                    notice = (f"code applied — plan {payload['plan']}, "
+                              f"until {payload['expires']}" if code == 200
+                              else payload.get("error", "code refused"))
+                    view_code, view = desk.account(body.get("token") or "")
+                    if view_code != 200:
+                        self._send_html(error_page(view.get("error", "")),
+                                        status=view_code, private=True)
+                    else:
+                        self._send_html(account_page(view, body.get("token", ""), notice),
+                                        status=code, private=True)
+                    return
                 elif self.path.startswith("/api/admin/"):
                     code, payload = desk.admin(self.path, body)
                 else:

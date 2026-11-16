@@ -12,6 +12,7 @@ against a fake daemon — the `Daemon` port is what makes that possible.
 import dataclasses
 import datetime
 import importlib.util
+import json
 import os
 import sqlite3
 import tempfile
@@ -341,6 +342,119 @@ class HttpTests(DeskTestCase):
         other = {"X-Forwarded-For": "198.51.100.10"}
         self.assertEqual(
             self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
+
+
+class AccountPageTests(HttpTests):
+    """The account surface: the bearer token travels POST bodies only —
+    never the request line — and every rendered page is private."""
+
+    def _token(self):
+        status, body = self.post("/api/signup", '{"name":"friend"}', "application/json")
+        self.assertEqual(status, 200)
+        return json.loads(body)["token"]
+
+    def post_headers(self, path, body, content_type):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}", data=body.encode(),
+            headers={"Content-Type": content_type}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, dict(response.headers), response.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), error.read().decode()
+
+    def get(self, path):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, dict(response.headers), response.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, dict(error.headers), error.read().decode()
+
+    def test_the_account_endpoint_returns_the_full_view(self):
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        status, body = self.post("/api/account", json.dumps({"token": token}),
+                                 "application/json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["plan"], "trial")
+        self.assertEqual(payload["bytes_cap"], 5 * 1024 ** 3)
+        self.assertEqual([d["peer"] for d in payload["devices"]],
+                         ["u0001-friend", "u0002-laptop"])
+        self.assertEqual(payload["devices"][0]["status"], "active")
+
+    def test_the_token_is_not_accepted_in_the_url(self):
+        token = self._token()
+        status, _, body = self.get(f"/api/status?token={token}")
+        self.assertEqual(status, 410)
+        self.assertNotIn("u0001-friend", body)
+
+    def test_status_by_post_still_works(self):
+        token = self._token()
+        status, body = self.post("/api/status", json.dumps({"token": token}),
+                                 "application/json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["peer"], "u0001-friend")
+
+    def test_the_account_page_is_private_and_noindexed(self):
+        token = self._token()
+        status, headers, page = self.post_headers(
+            "/account", f"token={token}", "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertEqual(headers.get("X-Robots-Tag"), "noindex")
+        self.assertIn("u0001-friend", page)
+
+    def test_the_account_shell_needs_no_script(self):
+        status, _, page = self.get("/account")
+        self.assertEqual(status, 200)
+        self.assertNotIn("<script", page)
+        self.assertIn('name="token"', page)
+
+    def test_the_account_page_escapes_the_label(self):
+        token = self._token()
+        self.desk.db.execute(
+            "UPDATE accounts SET label='<img onerror=x>' WHERE token=?", (token,))
+        _, _, page = self.post_headers(
+            "/account", f"token={token}", "application/x-www-form-urlencoded")
+        self.assertNotIn("<img", page)
+        self.assertIn("&lt;img", page)
+
+    def test_the_page_revokes_only_the_accounts_own_device(self):
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        status, _, _ = self.post_headers(
+            "/account/revoke", f"token={token}&peer=u0002-laptop",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.daemon.removed, ["u0002-laptop"])
+        # Another account's peer is not ours to remove.
+        other = self.desk.signup({"name": "other"})
+        other_peer = other[1]["peer"]
+        status, _, _ = self.post_headers(
+            "/account/revoke", f"token={token}&peer={other_peer}",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 404)
+        self.assertNotIn(other_peer, self.daemon.removed)
+
+    def test_the_add_device_form_mints_a_bound_ticket(self):
+        token = self._token()
+        status, _, page = self.post_headers(
+            "/account/device", f"token={token}&name=laptop",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("vallum1-join:", page)
+
+    def test_the_voucher_box_applies_the_code(self):
+        token = self._token()
+        _, minted = self.desk._mint_code({"bytes": 5000})
+        status, _, _ = self.post_headers(
+            "/account/voucher", f"token={token}&code={minted['code']}",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        row = self.desk.db.execute("SELECT bytes_cap FROM accounts").fetchone()
+        self.assertEqual(row["bytes_cap"], 5 * 1024 ** 3 + 5000)
 
 
 class MigrationTests(DeskTestCase):
