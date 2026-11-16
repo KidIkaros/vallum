@@ -1988,4 +1988,13 @@ ok "the full-tunnel daemons exited on SIGTERM"
 printf '\n== PASS\n'
 INNER
 
-unshare -Urn --map-root-user bash "$WORK/inner.sh" "$BIN" "$WORK" "$QUICK"
+# `-U -r` exists only to lend an unprivileged caller CAP_NET_ADMIN. As real
+# root it is dead weight — and on a host whose AppArmor forbids user
+# namespaces outright (Ubuntu 24.04+ runners among them) the uid_map write is
+# refused for root too. A plain `-n` network namespace needs no uid_map at
+# all, so root takes the direct shape.
+if [ "$(id -u)" = 0 ]; then
+    unshare -n bash "$WORK/inner.sh" "$BIN" "$WORK" "$QUICK"
+else
+    unshare -Urn --map-root-user bash "$WORK/inner.sh" "$BIN" "$WORK" "$QUICK"
+fi
