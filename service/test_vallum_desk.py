@@ -303,6 +303,12 @@ class HttpTests(DeskTestCase):
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode()
 
+    def test_the_page_header_renders_the_operator_name(self):
+        self.desk.config.operator_name = "wingman tunnel"
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
+            page = r.read().decode()
+        self.assertIn("<h1>wingman tunnel</h1>", page)
+
     def test_the_index_needs_no_script(self):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
             page = r.read().decode()

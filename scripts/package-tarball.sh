@@ -83,6 +83,7 @@ done
 # packaging/. It ships flat like every other executable, because install.sh
 # reads a release tarball from one directory.
 copy_one "service/vallum-desk"
+copy_one "service/vallum-desk-admin"
 
 # The completions are generated from the release binary and are gitignored, so
 # they are build artifacts: an empty one ships a shell that completes nothing.

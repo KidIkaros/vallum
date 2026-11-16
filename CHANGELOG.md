@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **The desk is a service layer: accounts, devices, plans, vouchers.** Per
+  ADR-0045 the schema gains a `peers` relation under a versioned
+  forward-only migration (`PRAGMA user_version`); one account number now
+  carries up to `--device-cap` (default 5) devices on a shared byte pool.
+  Invite codes carry plan payloads (`days`/`bytes`/`plan`); `POST
+  /api/voucher` applies an unused code's payload to a live account —
+  additive, so the cap grows and consumed bytes stay consumed. Revocation
+  splits: `/api/admin/revoke` removes one device, `revoke-account` removes
+  them all then marks the account.
+- **The account page exists — credentials in POST bodies only.** `GET
+  /account` asks for the account number; `POST /account` renders plan,
+  expiry, the shared pool, and per-device status with add-device, remove,
+  and voucher forms. `POST /api/account` is the same view as JSON;
+  `/api/devices/revoke` is the owner-scoped remove. Credential-bearing
+  pages send `Cache-Control: no-store` + `X-Robots-Tag: noindex`.
+- **`GET /api/status?token=` is retired → 410.** The bearer token rode the
+  request line into proxy access logs; it travels POST bodies now
+  (`POST /api/status`).
+- **`vallum-desk-admin` — the operator CLI.** `mint-code [--days --gib
+  --plan]`, `accounts`, `devices`, `codes`, `set-plan`, `revoke
+  [--account]`, `adopt`, `sweep`; `--json` for scripts. The admin token is
+  read from its file, never argv. Ships in every channel beside the desk;
+  `/api/admin/devices` and `/api/admin/codes` are the listings it wraps.
+- **`--operator-name` brands the pages** and `service/README.md` is now
+  the operator's deploy-and-operate guide.
 - **Invites can carry the operator's PSK and shaping.** `vallum peer invite
   --psk [--shaping <preset>]` now records the options in the invite, and the
   enrolment responder applies them exactly as `peer add --psk/--shaping` does:

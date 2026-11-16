@@ -460,6 +460,20 @@ install_docs() {
     if [ -n "$desk_source" ]; then
         run install -D -m 0755 "$desk_source" "$(dest /usr/local/lib/vallum/vallum-desk)"
     fi
+    desk_admin_source=""
+    for candidate in "$SOURCE_DIR/vallum-desk-admin" \
+        "$(dirname "$0")/../service/vallum-desk-admin" \
+        "service/vallum-desk-admin" "packaging/vallum-desk-admin"; do
+        if [ -f "$candidate" ]; then
+            desk_admin_source=$candidate
+            break
+        fi
+    done
+    if [ -n "$desk_admin_source" ]; then
+        run install -D -m 0755 "$desk_admin_source" \
+            "$(dest /usr/local/lib/vallum/vallum-desk-admin)"
+        run ln -sf /usr/local/lib/vallum/vallum-desk-admin "$(dest /usr/local/sbin/vallum-desk-admin)"
+    fi
     # The console's privileged path and the full-tunnel deploy scripts ship
     # with the product: without them the plan-before-apply panel is a button
     # that prints a sudo error (see the premortem, 2026-11-11).
@@ -578,7 +592,8 @@ uninstall() {
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
-    run rm -f /usr/local/lib/vallum/vallum-desk
+    run rm -f /usr/local/lib/vallum/vallum-desk /usr/local/lib/vallum/vallum-desk-admin \
+        /usr/local/sbin/vallum-desk-admin
     run systemctl disable vallum-cleanup 2>/dev/null || true
     run rm -f "$UNIT_DIR/vallum-cleanup.service"
     run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"

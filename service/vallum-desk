@@ -224,6 +224,7 @@ class DeskConfig:
     max_active_accounts: int = 200                   # the /24 holds 253
     signup_ip_day_limit: int = 3                     # signups per IP per day
     device_cap: int = 5                              # devices per account
+    operator_name: str = "vallum desk"               # the page header's brand
 
 
 # ---------------------------------------------------------------- the desk
@@ -776,18 +777,18 @@ Linux + systemd; the release signature verifies itself before anything is
 installed. Source and docs: <a href="https://github.com/KidIkaros/vallum">github.com/KidIkaros/vallum</a>.</p>"""
 
 
-def index_page(open_signup):
+def index_page(open_signup, operator="vallum desk"):
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
     intro = ("A device name gets you a join ticket; your key never leaves "
              "your machine." if open_signup else
              "An invite code gets you a join ticket; your key never leaves "
              "your machine.")
-    return f"""<!doctype html><title>vallum desk</title>
+    return f"""<!doctype html><title>{_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:36em;margin:10vh auto;padding:0 1em}}
 input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
-<h1>vallum desk</h1>
+<h1>{_esc(operator)}</h1>
 <p>Self-service enrolment for this Vallum server. {intro}</p>
 {INSTALL_BLURB}
 <form method="post" action="/signup">
@@ -797,7 +798,7 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 </form>"""
 
 
-def ticket_page(payload):
+def ticket_page(payload, operator="vallum desk"):
     """The one place the ticket is shown. No script, no storage: what the
     visitor copies is what they keep."""
     ticket = _esc(payload.get("ticket", ""))
@@ -811,10 +812,11 @@ def ticket_page(payload):
 <p><small>Your account number is carried with that button — save the page
 or the number itself if you want the account later.</small></p>"""
               if token else "")
-    return f"""<!doctype html><title>your join ticket</title>
+    return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
 <h1>Your join ticket</h1>
+<p><small>{_esc(operator)}</small></p>
 <p>Shown once. Copy it now — the desk does not keep it.
 Peer <code>{peer}</code>, trial until {expires} or {gib} GiB.</p>
 <pre>{ticket}</pre>
@@ -840,10 +842,11 @@ ACCOUNT_STYLE = ("<style>body{font:16px/1.6 system-ui;max-width:44em;margin:8vh 
                  "padding:1em;border:1px solid #888}</style>")
 
 
-def account_shell_page():
+def account_shell_page(operator="vallum desk"):
     """Where the account number goes. The token is a credential: it enters
     by POST body or not at all — never the URL."""
-    return f"""<!doctype html><title>vallum account</title>{ACCOUNT_STYLE}
+    return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
+<p><small>{_esc(operator)}</small></p>
 <h1>Your account</h1>
 <p>Your account number came with your join ticket. It is the only
 credential — treat it like a password.</p>
@@ -853,7 +856,7 @@ credential — treat it like a password.</p>
 </form>"""
 
 
-def account_page(view, token, notice=""):
+def account_page(view, token, notice="", operator="vallum desk"):
     """The "my account" surface: plan, the shared byte pool, every device —
     and the forms that act on them. The token rides hidden inputs, in POST
     bodies, never the URL."""
@@ -868,7 +871,8 @@ def account_page(view, token, notice=""):
     used_gib = view["bytes_used"] / (1024 ** 3)
     cap_gib = view["bytes_cap"] / (1024 ** 3)
     banner = f"<p><b>{_esc(notice)}</b></p>" if notice else ""
-    return f"""<!doctype html><title>vallum account</title>{ACCOUNT_STYLE}
+    return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
+<p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
 <p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
 expires {_esc(view['expires'])} · {used_gib:.2f} / {cap_gib:.1f} GiB used
@@ -953,10 +957,10 @@ def make_handler(desk):
 
         def do_GET(self):
             if self.path == "/":
-                self._send_html(index_page(desk.config.open_signup))
+                self._send_html(index_page(desk.config.open_signup, desk.config.operator_name))
                 return
             if self.path == "/account":
-                self._send_html(account_shell_page())
+                self._send_html(account_shell_page(desk.config.operator_name))
                 return
             if self.path.startswith("/api/status"):
                 # The token used to ride this URL — into proxy access logs.
@@ -977,7 +981,7 @@ def make_handler(desk):
                     # page. Agents keep /api/signup and its JSON.
                     code, payload = desk.signup(body, self._client_ip())
                     if code == 200:
-                        self._send_html(ticket_page(payload))
+                        self._send_html(ticket_page(payload, desk.config.operator_name))
                     else:
                         self._send_html(error_page(payload.get("error", "")), status=code)
                     return
@@ -996,7 +1000,7 @@ def make_handler(desk):
                     # form body, never the URL.
                     code, view = desk.account(body.get("token") or "")
                     if code == 200:
-                        self._send_html(account_page(view, body["token"]), private=True)
+                        self._send_html(account_page(view, body["token"], operator=desk.config.operator_name), private=True)
                     else:
                         self._send_html(error_page(view.get("error", "")),
                                         status=code, private=True)
@@ -1007,7 +1011,7 @@ def make_handler(desk):
                         # The page needs the token for its manage-account
                         # form; the caller sent it, so this is no new echo.
                         payload["token"] = body.get("token")
-                        self._send_html(ticket_page(payload), private=True)
+                        self._send_html(ticket_page(payload, desk.config.operator_name), private=True)
                     else:
                         self._send_html(error_page(payload.get("error", "")),
                                         status=code, private=True)
@@ -1021,7 +1025,7 @@ def make_handler(desk):
                         self._send_html(error_page(view.get("error", "")),
                                         status=view_code, private=True)
                     else:
-                        self._send_html(account_page(view, body.get("token", ""), notice),
+                        self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/voucher":
@@ -1034,7 +1038,7 @@ def make_handler(desk):
                         self._send_html(error_page(view.get("error", "")),
                                         status=view_code, private=True)
                     else:
-                        self._send_html(account_page(view, body.get("token", ""), notice),
+                        self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
                                         status=code, private=True)
                     return
                 elif self.path.startswith("/api/admin/"):
@@ -1079,6 +1083,8 @@ def parse_args(argv=None):
                         help="anonymous signups per IP per day (0 = unlimited)")
     parser.add_argument("--device-cap", type=int, default=5,
                         help="devices per account (default 5)")
+    parser.add_argument("--operator-name", default="vallum desk",
+                        help="the service name shown in page headers")
     parser.add_argument("--cli", default="vallum")
     return parser.parse_args(argv)
 
@@ -1115,6 +1121,7 @@ def main(argv=None):
         max_active_accounts=args.max_active_accounts,
         signup_ip_day_limit=args.signup_ip_day_limit,
         device_cap=args.device_cap,
+        operator_name=args.operator_name,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
     threading.Thread(target=desk.sweep, daemon=True).start()

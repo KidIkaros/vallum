@@ -135,6 +135,7 @@ assets = [
     # access. Ships, but nothing starts it until the operator enables it.
     ["../../packaging/vallum-desk@.service", "lib/systemd/system/vallum-desk@.service", "644"],
     ["../../service/vallum-desk", "usr/local/lib/vallum/vallum-desk", "755"],
+    ["../../service/vallum-desk-admin", "usr/local/lib/vallum/vallum-desk-admin", "755"],
     ["../../packaging/vallum-enroll@.service", "lib/systemd/system/vallum-enroll@.service", "644"],
     ["../../packaging/vallum-metrics.service", "lib/systemd/system/vallum-metrics.service", "644"],
     ["../../packaging/vallum-metrics.timer", "lib/systemd/system/vallum-metrics.timer", "644"],
@@ -169,6 +170,7 @@ assets = [
     { source = "../../packaging/vallum-quick-watch@.service", dest = "/lib/systemd/system/vallum-quick-watch@.service", mode = "644" },
     { source = "../../packaging/vallum-desk@.service", dest = "/lib/systemd/system/vallum-desk@.service", mode = "644" },
     { source = "../../service/vallum-desk", dest = "/usr/local/lib/vallum/vallum-desk", mode = "755" },
+    { source = "../../service/vallum-desk-admin", dest = "/usr/local/lib/vallum/vallum-desk-admin", mode = "755" },
     { source = "../../packaging/vallum-enroll@.service", dest = "/lib/systemd/system/vallum-enroll@.service", mode = "644" },
     { source = "../../packaging/vallum-metrics.service", dest = "/lib/systemd/system/vallum-metrics.service", mode = "644" },
     { source = "../../packaging/vallum-metrics.timer", dest = "/lib/systemd/system/vallum-metrics.timer", mode = "644" },
