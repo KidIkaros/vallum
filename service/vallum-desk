@@ -104,10 +104,6 @@ class Daemon:
 class DaemonCli(Daemon):
     """The daemon, reached only through its own CLI."""
 
-    # The ticket is one long token: exclude whitespace, or the CLI's trailing
-    # newlines come along and the client hands the daemon a broken ticket.
-    TICKET_RE = re.compile(r"vallum1-join:[^\s<]{40,}")
-
     def __init__(self, config, cli="vallum"):
         self.config, self.cli = config, cli
 
@@ -124,11 +120,21 @@ class DaemonCli(Daemon):
         return out.stdout
 
     def mint_ticket(self, peer):
-        out = self._run("peer", "invite", peer)
-        match = self.TICKET_RE.search(out)
-        if not match:
+        """The ticket as a field, not a line to scrape.
+
+        `peer invite --json` is the machine interface (ADR-0013/ADR-0044); a
+        regex over the human report once matched the usage string and handed a
+        client a 27-byte "ticket". The JSON shape is the contract.
+        """
+        out = self._run("peer", "invite", peer, "--json")
+        try:
+            invite = json.loads(out)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"invite's JSON did not parse: {error}") from error
+        ticket = invite.get("ticket")
+        if not ticket:
             raise RuntimeError("invite produced no join ticket — refusing to hand out a placeholder")
-        return match.group(0)
+        return ticket
 
     def counters(self):
         """peer name → bytes used, from the daemon's JSON snapshot.
@@ -329,17 +335,23 @@ class Desk:
         return None
 
     def _revoke(self, peer, reason, used):
-        """Mark the account and remove its peer. The removal is what makes the
-        revocation real; the row is what makes it visible."""
-        with self.lock:
-            self.db.execute("UPDATE accounts SET status=? WHERE peer=?", (reason, peer))
+        """Remove the peer first, then mark the account.
+
+        The removal is what makes the revocation real, so a failed removal must
+        leave the row active: the sweep only visits active accounts, and a row
+        marked revoked while its peer still answers is a live peer that is no
+        longer enforced and never retried.
+        """
         action = {"peer": peer, "reason": reason, "bytes": used}
         try:
             self.daemon.remove(peer)
-            print(f"desk: removed {peer} ({reason}, {used} bytes)")
         except RuntimeError as error:
             action["error"] = str(error)
-            print(f"desk: could not remove {peer}: {error}")
+            print(f"desk: could not remove {peer}; will retry: {error}")
+            return action
+        with self.lock:
+            self.db.execute("UPDATE accounts SET status=? WHERE peer=?", (reason, peer))
+        print(f"desk: removed {peer} ({reason}, {used} bytes)")
         return action
 
     def sweep(self):
@@ -436,12 +448,12 @@ class Desk:
         peer = body.get("peer")
         if not self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
             return 404, {"error": "unknown peer"}
-        with self.lock:
-            self.db.execute("UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
         try:
             self.daemon.remove(peer)
         except RuntimeError as error:
             return 502, {"error": str(error)}
+        with self.lock:
+            self.db.execute("UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
         return 200, {"revoked": peer}
 
     def _list_peers(self, body):
@@ -530,6 +542,24 @@ def make_handler(desk):
             except json.JSONDecodeError:
                 return {}
 
+        def _client_ip(self):
+            """The visitor, not the proxy.
+
+            The desk binds loopback and is fronted by Caddy in the documented
+            deployment, so every direct peer is the proxy. The rightmost
+            X-Forwarded-For hop is the address that proxy saw; a client cannot
+            forge it, because the proxy appends its own observation. A direct
+            loopback caller could spoof the header, but that caller is already
+            inside the operator's trust boundary.
+            """
+            direct = self.client_address[0]
+            forwarded = self.headers.get("X-Forwarded-For")
+            if forwarded and direct in ("127.0.0.1", "::1"):
+                hop = forwarded.split(",")[-1].strip()
+                if hop:
+                    return hop
+            return direct
+
         def _send_html(self, body, status=200):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -553,11 +583,11 @@ def make_handler(desk):
             try:
                 body = self._body()
                 if self.path == "/api/signup":
-                    code, payload = desk.signup(body, self.client_address[0])
+                    code, payload = desk.signup(body, self._client_ip())
                 elif self.path == "/signup":
                     # The no-script path: a plain form post, answered with a
                     # page. Agents keep /api/signup and its JSON.
-                    code, payload = desk.signup(body, self.client_address[0])
+                    code, payload = desk.signup(body, self._client_ip())
                     if code == 200:
                         self._send_html(ticket_page(payload))
                     else:

@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "vallum_desk_signup",
-      "description": "Self-service enrolment against a Vallum desk: an invite code becomes a join ticket and a peer on the server. The ticket is a secret \u2014 hand it to the device, never log it.",
+      "description": "Self-service enrolment against a Vallum desk: an invite code becomes a join ticket and a peer on the server. Pass an empty code when the desk runs in open-signup mode. The ticket is a secret \u2014 hand it to the device, never log it.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -15,7 +15,7 @@
           },
           "code": {
             "type": "string",
-            "description": "A single-use invite code from the operator."
+            "description": "A single-use invite code from the operator; empty when the desk allows open signup."
           },
           "name": {
             "type": "string",
@@ -141,7 +141,7 @@
           },
           "bytes_cap": {
             "type": "integer",
-            "description": "Byte cap for the period (0 keeps the current cap)."
+            "description": "Byte cap for the period."
           },
           "expires": {
             "type": "string",
@@ -262,7 +262,7 @@
     },
     {
       "name": "vallum_desk_set_status",
-      "description": "Set an account's status on the desk: reinstate one (active), or mark it expired, overquota or revoked. Reinstating is how an operator puts a peer back after a quota fired on a mis-set cap.",
+      "description": "Set an account's status on the desk: reinstate the row (active), or mark it expired, overquota or revoked. This changes the desk's record only; if the sweep already removed the peer, enrol a new ticket to reconnect.",
       "inputs": {
         "type": "object",
         "properties": {

@@ -31,9 +31,10 @@ DeskConfig = desk_module.DeskConfig
 class FakeDaemon(desk_module.Daemon):
     """A daemon that is a dictionary with a method or two."""
 
-    def __init__(self, counters=None, refuse=False):
+    def __init__(self, counters=None, refuse=False, refuse_remove=False):
         self._counters = counters or {}
         self._refuse = refuse
+        self._refuse_remove = refuse_remove
         self.removed = []
         self.minted = []
 
@@ -47,6 +48,8 @@ class FakeDaemon(desk_module.Daemon):
         return dict(self._counters)
 
     def remove(self, peer):
+        if self._refuse_remove:
+            raise RuntimeError("the daemon said no")
         self.removed.append(peer)
 
 
@@ -113,6 +116,25 @@ class SignupTests(DeskTestCase):
         self.assertEqual(self.signup(code="friend-code-2", name="beta")[1]["peer"], "u0002-beta")
 
 
+class DaemonCliTests(unittest.TestCase):
+    """The CLI port: what the desk reads from the daemon's own output."""
+
+    def test_the_ticket_is_read_from_the_json_field(self):
+        # `peer invite --json` is the machine interface. A regex over the
+        # human report is the class of bug that once matched a usage string.
+        with tempfile.TemporaryDirectory() as tempdir:
+            cli = os.path.join(tempdir, "vallum")
+            with open(cli, "w") as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' "
+                        "'{\"ticket\":\"vallum1-join:203.0.113.9:51922/laptop/id/token/fp\"}'\n")
+            os.chmod(cli, 0o755)
+            daemon = desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli)
+            self.assertEqual(
+                daemon.mint_ticket("laptop"),
+                "vallum1-join:203.0.113.9:51922/laptop/id/token/fp",
+            )
+
+
 class StatusTests(DeskTestCase):
 
     def test_status_reports_the_bytes_used_for_the_account_peer(self):
@@ -169,6 +191,21 @@ class EnforcementTests(DeskTestCase):
         today = desk_module.datetime.date.today().isoformat()
         self.desk.db.execute("UPDATE accounts SET expires=? WHERE peer=?", (today, peer))
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
+
+    def test_a_failed_removal_is_retried_instead_of_marked_revoked(self):
+        # The row is what the next sweep reads, so marking it before the peer
+        # is actually gone hides a live peer from every future pass.
+        _, signup_payload = self.signup()
+        peer = signup_payload["peer"]
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+        self.daemon._refuse_remove = True
+        action = self.desk.sweep_once()[0]
+        self.assertIn("error", action)
+        self.assertEqual(self.account_row(peer)["status"], "active")
+        self.daemon._refuse_remove = False
+        self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
+        self.assertEqual(self.account_row(peer)["status"], "expired")
+        self.assertEqual(self.daemon.removed, [peer])
 
 
 class OnDemandTests(DeskTestCase):
@@ -235,10 +272,12 @@ class HttpTests(DeskTestCase):
         self.server.server_close()
         super().tearDown()
 
-    def post(self, path, body, content_type):
+    def post(self, path, body, content_type, headers=None):
+        all_headers = {"Content-Type": content_type}
+        all_headers.update(headers or {})
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.port}{path}", data=body.encode(),
-            headers={"Content-Type": content_type}, method="POST")
+            headers=all_headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status, response.read().decode()
@@ -270,6 +309,20 @@ class HttpTests(DeskTestCase):
         status, body = self.post("/api/signup", '{"name":"json-user"}', "application/json")
         self.assertEqual(status, 200)
         self.assertIn("vallum1-join:", body)
+
+    def test_the_per_ip_limit_sees_the_visitor_behind_the_proxy(self):
+        # The desk is loopback-only and fronted by Caddy. Reading
+        # client_address would make every visitor 127.0.0.1 and turn the
+        # per-IP limit into a global three-signups-a-day limit.
+        self.config.signup_ip_day_limit = 1
+        same = {"X-Forwarded-For": "198.51.100.9"}
+        self.assertEqual(
+            self.post("/api/signup", '{"name":"one"}', "application/json", same)[0], 200)
+        self.assertEqual(
+            self.post("/api/signup", '{"name":"two"}', "application/json", same)[0], 429)
+        other = {"X-Forwarded-For": "198.51.100.10"}
+        self.assertEqual(
+            self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
 
 
 class AdminTests(DeskTestCase):

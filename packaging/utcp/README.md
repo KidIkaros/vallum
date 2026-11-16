@@ -7,7 +7,7 @@ Vallum:
 |---|---|---|
 | `vallum.utcp.json` | the `vallum` binary itself | 28 |
 | `vallum-fox.utcp.json` | the agent lane (`agent/vallum-fox`) | 8 |
-| `vallum-desk.utcp.json` | the enrolment desk's HTTP endpoints | 5 |
+| `vallum-desk.utcp.json` | the enrolment desk's HTTP endpoints | 7 |
 
 Each is a published surface with the same discipline: every tool carries a
 `tool_call_template`, every placeholder is a **required** input (an optional
@@ -71,12 +71,14 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_desk_mint_code` | `POST <desk>/api/admin/code` | Mint a single-use invite code. |
 | `vallum_desk_set_plan` | `POST <desk>/api/admin/plan` | Set a cap or expiry — a paid tier is a row. |
 | `vallum_desk_sweep` | `POST <desk>/api/admin/sweep` | Enforce expiry and quotas now. |
+| `vallum_desk_adopt` | `POST <desk>/api/admin/adopt` | Bring an existing peer under the desk's accounting. |
+| `vallum_desk_set_status` | `POST <desk>/api/admin/plan` | Reinstate the account row, or mark it expired, overquota or revoked. |
 
 The fox tools wrap the `vallum-fox` CLI (`agent/`), which drives a per-app
 tunnel: the agent's traffic egresses with the tunnel's identity, a dead tunnel
 refuses the request instead of falling back to the host network, and every
 request passes a per-domain budget. The desk tools talk to `vallum-desk`
-(`packaging/vallum-desk`), the self-service enrolment layer an operator runs to offer
+(`service/vallum-desk`), the self-service enrolment layer an operator runs to offer
 access on their own server.
 
 ### Activation

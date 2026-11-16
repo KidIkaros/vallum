@@ -2177,10 +2177,6 @@ fn widen_to_tunnel(addresses: &[String], networks: &[String]) -> Vec<String> {
         .collect()
 }
 
-// Eight distinct inputs, each used exactly where its name says. Grouping them
-// into a struct would rename arguments at six call sites without shortening the
-// list, and this is a pure string builder — there is no state to encapsulate.
-#[allow(clippy::too_many_arguments)]
 /// The DNS servers a peer enrolled by ticket should be handed: the same
 /// `[quick] dns` the file path already writes, which is what `--dns` set and
 /// what ADR-0013 means by "pushes a resolver; it does not run one". The ticket
@@ -2194,9 +2190,8 @@ fn peer_dns(config_path: &Path) -> Vec<String> {
 // Eight parameters, all of them facts about one config: the peer's name, the
 // addresses and networks it was given, the server's line, the endpoint, the
 // resolvers, the PSK and the shaping preset. They travel together and nothing
-// here is optional, so a struct would be ceremony around a formatter that is
-// called from two places — but the clump is real, and the day a ninth appears
-// it becomes one.
+// here is optional, so a struct would be ceremony around a pure string builder;
+// the clump stays a parameter list until a ninth input appears.
 #[allow(clippy::too_many_arguments)]
 fn client_config(
     name: &str,

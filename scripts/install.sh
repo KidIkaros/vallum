@@ -445,10 +445,20 @@ install_docs() {
     # The enrolment desk: the self-service layer (service/README.md). It is
     # optional at runtime — nothing starts it until the operator enables it —
     # but it ships with the product so an operator never has to assemble it.
-    if [ -f "service/vallum-desk" ]; then
-        run install -D -m 0755 "service/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
-    elif [ -f "$SOURCE_DIR/vallum-desk" ]; then
-        run install -D -m 0755 "$SOURCE_DIR/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
+    # Three layouts are real: a release tarball flattens it beside the
+    # binaries, a checkout keeps it in service/, and older trees kept it in
+    # packaging/. Try them in that order so `--from-release` and `--local`
+    # install the same program.
+    desk_source=""
+    for candidate in "$SOURCE_DIR/vallum-desk" "$(dirname "$0")/../service/vallum-desk" \
+        "service/vallum-desk" "packaging/vallum-desk"; do
+        if [ -f "$candidate" ]; then
+            desk_source=$candidate
+            break
+        fi
+    done
+    if [ -n "$desk_source" ]; then
+        run install -D -m 0755 "$desk_source" "$(dest /usr/local/lib/vallum/vallum-desk)"
     fi
     # The console's privileged path and the full-tunnel deploy scripts ship
     # with the product: without them the plan-before-apply panel is a button

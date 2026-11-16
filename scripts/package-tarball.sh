@@ -36,6 +36,7 @@ UNITS=(
     vallum-quick-watch@.service
     vallum-enroll@.service
     vallum-cleanup.service
+    vallum-desk@.service
     vallum-metrics.service
     vallum-metrics.timer
     vallum-deadman@.service
@@ -78,6 +79,10 @@ copy_one README.md
 for f in "${UNITS[@]}" "${DOCS[@]}" "${EXECUTABLES[@]}"; do
     copy_one "packaging/$f"
 done
+# The enrolment desk lives beside its tests and docs in service/, not in
+# packaging/. It ships flat like every other executable, because install.sh
+# reads a release tarball from one directory.
+copy_one "service/vallum-desk"
 
 # The completions are generated from the release binary and are gitignored, so
 # they are build artifacts: an empty one ships a shell that completes nothing.

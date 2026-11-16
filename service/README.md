@@ -2,7 +2,8 @@
 
 **Layout:** `service/vallum-desk` (the service), `service/test_vallum_desk.py`
 (its tests), `packaging/vallum-desk@.service` (the unit). The executable
-ships in the deb/rpm/install.sh channels like every other shipped program —
+ships in the deb, the rpm, the release tarball and `install.sh` like every other
+shipped program —
 `scripts/check-package-manifest.sh` knows about both `packaging/` and
 `service/` so the three channels cannot drift.
 
@@ -67,6 +68,11 @@ not a formality:
 | signups per IP per day | 3 | one visitor cannot fill the table |
 | trial days | 14 | shared with closed mode |
 
+The per-IP bound reads the last `X-Forwarded-For` hop when the desk is reached
+over loopback, which is how the documented Caddy front passes the visitor's
+address. Without that, every anonymous signup would arrive as `127.0.0.1` and
+the "per IP" ceiling would be a global three-a-day ceiling.
+
 The page needs no JavaScript (a plain form POST to `/signup` returns an HTML
 ticket page), so it survives a strict CSP. Agents keep `/api/signup` and its
 JSON. Tickets are shown once and the vhost sends `Cache-Control: no-store`.
@@ -112,7 +118,8 @@ until then the operator (or a friend) reaches it over SSH:
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `GET /` | none | signup page |
-| `POST /api/signup {code,name}` | invite code | mint + return a join ticket |
+| `POST /signup {code,name}` | invite code (or none in open mode) | the no-script form: same signup, answered as a ticket page |
+| `POST /api/signup {code,name}` | invite code (or none in open mode) | mint + return a join ticket |
 | `GET /api/status?token=T` | account token | plan, expiry, bytes used |
 | `POST /api/admin/code {admin_token}` | admin | mint an invite code |
 | `POST /api/admin/adopt {admin_token,peer}` | admin | adopt an existing peer as an account (migrating a live deployment) |
