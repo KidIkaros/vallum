@@ -6295,7 +6295,7 @@ dependencies = [
 
 [[package]]
 name = "vallum"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bytes",
  "clap 4.6.7",
@@ -6333,7 +6333,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-config"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
  "toml 1.1.8+spec-1.1.0",
@@ -6342,7 +6342,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-core"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "ipnet",
  "vallum-crypto",
@@ -6350,11 +6350,11 @@ dependencies = [
 
 [[package]]
 name = "vallum-crypto"
-version = "1.7.0"
+version = "1.8.0"
 
 [[package]]
 name = "vallum-crypto-contract"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "vallum-crypto",
  "vallum-crypto-sdk",
@@ -6362,7 +6362,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-crypto-sdk"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "dudect-bencher",
  "origin-crypto-sdk",
@@ -6371,7 +6371,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-gui"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6384,7 +6384,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-protocol-tests"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "criterion",
  "vallum-core",
@@ -6395,7 +6395,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-quick"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "clap 4.6.7",
  "ipnet",
@@ -6406,7 +6406,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-tunnel"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "ipnet",
  "vallum-core",

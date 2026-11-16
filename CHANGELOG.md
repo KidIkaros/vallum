@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-11-16
 
 - **The desk is a service layer: accounts, devices, plans, vouchers.** Per
   ADR-0045 the schema gains a `peers` relation under a versioned
@@ -27,6 +27,25 @@
   `/api/admin/devices` and `/api/admin/codes` are the listings it wraps.
 - **`--operator-name` brands the pages** and `service/README.md` is now
   the operator's deploy-and-operate guide.
+- **The webpage hands the client a join: `vallum://` deep links.** Every
+  ticket-bearing response (`signup`, `devices`) carries a `connect` URI —
+  `vallum://join?ticket=<t>&account=<token>` — and the ticket page fires it
+  from a Connect button via `window.location`, never an `href` where
+  prefetch and Referer would carry the credential. The packaged
+  `vallum-uri` handler validates the URI byte-strictly (the
+  `vallum1-join:` grammar, 32-hex account) and enrols with the ticket on
+  stdin and the account in `VALLUM_ACCOUNT` — no secrets in argv, no
+  shell-eval — and `vallum join` seals the account into the config's new
+  `[account]` table (which `deny_unknown_fields` makes a schema change:
+  older binaries refuse configs that carry it).
+- **`vallum-gui` takes over the scheme when installed.** Its desktop entry
+  owns `x-scheme-handler/vallum`; a launch URI is parsed at startup and
+  surfaces as a confirm dialog (server endpoint, account tail) before the
+  console enrols — the token crosses the pkexec boundary as a second stdin
+  line through `vallum-ops join`, since env dies at privilege elevation.
+  The desk's lock is now reentrant with every `self.db` access under it:
+  a raced read on the shared connection could surface `InterfaceError`
+  under `ThreadingHTTPServer`.
 - **Invites can carry the operator's PSK and shaping.** `vallum peer invite
   --psk [--shaping <preset>]` now records the options in the invite, and the
   enrolment responder applies them exactly as `peer add --psk/--shaping` does:
