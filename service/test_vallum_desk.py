@@ -607,6 +607,89 @@ class DevicesTests(DeskTestCase):
                 "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
 
 
+class VoucherTests(DeskTestCase):
+    """POST /api/voucher — a code's payload applied to an existing account,
+    additive: days extend expiry, bytes grow the shared cap, plan relabels."""
+
+    def _token(self):
+        _, payload = self.signup()
+        return payload["token"]
+
+    def test_a_voucher_extends_the_plan_additively(self):
+        token = self._token()
+        _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
+        code, _ = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 200)
+        row = self.desk.db.execute("SELECT * FROM accounts").fetchone()
+        self.assertEqual(row["bytes_cap"], 1000 + 5000)
+        self.assertEqual(row["plan"], "plus")
+        expected = (datetime.date.fromisoformat(row["expires"])
+                    - datetime.timedelta(days=30))
+        self.assertEqual(expected, datetime.date.fromisoformat(self.desk._trial_expiry()))
+        code_row = self.desk.db.execute(
+            "SELECT used_by FROM codes WHERE code=?", (minted["code"],)).fetchone()
+        self.assertEqual(code_row["used_by"], "u0001-friend")
+
+    def test_a_voucher_only_applies_the_parts_a_code_carries(self):
+        token = self._token()
+        _, minted = self.desk._mint_code({"bytes": 9000})
+        code, _ = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 200)
+        row = self.desk.db.execute("SELECT * FROM accounts").fetchone()
+        self.assertEqual(row["bytes_cap"], 10000)
+        self.assertEqual(row["plan"], "trial")
+        self.assertEqual(row["expires"], self.desk._trial_expiry())
+
+    def test_an_unknown_voucher_code_is_refused(self):
+        token = self._token()
+        code, payload = self.desk.voucher({"token": token, "code": "not-a-code"})
+        self.assertEqual(code, 403)
+        self.assertIn("invite-only", payload["error"])
+
+    def test_a_used_code_cannot_voucher_twice(self):
+        _, minted = self.desk._mint_code({"days": 30})
+        self.signup(code=minted["code"], name="first")
+        token = self._token()
+        code, payload = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 403)
+        self.assertIn("already used", payload["error"])
+
+    def test_a_voucher_needs_an_active_account(self):
+        token = self._token()
+        self.desk.admin("/api/admin/revoke-account",
+                        {"admin_token": "admin-secret", "peer": "u0001-friend"})
+        _, minted = self.desk._mint_code({"days": 30})
+        code, payload = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 403)
+        self.assertIn("revoked", payload["error"])
+
+    def test_a_payload_less_code_has_nothing_to_grant_and_is_not_burned(self):
+        token = self._token()
+        _, minted = self.desk._mint_code({})
+        code, payload = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 400)
+        self.assertIn("nothing to grant", payload["error"])
+        row = self.desk.db.execute(
+            "SELECT used_by FROM codes WHERE code=?", (minted["code"],)).fetchone()
+        self.assertIsNone(row["used_by"])
+
+    def test_a_voucher_redeems_once_under_a_race(self):
+        token = self._token()
+        _, minted = self.desk._mint_code({"days": 30, "bytes": 5000})
+        results = []
+        threads = [threading.Thread(
+            target=lambda: results.append(
+                self.desk.voucher({"token": token, "code": minted["code"]})[0]))
+            for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(results), [200, 403])
+        row = self.desk.db.execute("SELECT bytes_cap FROM accounts").fetchone()
+        self.assertEqual(row["bytes_cap"], 6000)
+
+
 class AdminTests(DeskTestCase):
 
     def test_a_wrong_admin_token_is_refused(self):

@@ -428,6 +428,62 @@ class Desk:
         return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
                      "expires": account["expires"], "bytes_cap": account["bytes_cap"]}
 
+    def voucher(self, body):
+        """A code's payload applied to an existing account — Mullvad's
+        submit-voucher shape. Additive: the code's days extend the expiry
+        (from its current value, or today if it already lapsed), its bytes
+        grow the shared cap, its label replaces the plan; consumed bytes
+        stay consumed. The burn and the apply are one locked step."""
+        token = body.get("token") or ""
+        account = self.db.execute(
+            "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        if not account:
+            return 404, {"error": "unknown account token"}
+        if account["status"] != "active":
+            return 403, {"error": f"account is {account['status']} — "
+                                  "only an active account redeems a code"}
+        code = (body.get("code") or "").strip()
+        if not code:
+            return 400, {"error": "code is required"}
+        with self.lock:
+            known = self.db.execute(
+                "SELECT used_by, days, bytes, plan FROM codes WHERE code=?",
+                (code,)).fetchone()
+            if not known:
+                if code in self.file_codes():
+                    return 400, {"error": "this code carries no plan payload — "
+                                          "nothing to grant (it still works for signup)"}
+                return 403, {"error": "unknown invite code — this desk is invite-only"}
+            if known["used_by"]:
+                return 403, {"error": "invite code already used"}
+            if not (known["days"] or known["bytes"] or known["plan"]):
+                return 400, {"error": "this code carries no plan payload — "
+                                      "nothing to grant (it still works for signup)"}
+            updates, values = [], []
+            if known["days"]:
+                # ISO dates compare lexicographically: the later of the two.
+                base = max(account["expires"], datetime.date.today().isoformat())
+                updates.append("expires=?")
+                values.append((datetime.date.fromisoformat(base)
+                               + datetime.timedelta(days=known["days"])).isoformat())
+            if known["bytes"]:
+                updates.append("bytes_cap=bytes_cap+?")
+                values.append(known["bytes"])
+            if known["plan"]:
+                updates.append("plan=?")
+                values.append(known["plan"])
+            values.append(account["id"])
+            self.db.execute(f"UPDATE accounts SET {', '.join(updates)} WHERE id=?",
+                            tuple(values))
+            self.db.execute("UPDATE codes SET used_by=? WHERE code=?",
+                            (account["peer"], code))
+            row = self.db.execute(
+                "SELECT expires, bytes_cap, plan FROM accounts WHERE id=?",
+                (account["id"],)).fetchone()
+        return 200, {"peer": account["peer"], "applied": code,
+                     "expires": row["expires"], "bytes_cap": row["bytes_cap"],
+                     "plan": row["plan"]}
+
     @staticmethod
     def _now():
         return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -793,6 +849,8 @@ def make_handler(desk):
                     return
                 elif self.path == "/api/devices":
                     code, payload = desk.add_device(body)
+                elif self.path == "/api/voucher":
+                    code, payload = desk.voucher(body)
                 elif self.path.startswith("/api/admin/"):
                     code, payload = desk.admin(self.path, body)
                 else:
