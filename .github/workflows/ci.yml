@@ -225,6 +225,10 @@ jobs:
           cargo run -p vallum -- tui --snapshot --width 120 --height 30 > /tmp/tui.txt
           grep -q Vallum /tmp/tui.txt
 
+      - name: The enrolment desk (python service)
+        working-directory: vallum
+        run: python3 -m unittest discover -s service -p 'test_*.py'
+
       - name: Package manifest parity (install.sh == deb == rpm)
         working-directory: vallum
         run: scripts/check-package-manifest.sh

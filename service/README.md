@@ -1,5 +1,21 @@
 # vallum-desk — the service layer
 
+**Layout:** `service/vallum-desk` (the service), `service/test_vallum_desk.py`
+(its tests), `packaging/vallum-desk@.service` (the unit). The executable
+ships in the deb/rpm/install.sh channels like every other shipped program —
+`scripts/check-package-manifest.sh` knows about both `packaging/` and
+`service/` so the three channels cannot drift.
+
+**Tests:** `python3 -m unittest discover -s service -p 'test_*.py'` (stdlib
+only, no dependencies, under a second). They run in `ci-local.sh` and in the
+hosted `ci` workflow, because a quota that never matches is a quota that
+never fires — the accounting is the whole value of the service, so it is
+tested against a fake daemon rather than trusted.
+
+**Shape:** `Desk` holds the account lifecycle and depends on a `Daemon`
+port; `DaemonCli` is the one implementation that talks to the `vallum` CLI.
+The port is what lets the tests fake the daemon.
+
 Turn a Vallum server into a self-service product: users sign up with an
 invite code (or, later, a payment), receive a daemon-minted join ticket, and
 run the agent lane (`../agent/`) on their own machine. The operator runs the

@@ -95,6 +95,9 @@ fi
 step "Test the lean daemon (no TUI)"
 check lean cargo test -p vallum --no-default-features || true
 
+step "The enrolment desk (python service: accounts, plans, enforcement)"
+check desk python3 -m unittest discover -s service -p 'test_*.py' || true
+
 step "Package manifest parity (install.sh == deb == rpm)"
 check parity bash scripts/check-package-manifest.sh || true
 check "the SDK is pinned once" bash scripts/check-sdk-pin.sh || true

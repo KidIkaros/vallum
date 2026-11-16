@@ -25,7 +25,10 @@ install_list=$(
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
             | grep -oE 'vallum[a-zA-Z0-9@._-]*' \
             | while read -r name; do
-                [ -f "packaging/$name" ] && echo "$name"
+                # Two components ship files: packaging/ (units and helpers) and
+                # service/ (the enrolment desk). A name that exists in either
+                # is a shipped file.
+                { [ -f "packaging/$name" ] || [ -f "service/$name" ]; } && echo "$name"
             done
         sed -n '/^install_docs/,/^}/p' scripts/install.sh \
             | grep -oE 'for shell in.*' | tr -s ' ;' '\n\n' \
@@ -44,14 +47,14 @@ install_list=$(printf '%s\n' "$install_list" | grep -vx "$EXCLUDE" || true)
 deb_list=$(
     awk '/\[package.metadata.deb\]/,/^\[package.metadata.generate-rpm\]/' \
         crates/vallum/Cargo.toml \
-        | grep -oE 'packaging/vallum[a-zA-Z0-9@._-]+' | sed 's|packaging/||' | sort -u
+        | grep -oE '(packaging|service)/vallum[a-zA-Z0-9@._-]+' | sed -e 's|packaging/||' -e 's|service/||' | sort -u
 )
 
 # rpm assets: "packaging/<file>" entries inside [package.metadata.generate-rpm].
 rpm_list=$(
     awk '/\[package.metadata.generate-rpm\]/,/^\[package.metadata.generate-rpm.scriptlets\]/' \
         crates/vallum/Cargo.toml \
-        | grep -oE 'packaging/vallum[a-zA-Z0-9@._-]+' | sed 's|packaging/||' | sort -u
+        | grep -oE '(packaging|service)/vallum[a-zA-Z0-9@._-]+' | sed -e 's|packaging/||' -e 's|service/||' | sort -u
 )
 
 fail=0

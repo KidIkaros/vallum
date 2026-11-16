@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""vallum-desk — the self-service enrolment desk for a Vallum server.
+
+One process on the server, next to the daemon. Anyone running a Vallum
+server can point would-be users at it: a visitor signs up with an invite
+code (closed alpha) or opens a paid plan later, receives a join ticket
+minted by the daemon itself, and manages their lane from there. The
+operator never runs an SSH command per user.
+
+    vallum-desk --config /etc/vallum/vallumrc.toml \
+                --codes /etc/vallum/desk-codes.txt \
+                --admin-token-file /etc/vallum/desk-admin-token \
+                --bind 127.0.0.1 --port 8400
+
+Binds loopback by default — put a TLS reverse proxy or an SSH tunnel in
+front before exposing it. Runs as root because the daemon's control
+socket is 0600 and peer operations are privileged; it speaks to the
+daemon only through the `vallum` CLI, never by touching the config.
+
+Plans (v1): trial with expiry and a byte cap, enforced by a sweep thread
+that reads the daemon's per-peer counters. Payment integration attaches
+at the plan boundary — the schema keeps a `paid_until` and `plan` field
+so a billing webhook only ever updates a row.
+
+Structure: `Desk` holds the account lifecycle and depends on a `Daemon`
+port, so the daemon can be faked in tests; `DaemonCli` is the one
+implementation that talks to the CLI.
+
+SPDX-License-Identifier: Apache-2.0
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import secrets
+import sqlite3
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ---------------------------------------------------------------- database
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS accounts (
+    id         INTEGER PRIMARY KEY,
+    peer       TEXT UNIQUE NOT NULL,      -- daemon peer name (u0001 style)
+    label      TEXT NOT NULL,             -- the name the user chose
+    token      TEXT UNIQUE NOT NULL,      -- account token: status/auth
+    code       TEXT NOT NULL,             -- invite code consumed
+    plan       TEXT NOT NULL DEFAULT 'trial',
+    created    TEXT NOT NULL,
+    expires    TEXT NOT NULL,             -- ISO date; trial end / paid_until
+    bytes_cap  INTEGER NOT NULL,          -- rolling total across the period
+    status     TEXT NOT NULL DEFAULT 'active',  -- active|expired|overquota|revoked
+    paid_until TEXT
+);
+CREATE TABLE IF NOT EXISTS codes (
+    code     TEXT PRIMARY KEY,
+    created  TEXT NOT NULL,
+    used_by  TEXT                       -- peer name once consumed
+);
+"""
+
+ACCOUNT_STATUSES = ("active", "expired", "overquota", "revoked")
+
+
+def open_database(path):
+    # Autocommit (isolation_level=None): every statement commits on its own, so
+    # a code minted on one request thread is visible to the next one. With the
+    # default deferred transactions, an INSERT left open by one thread made the
+    # next request's SELECT miss a row that was plainly in the file.
+    conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    return conn
+
+
+# ---------------------------------------------------------------- the port
+
+class Daemon:
+    """What the desk needs from the tunnel daemon.
+
+    The port exists so the account logic can be tested without a daemon: the
+    tests pass a fake, and the production wiring passes `DaemonCli`.
+    """
+
+    def mint_ticket(self, peer):
+        """Return a join ticket for `peer`."""
+        raise NotImplementedError
+
+    def counters(self):
+        """Return peer name → bytes used."""
+        raise NotImplementedError
+
+    def remove(self, peer):
+        """Revoke a peer on the server."""
+        raise NotImplementedError
+
+
+class DaemonCli(Daemon):
+    """The daemon, reached only through its own CLI."""
+
+    # The ticket is one long token: exclude whitespace, or the CLI's trailing
+    # newlines come along and the client hands the daemon a broken ticket.
+    TICKET_RE = re.compile(r"vallum1-join:[^\s<]{40,}")
+
+    def __init__(self, config, cli="vallum"):
+        self.config, self.cli = config, cli
+
+    def _run(self, *args):
+        out = subprocess.run([self.cli, *args, "--config", self.config],
+                             capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise RuntimeError(f"vallum {' '.join(args[:2])}: {out.stderr.strip()[:200]}")
+        return out.stdout
+
+    def mint_ticket(self, peer):
+        out = self._run("peer", "invite", peer)
+        match = self.TICKET_RE.search(out)
+        if not match:
+            raise RuntimeError("invite produced no join ticket — refusing to hand out a placeholder")
+        return match.group(0)
+
+    def counters(self):
+        """peer name → bytes used, from the daemon's JSON snapshot.
+
+        The JSON is the stable source: the text rendering keys peers by
+        fingerprint (`peer f4235695f9fb (laptop-bundle)`), so a text scrape
+        silently matched nothing — and a quota that never matches is a quota
+        that never fires, which is the income feature quietly doing nothing.
+        """
+        out = self._run("show", "--json")
+        try:
+            doc = json.loads(out)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"the daemon's JSON snapshot did not parse: {error}") from error
+        usage = {}
+        for peer in doc.get("peers", []):
+            name = peer.get("name")
+            if name:
+                usage[name] = int(peer.get("tx_bytes", 0)) + int(peer.get("rx_bytes", 0))
+        return usage
+
+    def remove(self, peer):
+        self._run("peer", "remove", peer)
+
+
+# ---------------------------------------------------------------- config
+
+@dataclass
+class DeskConfig:
+    """Everything the desk needs to run, in one place."""
+
+    state: str
+    codes: str
+    admin_token: str
+    trial_days: int
+    trial_bytes: int
+    sweep_secs: int
+    config: str
+    bind: str
+    port: int
+    cli: str = "vallum"
+
+
+# ---------------------------------------------------------------- the desk
+
+class Desk:
+    """The account lifecycle: signups, plans, enforcement, revocation."""
+
+    def __init__(self, config: DeskConfig, daemon: Daemon):
+        self.config = config
+        self.daemon = daemon
+        self.db = open_database(config.state)
+        self.lock = threading.Lock()
+
+    # -- inputs ---------------------------------------------------------
+
+    def file_codes(self):
+        """Invite codes from the operator's file, re-read per request so a code
+        can be added without restarting the desk."""
+        path = self.config.codes
+        if not path or not os.path.exists(path):
+            return set()
+        try:
+            with open(path) as f:
+                return {line.strip() for line in f if line.strip() and not line.startswith("#")}
+        except OSError as error:
+            print(f"desk: cannot read the codes file {path}: {error}")
+            return set()
+
+    def domain_of(self, url):
+        return re.sub(r"^[a-z]+://", "", url.split("/")[0]).split(":")[0].lower()
+
+    # -- signup ---------------------------------------------------------
+
+    def signup(self, body):
+        """An invite code becomes a join ticket and an account."""
+        code = (body.get("code") or "").strip()
+        label = (body.get("name") or "").strip()[:40]
+        if not code:
+            return 403, {"error": "unknown invite code — this desk is invite-only"}
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
+            return 400, {"error": "name must be lowercase letters/digits/hyphens"}
+        with self.lock:
+            known = self.db.execute(
+                "SELECT used_by FROM codes WHERE code=?", (code,)).fetchone()
+            if known and known["used_by"]:
+                return 403, {"error": "invite code already used"}
+            if not known and code not in self.file_codes():
+                return 403, {"error": "unknown invite code — this desk is invite-only"}
+            peer = self._next_peer_name(label)
+            try:
+                ticket = self.daemon.mint_ticket(peer)
+            except RuntimeError as error:
+                return 502, {"error": f"the daemon refused the enrolment: {error}"}
+            expires = self._trial_expiry()
+            token = secrets.token_hex(16)
+            self.db.execute(
+                "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (peer, label, token, code, "trial", self._now(), expires,
+                 self.config.trial_bytes, "active"))
+            if known:
+                self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (peer, code))
+            else:
+                self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
+                                (code, self._now(), peer))
+        return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
+                     "bytes_cap": self.config.trial_bytes,
+                     "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
+
+    def _next_peer_name(self, label):
+        """Peer names share their first eight characters on the kernel's
+        interface-name ceiling, so the counter leads: u0001-friend, u0002-friend."""
+        next_id = self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM accounts").fetchone()[0]
+        return f"u{next_id:04d}-{label[:8]}"[:24]
+
+    def _trial_expiry(self):
+        return (datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(days=self.config.trial_days)).date().isoformat()
+
+    @staticmethod
+    def _now():
+        return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+
+    # -- status ---------------------------------------------------------
+
+    def status(self, token):
+        row = self.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        if not row:
+            return 404, {"error": "unknown account token"}
+        used = self.daemon.counters().get(row["peer"], 0)
+        return 200, {"peer": row["peer"], "plan": row["plan"], "status": row["status"],
+                     "expires": row["expires"], "bytes_cap": row["bytes_cap"],
+                     "bytes_used": used}
+
+    # -- enforcement ----------------------------------------------------
+
+    def sweep_once(self):
+        """One enforcement pass: expire and de-quota accounts.
+
+        Returns the actions taken, so an operator can trigger it on demand and
+        see what happened.
+        """
+        actions = []
+        today = datetime.date.today().isoformat()
+        counters = self.daemon.counters()
+        for row in self.db.execute(
+                "SELECT * FROM accounts WHERE status='active'").fetchall():
+            reason = self._breach_reason(row, counters.get(row["peer"], 0), today)
+            if reason:
+                actions.append(self._revoke(row["peer"], reason, counters.get(row["peer"], 0)))
+        return actions
+
+    @staticmethod
+    def _breach_reason(row, used, today):
+        # Inclusive: an account whose expiry is today is already expired.
+        if row["expires"] <= today:
+            return "expired"
+        if used > row["bytes_cap"]:
+            return "overquota"
+        return None
+
+    def _revoke(self, peer, reason, used):
+        """Mark the account and remove its peer. The removal is what makes the
+        revocation real; the row is what makes it visible."""
+        with self.lock:
+            self.db.execute("UPDATE accounts SET status=? WHERE peer=?", (reason, peer))
+        action = {"peer": peer, "reason": reason, "bytes": used}
+        try:
+            self.daemon.remove(peer)
+            print(f"desk: removed {peer} ({reason}, {used} bytes)")
+        except RuntimeError as error:
+            action["error"] = str(error)
+            print(f"desk: could not remove {peer}: {error}")
+        return action
+
+    def sweep(self):
+        """The enforcement loop. Never dies: a failure is logged, not fatal."""
+        while True:
+            try:
+                self.sweep_once()
+            except Exception as error:  # noqa: BLE001 - the sweep must not kill the service
+                print(f"desk: sweep error: {error}")
+            time.sleep(self.config.sweep_secs)
+
+    # -- admin ----------------------------------------------------------
+
+    def admin(self, path, body):
+        """Admin endpoints. The token gates the whole group, then a routing
+        table picks the handler — a switch on a string that grows with the
+        service is the kind of function nobody can extend safely."""
+        if not self._is_admin(body):
+            return 403, {"error": "bad admin token"}
+        handler = self._admin_routes().get(path)
+        if not handler:
+            return 404, {"error": "no such admin endpoint"}
+        return handler(body)
+
+    def _is_admin(self, body):
+        given = body.get("admin_token") or ""
+        # Constant-time: the token is a secret, and a timing side channel on
+        # its comparison is a side channel on the service.
+        return secrets.compare_digest(given, self.config.admin_token)
+
+    def _admin_routes(self):
+        return {
+            "/api/admin/code": self._mint_code,
+            "/api/admin/adopt": self._adopt_peer,
+            "/api/admin/plan": self._set_plan,
+            "/api/admin/revoke": self._revoke_peer,
+            "/api/admin/peers": self._list_peers,
+            "/api/admin/sweep": self._run_sweep,
+        }
+
+    def _mint_code(self, body):
+        code = secrets.token_hex(8)
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO codes (code, created) VALUES (?,?)",
+                            (code, self._now()))
+        return 200, {"code": code, "note": "hand to one user; consumed on signup"}
+
+    def _adopt_peer(self, body):
+        """Register a peer that already exists on the server as an account: an
+        operator migrating a live deployment, or a device enrolled before the
+        desk was running. The peer is not re-created; it becomes enforceable."""
+        peer = body.get("peer")
+        if not peer:
+            return 400, {"error": "peer is required"}
+        if self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+            return 409, {"error": "that peer is already an account"}
+        label = (body.get("label") or peer)[:40]
+        token = secrets.token_hex(16)
+        expires = self._trial_expiry()
+        cap = int(body.get("bytes_cap") or self.config.trial_bytes)
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (peer, label, token, "adopted", "trial", self._now(), expires, cap, "active"))
+        return 200, {"peer": peer, "token": token, "expires": expires, "bytes_cap": cap}
+
+    def _set_plan(self, body):
+        """A plan is a row: cap, expiry, plan name, or status. A paid tier is
+        data, and reinstating a mis-quota'd account is the same change."""
+        peer = body.get("peer")
+        if not self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+            return 404, {"error": "unknown peer"}
+        columns, values = [], []
+        for column, key in (("bytes_cap", "bytes_cap"), ("expires", "expires"),
+                            ("paid_until", "paid_until"), ("plan", "plan")):
+            if key in body:
+                columns.append(f"{column}=?")
+                values.append(int(body[key]) if key == "bytes_cap" else str(body[key]))
+        if "status" in body:
+            status = str(body["status"])
+            if status not in ACCOUNT_STATUSES:
+                return 400, {"error": f"status must be one of {'|'.join(ACCOUNT_STATUSES)}"}
+            columns.append("status=?")
+            values.append(status)
+        if not columns:
+            return 400, {"error": "nothing to change"}
+        with self.lock:
+            self.db.execute(f"UPDATE accounts SET {', '.join(columns)} WHERE peer=?",
+                            (*values, peer))
+        return 200, {"peer": peer, "updated": [c.split("=")[0] for c in columns]}
+
+    def _revoke_peer(self, body):
+        peer = body.get("peer")
+        if not self.db.execute("SELECT peer FROM accounts WHERE peer=?", (peer,)).fetchone():
+            return 404, {"error": "unknown peer"}
+        with self.lock:
+            self.db.execute("UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
+        try:
+            self.daemon.remove(peer)
+        except RuntimeError as error:
+            return 502, {"error": str(error)}
+        return 200, {"revoked": peer}
+
+    def _list_peers(self, body):
+        rows = self.db.execute(
+            "SELECT peer,label,plan,status,expires,bytes_cap FROM accounts").fetchall()
+        return 200, {"peers": [dict(row) for row in rows]}
+
+    def _run_sweep(self, body):
+        return 200, {"actions": self.sweep_once()}
+
+
+# ---------------------------------------------------------------- HTTP
+
+PAGE = """<!doctype html><title>vallum desk</title>
+<style>body{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}
+input,button{font:inherit;padding:.4em .6em}button{cursor:pointer}</style>
+<h1>vallum desk</h1>
+<p>Self-service enrolment for this Vallum server. An invite code gets you a
+join ticket; your key never leaves your machine.</p>
+<form onsubmit="go(event)">
+<label>invite code<br><input name=code required></label><br><br>
+<label>device name<br><input name=name pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
+<button>Get my join ticket</button>
+</form><pre id=out></pre>
+<script>
+async function go(e){e.preventDefault();const f=new FormData(e.target);
+const r=await fetch('/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({code:f.get('code'),name:f.get('name')})});
+const j=await r.json();out.textContent=r.ok?j.ticket+'\n\n'+j.how:j.error;}
+</script>"""
+
+
+def make_handler(desk):
+    """The HTTP adapter. It translates requests into desk calls and nothing
+    else: no account rule lives here."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                return json.loads(self.rfile.read(length) or "{}")
+            except json.JSONDecodeError:
+                return {}
+
+        def _page(self):
+            body = PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/":
+                self._page()
+                return
+            if self.path.startswith("/api/status?"):
+                from urllib.parse import parse_qs, urlparse
+                query = parse_qs(urlparse(self.path).query)
+                code, payload = desk.status((query.get("token") or [""])[0])
+            else:
+                code, payload = 404, {"error": "no such endpoint"}
+            self._send(code, payload)
+
+        def do_POST(self):
+            body = self._body()
+            try:
+                if self.path == "/api/signup":
+                    code, payload = desk.signup(body)
+                elif self.path.startswith("/api/admin/"):
+                    code, payload = desk.admin(self.path, body)
+                else:
+                    code, payload = 404, {"error": "no such endpoint"}
+            except Exception as error:  # noqa: BLE001 - a service must answer
+                # A service must answer, not drop the connection: the client
+                # cannot tell a refusal from a crash.
+                print(f"desk: request failed: {error!r}")
+                code, payload = 500, {"error": f"internal error: {error}"}
+            self._send(code, payload)
+
+        def log_message(self, fmt, *args):
+            print(f"desk: {self.address_string()} {fmt % args}")
+
+    return Handler
+
+
+# ---------------------------------------------------------------- main
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="the Vallum enrolment desk")
+    parser.add_argument("--config", required=True, help="the server's vallum config")
+    parser.add_argument("--state", default="/var/lib/vallum/desk.sqlite")
+    parser.add_argument("--codes", default="/etc/vallum/desk-codes.txt",
+                        help="invite codes, one per line")
+    parser.add_argument("--admin-token-file", default="/etc/vallum/desk-admin-token")
+    parser.add_argument("--bind", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8400)
+    parser.add_argument("--trial-days", type=int, default=14)
+    parser.add_argument("--trial-bytes", type=int, default=50 * 1024 * 1024 * 1024,
+                        help="50 GiB default")
+    parser.add_argument("--sweep-secs", type=int, default=300)
+    parser.add_argument("--cli", default="vallum")
+    return parser.parse_args(argv)
+
+
+def admin_token_from(path):
+    """The operator's admin token, generated once if it does not exist."""
+    if os.path.exists(path):
+        with open(path) as f:
+            return f.read().strip()
+    token = secrets.token_hex(24)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(token + "\n")
+    os.chmod(path, 0o600)
+    print(f"desk: generated admin token in {path}")
+    return token
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    config = DeskConfig(
+        state=args.state,
+        codes=args.codes,
+        admin_token=admin_token_from(args.admin_token_file),
+        trial_days=args.trial_days,
+        trial_bytes=args.trial_bytes,
+        sweep_secs=args.sweep_secs,
+        config=args.config,
+        bind=args.bind,
+        port=args.port,
+        cli=args.cli,
+    )
+    desk = Desk(config, DaemonCli(config.config, config.cli))
+    threading.Thread(target=desk.sweep, daemon=True).start()
+    server = ThreadingHTTPServer((config.bind, config.port), make_handler(desk))
+    print(f"desk: serving on {config.bind}:{config.port} (config {config.config}, "
+          f"{len(desk.file_codes())} invite codes, trials {config.trial_days}d/"
+          f"{config.trial_bytes}B)")
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

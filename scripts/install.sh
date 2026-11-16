@@ -445,8 +445,8 @@ install_docs() {
     # The enrolment desk: the self-service layer (service/README.md). It is
     # optional at runtime — nothing starts it until the operator enables it —
     # but it ships with the product so an operator never has to assemble it.
-    if [ -f "packaging/vallum-desk" ]; then
-        run install -D -m 0755 "packaging/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
+    if [ -f "service/vallum-desk" ]; then
+        run install -D -m 0755 "service/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
     elif [ -f "$SOURCE_DIR/vallum-desk" ]; then
         run install -D -m 0755 "$SOURCE_DIR/vallum-desk" "$(dest /usr/local/lib/vallum/vallum-desk)"
     fi
