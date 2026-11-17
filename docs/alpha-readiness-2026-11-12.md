@@ -50,6 +50,17 @@ required:
 2. `scripts/verify-remote.sh wingman-vps --clean-remote`.
 3. Restore the tarball, `daemon-reload`, restart `vallum@` and `vallum-quick@`.
 
+> **Correction, 2026-11-17 — step 1 is no longer the operator's job, and it
+> never covered the state that matters.** `--clean-remote` now runs
+> `scripts/backup-deployment.sh` on the host itself, before it touches
+> anything: it copies `/etc/vallum`, `/var/lib/vallum` (the desk's account
+> database, which the hand tarball above missed — it did not exist yet) and the
+> units, **verifies the archive** (every config present, the database still
+> beginning with the SQLite header), and refuses the run if it cannot. The
+> archive path is printed at the end and recorded in the verdict, so the
+> restore is a command rather than a paragraph. See
+> `docs/qa/premortem-alpha-2026-11-17.md`, failure mode 2.
+
 The cost is ~2 minutes of tunnel downtime. The alternative — a throwaway second
 VPS — is the right long-term answer and needs a human (a `/wizard` job: card,
 DNS, provisioning), so it is recorded as the standing improvement rather than

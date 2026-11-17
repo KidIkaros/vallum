@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`--clean-remote` copies the deployment it is about to delete, and refuses if it cannot.**
+  `scripts/backup-deployment.sh` takes `/etc/vallum`, `/var/lib/vallum` and the units into a
+  `0600` archive and **verifies it** — every config present, every member listed, the desk
+  database still beginning with the SQLite header — then prints the restore command.
+  `verify-remote.sh` runs it on the host before touching anything, refuses the run when it fails,
+  and records the archive path in the stamp and in the signed verdict, so the restore is a command
+  rather than a paragraph in a document. `scripts/accept-deployment-backup.sh` is the gate:
+  12 assertions covering a byte-for-byte round trip and every failure path (no deployment, a desk
+  database that is not SQLite, an unusable destination — and no archive left behind by any of them).
 - **A gate skip is now an artefact, not a printed line.** `--skip-remote`,
   `--skip-stale`, `--skip-arm`, `--skip-fuzz` and `--skip-desktop` each write a
   **signed, commit-bound verdict** with `status: skipped` and the reason in a

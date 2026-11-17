@@ -30,7 +30,7 @@ cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/backup-deployment.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== durable state coverage"
@@ -44,6 +44,10 @@ echo "== desk database copy/restore"
 # rebuilt, so the copy-and-restore path is a gate rather than a paragraph in
 # the operator docs. Stdlib only: no daemon, no root, no network.
 scripts/accept-desk-restore.sh
+echo "== deployment copy/restore"
+# verify-remote's --clean-remote deletes a live deployment and now refuses
+# unless this backup path works, so the path is a gate rather than a promise.
+scripts/accept-deployment-backup.sh
 echo "== supply chain"
 cargo deny check
 echo "== standalone source build"

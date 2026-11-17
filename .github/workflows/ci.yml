@@ -241,6 +241,10 @@ jobs:
         working-directory: vallum
         run: scripts/accept-desk-restore.sh
 
+      - name: A deployment copies and restores before --clean-remote deletes it
+        working-directory: vallum
+        run: scripts/accept-deployment-backup.sh
+
   e2e:
     name: end-to-end (two namespaces, real kernel)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

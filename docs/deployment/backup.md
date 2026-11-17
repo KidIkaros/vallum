@@ -73,6 +73,14 @@ sudo tar -czpf vallum-state-$(date +%F).tar.gz -C / var/lib/vallum
 That archive is the one place the desk's database can also be captured by hand;
 the timer above is what makes it happen without anyone remembering.
 
+**`scripts/verify-remote.sh --clean-remote` does this for itself.** It deletes a
+live deployment to install its own, so it first runs
+`scripts/backup-deployment.sh` on the host: the same two roots plus the units,
+an archive written `0600`, verified member by member (and the desk database
+checked for its SQLite header) before anything is removed. If the copy cannot be
+made or verified, **the run stops and nothing is deleted**. The archive path is
+printed at the end and recorded in the signed verdict.
+
 Back it up to somewhere *off the host*, with the same custody you would give
 a CA private key: `/etc/vallum` **is** the server. Anyone with `server.key`
 can impersonate your endpoint; anyone with a client key can join as that

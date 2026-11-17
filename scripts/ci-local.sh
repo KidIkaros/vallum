@@ -102,6 +102,7 @@ step "Package manifest parity (install.sh == deb == rpm)"
 check parity bash scripts/check-package-manifest.sh || true
 check "durable state is named in the backup doc" bash scripts/check-state-coverage.sh || true
 check "the desk database copies and restores" bash scripts/accept-desk-restore.sh || true
+check "a deployment copies and restores" bash scripts/accept-deployment-backup.sh || true
 check "the SDK is pinned once" bash scripts/check-sdk-pin.sh || true
 
 step "Headless TUI snapshot"

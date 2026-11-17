@@ -18,8 +18,12 @@
 #
 # A host that already runs Vallum is refused, because the test installs its own
 # deployment and would otherwise delete a working one. `--clean-remote` is the
-# explicit override: it removes an existing Vallum deployment (listed below) and
-# then proceeds. It removes *Vallum's* files, never anyone else's.
+# explicit override: it first copies the deployment — /etc/vallum, /var/lib/vallum
+# and the units — with scripts/backup-deployment.sh, **verifies that copy**, and
+# refuses to remove anything if it could not be made; then it removes that
+# deployment (listed below) and proceeds. It removes *Vallum's* files, never
+# anyone else's. The archive path is printed at the end and recorded in the
+# verdict, so the restore never depends on someone having prepared a tarball.
 #
 # Two modes, by where the client half runs:
 #
@@ -113,6 +117,10 @@ cli_put(){ rsh "sudo ip netns exec $CLI_NS $*"; }
 PRODUCT=0
 KEEP=0
 CLEAN=0
+# Set when a live deployment is copied before being removed; the path is
+# printed in the summary and recorded in the verdict, so the evidence names the
+# artefact that can put the host back.
+BACKUP_ARCHIVE=""
 UPGRADE=0
 APP_CLASS=0
 # The outage leg runs once per run, not once per transport: it costs minutes and
@@ -360,6 +368,22 @@ if rsh "test -e /etc/vallum" 2>/dev/null; then
         bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.
    Re-run with --clean-remote to remove it first, or pick a host with no Vallum."
     fi
+    # The restore used to be a tarball built by hand from a paragraph in a
+    # document — so the gate that proves the product could destroy it whenever
+    # nobody read that far. It is now the script's own first step, and a failure
+    # here refuses the run before anything is touched.
+    say "copying the existing deployment before removing it"
+    rsh "sudo tee /root/vallum-backup-deployment.sh >/dev/null" < "$(dirname "$0")/backup-deployment.sh" \
+        || bad "could not place scripts/backup-deployment.sh on $TARGET"
+    rsh "sudo chmod 700 /root/vallum-backup-deployment.sh" || bad "could not make the backup script executable"
+    backup_out=$(rsh "sudo /root/vallum-backup-deployment.sh --label pre-verify-remote") \
+        || bad "the pre-run backup failed — refusing to delete a deployment that could not be copied.
+   Nothing has been removed. The backup script's own message says what it could not verify."
+    printf '%s\n' "$backup_out" | sed 's/^/   /'
+    BACKUP_ARCHIVE=$(printf '%s\n' "$backup_out" | sed -n 's/^backup-deployment: \([^ ]*\) (.*/\1/p' | head -1)
+    [ -n "$BACKUP_ARCHIVE" ] || bad "the backup reported success but did not name an archive"
+    ok "deployment copied to $BACKUP_ARCHIVE"
+
     say "removing the existing deployment (--clean-remote)"
     echo "   units:      vallum@*, vallum-quick@*, vallum-enroll@*"
     echo "   files:      /etc/vallum, /etc/sysctl.d/90-vallum.conf, /usr/bin/vallum{,-quick}"
@@ -1614,13 +1638,26 @@ cat > "$STAMP" <<EOF
   "assertions": $ASSERTIONS,
   "invoked_by": "$(id -un 2>/dev/null || echo unknown)@$(hostname 2>/dev/null || echo unknown)",
   "script_sha256": "$(sha256sum "$0" 2>/dev/null | cut -d' ' -f1)",
+  "backup_archive": "${BACKUP_ARCHIVE:-none}",
   "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 chown -R "${SUDO_USER:-root}" "$(dirname "$STAMP")" 2>/dev/null
-VERDICT_TARGET="$TARGET" "$(dirname "$0")/verdict.sh" verify-remote passed "$ASSERTIONS" "$0"
+# The note names the archive a `--clean-remote` run destroyed the host to
+# prove: whoever reads this record later can see whether a deployment had to be
+# restored, and from what.
+if [ -n "$BACKUP_ARCHIVE" ]; then
+    VERDICT_NOTE="pre-run deployment copied to $BACKUP_ARCHIVE" \
+        VERDICT_TARGET="$TARGET" "$(dirname "$0")/verdict.sh" verify-remote passed "$ASSERTIONS" "$0"
+else
+    VERDICT_TARGET="$TARGET" "$(dirname "$0")/verdict.sh" verify-remote passed "$ASSERTIONS" "$0"
+fi
 if [ "$NAMESPACED" = 1 ]; then
     say "recorded $(git rev-parse --short HEAD) as verified against $TARGET (namespaced, $ASSERTIONS assertions)"
 else
     say "recorded $(git rev-parse --short HEAD) as verified on two hosts ($ASSERTIONS assertions)"
+fi
+if [ -n "$BACKUP_ARCHIVE" ]; then
+    note "this run removed the host's deployment; it is at $BACKUP_ARCHIVE on $TARGET"
+    note "restore with: ssh $TARGET sudo tar -xzpf $BACKUP_ARCHIVE -C / && sudo systemctl daemon-reload"
 fi

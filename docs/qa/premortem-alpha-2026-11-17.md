@@ -48,8 +48,13 @@ records an intent, and no actor performs it.
 
 ## Revised plan
 
-1. Make `verify-remote.sh --clean-remote` take and verify its own backup of `/etc/vallum` **and**
-   `/var/lib/vallum`, and refuse to proceed if it cannot — the restore stops being a paragraph.
+1. ~~Make `verify-remote.sh --clean-remote` take and verify its own backup.~~ **Done 2026-11-17**:
+   `scripts/backup-deployment.sh` copies `/etc/vallum`, `/var/lib/vallum` and the units, verifies the
+   archive (every config present, the desk database still starting with the SQLite header), writes
+   `0600`, and prints the restore command. `--clean-remote` runs it on the host before touching
+   anything, refuses the run if it fails, and records the archive path in both the stamp and the
+   signed verdict. `scripts/accept-deployment-backup.sh` is the gate (12 assertions, signed verdict,
+   including the failure paths).
 2. ~~Add a `vallum-desk-backup` timer and a restore drill.~~ **Done 2026-11-17**:
    `vallum-desk-backup` + `.timer` ship with the desk, the installer and both packages enable the
    timer, and the service is conditioned on the database existing so it is inert where there is no
