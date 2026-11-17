@@ -17,9 +17,10 @@ Type=oneshot
 WorkingDirectory=%h/Coding/Gold/vallum
 Environment=HOST=wingman-vps
 ExecStart=%h/Coding/Gold/vallum/scripts/verify-scheduled.sh
-# The gate exits 1 on a failed run and 3 on a regression; both are the signal,
-# not a broken unit. The journal line and the metric carry the detail.
-SuccessExitStatus=1 3
+# 1 = an assertion failed (Vallum), 2 = the harness could not run (not Vallum),
+# 3 = a regression in the assertion count. All three are signals, not broken
+# units; the number and the metric carry which.
+SuccessExitStatus=1 2 3
 TimeoutStartSec=30min
 Nice=10
 IOSchedulingClass=idle

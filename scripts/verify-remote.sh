@@ -219,7 +219,18 @@ say(){ printf '── %s\n' "$*"; }
 ok(){ ASSERTIONS=$((ASSERTIONS+1)); printf '   ok    %s\n' "$*"; }
 ASSERTIONS=0
 fail(){ printf '   FAIL  %s\n' "$*"; }
-bad(){ printf '   FAIL  %s\n' "$*"; exit 1; }
+# A failed assertion is a product claim that did not hold; a harness failure is
+# the run not happening. They exit differently (1 vs 2) so the scheduled wrapper
+# can alert on the first and merely note the second — an SSH timeout must never
+# page as "Vallum is broken".
+bad(){
+    printf '   FAIL  %s\n' "$*"
+    if [ "${HARNESS_FAILED:-0}" = 1 ]; then
+        printf '   note  the harness could not run; this run does not speak to the tunnel\n'
+        exit 2
+    fi
+    exit 1
+}
 note(){ printf '   note  %s\n' "$*"; }
 
 while [ $# -gt 0 ]; do
@@ -282,27 +293,72 @@ fi
 # opened once below and cleaned up in cleanup(); rsh/rscp only ride it.
 SSH_MUX_DIR=$(mktemp -d -t vallum-verify-mux.XXXXXX)
 SSH_MUX="$SSH_MUX_DIR/sock"
-SSH_OPTS=(-o BatchMode=yes -o "ControlPath=$SSH_MUX" -o ControlMaster=no)
+# `ServerAlive*` is the one that matters: without it a silently dead path is
+# not noticed until the next write, which can be minutes later and looks like a
+# hung run. `ConnectTimeout` bounds the other end of the same problem — a failed
+# attempt that otherwise waits out the kernel's SYN retry budget (~2 min).
+SSH_KEEP=(-o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10)
+SSH_OPTS=(-o BatchMode=yes "${SSH_KEEP[@]}" -o "ControlPath=$SSH_MUX" -o ControlMaster=no)
+
+# Whether the harness itself could not run, as opposed to an assertion failing.
+# The distinction is the whole point of this block: a dropped SSH connection and
+# a broken tunnel are unrelated failures, and a run that reports the first as
+# the second sends the reader to the wrong file. `bad` exits 2 when this is set,
+# and scripts/verify-scheduled.sh turns that into "the gate could not run".
+HARNESS_FAILED=0
+
+_ssh_reopen() {
+    # The master is gone — a path change, a provider idle timeout, a rate
+    # limiter. Re-open it rather than let every later call fall back to its own
+    # connection: ssh does that silently when ControlPath points at nothing, and
+    # 144 fresh handshakes is the burst that provokes the rate limiter.
+    ssh_mux_close >/dev/null 2>&1
+    sleep 1
+    ssh_mux_open >/dev/null 2>&1
+}
+
+# Run one SSH operation, retrying once through a fresh master.
+#
+# Only a transport failure is retried (ssh's own 255). A remote command that
+# exits nonzero is a result, not a fault — `test -e /etc/vallum` returning 1 is
+# how this script asks a question — so its status is passed through untouched.
+_ssh_call() { # $1 = "ssh"|"scp" (for the message), rest = argv
+    shift
+    local rc
+    "$@" && return 0
+    rc=$?
+    [ "$rc" -eq 255 ] || return "$rc"
+    note "transport failed (ssh exit 255); re-opening the connection and retrying once"
+    _ssh_reopen
+    "$@" && return 0
+    rc=$?
+    if [ "$rc" -eq 255 ]; then
+        HARNESS_FAILED=1
+        note "the SSH transport to $TARGET failed twice — this is the harness, not the tunnel"
+    fi
+    return "$rc"
+}
+
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     OWNER_HOME=$(eval echo "~$SUDO_USER")
     # The control socket lives where the invoking user can write it.
     chown "$SUDO_USER" "$SSH_MUX_DIR"
-    rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+    rsh() { _ssh_call ssh sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
     # `-q` was here and is gone: a copy that fails prints its reason to stderr,
     # and the reason is the whole diagnostic. A run that died on
     # `bad "scp laptop-bundle.key"` left nothing behind to explain it — no ssh
     # error, no exit status — so the only conclusion available was a guess.
-    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
+    rscp() { _ssh_call scp sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp "${SSH_KEEP[@]}" -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 else
-    rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
-    rscp() { scp -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
+    rsh() { _ssh_call ssh ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+    rscp() { _ssh_call scp scp "${SSH_KEEP[@]}" -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 fi
 
 # The persistent connection all rsh/rscp calls multiplex onto. Opened after
 # the sudo check proves the keys work; ControlPersist keeps it warm through
 # the quiet stretches so the outage leg never pays a reconnect.
 ssh_mux_open() {
-    local -a open_opts=(-o BatchMode=yes -o ControlMaster=yes
+    local -a open_opts=(-o BatchMode=yes "${SSH_KEEP[@]}" -o ControlMaster=yes
         -o "ControlPath=$SSH_MUX" -o ControlPersist=yes -MNf)
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
         sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${open_opts[@]}" "$TARGET"
@@ -500,7 +556,7 @@ QUICK=$(cd "$(dirname "$QUICK")" && pwd)/$(basename "$QUICK")
 say "remote checks ($TARGET)"
 # The multiplexed control connection — one handshake for the whole run,
 # so the hundred-plus rsh calls below never trip a remote rate limit.
-ssh_mux_open || bad "cannot open an SSH control connection to $TARGET"
+ssh_mux_open || { HARNESS_FAILED=1; bad "cannot open an SSH control connection to $TARGET — the harness could not run"; }
 rsh "sudo -n true" 2>/dev/null || bad "the remote user needs passwordless sudo"
 # The difference between "the host has no such table" and "we could not read it"
 # matters: the cleanup deletes `inet vallum`, so a table we failed to save is a

@@ -253,17 +253,36 @@ groups:
       # happening. The second is the one that rots silently — a timer that was
       # disabled, a host that rebooted, a checkout that moved.
       - alert: VallumTwoHostGateFailing
-        expr: vallum_verify_passed == 0
+        expr: vallum_verify_outcome{kind="assert_fail"} == 1
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "The two-host gate failed on {{ $labels.host }} at {{ $labels.commit }}"
+          summary: "The two-host gate failed an assertion on {{ $labels.host }} at {{ $labels.commit }}"
           description: >-
-            `scripts/verify-scheduled.sh` recorded a failed run. The cause is in
-            the gate's own output in the journal (`journalctl -u
-            vallum-verify-scheduled`), and in /var/lib/vallum/verify-history.jsonl
-            next to the previous runs.
+            Vallum failed a claim it makes about itself. The cause is the gate's
+            own output in `journalctl -u vallum-verify-scheduled`, and the run
+            history is /var/lib/vallum/verify-history.jsonl beside it.
+
+      # Deliberately NOT critical, and deliberately not the same alert. A run
+      # the harness could not complete — an SSH timeout, a host that was down, a
+      # moved checkout — says nothing about the tunnel. Paging on it would mean
+      # paging for the test rig, which is exactly the conflation this split
+      # exists to prevent.
+      - alert: VallumTwoHostGateHarnessError
+        expr: vallum_verify_outcome{kind="harness_error"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The two-host gate could not run on {{ $labels.host }}"
+          description: >-
+            The gate did not complete, so its result is unknown rather than bad.
+            Usually the SSH transport to the target (the harness makes ~144
+            operations per run) or the host being unavailable. Check
+            `journalctl -u vallum-verify-scheduled` for the transport error; the
+            tunnel's own health is a separate question, answered by vallum_up
+            and the probes.
 
       - alert: VallumTwoHostGateStale
         expr: time() - vallum_verify_last_success_timestamp_seconds > 172800

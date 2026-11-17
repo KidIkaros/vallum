@@ -92,6 +92,24 @@ Grafana: copy `grafana/datasource.yml` and `grafana/dashboards.yml` into
 `/etc/vallum/grafana-dashboards/`, and restart. It binds `127.0.0.1:3000` — reach
 it over an SSH tunnel, not by opening the port.
 
+## The gate's exit codes, and why there are three
+
+`verify-remote.sh` and `verify-scheduled.sh` distinguish a product failure from a
+harness failure, because they are unrelated and one of them must never page as
+the other:
+
+| Exit | Meaning | Alert |
+|---|---|---|
+| 0 | every assertion passed | — |
+| 1 | an assertion failed — **Vallum** failed a claim | `VallumTwoHostGateFailing` (critical) |
+| 2 | the harness could not run — SSH, host down, moved checkout | `VallumTwoHostGateHarnessError` (warning) |
+| 3 | the gate passed but asserted less than last week | `VallumTwoHostGateWeakening` |
+
+A harness error is recorded as `vallum_verify_outcome{kind="harness_error"} 1`
+and its `assertions` is **0**, not the previous run's count — the verdict file
+survives between runs, and reading it undated was how an unreachable host once
+reported 42 assertions it never made.
+
 ## Check it is actually working
 
 A green unit is not evidence. These four commands are:

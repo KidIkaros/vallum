@@ -86,18 +86,33 @@ fi
 
 say "running the two-host gate against $HOST at $commit"
 log=$(mktemp -t vallum-verify.XXXXXX)
+# A marker so the verdict file can be dated: `.vallum-verdicts/verify-remote.json`
+# survives between runs, and a run that never wrote one (a harness error, a
+# failure before the summary) would otherwise report the PREVIOUS run's
+# assertion count as its own. Observed: an unreachable host reported 42
+# assertions — the count from the last successful run, which never happened.
+marker=$(mktemp -t vallum-verify-marker.XXXXXX)
 scripts/verify-remote.sh "$HOST" >"$log" 2>&1
 rc=$?
 
 # The gate prints its own assertion count in the summary; the verdict file is
 # the structured copy, and it is what the release path reads.
 assertions=0
-if [ -f .vallum-verdicts/verify-remote.json ]; then
-    assertions=$(sed -n 's/.*"assertions": *\([0-9]*\).*/\1/p' .vallum-verdicts/verify-remote.json | head -1)
+verdict=.vallum-verdicts/verify-remote.json
+if [ -f "$verdict" ] && [ "$verdict" -nt "$marker" ]; then
+    assertions=$(sed -n 's/.*"assertions": *\([0-9]*\).*/\1/p' "$verdict" | head -1)
     [ -n "$assertions" ] || assertions=0
 fi
+rm -f "$marker"
 
-if [ "$rc" -eq 0 ]; then status=pass; else status=fail; fi
+# Three outcomes, not two, and the third is the one that matters here: a run the
+# harness could not complete says nothing about the tunnel. verify-remote.sh
+# exits 2 for that, 1 for a failed assertion, 0 for a pass.
+case "$rc" in
+    0) status=pass ;;
+    2) status=harness_error ;;
+    *) status=assert_fail ;;
+esac
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 mkdir -p "$(dirname "$HISTORY")" 2>/dev/null
@@ -112,6 +127,17 @@ if [ -d "$(dirname "$METRICS")" ]; then
             printf '# HELP vallum_verify_passed Whether the last scheduled two-host run passed.\n'
             printf '# TYPE vallum_verify_passed gauge\n'
             printf 'vallum_verify_passed{host="%s",commit="%s"} %s\n' "$HOST" "$commit" "$([ "$rc" -eq 0 ] && echo 1 || echo 0)"
+            # One series per outcome, 1 for the one that happened. `assert_fail`
+            # means Vallum failed a claim; `harness_error` means the run did not
+            # happen and says nothing about Vallum. They get different alerts
+            # because they are different failures, and conflating them is how an
+            # SSH timeout becomes a product incident.
+            printf '# HELP vallum_verify_outcome The last scheduled run'"'"'s outcome, one series per kind.\n'
+            printf '# TYPE vallum_verify_outcome gauge\n'
+            for kind in pass assert_fail harness_error; do
+                printf 'vallum_verify_outcome{host="%s",commit="%s",kind="%s"} %s\n' \
+                    "$HOST" "$commit" "$kind" "$([ "$status" = "$kind" ] && echo 1 || echo 0)"
+            done
             printf '# HELP vallum_verify_assertions Assertions the last scheduled two-host run made.\n'
             printf '# TYPE vallum_verify_assertions gauge\n'
             printf 'vallum_verify_assertions{host="%s",commit="%s"} %s\n' "$HOST" "$commit" "$assertions"
@@ -157,8 +183,18 @@ if [ "$rc" -eq 0 ]; then
     exit 0
 fi
 
-say "FAIL  $commit  $assertions assertions  ($HOST)  exit $rc"
+if [ "$status" = harness_error ]; then
+    say "HARNESS ERROR  $commit  ($HOST)  exit $rc"
+    say "  the run did not happen, so this says nothing about the tunnel."
+    say "  It is recorded as harness_error and alerts as a warning, not a product failure."
+else
+    say "FAIL  $commit  $assertions assertions  ($HOST)  exit $rc"
+fi
 say "--- the gate's last 30 lines ---"
 tail -30 "$log"
 [ -n "$prev_status" ] && [ "$prev_status" = pass ] && say "TRANSITION  the previous run passed; this one did not"
+# The unit's SuccessExitStatus accepts 1, 2 and 3 — all three are signals, not
+# broken units — but the number carries which signal, and the metric carries it
+# into the store where the alerts can tell them apart.
+[ "$status" = harness_error ] && exit 2
 exit 1
