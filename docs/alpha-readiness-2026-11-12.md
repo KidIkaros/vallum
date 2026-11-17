@@ -439,6 +439,21 @@ answer. Every clause now has an artefact:
   server-side and then revoked. The ticket page now also tells the visitor how
   to get `vallum` — the earlier version handed out a command for a binary the
   stranger did not have.
+
+  > **CORRECTION 2026-11-17 — the deployment this paragraph describes is no
+  > longer the one serving.** Inspected live: the host has exactly one config,
+  > `/etc/vallum/vallum0.toml`, `10.7.0.1/24`, `listen 0.0.0.0:51820`, unchanged
+  > since 2026-11-11. There is no `vallumrc.toml`; the desk, the enrolment
+  > responder and the tunnel all run as `@vallum0`; `vallum-quick@vallumrc` has
+  > been in `failed` since 2026-11-16 17:01. A ticket minted today reads
+  > `107.175.238.82:51821`, not `:51921`. So the renumber to
+  > `vallumrc`/`10.99.90.0/24`/`51921` described above was either reverted or
+  > never left the state recorded here, and the `10.99.90.8/32` path cannot be
+  > reproduced against this host. The *capability* claim — a stranger can sign
+  > up and be served — was re-verified against the live deployment on 2026-11-17
+  > (desk answers 200 publicly, `peer invite` mints a real ticket naming the live
+  > responder); the *addresses* in this paragraph are stale and are kept only
+  > because deleting a historical claim hides that it went stale unnoticed.
 - **The validation is reproducible.** All gates are in the tree and runnable;
   verdicts are signed and commit-bound; the remote stamp names the host, the
   script hash, and the assertion count.
