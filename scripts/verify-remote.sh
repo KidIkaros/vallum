@@ -16,14 +16,32 @@
 #   ./scripts/verify-remote.sh --app-class user@vps.example.com
 #   ./scripts/verify-remote.sh --clean-remote user@vps.example.com
 #
-# A host that already runs Vallum is refused, because the test installs its own
-# deployment and would otherwise delete a working one. `--clean-remote` is the
-# explicit override: it first copies the deployment — /etc/vallum, /var/lib/vallum
-# and the units — with scripts/backup-deployment.sh, **verifies that copy**, and
-# refuses to remove anything if it could not be made; then it removes that
-# deployment (listed below) and proceeds. It removes *Vallum's* files, never
-# anyone else's. The archive path is printed at the end and recorded in the
-# verdict, so the restore never depends on someone having prepared a tarball.
+# **A host that already runs Vallum can run this test.** Scratch mode (the
+# default) keeps its state entirely apart from a deployment: its own directory
+# under /tmp, its own config, its own nftables table `inet vallumtest`, its own
+# interface `vallumrc`, its own network namespace, and its own UDP port and
+# subnet. What it cannot do is share a port or a tunnel subnet with the live
+# deployment, so those are checked up front and the run refuses with the exact
+# override if they collide:
+#
+#   PORT=51931 SUBNET=10.99.91.0/24 ./scripts/verify-remote.sh host
+#
+# At the end it asserts the live deployment is still there (/etc/vallum and
+# table `inet vallum`), and revokes the stamp if it is not. Before that check
+# existed, the teardown deleted /etc/vallum, /run/vallum, `inet vallum` and
+# /usr/bin/vallum{,-quick} unconditionally — which is why the release gate
+# needed a host of its own, and why the gate that proves the product could
+# destroy it.
+#
+# `--product` DOES install the real thing (units, /etc/vallum, /usr/bin/…) and
+# so still refuses a host that already runs Vallum. `--clean-remote` is the
+# explicit override for it: it first copies the deployment — /etc/vallum,
+# /var/lib/vallum and the units — with scripts/backup-deployment.sh,
+# **verifies that copy**, and refuses to remove anything if it could not be
+# made; then it removes that deployment (listed below) and proceeds. It removes
+# *Vallum's* files, never anyone else's. The archive path is printed at the end
+# and recorded in the verdict, so the restore never depends on someone having
+# prepared a tarball.
 #
 # Two modes, by where the client half runs:
 #
@@ -121,6 +139,17 @@ CLEAN=0
 # printed in the summary and recorded in the verdict, so the evidence names the
 # artefact that can put the host back.
 BACKUP_ARCHIVE=""
+# Set when this run deleted the host's own `inet vallum` table, so the restore
+# step knows whether there is anything to put back. Scratch mode never deletes
+# it, and re-applying a table that still exists fails ("File exists") — which
+# would have failed the run after a perfectly clean pass.
+NAT_DELETED=0
+# Set when the host had a live deployment at start-up; the run then asserts, at
+# the end, that it still does. That assertion is the point of the whole change.
+LIVE_DEPLOYMENT=0
+# Set when enrol_ssh moved a host's own /usr/bin/vallum aside; cleanup puts it
+# back. Without this a gate run replaces production binaries with the tree's.
+BINARY_RESTORE=0
 UPGRADE=0
 APP_CLASS=0
 # The outage leg runs once per run, not once per transport: it costs minutes and
@@ -255,6 +284,7 @@ SERVER_PATTERN=""
 
 NAT_RESTORE_FAILED=0
 restore_nat() {
+    [ "$NAT_DELETED" = 1 ] || return 0
     [ -s "$NAT_SAVE" ] || return 0
     if rsh "sudo nft -f -" <"$NAT_SAVE" >/dev/null 2>&1; then
         ok "the host's own \`inet vallum\` NAT table was restored"
@@ -285,31 +315,79 @@ cleanup() {
     [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null
     [ -f "$LOCAL_DIR/client.toml" ] && "$QUICK" detach "$LOCAL_DIR/client.toml" >/dev/null 2>&1
     if [ "$REMOTE_STARTED" = 1 ]; then
-        rsh "set +e
-            sudo pkill -f '^$REMOTE_DIR/vallum run' 2>/dev/null
-            sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
-            sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
-            sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
-            sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
-                       /etc/systemd/system/vallum-quick-watch@.service \
-                       /etc/systemd/system/vallum-enroll@.service
-            sudo systemctl daemon-reload >/dev/null 2>&1
-            sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
-            sudo ufw delete allow $PORT/udp >/dev/null 2>&1
-            sudo ufw delete allow $((PORT+1))/udp >/dev/null 2>&1
-            sudo iptables -D FORWARD -i vallumrc -j ACCEPT 2>/dev/null
-            sudo iptables -D FORWARD -o vallumrc -j ACCEPT 2>/dev/null
-            sudo iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
-            sudo nft delete table inet vallum 2>/dev/null
-            sudo nft delete table inet vallumtest 2>/dev/null
-            sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick
-            sudo rm -rf $REMOTE_DIR
-            # The client namespace (--namespaced) and its veth. The veth is
-            # deleted by name on the host first: deleting the namespace alone
-            # would orphan the host-side peer.
-            sudo ip netns pids $CLI_NS 2>/dev/null | xargs -r kill 2>/dev/null
-            sudo ip netns del $CLI_NS 2>/dev/null
-            sudo ip link del $CLI_VETH 2>/dev/null" >/dev/null 2>&1
+        # The teardown removes what THIS RUN created, not every Vallum artefact
+        # on the machine. It used to delete /etc/vallum, /run/vallum, table
+        # `inet vallum` and /usr/bin/vallum{,-quick} unconditionally — which is
+        # why the script had to refuse any host that already ran Vallum, and why
+        # the release gate needed a second host of its own. Scratch mode installs
+        # none of those: it runs from $REMOTE_DIR with `--no-host --no-service`,
+        # its own config, its own table `inet vallumtest` and its own interface
+        # `vallumrc`. So on a host with a live deployment, an unconditional
+        # teardown is the whole problem, not a safety measure.
+        if [ "$PRODUCT" = 1 ]; then
+            # --product / --upgrade DID install the real thing: units, /etc/vallum,
+            # /usr/bin/vallum{,-quick}, the live firewall state. Same teardown.
+            rsh "set +e
+                sudo pkill -f '^$REMOTE_DIR/vallum run' 2>/dev/null
+                sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
+                sudo systemctl disable --now vallum-enroll@vallumrc >/dev/null 2>&1
+                sudo systemctl disable --now vallum-quick@vallumrc vallum@vallumrc >/dev/null 2>&1
+                sudo rm -f /etc/systemd/system/vallum@.service /etc/systemd/system/vallum-quick@.service \
+                           /etc/systemd/system/vallum-quick-watch@.service \
+                           /etc/systemd/system/vallum-enroll@.service
+                sudo systemctl daemon-reload >/dev/null 2>&1
+                sudo rm -rf /etc/vallum /run/vallum /etc/sysctl.d/90-vallum.conf
+                sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+                sudo ufw delete allow $((PORT+1))/udp >/dev/null 2>&1
+                sudo iptables -D FORWARD -i vallumrc -j ACCEPT 2>/dev/null
+                sudo iptables -D FORWARD -o vallumrc -j ACCEPT 2>/dev/null
+                sudo iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
+                sudo nft delete table inet vallum 2>/dev/null
+                sudo nft delete table inet vallumtest 2>/dev/null
+                sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick
+                sudo rm -rf $REMOTE_DIR
+                # The client namespace (--namespaced) and its veth. The veth is
+                # deleted by name on the host first: deleting the namespace alone
+                # would orphan the host-side peer.
+                sudo ip netns pids $CLI_NS 2>/dev/null | xargs -r kill 2>/dev/null
+                sudo ip netns del $CLI_NS 2>/dev/null
+                sudo ip link del $CLI_VETH 2>/dev/null" >/dev/null 2>&1
+        else
+            # Scratch mode. Only what this run made: the test table, the test
+            # daemon and its directory, the interface it created, the port rule
+            # it added, and the namespace. `/etc/vallum`, `/run/vallum`,
+            # `inet vallum` and `/usr/bin/vallum*` belong to whoever was here
+            # first and are not this script's to remove.
+            rsh "set +e
+                sudo pkill -f '^$REMOTE_DIR/vallum run' 2>/dev/null
+                sudo pkill -f '^$REMOTE_DIR/vallum enroll-serve' 2>/dev/null
+                sudo ufw delete allow $PORT/udp >/dev/null 2>&1
+                sudo ufw delete allow $((PORT+1))/udp >/dev/null 2>&1
+                # One rule per interface family this run could have added; -D
+                # removes a single matching rule and fails harmlessly if absent.
+                sudo iptables -D FORWARD -i vallumrc -j ACCEPT 2>/dev/null
+                sudo iptables -D FORWARD -o vallumrc -j ACCEPT 2>/dev/null
+                sudo iptables -D INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null
+                sudo nft delete table inet vallumtest 2>/dev/null
+                sudo ip netns pids $CLI_NS 2>/dev/null | xargs -r kill 2>/dev/null
+                sudo ip netns del $CLI_NS 2>/dev/null
+                sudo ip link del $CLI_VETH 2>/dev/null
+                sudo rm -rf $REMOTE_DIR" >/dev/null 2>&1
+            # The scratch daemon creates interface `vallumrc`; the live
+            # deployment's is a different name, and this only removes the one
+            # this run made.
+            rsh "sudo ip link del vallumrc 2>/dev/null" >/dev/null 2>&1
+            # Put the host's own binaries back, and remove the test build only
+            # when there was nothing there before.
+            if [ "$BINARY_RESTORE" = 1 ]; then
+                rsh "set +e
+                    sudo mv -f /usr/bin/vallum.pre-verify-remote /usr/bin/vallum
+                    sudo mv -f /usr/bin/vallum-quick.pre-verify-remote /usr/bin/vallum-quick" >/dev/null 2>&1
+                note "restored the host's own /usr/bin/vallum{,-quick}"
+            else
+                rsh "sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
+            fi
+        fi
         if [ -n "$FORWARD_WAS" ]; then
             rsh "sudo sysctl -q -w net.ipv4.ip_forward=$FORWARD_WAS" >/dev/null 2>&1
         fi
@@ -319,6 +397,21 @@ cleanup() {
     # did — put the table back and then deleted it again, so the fix was a no-op
     # that read like a fix (found by the premortem, 2026-11-12).
     restore_nat
+    # The host had a deployment when this run started and was not asked to
+    # remove it: prove it is still there. Asserted rather than assumed because
+    # the whole reason scratch mode used to need a dedicated host was a teardown
+    # that took production with it, and a future edit could put that back
+    # silently. This check is what makes the regression loud.
+    if [ "$LIVE_DEPLOYMENT" = 1 ] && [ "$PRODUCT" != 1 ]; then
+        if rsh "test -e /etc/vallum && sudo nft list table inet vallum >/dev/null 2>&1"; then
+            ok "the host's live deployment is intact (/etc/vallum and table inet vallum)"
+        else
+            rm -f "$(verified_stamp)" 2>/dev/null
+            fail "the host's live deployment is GONE — this run destroyed a deployment it was not asked to touch"
+            fail "   restore it: the archive from backup-deployment.sh, or /root on $TARGET"
+            exit 1
+        fi
+    fi
     if [ "$NAT_RESTORE_FAILED" = 1 ]; then
         # The stamp says this commit passed the gate. If the host was left
         # broken, that stamp is a lie - revoke it and fail the run.
@@ -364,10 +457,51 @@ else
     note "the host has no \`inet vallum\` table to preserve"
 fi
 if rsh "test -e /etc/vallum" 2>/dev/null; then
-    if [ "$CLEAN" != 1 ]; then
-        bad "/etc/vallum already exists on the remote; refusing to delete a live deployment.
-   Re-run with --clean-remote to remove it first, or pick a host with no Vallum."
+    LIVE_DEPLOYMENT=1
+    if [ "$CLEAN" != 1 ] && [ "$PRODUCT" = 1 ]; then
+        # --product installs the real thing over /etc/vallum and the real units,
+        # so on a host that already has a deployment it would overwrite one.
+        bad "/etc/vallum already exists on the remote and --product would install over it.
+   Re-run with --clean-remote to remove the existing deployment first, or pick a
+   host with no Vallum."
     fi
+    if [ "$CLEAN" != 1 ]; then
+        # Scratch mode touches none of the existing deployment's state: its own
+        # directory, its own config, its own table `inet vallumtest`, its own
+        # interface `vallumrc`, its own namespace. What it CAN collide with is
+        # the host's UDP port and tunnel subnet, and that collision would be
+        # silent — two daemons on one port, or two interfaces claiming one /24 —
+        # so it is checked here rather than discovered as a mystery handshake
+        # failure later.
+        live=$(rsh "sudo cat /etc/vallum/*.toml 2>/dev/null \
+            | sed -n -e 's/^[[:space:]]*listen[[:space:]]*=[[:space:]]*\"[^\"]*:\([0-9]*\)\"/port \1/p' \
+                     -e 's/^[[:space:]]*address[[:space:]]*=[[:space:]]*\"\([0-9.]*\)\/[0-9]*\"/addr \1/p'" 2>/dev/null)
+        live_port=$(printf '%s\n' "$live" | sed -n 's/^port \(.*\)/\1/p' | sort -u)
+        live_addr=$(printf '%s\n' "$live" | sed -n 's/^addr \(.*\)/\1/p' | sort -u)
+        live_prefix=${SUBNET%.*.*}
+        for p in $live_port; do
+            [ "$p" = "$PORT" ] || continue
+            bad "the host already listens on UDP $PORT (an existing deployment's config).
+   Scratch mode would bind the same port. Pick another:
+     PORT=$((PORT + 10)) SUBNET=10.99.91.0/24 $0 $TARGET"
+        done
+        for a in $live_addr; do
+            case "$a" in
+                "$live_prefix".*) : ;;
+                *) continue ;;
+            esac
+            bad "the host already uses the subnet $SUBNET (an existing deployment's config).
+   Two daemons on one /24 would route each other's addresses. Pick another:
+     SUBNET=10.99.91.0/24 $0 $TARGET"
+        done
+        note "the host has a live deployment; scratch mode leaves it alone"
+        note "   its state:  /etc/vallum, /run/vallum, table inet vallum, /usr/bin/vallum*"
+        note "   this run:   $REMOTE_DIR, table inet vallumtest, iface vallumrc, UDP $PORT, $SUBNET"
+    fi
+fi
+# Only --clean-remote removes a deployment. Scratch mode above proved it can run
+# beside one; this branch is the destructive one and it is opt-in.
+if [ "$CLEAN" = 1 ] && rsh "test -e /etc/vallum" 2>/dev/null; then
     # The restore used to be a tarball built by hand from a paragraph in a
     # document — so the gate that proves the product could destroy it whenever
     # nobody read that far. It is now the script's own first step, and a failure
@@ -399,12 +533,19 @@ if rsh "test -e /etc/vallum" 2>/dev/null; then
         sudo ufw delete allow $PORT/udp >/dev/null 2>&1
         sudo nft delete table inet vallum >/dev/null 2>&1
         sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
+    NAT_DELETED=1
     rsh "test ! -e /etc/vallum" || bad "could not remove the existing deployment"
     ok "existing deployment removed"
 fi
+# The old single block ended here; the `fi` above closes the --clean-remote
+# branch, and the block it replaced closed the outer `/etc/vallum` test.
 FORWARD_WAS=$(rsh "cat /proc/sys/net/ipv4/ip_forward" 2>/dev/null | tr -d '[:space:]')
 [ -n "$FORWARD_WAS" ] || bad "cannot read the remote's ip_forward"
-ok "passwordless sudo, no existing deployment, ip_forward=$FORWARD_WAS"
+if [ "$LIVE_DEPLOYMENT" = 1 ] && [ "$CLEAN" != 1 ]; then
+    ok "passwordless sudo, ip_forward=$FORWARD_WAS, running beside the host's live deployment"
+else
+    ok "passwordless sudo, no existing deployment, ip_forward=$FORWARD_WAS"
+fi
 
 # The target may be an ssh alias, so ask ssh what it would connect to — as the
 # invoking user, because `ssh` reads `~/.ssh/config` from the passwd entry and
@@ -638,8 +779,23 @@ enrol_bundle() {
 enrol_ssh() {
     local name=$1 dir=$2
     # `setup --remote` runs `sudo vallum peer enroll` over there, so the binary
-    # must be installed. Cleanup removes it again.
+    # must be installed.
+    #
+    # On a host that already has a deployment this installs OVER production
+    # binaries — a gate run would leave the tree's build at /usr/bin/vallum,
+    # which the next `systemctl restart` would then run. So an existing binary is
+    # moved aside first and put back by cleanup, and the run says so. Scratch
+    # mode used to delete /usr/bin/vallum outright on the way out, which was
+    # worse in a different direction (it removed a deployment's binary); this is
+    # the version that neither keeps nor destroys what was there.
     if [ "$PRODUCT" != 1 ]; then
+        if rsh "sudo test -e /usr/bin/vallum" 2>/dev/null; then
+            rsh "sudo cp -p /usr/bin/vallum /usr/bin/vallum.pre-verify-remote \
+                 && sudo cp -p /usr/bin/vallum-quick /usr/bin/vallum-quick.pre-verify-remote" 2>/dev/null \
+                || bad "could not set the host's own binaries aside"
+            BINARY_RESTORE=1
+            note "the host already has /usr/bin/vallum — set aside, restored by cleanup"
+        fi
         rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum" || bad "install vallum on the remote"
         note "installed vallum to /usr/bin on the remote for the ssh transport"
     fi

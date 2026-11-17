@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The two-host gate runs beside a live deployment — no second host needed.** `verify-remote.sh`'s
+  scratch mode installs nothing into `/etc/vallum`, `/run/vallum`, `/usr/bin` or nftables table
+  `inet vallum`, yet its teardown deleted all of them on the way out, so the script had to refuse any
+  host that already ran Vallum and the release gate effectively required a dedicated VPS. Cleanup now
+  removes only what the run created (`inet vallumtest`, `vallumrc`, `/tmp/vallum-remote-test`, its own
+  namespace, its own port rule), refuses up front if `PORT`/`SUBNET` collide with the deployment's
+  config, sets a host's own `/usr/bin/vallum{,-quick}` aside during the ssh transport and restores
+  them, and **asserts at the end that `/etc/vallum` and `inet vallum` survived** — revoking the stamp
+  if they did not. `--product` still refuses a live host, because it does install the real thing.
+  Verified on the live host: PASS, 42 assertions, with config/key/NAT checksums identical before and
+  after.
 - **The release trust anchor is one key set in three places, and a gate keeps it that way.**
   `scripts/check-trust-anchor.sh` compares `scripts/install.sh`'s embedded
   `RELEASE_SIGNING_PUBKEY` against `packaging/vallum-release.pub` and

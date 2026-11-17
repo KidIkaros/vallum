@@ -212,6 +212,35 @@ it proved. The stamp lives outside the repository so it cannot be committed by
 accident, and it is bound to a commit so a pass from last month cannot stand in
 for this tree.
 
+### It runs beside a live deployment
+
+Scratch mode keeps every piece of its state separate from a deployment: its own
+directory under `/tmp`, its own config, its own nftables table `inet vallumtest`,
+its own interface `vallumrc`, its own network namespace, and its own UDP port and
+subnet. So the gate can run against the host that already serves traffic — no
+second VPS, no `--clean-remote`, no downtime, no restore. Two things are checked
+rather than assumed:
+
+- **Port and subnet must not collide** with the deployment's config. The run
+  refuses with the exact override if they do (`PORT=51931 SUBNET=10.99.91.0/24`).
+- **The deployment must still be there at the end.** The run asserts `/etc/vallum`
+  and table `inet vallum` survived, and revokes the stamp if they did not.
+
+The teardown removes only what the run created. Before that was true, it deleted
+`/etc/vallum`, `/run/vallum`, `inet vallum` and `/usr/bin/vallum{,-quick}` on the
+way out regardless of mode — which is why this gate used to need a host of its
+own, and why the gate that proves the product could destroy it. A host's own
+`/usr/bin/vallum{,-quick}` is now moved aside during the ssh transport and put
+back by cleanup, so a run neither keeps nor destroys production binaries.
+
+**One caveat, stated plainly:** the default `--namespaced` mode runs the client
+in a network namespace *on the same machine* as the server. That proves the
+protocol, the enrolment paths and the network path, but not that two kernels
+agree. `--host-direct` (client on the invoking machine, server on the host) is
+the only thing that proves the latter, and it rewrites this machine's routing for
+the duration of the run — keep it for a release-day pass after
+protocol-affecting changes.
+
 ## Cutting a release
 
 ```sh

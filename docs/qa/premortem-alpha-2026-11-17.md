@@ -67,8 +67,16 @@ records an intent, and no actor performs it.
    commit-bound verdict with `status: skipped` and the reason in `note`, plus a row in the tracked
    `docs/qa/gate-skips.md`. The release log prints `N gate(s) unproven for this commit`, and a
    recorded skip is no longer misread as a failed gate.
-4. Provision the throwaway second VPS — it is already named as the standing improvement and it is the
-   only thing that turns gate 1 from "the live host survived" into "two machines agreed".
+4. ~~Provision the throwaway second VPS.~~ **Superseded 2026-11-17 — the second host was never
+   needed.** The refusal that made this look like an infrastructure problem was the script's own
+   teardown: scratch mode installed nothing into `/etc/vallum`, `/run/vallum`, `/usr/bin` or table
+   `inet vallum`, yet cleanup deleted all of them on the way out, so the script had to refuse any host
+   that already ran Vallum. Cleanup now removes only what the run created, a port/subnet collision is
+   checked up front, a host's own `/usr/bin/vallum{,-quick}` is set aside and restored, and the run
+   asserts at the end that `/etc/vallum` and `inet vallum` survived (revoking the stamp if not).
+   Verified by running it: `verify-remote.sh wingman-vps` **PASSED with 42 assertions beside the live
+   deployment**, and the host's config, key and NAT table checksums were identical before and after.
+   `--host-direct` remains the only true two-machine pass, and that is a laptop run, not a VPS.
 5. Put a second owner on `CODEOWNERS` and a second key in `packaging/allowed_signers`, or write the
    break-glass procedure for the key — the strictness is right; single custody is what is missing.
 
