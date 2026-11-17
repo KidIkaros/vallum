@@ -197,10 +197,11 @@ class DaemonCliTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             daemon.liveness()
 
-    def test_the_base_port_says_unknown_rather_than_raising(self):
-        # A Daemon implementation that cannot answer must not take the account
-        # page down; the page then says so in words.
-        self.assertEqual(desk_module.Daemon().liveness(), {})
+    def test_the_base_port_says_it_cannot_answer_rather_than_raising(self):
+        # `None` is "could not ask". An empty dict is a different fact — the
+        # daemon answered and has no peers — and conflating the two is how a page
+        # tells a user "never connected" about a device the server never had.
+        self.assertIsNone(desk_module.Daemon().liveness())
 
 
 class StatusTests(DeskTestCase):
@@ -427,7 +428,8 @@ class LivenessTests(DeskTestCase):
         return self.desk.account(self._token())
 
     def test_a_device_that_never_handshaked_is_never_not_active(self):
-        code, view = self._account({})
+        # The peer exists on the server and has not connected: `never`.
+        code, view = self._account({"u0001-friend": None})
         self.assertEqual(code, 200)
         device = view["devices"][0]
         self.assertEqual(device["status"], "active")
@@ -455,6 +457,19 @@ class LivenessTests(DeskTestCase):
         now = 1_000_000
         self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS, now)[0], "live")
         self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS - 1, now)[0], "offline")
+
+    def test_a_device_the_server_has_no_peer_for_is_missing_not_never(self):
+        # Found on the live server after the first deploy: all 14 desk devices
+        # had no peer on the daemon (the peer table had been rebuilt when the
+        # server was renumbered), and the page said "never connected" — which
+        # reads as "try connecting". It cannot connect; there is nothing to
+        # connect to. The fix is a new ticket.
+        code, view = self._account({})
+        self.assertEqual(code, 200)
+        device = view["devices"][0]
+        self.assertEqual(device["status"], "active")
+        self.assertEqual(device["connection"], "missing")
+        self.assertIsNone(device["last_seen_seconds"])
 
     def test_a_daemon_that_cannot_answer_says_unknown_and_keeps_the_page(self):
         # Not `offline`: telling a user their tunnel is down because the

@@ -154,12 +154,20 @@ class Daemon:
     def liveness(self):
         """Return peer name → last handshake as unix seconds, or None.
 
-        A peer absent from the mapping, or mapped to None, has never handshaked.
-        This is the port's *default* rather than an abstract method: an
-        implementation that cannot answer must not make the account page fail,
-        and the page then says "unknown" rather than inventing a state.
+        Two different answers, and the difference matters:
+
+        * a **dict** — the daemon answered; a peer mapped to `None` exists and
+          has never handshaked, and a peer *absent* from the dict does not exist
+          on the server at all;
+        * **None** — the daemon could not be asked, so nothing here is known.
+
+        Collapsing those two into one empty dict is how a page ends up telling a
+        user "never connected" about a device the server has no record of, which
+        sends them to the wrong fix. This is the port's default rather than an
+        abstract method: an implementation that cannot answer must not make the
+        account page fail.
         """
-        return {}
+        return None
 
     def remove(self, peer):
         """Revoke a peer on the server."""
@@ -222,6 +230,11 @@ class DaemonCli(Daemon):
         `null`, which is the daemon's own record — the same field
         `vallum_peer_handshake_age_seconds` is rendered from, so the number a
         user sees here and the number a scraper sees cannot drift.
+
+        Only peers the daemon actually has are in the result. A desk device
+        whose peer is missing from here is a different problem from one that
+        exists and has not connected, and the caller is responsible for saying
+        so.
         """
         out = self._run("show", "--json")
         seen = {}
@@ -584,9 +597,18 @@ class Desk:
                 # a statement about a device that no longer exists.
                 device["connection"], device["last_seen_seconds"] = None, None
                 continue
-            device["connection"], device["last_seen_seconds"] = (
-                ("unknown", None) if seen is None
-                else connection_state(seen.get(device["peer"]), now))
+            if seen is None:
+                device["connection"], device["last_seen_seconds"] = "unknown", None
+                continue
+            if device["peer"] not in seen:
+                # The account has a device the server has no peer for. That is
+                # not "never connected" — connecting is not something this device
+                # can do — it is a disagreement between the desk and the daemon,
+                # and the fix is a new ticket, not a retry.
+                device["connection"], device["last_seen_seconds"] = "missing", None
+                continue
+            device["connection"], device["last_seen_seconds"] = connection_state(
+                seen[device["peer"]], now)
         return 200, {
             "peer": row["peer"], "label": row["label"], "plan": row["plan"],
             "status": row["status"], "expires": row["expires"],
@@ -1023,6 +1045,8 @@ def _connection_cell(device):
         return f"not connected (last seen {when} ago)"
     if state == "never":
         return "never connected"
+    if state == "missing":
+        return "not on the server — this device has no peer; get a new ticket"
     if state is None:
         return "—"
     return "unknown — the server could not be asked"
