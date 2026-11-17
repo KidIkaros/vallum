@@ -181,6 +181,19 @@ So these are post-flip steps, and they need the flip to be safe already:
       `test (stable)`, `test (1.95.0)`, `install`, `acceptance` (`audit` is not
       required — it refuses fork PRs by design), dismiss stale approvals,
       require `CODEOWNERS` review; no force pushes, no branch deletion.
+
+      **Read this before treating a bypass as a red flag.** The rule requires
+      one approving review and `CODEOWNERS` review, and the sole maintainer is
+      the code owner — so the owner *cannot* satisfy it, and every direct push
+      reports `Bypassed rule violations`. That is the intended posture, not a
+      lapse: the protection exists to keep a *stranger* off `main`, and
+      `enforce_admins` is off so the one person who can review everything does
+      not have to pretend to review their own work. The gate for the owner is
+      `scripts/verify.sh` locally plus the signed verdicts and the two-host
+      stamp that `release.sh` refuses to proceed without. The moment a second
+      maintainer exists, turn `enforce_admins` on — the rule is already correct
+      for that day, and it is the only thing standing between a compromised
+      contributor account and `main`.
 - [x] **Private vulnerability reporting enabled** (2026-11-16, via
       `PUT /repos/KidIkaros/vallum/private-vulnerability-reporting`). The
       Security → Advisories → Report a vulnerability button now exists.
