@@ -132,6 +132,47 @@ CLI_VETH=vallum-cli-h
 # Every client-side action happens on the target, inside the namespace.
 # Arguments are joined because they are all literals this script controls.
 cli_put(){ rsh "sudo ip netns exec $CLI_NS $*"; }
+
+# Why a large download failed, from what curl actually reported.
+#
+# The assertion used to print "<n> of 1000000 bytes — path MTU blackhole", which
+# states a cause it never measured: size_download is 0 for a refused connection,
+# a silently dropped packet, an unresolvable name and a stalled TLS handshake
+# alike. A run that failed on an SSH hiccup therefore read as an MTU fault, and
+# the next run — identical code, same host — passed. A gate whose failure text
+# names the wrong layer is worse than one that says nothing, because it sends
+# the reader to the wrong file.
+#
+# The discriminator is curl's exit status plus the two timers:
+#   time_connect 0 + no appconnect   TCP never established
+#   time_connect set + no appconnect TCP is fine, TLS is not — THE blackhole shape
+#   appconnect set                  TLS completed, so the fault is after it
+# A timer of 0.000000 means the phase never happened; 0.041 means it took 41 ms.
+# `${x%%.*}` cannot tell those apart — it reads 0.041 as "0" — so the comparison
+# is numeric. (This was written the wrong way first, and the classifier then
+# called a 41 ms connect "TCP never established": the same mis-attribution the
+# whole change exists to remove.)
+is_zero() { awk -v v="${1:-0}" 'BEGIN { exit !(v + 0 == 0) }'; }
+
+describe_download_failure() { # $1=exit $2=size $3=connect $4=appconnect $5=http_code
+    local rc=$1 size=$2 connect=$3 appconnect=$4 code=$5 what
+    case "$rc" in
+        255) what="the SSH transport to the target failed, so curl never ran — this is not a tunnel fault" ;;
+        0)   what="curl succeeded but returned $size bytes (HTTP $code)" ;;
+        6)   what="the name did not resolve inside the namespace — a DNS fault, not MTU" ;;
+        7)   what="connection refused — something answered, so the path is fine" ;;
+        28)  if is_zero "$connect"; then
+                 what="timed out before TCP connected — packets are being dropped or the route is wrong"
+             elif is_zero "$appconnect"; then
+                 what="TCP connected (${connect}s) but TLS never completed — the path-MTU blackhole signature"
+             else
+                 what="TLS completed (${appconnect}s) and the transfer stalled — loss, not MTU"
+             fi ;;
+        35|60) what="TLS handshake failed (exit $rc) with TCP connected — certificate or MTU, check the pair" ;;
+        *)   what="curl exited $rc" ;;
+    esac
+    printf '%s' "$what"
+}
 PRODUCT=0
 KEEP=0
 CLEAN=0
@@ -1138,15 +1179,35 @@ PY
     # some sites hang", so the size that arrived matters.
     curl_r=$(rsh "command -v curl >/dev/null 2>&1 && echo 1")
     if [ "${curl_r:-0}" = 1 ] && [ -n "$edge" ]; then
-        local got
-        got=$(cli_put "curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+        local out rc size connect appconnect code
+        out=$(cli_put "curl -s --max-time 25 -o /dev/null \
+            -w '%{size_download} %{time_connect} %{time_appconnect} %{http_code}' \
             --resolve speed.cloudflare.com:443:$edge \
-            'https://speed.cloudflare.com/__down?bytes=1000000'" 2>"$dir/curl.log" || true)
-        if [ "${got:-0}" -ge 900000 ]; then
+            'https://speed.cloudflare.com/__down?bytes=1000000'" 2>"$dir/curl.log")
+        rc=$?
+        # ssh returns the remote command's status, so curl's own exit code
+        # survives; 255 means the SSH hop itself failed and curl never ran.
+        read -r size connect appconnect code <<<"$out"
+        if [ "${size:-0}" -ge 900000 ]; then
             ok "$name: a 1 MiB HTTPS response arrives intact"
         else
             [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
-            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+            why=$(describe_download_failure "$rc" "${size:-0}" "$connect" "$appconnect" "$code")
+            # Pay for a measurement only when the shape says MTU could be it:
+            # the server is the hop that NATs this download, so its path to the
+            # edge is the one that would black-hole it. `vallum doctor
+            # --probe-mtu` already exists and bisects with `ping -M do`; the
+            # assertion above used to *name* this cause without ever asking it.
+            measured=""
+            case "$why" in
+                *blackhole*|*"TLS handshake failed"*)
+                    measured=$(rsh "sudo $SERVER_CMD doctor --config $CONFIG --probe-mtu $edge 2>&1 | sed -n 's/^[A-Z]* *path-mtu *//p'" | head -1)
+                    [ -n "$measured" ] && measured="
+   measured: path-mtu $measured"
+                    ;;
+            esac
+            bad "$name: a large HTTPS response did not arrive (${size:-0} of 1000000 bytes, curl exit $rc, connect ${connect:-none}s, tls ${appconnect:-none}s)
+   $why$measured"
         fi
     else
         note "curl absent on the target, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
@@ -1441,15 +1502,33 @@ PY
     # reported by users as "the VPN is up but some sites hang", so the size that
     # arrived matters more than the fact that something did.
     if command -v curl >/dev/null 2>&1 && [ -n "$edge" ]; then
-        local got
-        got=$(curl -s --max-time 25 -o /dev/null -w '%{size_download}' \
+        local out rc size connect appconnect code
+        out=$(curl -s --max-time 25 -o /dev/null \
+            -w '%{size_download} %{time_connect} %{time_appconnect} %{http_code}' \
             --resolve speed.cloudflare.com:443:$edge \
-            "https://speed.cloudflare.com/__down?bytes=1000000" 2>"$dir/curl.log" || true)
-        if [ "${got:-0}" -ge 900000 ]; then
+            "https://speed.cloudflare.com/__down?bytes=1000000" 2>"$dir/curl.log")
+        rc=$?
+        read -r size connect appconnect code <<<"$out"
+        if [ "${size:-0}" -ge 900000 ]; then
             ok "$name: a 1 MiB HTTPS response arrives intact"
         else
             [ -s "$dir/curl.log" ] && cat "$dir/curl.log"
-            bad "$name: a large HTTPS response did not arrive (${got:-0} of 1000000 bytes) — path MTU blackhole"
+            why=$(describe_download_failure "$rc" "${size:-0}" "$connect" "$appconnect" "$code")
+            # Pay for a measurement only when the shape says MTU could be it:
+            # the server is the hop that NATs this download, so its path to the
+            # edge is the one that would black-hole it. `vallum doctor
+            # --probe-mtu` already exists and bisects with `ping -M do`; the
+            # assertion above used to *name* this cause without ever asking it.
+            measured=""
+            case "$why" in
+                *blackhole*|*"TLS handshake failed"*)
+                    measured=$(rsh "sudo $SERVER_CMD doctor --config $CONFIG --probe-mtu $edge 2>&1 | sed -n 's/^[A-Z]* *path-mtu *//p'" | head -1)
+                    [ -n "$measured" ] && measured="
+   measured: path-mtu $measured"
+                    ;;
+            esac
+            bad "$name: a large HTTPS response did not arrive (${size:-0} of 1000000 bytes, curl exit $rc, connect ${connect:-none}s, tls ${appconnect:-none}s)
+   $why$measured"
         fi
     else
         note "curl absent, or the edge could not be resolved over ordinary DNS: the large-response check was skipped"
