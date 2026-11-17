@@ -57,8 +57,11 @@ records an intent, and no actor performs it.
    `scripts/accept-desk-restore.sh` runs the copy-and-restore path as a gate (8 assertions, signed
    verdict) in `verify.sh`, `ci-local.sh` and CI. Off-host remains the operator's `--dest`; a copy on
    the same disk is not disaster recovery and the docs say so.
-3. Make a skip an artefact: `--skip-remote "reason"` writes a signed, commit-bound `skipped` verdict,
-   so "how many releases shipped unproven" is a query instead of a memory.
+3. ~~Make a skip an artefact.~~ **Done 2026-11-17** (`efab8cc`): every escape hatch
+   (`--skip-remote`, `--skip-stale`, `--skip-arm`, `--skip-fuzz`, `--skip-desktop`) writes a signed,
+   commit-bound verdict with `status: skipped` and the reason in `note`, plus a row in the tracked
+   `docs/qa/gate-skips.md`. The release log prints `N gate(s) unproven for this commit`, and a
+   recorded skip is no longer misread as a failed gate.
 4. Provision the throwaway second VPS — it is already named as the standing improvement and it is the
    only thing that turns gate 1 from "the live host survived" into "two machines agreed".
 5. Put a second owner on `CODEOWNERS` and a second key in `packaging/allowed_signers`, or write the
