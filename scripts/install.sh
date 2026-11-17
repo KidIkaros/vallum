@@ -413,6 +413,7 @@ install_docs() {
         vallum-quick-watch@.service vallum-enroll@.service \
         vallum-cleanup.service \
         vallum-desk@.service \
+        vallum-desk-backup.service vallum-desk-backup.timer \
         vallum-metrics.service vallum-metrics.timer; do
         if [ -f "$SOURCE_DIR/$unit" ]; then
             run install -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
@@ -473,6 +474,23 @@ install_docs() {
         run install -D -m 0755 "$desk_admin_source" \
             "$(dest /usr/local/lib/vallum/vallum-desk-admin)"
         run ln -sf /usr/local/lib/vallum/vallum-desk-admin "$(dest /usr/local/sbin/vallum-desk-admin)"
+    fi
+    # The desk's account database is the one thing in the product that cannot
+    # be rebuilt — the account number is the only credential and there is no
+    # reset flow. The backup timer ships with it and is enabled below; the
+    # service's ConditionPathExists keeps it inert on a host with no desk.
+    desk_backup_source=""
+    for candidate in "$SOURCE_DIR/vallum-desk-backup" \
+        "$(dirname "$0")/../service/vallum-desk-backup" \
+        "service/vallum-desk-backup" "packaging/vallum-desk-backup"; do
+        if [ -f "$candidate" ]; then
+            desk_backup_source=$candidate
+            break
+        fi
+    done
+    if [ -n "$desk_backup_source" ]; then
+        run install -D -m 0755 "$desk_backup_source" \
+            "$(dest /usr/local/lib/vallum/vallum-desk-backup)"
     fi
     # The vallum:// scheme handler: a browser Connect click becomes a
     # `vallum join` with the ticket on stdin and the account number in the
@@ -538,6 +556,13 @@ install_docs() {
     if [ -z "$ROOT" ]; then
     if [ -f "$UNIT_DIR/vallum-cleanup.service" ]; then
         run systemctl enable vallum-cleanup || true
+    fi
+    # The desk backup timer joins the restore floor: enabling it costs nothing
+    # on a host with no desk (the service is conditioned on the database
+    # existing) and it is the only thing that makes a copy happen without
+    # someone remembering to run a command.
+    if [ -f "$UNIT_DIR/vallum-desk-backup.timer" ]; then
+        run systemctl enable --now vallum-desk-backup.timer || true
     fi
     run systemctl daemon-reload || true
 
@@ -618,8 +643,10 @@ uninstall() {
         run systemctl disable --now "$instance"
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
+    run systemctl disable --now vallum-desk-backup.timer 2>/dev/null || true
     run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
     run rm -f /usr/local/lib/vallum/vallum-desk /usr/local/lib/vallum/vallum-desk-admin \
+        /usr/local/lib/vallum/vallum-desk-backup \
         /usr/local/lib/vallum/vallum-uri /usr/local/sbin/vallum-desk-admin \
         /usr/share/applications/vallum-uri.desktop
     run systemctl disable vallum-cleanup 2>/dev/null || true
@@ -629,7 +656,8 @@ uninstall() {
         "$UNIT_DIR/vallum-quick@.service" "$UNIT_DIR/vallum-desk@.service" \
         "$UNIT_DIR/vallum-quick-watch@.service" \
         "$UNIT_DIR/vallum-enroll@.service" "$UNIT_DIR/vallum-metrics.service" \
-        "$UNIT_DIR/vallum-metrics.timer"
+        "$UNIT_DIR/vallum-metrics.timer" \
+        "$UNIT_DIR/vallum-desk-backup.service" "$UNIT_DIR/vallum-desk-backup.timer"
     # The tmpfiles entry goes with the package; the directory it creates is
     # /run, which is cleared at boot, so there is nothing else to remove.
     run rm -f "$TMPFILES_DIR/vallum-tmpfiles.conf"

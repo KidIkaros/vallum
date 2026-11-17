@@ -86,6 +86,17 @@ class DeskTestCase(unittest.TestCase):
         return self.desk.signup({"code": code, "name": name})
 
 
+class StateFileModeTests(DeskTestCase):
+    """The account database holds the only credential the desk issues."""
+
+    def test_database_is_not_world_readable(self):
+        # sqlite3 creates the file 0644 under the default umask, and every
+        # account token would then be readable by any local account — the CI
+        # runner user on the same host included. `open_database` tightens it.
+        mode = os.stat(self.config.state).st_mode & 0o777
+        self.assertEqual(mode, 0o600, f"{self.config.state} is mode {mode:o}, not 600")
+
+
 class SignupTests(DeskTestCase):
 
     def test_a_valid_code_returns_a_ticket_and_creates_an_account(self):

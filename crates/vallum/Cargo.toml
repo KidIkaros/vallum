@@ -134,6 +134,12 @@ assets = [
     # The enrolment desk: the self-service layer an operator runs to sell
     # access. Ships, but nothing starts it until the operator enables it.
     ["../../packaging/vallum-desk@.service", "lib/systemd/system/vallum-desk@.service", "644"],
+    # The desk's account database is the one state that cannot be rebuilt, so
+    # its verified-copy timer ships beside it and is conditioned on the
+    # database existing.
+    ["../../packaging/vallum-desk-backup.service", "lib/systemd/system/vallum-desk-backup.service", "644"],
+    ["../../packaging/vallum-desk-backup.timer", "lib/systemd/system/vallum-desk-backup.timer", "644"],
+    ["../../service/vallum-desk-backup", "usr/local/lib/vallum/vallum-desk-backup", "755"],
     ["../../service/vallum-desk", "usr/local/lib/vallum/vallum-desk", "755"],
     ["../../service/vallum-desk-admin", "usr/local/lib/vallum/vallum-desk-admin", "755"],
     ["../../service/vallum-uri", "usr/local/lib/vallum/vallum-uri", "755"],
@@ -171,6 +177,9 @@ assets = [
     { source = "../../packaging/vallum-quick@.service", dest = "/lib/systemd/system/vallum-quick@.service", mode = "644" },
     { source = "../../packaging/vallum-quick-watch@.service", dest = "/lib/systemd/system/vallum-quick-watch@.service", mode = "644" },
     { source = "../../packaging/vallum-desk@.service", dest = "/lib/systemd/system/vallum-desk@.service", mode = "644" },
+    { source = "../../packaging/vallum-desk-backup.service", dest = "/lib/systemd/system/vallum-desk-backup.service", mode = "644" },
+    { source = "../../packaging/vallum-desk-backup.timer", dest = "/lib/systemd/system/vallum-desk-backup.timer", mode = "644" },
+    { source = "../../service/vallum-desk-backup", dest = "/usr/local/lib/vallum/vallum-desk-backup", mode = "755" },
     { source = "../../service/vallum-desk", dest = "/usr/local/lib/vallum/vallum-desk", mode = "755" },
     { source = "../../service/vallum-desk-admin", dest = "/usr/local/lib/vallum/vallum-desk-admin", mode = "755" },
     { source = "../../service/vallum-uri", dest = "/usr/local/lib/vallum/vallum-uri", mode = "755" },
@@ -206,6 +215,10 @@ if [ -d /run/systemd/system ]; then
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
     fi
+    # The desk's account database is the one state in the product that cannot
+    # be rebuilt, so its copy timer is enabled rather than offered. The service
+    # is conditioned on the database existing: inert on a host with no desk.
+    systemctl enable --now vallum-desk-backup.timer 2>/dev/null || true
     # The console's privileged path needs a sudoers rule, and a package cannot
     # write one: the rule names a user and the package does not know who is
     # installing it. The console falls back to polkit without it.
@@ -223,6 +236,7 @@ if [ "${1:-0}" -eq 0 ] && [ -d /run/systemd/system ]; then
         | awk '{print $1}' | sed 's/\\.service$//;s/\\.timer$//' \
         | while read -r unit; do systemctl disable --now "$unit" 2>/dev/null || true; done
     systemctl disable --now vallum-metrics.timer vallum-metrics.service 2>/dev/null || true
+    systemctl disable --now vallum-desk-backup.timer vallum-desk-backup.service 2>/dev/null || true
 fi
 exit 0
 """

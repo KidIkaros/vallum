@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""vallum-desk-backup — take a consistent copy of the desk's account database.
+
+The desk issues account numbers, and the number is the only credential it ever
+mints: no email, no password reset (ADR-0045). The database therefore holds the
+one thing in the product that cannot be re-derived, and until this script
+existed the only copy instruction was a sentence in
+docs/deployment/backup.md that nobody performed.
+
+Two properties matter more than anything else here:
+
+* **The copy is taken through SQLite**, not with `cp`. The desk autocommits
+  every statement and runs several request threads, so a byte copy can capture
+  a torn page. `Connection.backup()` is SQLite's own online-backup API: it
+  copies a consistent snapshot of a live database and needs no downtime.
+* **The copy is verified before it is trusted.** A backup nobody has opened is
+  a hope. Every run reopens what it wrote, compares `PRAGMA user_version` and
+  the row counts against the source, and fails if they disagree — and it fails
+  loudly when the source is *missing*, because a backup of nothing succeeding
+  silently is exactly how a restore discovers the loss.
+
+    vallum-desk-backup                        # daily default: /var/backups/vallum
+    vallum-desk-backup --dest /mnt/backups/vallum --keep 30
+    vallum-desk-backup --state /tmp/probe.sqlite --dest /tmp/out
+
+Exit codes: 0 ok, 1 the copy failed or did not verify, 2 nothing to back up.
+
+A copy on the same disk as the original is not disaster recovery — it survives
+a bad migration or a deleted row, not a lost host. Point `--dest` at storage
+that is not this machine's disk (a mounted volume, or an rsync/restic job that
+collects /var/backups/vallum) before calling the desk's state protected.
+"""
+
+import argparse
+import datetime
+import os
+import sqlite3
+import sys
+
+DEFAULT_STATE = "/var/lib/vallum/desk.sqlite"
+DEFAULT_DEST = "/var/backups/vallum"
+DEFAULT_KEEP = 14
+
+
+def connect_readonly(path):
+    # mode=ro: the backup must never be the thing that writes to the live
+    # database. SQLite's backup API works against a read-only source.
+    uri = f"file:{path}?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=30)
+
+
+def fingerprint(conn):
+    """What a restore has to reproduce: schema version and row counts."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    counts = {}
+    for table in ("accounts", "peers", "codes"):
+        try:
+            counts[table] = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            # A pre-desk database has no such table; record it as absent rather
+            # than crashing, so the comparison below is still meaningful.
+            counts[table] = None
+    return version, counts
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Take a verified, consistent copy of the desk's account database.")
+    parser.add_argument("--state", default=DEFAULT_STATE,
+                        help=f"the desk's database (default {DEFAULT_STATE})")
+    parser.add_argument("--dest", default=DEFAULT_DEST,
+                        help=f"where copies are written (default {DEFAULT_DEST})")
+    parser.add_argument("--keep", type=int, default=DEFAULT_KEEP,
+                        help=f"how many copies to retain (default {DEFAULT_KEEP})")
+    parser.add_argument("--quiet", action="store_true", help="only report failures")
+    args = parser.parse_args(argv)
+
+    if not os.path.exists(args.state):
+        print(f"vallum-desk-backup: no desk database at {args.state} — nothing to back up.\n"
+              "If the desk runs on this host, its --state path is wrong; if it does not, "
+              "this timer has nothing to do (the unit's ConditionPathExists should have "
+              "kept it from running).", file=sys.stderr)
+        return 2
+
+    os.makedirs(args.dest, mode=0o700, exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = os.path.join(args.dest, f"desk-{stamp}.sqlite")
+    # Two copies inside the same second must not overwrite each other: a manual
+    # run beside the timer is exactly how someone would take "one more before
+    # the upgrade", and losing that copy to the timer's filename is the failure
+    # this script exists to prevent.
+    suffix = 1
+    while os.path.exists(target):
+        target = os.path.join(args.dest, f"desk-{stamp}-{suffix}.sqlite")
+        suffix += 1
+
+    try:
+        source = connect_readonly(args.state)
+    except sqlite3.Error as error:
+        print(f"vallum-desk-backup: cannot open {args.state}: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        expected_version, expected_counts = fingerprint(source)
+        destination = sqlite3.connect(target)
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+    except sqlite3.Error as error:
+        print(f"vallum-desk-backup: copy failed: {error}", file=sys.stderr)
+        if os.path.exists(target):
+            os.unlink(target)
+        return 1
+    finally:
+        source.close()
+
+    # 0600: the file holds every account token. The live database is tightened
+    # by the desk itself for the same reason.
+    os.chmod(target, 0o600)
+
+    # Verify the copy, not the copy operation.
+    try:
+        copy = sqlite3.connect(f"file:{target}?mode=ro", uri=True)
+        try:
+            got_version, got_counts = fingerprint(copy)
+        finally:
+            copy.close()
+    except sqlite3.Error as error:
+        print(f"vallum-desk-backup: the copy at {target} will not open: {error}",
+              file=sys.stderr)
+        return 1
+
+    if (got_version, got_counts) != (expected_version, expected_counts):
+        print(f"vallum-desk-backup: the copy does not match the source.\n"
+              f"  source: version {expected_version}, {expected_counts}\n"
+              f"  copy:   version {got_version}, {got_counts}", file=sys.stderr)
+        return 1
+
+    removed = prune(args.dest, args.keep)
+    if not args.quiet:
+        size = os.path.getsize(target)
+        print(f"vallum-desk-backup: wrote {target} ({size} bytes, mode 0600), "
+              f"verified against the source: version {expected_version}, {expected_counts}"
+              + (f", pruned {removed} older copy/copies" if removed else ""))
+        if expected_counts.get("accounts") == 0:
+            print("vallum-desk-backup: the source has zero accounts. If the desk has "
+                  "served anyone, this copy is a healthy-looking empty database — "
+                  "check the --state path before trusting it.", file=sys.stderr)
+    return 0
+
+
+def prune(dest, keep):
+    """Delete all but the newest `keep` copies. Only this script's own names."""
+    if keep < 1:
+        return 0
+    copies = sorted(
+        (os.path.join(dest, name) for name in os.listdir(dest)
+         if name.startswith("desk-") and name.endswith(".sqlite")),
+        key=lambda path: os.path.getmtime(path),
+        reverse=True,
+    )
+    removed = 0
+    for path in copies[keep:]:
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+if __name__ == "__main__":
+    sys.exit(main())

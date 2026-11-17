@@ -37,6 +37,8 @@ UNITS=(
     vallum-enroll@.service
     vallum-cleanup.service
     vallum-desk@.service
+    vallum-desk-backup.service
+    vallum-desk-backup.timer
     vallum-metrics.service
     vallum-metrics.timer
     vallum-deadman@.service
@@ -84,6 +86,7 @@ done
 # reads a release tarball from one directory.
 copy_one "service/vallum-desk"
 copy_one "service/vallum-desk-admin"
+copy_one "service/vallum-desk-backup"
 copy_one "service/vallum-uri"
 copy_one "packaging/vallum-uri.desktop"
 

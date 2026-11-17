@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily verified copy of the Vallum desk's account database
+
+[Timer]
+# Daily, with a jitter so a fleet of desks does not all copy at midnight. The
+# retention window is the unit's `--keep`, default 14 days.
+OnCalendar=daily
+RandomizedDelaySec=30m
+# A host that was off across the scheduled time takes its copy on the next
+# boot rather than skipping the day.
+Persistent=true
+Unit=vallum-desk-backup.service
+
+[Install]
+WantedBy=timers.target

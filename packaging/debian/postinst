@@ -24,6 +24,11 @@ if [ -d /run/systemd/system ]; then
     if [ -d /var/lib/node_exporter/textfile_collector ]; then
         systemctl enable --now vallum-metrics.timer 2>/dev/null || true
     fi
+    # The desk's account database is the one state in the product that cannot
+    # be rebuilt, so its copy timer is enabled rather than offered: the service
+    # is conditioned on the database existing, which makes it inert on a host
+    # that does not run a desk.
+    systemctl enable --now vallum-desk-backup.timer 2>/dev/null || true
     # The console's privileged path (its kill switch and its apply) needs a
     # sudoers rule, and a package cannot write one: the rule names a user and
     # the package does not know who is installing it. The installer renders it

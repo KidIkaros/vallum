@@ -1,8 +1,10 @@
 # vallum-desk — the service layer
 
 **Layout:** `service/vallum-desk` (the service), `service/vallum-desk-admin`
-(the operator CLI), `service/test_vallum_desk.py` + `test_vallum_desk_admin.py`
-(the tests), `packaging/vallum-desk@.service` (the unit). The executables
+(the operator CLI), `service/vallum-desk-backup` (the verified copy of the
+account database), `service/test_vallum_desk.py` + `test_vallum_desk_admin.py`
+(the tests), `packaging/vallum-desk@.service` +
+`packaging/vallum-desk-backup.{service,timer}` (the units). The executables
 ship in the deb, the rpm, the release tarball and `install.sh` like every
 other shipped program — `scripts/check-package-manifest.sh` knows about both
 `packaging/` and `service/` so the channels cannot drift.
@@ -93,6 +95,30 @@ same trust boundary.
 The desk generates its admin token on first run at
 `/etc/vallum/desk-admin-token` (mode 0600). `vallum-desk-admin` reads it
 from there by default — the token never travels argv.
+
+## The account database is the state that cannot be rebuilt
+
+Everything else in this product is derived from a key or re-enrolled from a
+ticket. An account number is not: it is the only credential the desk issues,
+there is no email and no reset flow (ADR-0045), so `desk.sqlite` is the one
+file whose loss is permanent.
+
+`vallum-desk-backup.timer` therefore ships with the desk and is **enabled by
+the installer**; the service is conditioned on the database existing, so it is
+inert on a host that does not run a desk. Each run copies the live database
+through SQLite's online-backup API, writes the copy `0600` to
+`/var/backups/vallum`, reopens it and compares `PRAGMA user_version` and the
+row counts against the source, then keeps the newest `--keep` (default 14).
+
+```sh
+systemctl list-timers vallum-desk-backup.timer
+sudo /usr/local/lib/vallum/vallum-desk-backup --dest /mnt/offhost/desk --keep 30
+```
+
+A copy on the same disk survives a bad migration, not a lost host: point
+`--dest` off-host via `VALLUM_DESK_BACKUP_ARGS` in `/etc/vallum/desk-backup.env`.
+`scripts/accept-desk-restore.sh` is the gate that proves the copy path and the
+restore path both work; it runs in `verify.sh`, `ci-local.sh` and CI.
 
 ## Config reference (all command-line, repeatable via env file)
 

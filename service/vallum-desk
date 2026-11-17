@@ -105,6 +105,14 @@ def open_database(path):
     # default deferred transactions, an INSERT left open by one thread made the
     # next request's SELECT miss a row that was plainly in the file.
     conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    # The account token lives in this file and is the only credential the desk
+    # issues, so the file is 0600 like the admin token beside it. sqlite3 creates
+    # it 0644 under the default umask — on a host that also carries a CI runner
+    # user, that is every account number readable by an unprivileged account.
+    try:
+        os.chmod(path, 0o600)
+    except OSError as error:  # a read-only mount is the operator's choice to make
+        print(f"desk: could not tighten {path} to 0600: {error}")
     conn.row_factory = sqlite3.Row
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > SCHEMA_VERSION:

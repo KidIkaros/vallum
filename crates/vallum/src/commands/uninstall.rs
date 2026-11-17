@@ -23,12 +23,22 @@ use crate::say;
 
 const BINARIES: [&str; 2] = ["/usr/bin/vallum", "/usr/bin/vallum-quick"];
 
-const UNITS: [&str; 7] = [
+/// Every unit `install.sh` and the packages ship. This list used to name seven
+/// of the twelve, so a routine uninstall left the cleanup floor, the dead-man,
+/// the desk and the desk's backup timer installed and enabled — the units that
+/// keep changing a host after the product is gone.
+const UNITS: [&str; 13] = [
     "/etc/systemd/system/vallum@.service",
     "/etc/systemd/system/vallum-guard@.service",
     "/etc/systemd/system/vallum-quick@.service",
     "/etc/systemd/system/vallum-quick-watch@.service",
     "/etc/systemd/system/vallum-enroll@.service",
+    "/etc/systemd/system/vallum-cleanup.service",
+    "/etc/systemd/system/vallum-deadman@.service",
+    "/etc/systemd/system/vallum-deadman@.timer",
+    "/etc/systemd/system/vallum-desk@.service",
+    "/etc/systemd/system/vallum-desk-backup.service",
+    "/etc/systemd/system/vallum-desk-backup.timer",
     "/etc/systemd/system/vallum-metrics.service",
     "/etc/systemd/system/vallum-metrics.timer",
 ];
@@ -131,8 +141,18 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
             orphan.display()
         );
     }
+    // `/var/lib/vallum` holds two unlike things: the routing plan each attach
+    // recorded (`<iface>.quick` — reproducible by attaching again) and the
+    // desk's account database (`desk.sqlite` — reproducible by nothing; the
+    // account number is the only credential and there is no reset flow,
+    // ADR-0045). An uninstall used to remove the whole directory, so removing a
+    // routing record also destroyed every account, silently, under a message
+    // promising that secrets were kept. The plans go; the database stays and is
+    // named; `--purge` is the only thing that removes it.
     if orphans.is_empty() {
-        remove_dir(dry, Path::new(STATE_DIR));
+        for plan in quick_plans() {
+            remove_file(dry, &plan);
+        }
     }
 
     // ── host networking: per-config teardown covers nft/ufw/FORWARD ──
@@ -176,13 +196,23 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
     // in it. It disappears at the next boot with the rest of /run. See ADR-0017.
 
     // ── secrets: kept unless purged ──
+    // The desk's account database is in the same class: it is not a secret the
+    // product may delete on an uninstall, and it is not reproducible either.
+    let desk_state = Path::new(STATE_DIR).join("desk.sqlite");
     if args.purge {
         remove_dir(dry, crate::host::paths::config_dir());
+        remove_file(dry, &desk_state);
     } else {
         say!(
             "   kept  {} (pass --purge to remove configs and keys)",
             crate::host::paths::config_dir().display()
         );
+        if desk_state.exists() || dry {
+            say!(
+                "   kept  {} (the desk's accounts; --purge removes it too)",
+                desk_state.display()
+            );
+        }
     }
 
     // ── binaries last: a running process can unlink itself safely ──
@@ -284,6 +314,18 @@ fn configs() -> Vec<std::path::PathBuf> {
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect()
+}
+
+/// Every `<iface>.quick` record in the state directory, orphan or not. The
+/// uninstall removes these and nothing else there: see the desk database.
+fn quick_plans() -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(STATE_DIR)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "quick"))
         .collect()
 }
 

@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+- **The desk's account database is copied daily, and the copy is proved.**
+  `vallum-desk-backup` + `vallum-desk-backup.timer` ship with the desk and the
+  installer enables the timer; the service is conditioned on the database
+  existing, so it is inert on a host with no desk. Each run copies the live
+  database through SQLite's online-backup API, writes it `0600` to
+  `/var/backups/vallum`, **reopens the copy and compares `PRAGMA user_version`
+  and the row counts against the source**, and keeps the newest 14. A missing
+  source exits 2 rather than "succeeding" with nothing.
+  `scripts/accept-desk-restore.sh` is the gate: it builds a database, copies
+  it, restores it, checks every row and a known token, and asserts the failure
+  paths — it runs in `verify.sh`, `ci-local.sh` and the `ci` workflow, and its
+  signed verdict joins the release preflight.
+- **`vallum uninstall` no longer deletes the desk's accounts.** It removed
+  `/var/lib/vallum` wholesale to clear the `<iface>.quick` routing records, so
+  an uninstall also destroyed `desk.sqlite` — every account number, which
+  cannot be re-issued — under a message promising that secrets were kept. It
+  now removes the routing records only, names the database it kept, and leaves
+  it to `--purge` beside `/etc/vallum`. The unit list also gained the five
+  units it was missing (cleanup, the dead-man pair, the desk, the desk backup
+  timer), which a routine uninstall used to leave installed and enabled.
+- **The backup document now covers the desk's database, and a gate keeps it
+  that way.** `docs/deployment/backup.md` claimed all durable state lived in
+  `/etc/vallum`; 1.8.0 put the account database at
+  `/var/lib/vallum/desk.sqlite`, outside every backup instruction, holding the
+  one credential the service issues and cannot re-issue. The document names
+  both roots, how to copy a live SQLite database safely, how to restore it,
+  and how to prove the restored copy is the right one.
+  `scripts/check-state-coverage.sh` fails when a durable root appears in
+  shipped code but not in that document; it runs in `scripts/verify.sh`, the
+  `ci` workflow and `ci-local.sh`. Diagnosis in
+  `docs/qa/delivery-topology-2026-11-17.md`.
+- **The desk's account database is created 0600.** sqlite3 created
+  `/var/lib/vallum/desk.sqlite` 0644 under the default umask, so every account
+  token — the only credential the service issues, with no reset flow — was
+  readable by any local account on the host, including a CI runner user.
+  `open_database` now tightens the mode and a test asserts it. Found by the
+  pre-commit review; the file's mode, not the process's, was the gap.
+
 ## 1.8.0 — 2026-11-16
 
 - **The desk is a service layer: accounts, devices, plans, vouchers.** Per

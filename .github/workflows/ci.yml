@@ -233,6 +233,14 @@ jobs:
         working-directory: vallum
         run: scripts/check-package-manifest.sh
 
+      - name: Durable state coverage (every store named in the backup doc)
+        working-directory: vallum
+        run: scripts/check-state-coverage.sh
+
+      - name: Desk database copies and restores (the irreplaceable state)
+        working-directory: vallum
+        run: scripts/accept-desk-restore.sh
+
   e2e:
     name: end-to-end (two namespaces, real kernel)
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","linux","x64"]') || 'ubuntu-latest' }}

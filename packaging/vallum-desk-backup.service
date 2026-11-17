@@ -1,0 +1,29 @@
+[Unit]
+Description=Vallum enrolment desk — a verified copy of the account database
+Documentation=man:vallum-desk(8)
+# The desk's database is the only state in the product that cannot be rebuilt:
+# the account number is the sole credential and there is no reset flow
+# (ADR-0045). This unit is enabled at install time and is inert on a host that
+# does not run a desk, because of the condition below — so a server that starts
+# a desk later begins backing it up without anyone remembering to enable
+# anything. That is the whole point: the copy must not depend on attention.
+ConditionPathExists=/var/lib/vallum/desk.sqlite
+
+[Service]
+Type=oneshot
+# An operator can point copies somewhere else without editing the unit:
+#   VALLUM_DESK_BACKUP_ARGS=--dest /mnt/backups/vallum --keep 30
+EnvironmentFile=-/etc/vallum/desk-backup.env
+ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk-backup $VALLUM_DESK_BACKUP_ARGS
+# Root is required: the database is 0600 under /var/lib/vallum and the copy is
+# written 0600, which is the same reason the desk itself runs as root.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# The source is read through SQLite's read-only URI; the destination is the
+# only thing this unit writes.
+ReadOnlyPaths=/var/lib/vallum
+ReadWritePaths=/var/backups/vallum
+
+[Install]
+WantedBy=multi-user.target

@@ -16,6 +16,18 @@ answer.** Nothing here is about operating a service for strangers: there are no
 users, no SLA, and no front door to defend. Invite minting stays a root command
 on the server, which is correct for an instrument.
 
+> **Correction, 2026-11-17 — the paragraph above is now scoped to the tunnel,
+> not to the project.** 1.8.0 shipped the desk, and §"A stranger can join and
+> be served" below records `desk.wingman.gold` serving **open signup to
+> anonymous visitors** on 2026-11-16, minting accounts with an expiry, a byte
+> cap and a device cap. So there *is* a front door, it has served strangers,
+> and the thing it hands out is a credential that cannot be re-issued
+> (ADR-0045). Read "no users, no SLA" as the tunnel's framing; the desk is a
+> service that has not yet been given a reliability target, an error budget, a
+> backup timer or an alert — the four things this sentence used to make
+> unnecessary. The gap is recorded in `docs/qa/delivery-topology-2026-11-17.md`
+> and in the premortem of the same date.
+
 That reframes the security work as well: admission, bundle policy and the hook
 refusal are properties of the protocol's boundary — the things a stranger
 *reproducing* the validation would otherwise have to trust on faith.
