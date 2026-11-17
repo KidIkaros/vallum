@@ -17,6 +17,7 @@ pub mod sandbox;
 pub mod server;
 pub mod setup;
 pub mod status;
+pub mod support_bundle;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod uninstall;

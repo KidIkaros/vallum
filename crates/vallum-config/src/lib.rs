@@ -1035,13 +1035,66 @@ impl std::fmt::Display for ConfigError {
                 write!(f, "read config `{}`: {source}", path.display())
             }
             Self::Toml { path, source } => {
-                write!(f, "parse config `{}`: {source}", path.display())
+                // `toml::de::Error` quotes the offending line, which for a
+                // misplaced `preshared_key` is the secret itself — and this
+                // string is what lands in `vallum doctor`, `vallum status` and
+                // every support bundle, i.e. the text users paste into issues.
+                // Redact before it is formatted, not after someone notices.
+                write!(
+                    f,
+                    "parse config `{}`: {}",
+                    path.display(),
+                    redact_secrets(&source.to_string())
+                )
             }
             Self::Invalid { path, message } => {
                 write!(f, "config `{}`: {message}", path.display())
             }
         }
     }
+}
+
+/// Field names whose values must never appear in an error message.
+///
+/// Only the fields that hold a *secret* — `private_key` holds a path, and the
+/// path is the useful half of a config diagnosis, so it is deliberately absent.
+const SECRET_FIELDS: [&str; 3] = ["preshared_key", "ss_psk", "token"];
+
+/// Replace the value on any line that assigns one of [`SECRET_FIELDS`].
+///
+/// Line-oriented rather than a search for the secret's shape: a 64-hex pattern
+/// would also catch a public key's fingerprint, and missing one secret is worse
+/// than redacting one extra line. The key name is the only stable marker.
+pub fn redact_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_start();
+        // The key is the last identifier before `=`, not the whole left-hand
+        // side: a `toml` parse error prefixes the line with a `6 | ` gutter, and
+        // matching on the full left-hand side is how the first attempt at this
+        // silently redacted nothing.
+        let ident = bare.split_once('=').map(|(left, _)| {
+            left.trim()
+                .rsplit(|c: char| c == '|' || c.is_whitespace())
+                .next()
+                .unwrap_or("")
+                .trim_matches('"')
+        });
+        if !ident.is_some_and(|key| SECRET_FIELDS.contains(&key)) {
+            out.push_str(line);
+            continue;
+        }
+        // Keep the layout the parse error describes: the gutter, the key, and
+        // the caret lines that follow are what make the message readable.
+        let (head, _) = bare.split_once('=').unwrap_or((bare, ""));
+        out.push_str(&line[..line.len() - bare.len()]);
+        out.push_str(head.trim_end());
+        out.push_str(" = \"<redacted>\"");
+        if line.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 impl std::error::Error for ConfigError {
@@ -1217,6 +1270,44 @@ pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parse_error_does_not_quote_a_preshared_key() {
+        // `toml::de::Error` prints the offending line, and this string is what
+        // `vallum doctor`/`status`/every support bundle carries — i.e. the text
+        // that reaches an issue tracker. A misplaced `preshared_key` must not
+        // take the key with it.
+        let secret = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+        let message = format!(
+            "TOML parse error at line 6, column 1\n  |\n6 | preshared_key = \"{secret}\"\n  | ^^^^^^^^^^^^^"
+        );
+        let redacted = redact_secrets(&message);
+        assert!(!redacted.contains(secret), "{redacted}");
+        assert!(redacted.contains("6 | preshared_key = \"<redacted>\""));
+        // The gutter and the caret lines are the diagnosis; they survive.
+        assert!(redacted.contains("^^^"));
+    }
+
+    #[test]
+    fn the_account_token_and_ss_psk_are_redacted_too() {
+        let text = "[account]\ntoken = \"0123456789abcdef0123456789abcdef\"\n";
+        assert!(!redact_secrets(text).contains("0123456789abcdef"));
+        let text = "ss_psk = \"hunter2\"\n";
+        assert!(!redact_secrets(text).contains("hunter2"));
+    }
+
+    #[test]
+    fn a_config_path_and_public_keys_survive_redaction() {
+        // `private_key` is a path — it is the useful half of the diagnosis.
+        let text = "private_key = \"laptop.key\"\npublic_key = \"ABC=\"\n";
+        assert_eq!(redact_secrets(text), text);
+    }
+
+    #[test]
+    fn a_line_naming_a_secret_without_a_value_is_left_alone() {
+        let text = "# preshared_key is set below\npreshared_key_file = \"/etc/vallum/psk\"\n";
+        assert_eq!(redact_secrets(text), text);
+    }
 
     #[test]
     fn a_local_private_key_rename_moves_only_the_interface_field() {

@@ -20,12 +20,13 @@ use vallum::commands::sandbox::SandboxArgs;
 use vallum::commands::server::ServerArgs;
 use vallum::commands::setup::SetupArgs;
 use vallum::commands::status::StatusArgs;
+use vallum::commands::support_bundle::SupportBundleArgs;
 #[cfg(feature = "tui")]
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::uninstall::UninstallArgs;
 use vallum::commands::{
     bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run, sandbox,
-    server, setup, status, uninstall,
+    server, setup, status, support_bundle, uninstall,
 };
 use vallum::Error;
 
@@ -100,6 +101,8 @@ enum Command {
     Peer(PeerArgs),
     /// Print the daemon's state as Prometheus metrics.
     Metrics(MetricsArgs),
+    /// Collect the files a support conversation would ask for.
+    SupportBundle(SupportBundleArgs),
     /// Issue, sign, verify, and inspect identity documents.
     Identity(IdentityArgs),
     /// Import a client `.vallum-bundle` file.
@@ -219,6 +222,7 @@ fn main() -> ExitCode {
         }),
         Command::Peer(args) => peer::peer(&args),
         Command::Metrics(args) => metrics::metrics(&args),
+        Command::SupportBundle(args) => support_bundle::support_bundle(&args),
         Command::Sandbox(args) => sandbox::list(&args),
         Command::Identity(args) => identity::identity(&args),
         Command::ImportBundle(args) => import::import(&args),

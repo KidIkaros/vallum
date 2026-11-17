@@ -17,6 +17,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -30,15 +31,20 @@ _spec.loader.exec_module(desk_module)
 
 Desk = desk_module.Desk
 DeskConfig = desk_module.DeskConfig
+connection_state = desk_module.connection_state
+SESSION_LIVE_SECONDS = desk_module.SESSION_LIVE_SECONDS
 
 
 class FakeDaemon(desk_module.Daemon):
     """A daemon that is a dictionary with a method or two."""
 
-    def __init__(self, counters=None, refuse=False, refuse_remove=False):
+    def __init__(self, counters=None, refuse=False, refuse_remove=False, liveness=None,
+                 refuse_liveness=False):
         self._counters = counters or {}
         self._refuse = refuse
         self._refuse_remove = refuse_remove
+        self._liveness = liveness or {}
+        self._refuse_liveness = refuse_liveness
         self.removed = []
         self.minted = []
 
@@ -50,6 +56,11 @@ class FakeDaemon(desk_module.Daemon):
 
     def counters(self):
         return dict(self._counters)
+
+    def liveness(self):
+        if self._refuse_liveness:
+            raise RuntimeError("the daemon did not answer")
+        return dict(self._liveness)
 
     def remove(self, peer):
         if self._refuse_remove:
@@ -150,6 +161,46 @@ class DaemonCliTests(unittest.TestCase):
                 daemon.mint_ticket("laptop"),
                 "vallum1-join:203.0.113.9:51922/laptop/id/token/fp",
             )
+
+    def _daemon_emitting(self, body):
+        """A DaemonCli whose `vallum show --json` prints `body`."""
+        tempdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(tempdir, ignore_errors=True))
+        cli = os.path.join(tempdir, "vallum")
+        with open(cli, "w") as f:
+            f.write("#!/bin/sh\ncat <<'JSON'\n" + body + "\nJSON\n")
+        os.chmod(cli, 0o755)
+        return desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli)
+
+    def test_liveness_is_read_from_the_daemons_own_handshake_field(self):
+        # `last_handshake` is the same field the daemon renders
+        # vallum_peer_handshake_age_seconds from, so the number the page shows
+        # and the number a scraper sees cannot disagree.
+        daemon = self._daemon_emitting(json.dumps({"peers": [
+            {"name": "laptop", "last_handshake": {"sec": 1794934000, "nsec": 1},
+             "tx_bytes": 1, "rx_bytes": 2},
+        ]}))
+        self.assertEqual(daemon.liveness(), {"laptop": 1794934000})
+
+    def test_a_peer_that_never_handshaked_reads_as_None_not_zero(self):
+        # Zero is a real unix time (1970). Returning it would date every unused
+        # device to the epoch and, worse, read as `offline` rather than `never`.
+        daemon = self._daemon_emitting(json.dumps({"peers": [
+            {"name": "laptop", "last_handshake": None, "tx_bytes": 0, "rx_bytes": 0},
+        ]}))
+        self.assertEqual(daemon.liveness(), {"laptop": None})
+
+    def test_a_snapshot_without_a_peers_list_fails_loudly(self):
+        # The alternative — an empty dict — makes every device render `unknown`
+        # and hides a shape change in the daemon's JSON behind a calm page.
+        daemon = self._daemon_emitting(json.dumps({"interfaces": []}))
+        with self.assertRaises(RuntimeError):
+            daemon.liveness()
+
+    def test_the_base_port_says_unknown_rather_than_raising(self):
+        # A Daemon implementation that cannot answer must not take the account
+        # page down; the page then says so in words.
+        self.assertEqual(desk_module.Daemon().liveness(), {})
 
 
 class StatusTests(DeskTestCase):
@@ -359,6 +410,82 @@ class HttpTests(DeskTestCase):
         other = {"X-Forwarded-For": "198.51.100.10"}
         self.assertEqual(
             self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
+
+
+class LivenessTests(DeskTestCase):
+    """/api/account answers "is this device working?" as well as "was it
+    issued?". `status` is a provisioning fact; a device that never handshaked
+    used to render as plain `active`, which is a lie about the only thing the
+    user is looking for."""
+
+    def _token(self):
+        _, payload = self.signup()
+        return payload["token"]
+
+    def _account(self, liveness_mapping):
+        self.desk.daemon = FakeDaemon(liveness=liveness_mapping)
+        return self.desk.account(self._token())
+
+    def test_a_device_that_never_handshaked_is_never_not_active(self):
+        code, view = self._account({})
+        self.assertEqual(code, 200)
+        device = view["devices"][0]
+        self.assertEqual(device["status"], "active")
+        self.assertEqual(device["connection"], "never")
+        self.assertIsNone(device["last_seen_seconds"])
+
+    def test_a_recent_handshake_is_live_with_its_age(self):
+        now = int(time.time())
+        code, view = self._account({"u0001-friend": now - 42})
+        self.assertEqual(code, 200)
+        device = view["devices"][0]
+        self.assertEqual(device["connection"], "live")
+        self.assertIn(device["last_seen_seconds"], (42, 43))
+
+    def test_a_handshake_older_than_the_reject_window_is_offline(self):
+        now = int(time.time())
+        _, view = self._account({"u0001-friend": now - 4000})
+        device = view["devices"][0]
+        self.assertEqual(device["connection"], "offline")
+        self.assertGreater(device["last_seen_seconds"], SESSION_LIVE_SECONDS)
+
+    def test_the_boundary_is_the_protocols_reject_window(self):
+        # 180 s is where the daemon stops accepting the session. Off by one here
+        # means the page calls a dead tunnel live, so pin both sides.
+        now = 1_000_000
+        self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS, now)[0], "live")
+        self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS - 1, now)[0], "offline")
+
+    def test_a_daemon_that_cannot_answer_says_unknown_and_keeps_the_page(self):
+        # Not `offline`: telling a user their tunnel is down because the
+        # operator's daemon was busy is a false alarm in the one place they go
+        # to check. Not a 500 either — the quota and revoke still work.
+        self.desk.daemon = FakeDaemon(refuse_liveness=True)
+        code, view = self.desk.account(self._token())
+        self.assertEqual(code, 200)
+        self.assertEqual(view["devices"][0]["connection"], "unknown")
+        self.assertEqual(view["devices"][0]["status"], "active")
+
+    def test_a_revoked_device_is_not_described_as_a_connection(self):
+        # The daemon has no peer record for it. "never connected" would be a
+        # claim about a device that no longer exists on the server.
+        token = self._token()
+        self.desk.daemon = FakeDaemon(liveness={"u0001-friend": int(time.time()) - 5})
+        code, view = self.desk.account(token)
+        self.assertEqual(code, 200)
+        self.assertEqual(view["devices"][0]["connection"], "live")
+        self.desk.db.execute("UPDATE peers SET status='removed' WHERE peer='u0001-friend'")
+        code, view = self.desk.account(token)
+        self.assertEqual(code, 200)
+        self.assertEqual(view["devices"][0]["status"], "removed")
+        self.assertIsNone(view["devices"][0]["connection"])
+
+    def test_a_future_handshake_does_not_produce_a_negative_age(self):
+        # Clock skew between the daemon and the desk is not a user-facing
+        # duration; `-3s ago` is a bug report waiting to happen.
+        now = int(time.time())
+        _, view = self._account({"u0001-friend": now + 300})
+        self.assertEqual(view["devices"][0]["last_seen_seconds"], 0)
 
 
 class AccountPageTests(HttpTests):

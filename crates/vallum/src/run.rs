@@ -273,6 +273,24 @@ fn socket_state(path: &Path) -> SocketState {
     }
 }
 
+/// Whether a repeating condition should be logged now.
+///
+/// `None` means it has not been explained yet, so it must be. After that the
+/// answer is a deadline, not a heuristic: at most one explanation per interval.
+/// The counters carry the volume that the log no longer carries — that is the
+/// trade, and it is only safe because every repeating condition worth reading
+/// has a counter beside it.
+///
+/// Called with an explicit `now` so the deadline is testable without sleeping.
+fn rebind_should_warn(last: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    match last {
+        None => true,
+        // `duration_since` panics on a `now` before `last`, which a mock clock in
+        // a test can produce; `saturating_duration_since` answers zero instead.
+        Some(last) => now.saturating_duration_since(last) >= interval,
+    }
+}
+
 /// Everything the loop needs from the operating system.
 ///
 /// Grouped rather than passed one by one: they are the three substitutions a test
@@ -704,6 +722,14 @@ pub fn run(
     // let a scraper page on the counter.
     let mut control_rebind_failures: u64 = 0;
     let mut control_unreachable_warned = false;
+    // The repeating case: a socket that is gone and cannot be re-bound stays
+    // gone, and the tick that finds it runs every couple of seconds. Explaining
+    // it every tick is how the reference server's journal became 99.8% one
+    // message — 26,564 identical pairs in 24 h, with the seven real restarts
+    // buried between them. Say it once, then on a long reminder deadline, and
+    // carry the count so a skim still shows the duration.
+    let mut control_rebind_warned: Option<Instant> = None;
+    let control_rebind_remind = Duration::from_secs(3600);
 
     loop {
         if shutdown.is_triggered() {
@@ -748,11 +774,19 @@ pub fn run(
                         }
                     }
                     SocketState::Gone => {
-                        log_warn!(
-                            log,
-                            "control socket `{}` was removed; re-binding",
-                            path.display()
-                        );
+                        let now = Instant::now();
+                        let remind =
+                            rebind_should_warn(control_rebind_warned, now, control_rebind_remind);
+                        if remind {
+                            control_rebind_warned = Some(now);
+                            log_warn!(
+                                log,
+                                "control socket `{}` was removed; re-binding (occurrence {}; \
+                                 this message repeats at most hourly while the condition holds)",
+                                path.display(),
+                                control_rebind_failures.saturating_add(1)
+                            );
+                        }
                         control_shutdown.trigger();
                         control_shutdown = Shutdown::new();
                         match control::serve(
@@ -766,11 +800,18 @@ pub fn run(
                             }
                             Err(error) => {
                                 control_rebind_failures = control_rebind_failures.saturating_add(1);
-                                log_warn!(
-                                    log,
-                                    "failed to re-bind control socket `{}`: {error}",
-                                    path.display()
-                                );
+                                // The count is the durable signal — `vallum_up 0`
+                                // plus `vallum_control_rebind_failures_total` —
+                                // and it is what the alert reads. The line below
+                                // is the human explanation, on the same deadline.
+                                if remind {
+                                    log_warn!(
+                                        log,
+                                        "failed to re-bind control socket `{}` ({} failures so far): {error}",
+                                        path.display(),
+                                        control_rebind_failures
+                                    );
+                                }
                             }
                         }
                     }
@@ -1214,9 +1255,10 @@ fn spawn_udp_reader(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        path_stalled, socket_state, SocketState, DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY,
-        UDP_BUFFER,
+        path_stalled, rebind_should_warn, socket_state, SocketState, DEFAULT_UNDER_LOAD_DEPTH,
+        QUEUE_CAPACITY, UDP_BUFFER,
     };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn the_read_buffer_is_one_byte_past_the_message_cap() {
@@ -1286,6 +1328,34 @@ mod tests {
         // No persistent keepalive to calibrate against: fall back to a minute.
         assert!(path_stalled(90_000, 5_000, 0));
         assert!(!path_stalled(30_000, 5_000, 0));
+    }
+
+    #[test]
+    fn a_repeating_condition_is_explained_once_then_on_a_deadline() {
+        // The bug this encodes: the reference server logged the same two control
+        // socket warnings every 18 s — 26,564 pairs in 24 h, 99.8% of the unit's
+        // journal — so the seven real restarts were not findable. One line per
+        // hour keeps the condition visible without hiding everything else.
+        let interval = Duration::from_secs(3600);
+        let t0 = Instant::now();
+        assert!(rebind_should_warn(None, t0, interval));
+        assert!(!rebind_should_warn(
+            Some(t0),
+            t0 + Duration::from_secs(1),
+            interval
+        ));
+        assert!(!rebind_should_warn(
+            Some(t0),
+            t0 + Duration::from_secs(3599),
+            interval
+        ));
+        assert!(rebind_should_warn(Some(t0), t0 + interval, interval));
+        // A clock that goes backwards must not panic and must not re-warn.
+        assert!(!rebind_should_warn(
+            Some(t0),
+            t0 - Duration::from_secs(5),
+            interval
+        ));
     }
 
     #[test]

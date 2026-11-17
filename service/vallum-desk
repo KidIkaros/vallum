@@ -46,6 +46,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCHEMA_VERSION = 1
 
+# The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
+# daemon side). Past it the session is dead by construction: a handshake older
+# than this means the device is not connected, whatever the config still says.
+# The same number is the client's `stale` verdict boundary, so a user reading
+# `vallum status` and a user reading the account page are told the same thing.
+SESSION_LIVE_SECONDS = 180
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
@@ -144,6 +151,16 @@ class Daemon:
         """Return peer name → bytes used."""
         raise NotImplementedError
 
+    def liveness(self):
+        """Return peer name → last handshake as unix seconds, or None.
+
+        A peer absent from the mapping, or mapped to None, has never handshaked.
+        This is the port's *default* rather than an abstract method: an
+        implementation that cannot answer must not make the account page fail,
+        and the page then says "unknown" rather than inventing a state.
+        """
+        return {}
+
     def remove(self, peer):
         """Revoke a peer on the server."""
         raise NotImplementedError
@@ -193,16 +210,42 @@ class DaemonCli(Daemon):
         that never fires, which is the income feature quietly doing nothing.
         """
         out = self._run("show", "--json")
+        usage = {}
+        for peer in self._peers(out):
+            usage[peer["name"]] = int(peer.get("tx_bytes", 0)) + int(peer.get("rx_bytes", 0))
+        return usage
+
+    def liveness(self):
+        """peer name → the peer's last handshake as unix seconds, or None.
+
+        `vallum show --json` carries `last_handshake` as `{sec, nsec}` or
+        `null`, which is the daemon's own record — the same field
+        `vallum_peer_handshake_age_seconds` is rendered from, so the number a
+        user sees here and the number a scraper sees cannot drift.
+        """
+        out = self._run("show", "--json")
+        seen = {}
+        for peer in self._peers(out):
+            handshake = peer.get("last_handshake")
+            seen[peer["name"]] = handshake.get("sec") if isinstance(handshake, dict) else None
+        return seen
+
+    @staticmethod
+    def _peers(out):
+        """The `peers` list from a `show --json` body, or a loud failure.
+
+        Duplicated parsing belongs in one place: the failure mode this guards
+        against is a shape change that silently yields no peers, which reads as
+        "every device is unknown" instead of "the daemon's JSON changed".
+        """
         try:
             doc = json.loads(out)
         except json.JSONDecodeError as error:
             raise RuntimeError(f"the daemon's JSON snapshot did not parse: {error}") from error
-        usage = {}
-        for peer in doc.get("peers", []):
-            name = peer.get("name")
-            if name:
-                usage[name] = int(peer.get("tx_bytes", 0)) + int(peer.get("rx_bytes", 0))
-        return usage
+        peers = doc.get("peers")
+        if not isinstance(peers, list):
+            raise RuntimeError("the daemon's JSON snapshot has no `peers` list")
+        return [peer for peer in peers if peer.get("name")]
 
     def remove(self, peer):
         self._run("peer", "remove", peer)
@@ -519,6 +562,31 @@ class Desk:
                         "status": "active", "created": row["created"]}]
         counters = self.daemon.counters()
         live = [d["peer"] for d in devices if d["status"] == "active"]
+        # Liveness, not provisioning. `status` above is the *record's* state —
+        # "this device was issued a peer and not revoked" — and it was the only
+        # thing the page showed. A device that never handshaked therefore read as
+        # "active", which is a false statement about the one property the user
+        # cares about. The daemon already knows better; ask it.
+        #
+        # A daemon that cannot answer must not take the account page down: the
+        # session list, the quota and the revoke button are all still true
+        # without it. So a read failure leaves `connection` at `unknown`, which
+        # is a different sentence from `offline`.
+        try:
+            seen = self.daemon.liveness()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            seen = None
+        now = int(time.time())
+        for device in devices:
+            if device["status"] != "active":
+                # A revoked device is not a candidate for a connection: the
+                # daemon has no peer to ask about, and "never connected" would be
+                # a statement about a device that no longer exists.
+                device["connection"], device["last_seen_seconds"] = None, None
+                continue
+            device["connection"], device["last_seen_seconds"] = (
+                ("unknown", None) if seen is None
+                else connection_state(seen.get(device["peer"]), now))
         return 200, {
             "peer": row["peer"], "label": row["label"], "plan": row["plan"],
             "status": row["status"], "expires": row["expires"],
@@ -790,6 +858,43 @@ class Desk:
         return 200, {"actions": self.sweep_once()}
 
 
+# ---------------------------------------------------------------- liveness
+
+def connection_state(last_handshake_sec, now):
+    """(word, age_seconds) for a device, from the daemon's last-handshake time.
+
+    Three words, and no fourth for "unknown": a caller that cannot read the
+    daemon gets `None`, which reads as "we do not know" — the honest answer, and
+    different from "never connected". A page that renders `unknown` as `offline`
+    would tell a user their tunnel is down because the operator's daemon was
+    busy.
+
+    `live` uses the protocol's reject window rather than a number chosen here:
+    past 180 s the key is not used, so the session is over by construction.
+    """
+    if last_handshake_sec is None:
+        return "never", None
+    try:
+        age = max(0, int(now) - int(last_handshake_sec))
+    except (TypeError, ValueError):
+        return "unknown", None
+    return ("live" if age <= SESSION_LIVE_SECONDS else "offline"), age
+
+
+def humanize_age(seconds):
+    """A duration a user reads at a glance; not a precise interval."""
+    if seconds is None:
+        return ""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
 # ---------------------------------------------------------------- HTTP
 
 def _esc(text):
@@ -901,13 +1006,35 @@ credential — treat it like a password.</p>
 </form>"""
 
 
+def _connection_cell(device):
+    """The one column the user reads to answer "is it working?".
+
+    Rendered as a sentence rather than a flag because "offline" alone invites the
+    question "how long?", and "live" alone invites "since when?". A device that
+    has never been used says so — that is a different problem from one that
+    stopped, and it sends the reader to a different fix.
+    """
+    state = device.get("connection")
+    age = device.get("last_seen_seconds")
+    when = humanize_age(age)
+    if state == "live":
+        return f"connected ({when} ago)"
+    if state == "offline":
+        return f"not connected (last seen {when} ago)"
+    if state == "never":
+        return "never connected"
+    if state is None:
+        return "—"
+    return "unknown — the server could not be asked"
+
+
 def account_page(view, token, notice="", operator="vallum desk"):
     """The "my account" surface: plan, the shared byte pool, every device —
     and the forms that act on them. The token rides hidden inputs, in POST
     bodies, never the URL."""
     devices = "".join(
         f"<tr><td>{_esc(d['label'])}</td><td><code>{_esc(d['peer'])}</code></td>"
-        f"<td>{_esc(d['status'])}</td><td>"
+        f"<td>{_esc(d['status'])}</td><td>{_connection_cell(d)}</td><td>"
         + (f"""<form method="post" action="/account/revoke" style="display:inline">
 <input type="hidden" name="token" value="{_esc(token)}">
 <input type="hidden" name="peer" value="{_esc(d['peer'])}">
@@ -923,7 +1050,7 @@ def account_page(view, token, notice="", operator="vallum desk"):
 expires {_esc(view['expires'])} · {used_gib:.2f} / {cap_gib:.1f} GiB used
 (shared across devices).</p>
 <h2>Devices</h2>
-<table><tr><th>name</th><th>peer</th><th>status</th><th></th></tr>{devices}</table>
+<table><tr><th>name</th><th>peer</th><th>status</th><th>connection</th><th></th></tr>{devices}</table>
 <h3>Add a device</h3>
 <form method="post" action="/account/device">
 <input type="hidden" name="token" value="{_esc(token)}">

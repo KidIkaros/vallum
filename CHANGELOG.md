@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- **The account page says whether a device is actually connected.** Its Devices
+  table showed only `status`, which is a *provisioning* fact — "a peer was issued
+  and not revoked". A device that had never handshaked therefore read as plain
+  `active`, which is a false statement about the one property the user opens the
+  page to check. `/api/account` now carries `connection` (`live` / `offline` /
+  `never` / `unknown`) and `last_seen_seconds` per device, read from the daemon's
+  own `last_handshake` in `show --json` — the same field
+  `vallum_peer_handshake_age_seconds` is rendered from, so the number a user sees
+  and the number a scraper sees cannot drift. `live` is the protocol's reject
+  window (180 s): past it the key is not used, so the session is over by
+  construction. A daemon that cannot be asked renders `unknown — the server could
+  not be asked`, never `offline`: telling a user their tunnel is down because the
+  operator's daemon was busy is a false alarm in the one place they go to check.
+  A revoked device renders `—`, because there is no peer left to ask about. On
+  the reference server this immediately corrects two devices that had been
+  shown as `active` while never having handshaked.
+- **`vallum support-bundle` collects what a support conversation asks for.** The
+  gap was never "no diagnostics" — `status --json`, `doctor --json` and `metrics`
+  already answer almost everything. It was that a user on a broken tunnel had to
+  know which five commands to run and then paste six outputs into a chat. One
+  command now writes `status.json`, `doctor.json`, `show.json`, `metrics.txt`,
+  the config (redacted), `host.txt`, the unit's journal, and a `README.txt` that
+  states what is in the bundle *and what was withheld*, then archives it. A
+  command that failed is recorded with its exit code rather than producing an
+  empty file that reads like a clean run. Private keys are never opened — a
+  config's `private_key` is a path, and the path is what goes in.
+- **A config parse error no longer quotes a preshared key.** `toml::de::Error`
+  prints the offending line, so a `preshared_key` in the wrong table printed the
+  secret itself — in `vallum doctor`, in `vallum status`, and therefore in any
+  support bundle: exactly the text a user pastes into an issue. `redact_secrets`
+  in `vallum-config` now rewrites the value on any line assigning
+  `preshared_key`, `ss_psk`, or `token`, in both error renderers and on every
+  file the bundle collects. It matches by field name, not by the shape of the
+  value: a 64-hex pattern would also catch a public key's fingerprint, and
+  missing a secret is worse than redacting one extra line.
+- **A repeating daemon warning is now logged once, then hourly.** The control
+  socket loop logged the same two warnings every 18 s — 26,564 identical pairs
+  in 24 h on the reference server, 99.8% of the unit's journal, with the seven
+  real restarts buried between them. A journal that is one message repeated is
+  not evidence. The counters (`vallum_up`,
+  `vallum_control_rebind_failures_total`) still carry the volume; the line now
+  carries the occurrence number and says how often it will repeat.
 - **The control socket can no longer be mistaken for a deleted one.** The daemon
   probed its control path with `Path::exists()`, which answers `false` for *every*
   error — including "you may not look". After `systemd-tmpfiles --create` reset

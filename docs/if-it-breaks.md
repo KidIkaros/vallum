@@ -78,3 +78,30 @@ journalctl -u vallum@vallum0 -n 50
 If the console cannot reach a daemon it says so; it does not pretend a tunnel is
 up. The EGRESS panel states where traffic is actually leaving from, which is the
 question that matters when the answer is "somewhere you did not intend".
+
+## When you need to ask someone
+
+```sh
+sudo vallum support-bundle
+```
+
+That writes `vallum-support-<host>-<stamp>.tar.gz` in the current directory and
+tells you what it put in it. It collects the four commands above (`status`,
+`doctor`, `show`, `metrics`, each as JSON where it has one), the config, the
+host's kernel and distribution, and the last 500 lines of the unit's journal.
+
+It is built to be sent to someone else, so it is built not to carry secrets:
+
+* **Private keys are never read.** `private_key = "…"` in a config is a *path*;
+  the path is included, the file is not opened.
+* **Preshared keys are redacted** as `preshared_key = "<redacted>"`.
+* **Enrolment tickets, account numbers, and join URIs are not collected.**
+
+`README.txt` inside the bundle lists what is in it and what was withheld, so you
+can check before sending. If a check failed, its file starts with a `#` line
+saying which command and how it exited — a failed check is a finding, not a
+missing file.
+
+Add `--no-journal` if you would rather not send log text at all; the rest of the
+bundle is still enough to tell a platform fault from a config fault.
+

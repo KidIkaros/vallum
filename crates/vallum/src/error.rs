@@ -175,7 +175,16 @@ impl fmt::Display for Error {
                 Ok(())
             }
             Self::Toml { path, source } => {
-                write!(f, "{}: {source}", path.display())
+                // `toml::de::Error` quotes the offending line, and a misplaced
+                // `preshared_key` is the secret itself. This is the string
+                // `vallum doctor` prints, i.e. the text users paste into an
+                // issue — see `vallum_config::redact_secrets` for the rule.
+                write!(
+                    f,
+                    "{}: {}",
+                    path.display(),
+                    vallum_config::redact_secrets(&source.to_string())
+                )
             }
             Self::Routing(e) => write!(f, "peer table refused: {e}"),
             Self::Invalid { path, what } => write!(f, "{}: {what}", path.display()),
