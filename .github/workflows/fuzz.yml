@@ -36,7 +36,14 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: fuzz-${{ github.ref }}
+  # On a branch, a newer push makes the older run irrelevant - cancel it. On
+  # main it does NOT: a completed run is the evidence that a commit's parsers
+  # survived a fuzzing pass, and cancelling it means that evidence never exists.
+  # This is the same rule ci.yml carries, and it was still wrong here: pushing
+  # a8ca825 cancelled the fuzz run for ad98a17, so ad98a17 had no fuzz evidence
+  # at all despite the workflow having started. Main runs get a group nothing
+  # else can join, keyed by run id, so no later push can land in it.
+  group: ${{ github.ref == 'refs/heads/main' && format('fuzz-main-{0}', github.run_id) || format('fuzz-{0}', github.ref) }}
   cancel-in-progress: true
 
 permissions:

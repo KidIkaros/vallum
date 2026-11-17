@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`fuzz.yml` no longer cancels the previous run on `main`.** Its concurrency
+  group was `fuzz-<ref>` with `cancel-in-progress: true`, so every push to main
+  cancelled the fuzz run for the commit before it — pushing `a8ca825` cancelled
+  `ad98a17`'s run, leaving that commit with no fuzz evidence even though the
+  workflow had started. `ci.yml` was fixed for exactly this; `fuzz.yml` was not.
+  Main now gets a group keyed by run id, which nothing else can join.
 - **`--clean-remote` copies the deployment it is about to delete, and refuses if it cannot.**
   `scripts/backup-deployment.sh` takes `/etc/vallum`, `/var/lib/vallum` and the units into a
   `0600` archive and **verifies it** — every config present, every member listed, the desk
