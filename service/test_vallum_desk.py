@@ -504,6 +504,78 @@ class LivenessTests(DeskTestCase):
         self.assertEqual(view["devices"][0]["last_seen_seconds"], 0)
 
 
+class FunnelTests(DeskTestCase):
+    """The alpha's one number: tickets minted versus devices that connected.
+
+    Fourteen tickets and zero handshakes read as a healthy quiet system for a
+    day, because nothing compared the two. These tests pin the comparison and,
+    just as importantly, pin that every series is emitted even when it is zero —
+    a metric that vanishes at zero makes "no devices" look like "no desk".
+    """
+
+    def _funnel(self, liveness_mapping):
+        # Sign up first: an empty desk reports zeros, which would pass several of
+        # these assertions for the wrong reason.
+        self.signup()
+        self.desk.daemon = FakeDaemon(liveness=liveness_mapping)
+        return self.desk.funnel()
+
+    def test_a_ticket_nobody_redeemed_counts_as_unredeemed_not_handshaked(self):
+        funnel = self._funnel({})
+        self.assertEqual(funnel["devices"]["unredeemed"], 1)
+        self.assertEqual(funnel["handshaked"], 0)
+        self.assertEqual(funnel["devices_total"], 1)
+
+    def test_a_device_that_connected_counts_as_handshaked(self):
+        funnel = self._funnel({"u0001-friend": int(time.time()) - 5})
+        self.assertEqual(funnel["devices"]["live"], 1)
+        self.assertEqual(funnel["handshaked"], 1)
+
+    def test_a_device_that_connected_and_stopped_still_counts_as_handshaked(self):
+        # `offline` proves the join path ran end to end, which is the question an
+        # alpha asks. Counting only `live` would make the funnel report 0 the
+        # moment a user closed their laptop — the opposite of the signal.
+        funnel = self._funnel({"u0001-friend": int(time.time()) - 10_000})
+        self.assertEqual(funnel["devices"]["offline"], 1)
+        self.assertEqual(funnel["handshaked"], 1)
+
+    def test_a_revoked_device_is_not_counted_at_all(self):
+        self.signup()
+        self.desk.db.execute("UPDATE peers SET status='removed' WHERE peer='u0001-friend'")
+        self.desk.daemon = FakeDaemon(liveness={})
+        self.assertEqual(self.desk.funnel()["devices_total"], 0)
+
+    def test_a_daemon_that_cannot_answer_is_visible_as_such(self):
+        self.signup()
+        self.desk.daemon = FakeDaemon(refuse_liveness=True)
+        funnel = self.desk.funnel()
+        self.assertFalse(funnel["daemon_answered"])
+        self.assertEqual(funnel["devices"]["unknown"], 1)
+
+    def test_every_series_is_emitted_even_at_zero(self):
+        # The reason the exposition always prints all five states: a series that
+        # appears only when nonzero makes an empty alpha indistinguishable from a
+        # broken scrape.
+        text = desk_module.funnel_exposition(self._funnel({}))
+        for state in ("live", "offline", "never", "unredeemed", "unknown"):
+            self.assertIn(f'vallum_alpha_devices{{state="{state}"}}', text)
+        self.assertIn("vallum_alpha_handshaked_devices 0", text)
+        self.assertIn("vallum_alpha_devices_total 1", text)
+        self.assertIn("vallum_alpha_daemon_answered 1", text)
+
+    def test_the_exposition_is_parseable_prometheus(self):
+        # Shape, not just substrings: every non-comment line is `name[labels] value`
+        # and the value is numeric. A malformed scrape is silently dropped by the
+        # import endpoint, which would look exactly like a quiet alpha.
+        text = desk_module.funnel_exposition(self._funnel({}))
+        for line in text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, _, value = line.rpartition(" ")
+            self.assertRegex(name, r"^[a-z_]+(\{[a-z_]+=\"[^\"]*\"\})?$")
+            float(value)
+
+
 class AccountPageTests(HttpTests):
     """The account surface: the bearer token travels POST bodies only —
     never the request line — and every rendered page is private."""

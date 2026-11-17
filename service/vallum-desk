@@ -559,6 +559,85 @@ class Desk:
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
                      "plan": row["plan"]}
 
+    def _active_devices(self):
+        """Every device the desk believes it has, as `{peer, status}`.
+
+        One definition, used by both `account()` and `funnel()`. A pre-migration
+        account carries its device in the `peer` column rather than a `peers`
+        row, and the two readers must agree about that or the page and the
+        metric describe different databases.
+
+        Caller holds the lock.
+        """
+        rows = [dict(r) for r in self.db.execute(
+            "SELECT a.peer AS peer, p.peer AS device, "
+            "       COALESCE(p.status, 'active') AS status "
+            "FROM accounts a LEFT JOIN peers p ON p.account_id=a.id "
+            "ORDER BY a.id, p.id")]
+        devices = []
+        seen_accounts = set()
+        for row in rows:
+            if row["device"]:
+                devices.append({"peer": row["device"], "status": row["status"]})
+            elif row["peer"] and row["peer"] not in seen_accounts:
+                # The legacy shape: the account's own peer column IS its device.
+                devices.append({"peer": row["peer"], "status": "active"})
+            if row["peer"]:
+                seen_accounts.add(row["peer"])
+        return devices
+
+    def funnel(self):
+        """What the alpha is actually producing: tickets minted versus devices
+        that ever handshaked.
+
+        This exists because 14 tickets and 0 handshakes read as a healthy quiet
+        system for a day. Every device row was `active`, the desk said so
+        cheerfully, and nothing anywhere compared "we handed out a ticket" with
+        "a device connected". The conversion number is the whole point of an
+        alpha, so it has to be a measurement rather than something someone
+        notices by reading labels.
+
+        Counts, not a ratio: a ratio hides its denominator, and "0 of 0" and
+        "0 of 14" are very different situations that a single float conflates.
+        """
+        with self.lock:
+            accounts = {}
+            for row in self.db.execute(
+                    "SELECT status, COUNT(*) AS n FROM accounts GROUP BY status"):
+                accounts[row["status"]] = row["n"]
+            # Every active device the desk believes it has, including the
+            # pre-migration rows whose device is the account's own `peer`
+            # column. Sharing this with `account()` is deliberate: a funnel that
+            # counted only `peers` rows would report 0 devices on a database
+            # where `account()` reports one, and the two numbers are read side
+            # by side.
+            peers = self._active_devices()
+        try:
+            seen = self.daemon.liveness()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            seen = None
+        states = {"live": 0, "offline": 0, "never": 0, "unredeemed": 0, "unknown": 0}
+        for peer in peers:
+            if peer["status"] != "active":
+                continue
+            if seen is None:
+                states["unknown"] += 1
+            elif peer["peer"] not in seen:
+                states["unredeemed"] += 1
+            else:
+                state, _age = connection_state(seen[peer["peer"]], int(time.time()))
+                states[state] = states.get(state, 0) + 1
+        return {
+            "accounts": accounts,
+            "devices": states,
+            "devices_total": sum(states.values()),
+            # A device that reached a handshake at some point. `live` is now,
+            # `offline` is "it worked and then stopped" — both prove the join
+            # path runs end to end, which is the question an alpha asks.
+            "handshaked": states["live"] + states["offline"],
+            "daemon_answered": seen is not None,
+        }
+
     def account(self, token):
         """The full account view the page and its JSON share: the plan row,
         the shared-pool numbers, and every device with its own status."""
@@ -903,6 +982,43 @@ def connection_state(last_handshake_sec, now):
     except (TypeError, ValueError):
         return "unknown", None
     return ("live" if age <= SESSION_LIVE_SECONDS else "offline"), age
+
+
+def funnel_exposition(funnel):
+    """The funnel as Prometheus text.
+
+    Written here rather than in the pusher because the desk owns the meaning:
+    a shell script that recomputed "handshaked" would be a second definition of
+    the same word, and the two would drift the first time a state was added.
+
+    Every series is always emitted, including zeros. A metric that appears only
+    when it is nonzero makes "no devices" indistinguishable from "the desk did
+    not answer", which is the confusion this whole slice exists to remove.
+    """
+    lines = [
+        "# HELP vallum_alpha_devices Devices by connection state, from the daemon's own handshake record.",
+        "# TYPE vallum_alpha_devices gauge",
+    ]
+    for state, count in sorted(funnel["devices"].items()):
+        lines.append(f'vallum_alpha_devices{{state="{state}"}} {count}')
+    lines += [
+        "# HELP vallum_alpha_devices_total Devices the desk is tracking.",
+        "# TYPE vallum_alpha_devices_total gauge",
+        f'vallum_alpha_devices_total {funnel["devices_total"]}',
+        "# HELP vallum_alpha_handshaked_devices Devices that reached a handshake at least once.",
+        "# TYPE vallum_alpha_handshaked_devices gauge",
+        f'vallum_alpha_handshaked_devices {funnel["handshaked"]}',
+        "# HELP vallum_alpha_accounts Accounts by status.",
+        "# TYPE vallum_alpha_accounts gauge",
+    ]
+    for status, count in sorted(funnel["accounts"].items()):
+        lines.append(f'vallum_alpha_accounts{{status="{status}"}} {count}')
+    lines += [
+        "# HELP vallum_alpha_daemon_answered Whether the daemon could be asked about liveness.",
+        "# TYPE vallum_alpha_daemon_answered gauge",
+        f'vallum_alpha_daemon_answered {1 if funnel["daemon_answered"] else 0}',
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def humanize_age(seconds):
@@ -1284,6 +1400,8 @@ def parse_args(argv=None):
     parser.add_argument("--operator-name", default="vallum desk",
                         help="the service name shown in page headers")
     parser.add_argument("--cli", default="vallum")
+    parser.add_argument("--metrics", action="store_true",
+                        help="print the funnel as Prometheus text and exit")
     return parser.parse_args(argv)
 
 
@@ -1322,6 +1440,12 @@ def main(argv=None):
         operator_name=args.operator_name,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
+    if args.metrics:
+        # One scrape, no listener. The pusher runs this on a timer; there is no
+        # new port and no new credential, which is the same reasoning
+        # `vallum metrics` uses for the daemon.
+        print(funnel_exposition(desk.funnel()), end="")
+        return 0
     threading.Thread(target=desk.sweep, daemon=True).start()
     server = ThreadingHTTPServer((config.bind, config.port), make_handler(desk))
     print(f"desk: serving on {config.bind}:{config.port} (config {config.config}, "

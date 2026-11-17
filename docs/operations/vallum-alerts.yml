@@ -352,3 +352,61 @@ groups:
             session keeps being lost and rebuilt — the "always-on with backoff"
             recovery is working, but something is repeatedly killing it. Look
             for MTU renegotiation, an unstable path, or a server cycling.
+
+      # The alpha's one number: did any device that was handed a ticket ever
+      # connect? 14 tickets with 0 handshakes read as a quiet healthy system for
+      # a day, because nothing compared the two. This is that comparison, and it
+      # is the alert the whole funnel exists to feed.
+      #
+      # `for: 24h` because an alpha legitimately sits idle overnight; a day of
+      # nobody connecting, with tickets outstanding, is not idle.
+      - alert: VallumNoDeviceEverConnected
+        expr: vallum_alpha_handshaked_devices == 0 and vallum_alpha_devices_total > 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} devices are tracked but none has ever connected"
+          description: >-
+            The desk has minted join tickets and no device has reached a
+            handshake. Either nobody is trying (the alpha has no audience yet,
+            which is worth knowing) or the join path is broken end to end and
+            every visitor is failing at the same step. Read
+            `vallum_alpha_devices{state="unredeemed"}`: if it equals the total,
+            the tickets are being minted and never redeemed — check that the
+            ticket's address and port are reachable from outside, which is the
+            failure that made this alert necessary.
+
+      # A desk that cannot reach the daemon reports every device as `unknown`,
+      # which is honest and useless. This is the series that says the desk's own
+      # view is degraded, so a reader knows to distrust the other alpha series.
+      - alert: VallumDeskCannotSeeDaemon
+        expr: vallum_alpha_daemon_answered == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The desk cannot read device liveness from the daemon"
+          description: >-
+            `vallum show --json` is failing from the desk's account, so every
+            device renders `unknown`. The account page still works; its
+            connection column does not. Check that the desk's `--config` path is
+            readable by the unit's user and that `vallum@<stem>` is running.
+
+      # The rule that would have caught a 30-hour failure. Every other alert here
+      # reads Vallum's own metrics, and a unit that is not running emits none —
+      # so a dead unit was invisible by construction. This reads the host's own
+      # view of itself instead.
+      - alert: VallumUnitFailed
+        expr: vallum_failed_units_total > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} systemd unit(s) on {{ $labels.instance }} are failed"
+          description: >-
+            `systemctl --failed` is non-empty on the host that runs Vallum. Read
+            `vallum_unit_failed` for which unit and `systemctl status <unit>` for
+            why. A failed `vallum-quick@` or `vallum@` unit means the tunnel is
+            not carrying; a failed unit that is not Vallum's is still worth
+            knowing about on the box that terminates the VPN.

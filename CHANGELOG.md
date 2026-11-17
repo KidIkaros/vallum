@@ -26,6 +26,26 @@
   the alpha session of 2026-11-16 that nobody redeemed. On the reference server
   this immediately corrects two devices that had been shown as `active` while
   never having handshaked.
+- **The alpha's funnel is now a measurement.** `vallum-desk --metrics` prints
+  the alpha's one number as Prometheus text: `vallum_alpha_devices{state}` split
+  into `live`/`offline`/`never`/`unredeemed`/`unknown`, plus
+  `vallum_alpha_handshaked_devices`, `vallum_alpha_devices_total`,
+  `vallum_alpha_accounts{status}` and `vallum_alpha_daemon_answered`. It exists
+  because 14 join tickets with zero handshakes read as a healthy quiet system
+  for a day: every device row was `active`, the desk said so cheerfully, and
+  nothing anywhere compared "we handed out a ticket" with "a device connected".
+  Every series is emitted even at zero — a metric that vanishes at zero makes an
+  empty alpha indistinguishable from a broken scrape. Three rules read it:
+  `VallumNoDeviceEverConnected` (warning, 24 h), `VallumDeskCannotSeeDaemon`
+  (warning, 15 m) and `VallumUnitFailed`.
+- **The host's own unit health is scraped, so a dead unit can no longer be
+  invisible.** Every alert before this read Vallum's metrics, and a unit that is
+  not running emits none — which is how `vallum-quick@vallumrc` sat `failed` for
+  30 hours with all 19 rules green. The telemetry pusher now also pushes
+  `vallum_unit_failed{unit}` and `vallum_failed_units_total` from
+  `systemctl --failed`. The first scrape on the reference host immediately found
+  three: `swapfile.swap`, `vallum-quick@vallum0.service` and
+  `vallum-quick@vallumrc.service`.
 - **`vallum support-bundle` collects what a support conversation asks for.** The
   gap was never "no diagnostics" — `status --json`, `doctor --json` and `metrics`
   already answer almost everything. It was that a user on a broken tunnel had to
