@@ -191,6 +191,9 @@ LIVE_DEPLOYMENT=0
 # Set when enrol_ssh moved a host's own /usr/bin/vallum aside; cleanup puts it
 # back. Without this a gate run replaces production binaries with the tree's.
 BINARY_RESTORE=0
+# Set only when this run actually installed a binary at /usr/bin/vallum. Cleanup
+# removes that binary, and ONLY that one — see the note at the removal.
+BINARY_INSTALLED=0
 UPGRADE=0
 APP_CLASS=0
 # The outage leg runs once per run, not once per transport: it costs minutes and
@@ -285,10 +288,14 @@ if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
     # The control socket lives where the invoking user can write it.
     chown "$SUDO_USER" "$SSH_MUX_DIR"
     rsh() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
-    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -q -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
+    # `-q` was here and is gone: a copy that fails prints its reason to stderr,
+    # and the reason is the whole diagnostic. A run that died on
+    # `bad "scp laptop-bundle.key"` left nothing behind to explain it — no ssh
+    # error, no exit status — so the only conclusion available was a guess.
+    rscp() { sudo -u "$SUDO_USER" env HOME="$OWNER_HOME" scp -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 else
     rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
-    rscp() { scp -q -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
+    rscp() { scp -o "ControlPath=$SSH_MUX" -o ControlMaster=no "$@"; }
 fi
 
 # The persistent connection all rsh/rscp calls multiplex onto. Opened after
@@ -418,15 +425,26 @@ cleanup() {
             # deployment's is a different name, and this only removes the one
             # this run made.
             rsh "sudo ip link del vallumrc 2>/dev/null" >/dev/null 2>&1
-            # Put the host's own binaries back, and remove the test build only
-            # when there was nothing there before.
+            # Put the host's own binaries back, and remove a test build ONLY if
+            # this run is what put it there.
+            #
+            # This deleted /usr/bin/vallum and vallum-quick unconditionally, and
+            # on 2026-11-17 that took a live server's binaries away: the run
+            # failed at the bundle transport *before* enrol_ssh, so nothing had
+            # been installed, BINARY_RESTORE was never set — and cleanup removed
+            # the deployment's binaries anyway. `vallum@` then failed to start,
+            # because its ExecStart is that path. Two independent guards now, and
+            # both are needed: one restores what was moved aside, the other
+            # refuses to delete what was never installed.
             if [ "$BINARY_RESTORE" = 1 ]; then
                 rsh "set +e
                     sudo mv -f /usr/bin/vallum.pre-verify-remote /usr/bin/vallum
                     sudo mv -f /usr/bin/vallum-quick.pre-verify-remote /usr/bin/vallum-quick" >/dev/null 2>&1
                 note "restored the host's own /usr/bin/vallum{,-quick}"
-            else
+            elif [ "$BINARY_INSTALLED" = 1 ]; then
                 rsh "sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
+            else
+                note "left /usr/bin/vallum{,-quick} alone — this run installed neither"
             fi
         fi
         if [ -n "$FORWARD_WAS" ]; then
@@ -838,6 +856,7 @@ enrol_ssh() {
             note "the host already has /usr/bin/vallum — set aside, restored by cleanup"
         fi
         rsh "sudo install -m0755 $REMOTE_DIR/vallum /usr/bin/vallum" || bad "install vallum on the remote"
+        BINARY_INSTALLED=1
         note "installed vallum to /usr/bin on the remote for the ssh transport"
     fi
     as_owner "$dir" "$VALLUM setup --remote $TARGET --remote-config $CONFIG --name $name" > "$dir/setup.log" 2>&1 \
@@ -1110,7 +1129,12 @@ PY
     # with a No such file on its key.
     for key in "$dir"/*.key; do
         [ -e "$key" ] || continue
-        rscp "$key" "$TARGET:$rdir/" || bad "$name: scp $(basename "$key")"
+        rscp "$key" "$TARGET:$rdir/" \
+            || bad "$name: scp $(basename "$key") failed — the message above is ssh's own.
+        If it says 'Connection timed out' the transport died, not the tunnel: the host
+        drops new connections under load (sshd MaxStartups) and this gate opens a
+        lot of them. Re-run; a failure that repeats at the same step is the gate, one
+        that moves around is the transport."
     done
 
     # Before running it, check the config as the server produced it:

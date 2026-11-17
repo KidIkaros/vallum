@@ -68,6 +68,26 @@ vallum metrics --control /run/vallum/vallum0.sock       # socket directly
 vallum metrics --prefix site_a                         # rename every family
 ```
 
+## Watching the gate, and watching from outside
+
+Two things the daemon's counters cannot see, both wired on the reference
+deployment and both reproducible from `contrib/monitoring/`:
+
+- **Whether the proof still passes.** `scripts/verify-scheduled.sh` runs the
+  two-host gate nightly and publishes `vallum_verify_passed`,
+  `vallum_verify_assertions` and `vallum_verify_last_success_timestamp_seconds`.
+  Three alerts read them: the gate failing, the gate going stale for 48 h, and
+  the gate asserting less than it did a week ago — a gate that stops checking
+  something still reports PASS, which is why the count is tracked.
+- **Whether the deployment is reachable from outside the process.**
+  `blackbox_exporter` probes ICMP, the resolver and the desk's TLS certificate
+  (`probe_success`, `probe_ssl_earliest_cert_expiry`). A failing probe with
+  `vallum_up 1` means the daemon is healthy and something in front of it is not.
+
+`contrib/monitoring/README.md` has the wiring, and the four commands that prove
+it is actually collecting rather than merely running — the state a store with no
+series in it convincingly imitates.
+
 ## Alert rules
 
 `packaging/vallum-alerts.yml` ships starting-point rules in two groups. The

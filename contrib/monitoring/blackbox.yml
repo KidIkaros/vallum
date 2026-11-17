@@ -1,0 +1,70 @@
+# Probes for the things `vallum metrics` cannot see.
+#
+# The daemon reports its own counters. It cannot tell you that the host is
+# unreachable from outside, that the enrolment port stopped answering, or that
+# the desk's TLS certificate expires on Friday — those are properties of the
+# path and of the deployment, not of the process. Blackbox probing is the
+# standard way to measure them, and this is the module set for Vallum.
+#
+# Each module is referenced by a scrape job in `scrape.yml`, which VictoriaMetrics
+# runs with `-promscrape.config`. The result is the usual family: `probe_success`,
+# `probe_duration_seconds`, and for TLS `probe_ssl_earliest_cert_expiry`.
+#
+#   blackbox_exporter --config.file=/etc/vallum/blackbox.yml \
+#                     --web.listen-address=127.0.0.1:9115
+modules:
+  # Reachability and RTT. This is the probe that catches "the VPS is down" before
+  # the tunnel's own counters notice, because it does not depend on the daemon.
+  icmp:
+    prober: icmp
+    timeout: 5s
+    icmp:
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: true
+
+  # The host's own resolver. Vallum pushes DNS through the tunnel and the desk
+  # hands out configs naming a resolver; a host that cannot resolve is a host
+  # where `peer invite` fails, `setup --join` fails, and `vallum-quick`'s
+  # captive-portal probe misreads the world. Nothing in the tunnel's counters
+  # sees this.
+  #
+  # Note what is deliberately NOT here: a TCP probe of the enrolment port. That
+  # responder is **UDP** (51820+1 on the live server), and a TCP connect to a UDP
+  # port can only ever fail — the exact trap recorded in
+  # docs/alpha-readiness-2026-11-12.md, where a `/dev/tcp` probe aimed at UDP
+  # 51820 "can only fail and looks exactly like a dead tunnel". Blackbox has no
+  # UDP prober, so the enrolment path is measured by the two-host gate instead.
+  dns_resolver:
+    prober: dns
+    timeout: 5s
+    dns:
+      preferred_ip_protocol: ip4
+      query_name: example.com
+      query_type: A
+      valid_rcodes: [NOERROR]
+
+  # The desk's front door, with the certificate. A desk whose certificate expired
+  # serves nothing a browser will trust, and the account page is the only way a
+  # user sees their expiry — so this is a user-facing dependency, not decoration.
+  https_desk:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: [200, 302, 401, 403]
+      tls_config:
+        # Verification is the point: an expired or wrong-name certificate is
+        # what `probe_ssl_earliest_cert_expiry` and `probe_success` are for, so
+        # the probe must fail when it would fail for a user.
+        insecure_skip_verify: false
+
+  # The account API, which is what the client actually calls after a join. A
+  # 200 here means the desk can answer; the tunnel's metrics cannot see the desk
+  # at all.
+  http_desk_api:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      method: POST
+      valid_status_codes: [400, 401, 404]

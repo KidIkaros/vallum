@@ -1,0 +1,34 @@
+[Unit]
+Description=Blackbox prober for the Vallum deployment's outside-in checks
+Documentation=https://github.com/prometheus/blackbox_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blackbox
+Group=blackbox
+ExecStart=/usr/local/bin/blackbox_exporter \
+    --config.file=/etc/vallum/blackbox.yml \
+    --web.listen-address=127.0.0.1:9115
+Restart=on-failure
+RestartSec=5
+# ICMP probing needs a raw socket; everything else here is an ordinary outbound
+# connection. Ambient capabilities are how it gets one without running as root.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

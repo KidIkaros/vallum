@@ -1,0 +1,19 @@
+# The store, as a datasource. VictoriaMetrics speaks PromQL, so Grafana's
+# Prometheus datasource is the right driver — there is nothing Vallum-specific
+# about this file.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    # Fixed uid: the dashboard JSON references it, and a uid that Grafana
+    # generates would break the panels on a re-provision.
+    uid: VM
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:8428
+    isDefault: true
+    jsonData:
+      # VictoriaMetrics answers PromQL; this keeps Grafana from offering
+      # Prometheus-only features the store does not implement.
+      prometheusType: Prometheus
+      httpMethod: POST
+      timeInterval: 15s

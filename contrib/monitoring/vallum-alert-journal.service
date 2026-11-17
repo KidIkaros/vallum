@@ -1,0 +1,16 @@
+[Unit]
+Description=Print firing Vallum alerts to the journal
+After=vmalert.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/vallum/vallum-alert-journal
+# A firing alert is not a unit failure — the journal line is the signal, and the
+# exit code exists so `systemctl status` shows it without a red unit every
+# 30 seconds.
+SuccessExitStatus=1
+ReadWritePaths=/run/vallum
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

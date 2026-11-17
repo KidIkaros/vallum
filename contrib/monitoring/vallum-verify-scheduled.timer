@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the Vallum two-host gate nightly
+
+[Timer]
+# Nightly at 03:20 local, deliberately not on the hour: every scheduler in the
+# world fires at :00, and this one shares a host with a CI runner.
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=15m
+# A host that was off across the window takes the run on the next boot rather
+# than skipping a day silently.
+Persistent=true
+Unit=vallum-verify-scheduled.service
+
+[Install]
+WantedBy=timers.target

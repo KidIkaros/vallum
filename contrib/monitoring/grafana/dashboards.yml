@@ -1,0 +1,18 @@
+# Provisioning: datasource and dashboard are files, not clicks.
+#
+# A dashboard built by hand in the UI lives in Grafana's database and is lost
+# with the container, the volume or the rebuild. These two files make the
+# monitoring reproducible in the same way the gates make the product
+# reproducible: the tree is the source, and `systemctl restart grafana-server`
+# is the apply.
+apiVersion: 1
+providers:
+  - name: vallum
+    orgId: 1
+    folder: Vallum
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/vallum/grafana-dashboards

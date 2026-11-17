@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **The control socket can no longer be mistaken for a deleted one.** The daemon
+  probed its control path with `Path::exists()`, which answers `false` for *every*
+  error — including "you may not look". After `systemd-tmpfiles --create` reset
+  `/run/vallum` to `root:root` (it does that on every boot, and on every install
+  that runs it), the dropped-privilege daemon read its own live socket as deleted,
+  retried a bind it could never win, and logged the same two warnings every 18 s
+  while the control plane was dead. `systemctl is-active` said `active` and
+  `peer list` worked (it reads the config), so the only symptom was `vallum_up 0`.
+  `socket_state()` now separates Present / Gone / Unreachable, explains the
+  unreachable case once with the exact fix, and publishes
+  `vallum_control_rebind_failures_total`, with a `VallumControlPlaneUnreachable`
+  alert on it. Observed on the reference server on 2026-11-09 and 2026-11-17.
+- **`verify-remote.sh` no longer deletes a deployment's binaries it never
+  installed.** Cleanup removed `/usr/bin/vallum{,-quick}` whenever it had not set
+  a host's copies aside — so a run that failed *before* the ssh transport, the
+  only thing that installs them, took a live server's binaries away, and
+  `vallum@` then failed to start. Cleanup now removes a binary only if this run
+  installed it. Found by doing exactly that to the reference server on
+  2026-11-17; the host was reinstalled from the signed release.
+- **Monitoring that collects, instead of a store with nothing in it.**
+  `contrib/monitoring/` wires the daemon's counters, the nightly two-host gate
+  and outside-in blackbox probes into VictoriaMetrics, evaluates the shipped
+  rules with vmalert, turns firing alerts into journal lines, and provisions a
+  Grafana dashboard from files. `scripts/verify-scheduled.sh` is the nightly
+  gate: one JSON line of history per run plus `vallum_verify_passed`,
+  `_assertions` and `_last_success_timestamp_seconds`, with alerts for the gate
+  failing, going stale, and asserting less than it did a week ago.
 - **The two-host gate runs beside a live deployment — no second host needed.** `verify-remote.sh`'s
   scratch mode installs nothing into `/etc/vallum`, `/run/vallum`, `/usr/bin` or nftables table
   `inet vallum`, yet its teardown deleted all of them on the way out, so the script had to refuse any

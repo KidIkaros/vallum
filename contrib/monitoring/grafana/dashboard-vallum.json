@@ -1,0 +1,454 @@
+{
+  "uid": "vallum-overview",
+  "title": "Vallum \u2014 tunnel, deployment, gate",
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Tunnel up",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_up",
+          "legendFormat": "vallum_up"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Client verdict",
+      "type": "stat",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_client_verdict == 1",
+          "legendFormat": "{{verdict}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Control rebind failures",
+      "type": "stat",
+      "gridPos": {
+        "x": 9,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_control_rebind_failures_total",
+          "legendFormat": "rebind failures"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Two-host gate",
+      "type": "stat",
+      "gridPos": {
+        "x": 13,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_verify_passed",
+          "legendFormat": "passed"
+        },
+        {
+          "refId": "B",
+          "expr": "vallum_verify_assertions",
+          "legendFormat": "assertions"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Outside-in probes",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_success",
+          "legendFormat": "{{probe}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Peers handshaked",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_peers_handshaked",
+          "legendFormat": "handshaked"
+        },
+        {
+          "refId": "B",
+          "expr": "vallum_peers_total",
+          "legendFormat": "configured"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Per-peer handshake age",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 4,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_peer_handshake_age_seconds",
+          "legendFormat": "{{peer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Datagrams out / packets in",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vallum_loop_datagrams_sent_total[5m])",
+          "legendFormat": "datagrams sent"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(vallum_loop_packets_delivered_total[5m])",
+          "legendFormat": "packets delivered"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Handshakes established vs refused",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vallum_loop_handshakes_established_total[5m])",
+          "legendFormat": "established"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(vallum_loop_handshakes_refused_total[5m])",
+          "legendFormat": "refused"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Delivery ratio per peer",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 11,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_peer_delivery_ratio",
+          "legendFormat": "{{peer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Desk certificate expiry",
+      "type": "stat",
+      "gridPos": {
+        "x": 16,
+        "y": 11,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_ssl_earliest_cert_expiry - time()",
+          "legendFormat": "seconds left"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Fragments dropped / rate limited",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(vallum_loop_fragments_dropped_total[5m])",
+          "legendFormat": "dropped"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(vallum_fragments_rate_limited_total[5m])",
+          "legendFormat": "rate limited"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "Gate history (assertions)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VM"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "vallum_verify_assertions",
+          "legendFormat": "assertions"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

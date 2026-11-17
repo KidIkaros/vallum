@@ -164,6 +164,16 @@ pub mod field {
     /// Datagrams refused by the per-source admission bucket before reassembly:
     /// a source that is not a configured peer, over its allowance (ADR-0030).
     pub const VALLUM_FRAGMENTS_RATE_LIMITED: &str = "vallum_fragments_rate_limited";
+    /// Times the control socket could not be re-bound because the runtime
+    /// directory stopped being reachable to the dropped-privilege process.
+    ///
+    /// Published because that failure is otherwise invisible from outside: the
+    /// daemon stays `active`, the interface keeps carrying, `peer list` works
+    /// (it reads the config), and the only symptom is a control socket nobody
+    /// can connect to. `vallum_up` reports it, but a counter distinguishes
+    /// "the socket was deleted" from "we lost the directory" — the second one
+    /// needs an operator, and a restart.
+    pub const VALLUM_CONTROL_REBIND_FAILURES: &str = "vallum_control_rebind_failures";
     /// Initiations the responder dropped, by reason. Silent on the wire by
     /// design — an unauthenticated datagram gets no oracle — so these counters
     /// are the only account of a refusal. A server that receives an initiation
@@ -659,6 +669,10 @@ pub fn render_get(state: &DeviceState) -> String {
         (
             field::VALLUM_FRAGMENTS_RATE_LIMITED,
             stats.fragments_rate_limited,
+        ),
+        (
+            field::VALLUM_CONTROL_REBIND_FAILURES,
+            stats.control_rebind_failures,
         ),
         (
             field::VALLUM_HANDSHAKE_DROPPED_NO_MAC,

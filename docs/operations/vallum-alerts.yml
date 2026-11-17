@@ -213,6 +213,110 @@ groups:
             already had the whole budget the real-link gate allows it. Check the
             path to the endpoint and whether the server is up.
 
+      # Outside-in probes. The daemon's counters describe the tunnel; these
+      # describe the deployment as the world reaches it. A failing probe with a
+      # healthy `vallum_up` is the interesting case: the process is fine and the
+      # path, the firewall or the certificate is not.
+      - alert: VallumProbeFailing
+        expr: probe_success == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.probe }} probe failing against {{ $labels.instance }}"
+          description: >-
+            blackbox_exporter cannot complete the {{ $labels.probe }} probe. With
+            `vallum_up 1` alongside, the daemon is healthy and something in front
+            of it is not: a firewall, the TLS certificate, or the resolver.
+            Run it by hand to see why:
+            `curl -s "http://127.0.0.1:9115/probe?module=<probe>&target=<instance>"`.
+
+      # 21 days: long enough that a genuine expiry is fixable, short enough that
+      # it is a task rather than an incident. The certificate is what makes the
+      # account page reachable, and a client's join flow starts there.
+      - alert: VallumDeskCertificateExpiring
+        expr: probe_ssl_earliest_cert_expiry - time() < 21 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The desk's TLS certificate expires in under 21 days"
+          description: >-
+            `probe_ssl_earliest_cert_expiry` is the earliest expiry in the chain
+            served by {{ $labels.instance }}. Renew it before it lapses: an
+            expired certificate makes the desk unreachable for every client that
+            has not already joined, and the join flow is where an account is
+            created.
+
+      # The gate that proves the product, watched like a product. Two distinct
+      # failures: the scheduled run failed, and the scheduled run stopped
+      # happening. The second is the one that rots silently — a timer that was
+      # disabled, a host that rebooted, a checkout that moved.
+      - alert: VallumTwoHostGateFailing
+        expr: vallum_verify_passed == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The two-host gate failed on {{ $labels.host }} at {{ $labels.commit }}"
+          description: >-
+            `scripts/verify-scheduled.sh` recorded a failed run. The cause is in
+            the gate's own output in the journal (`journalctl -u
+            vallum-verify-scheduled`), and in /var/lib/vallum/verify-history.jsonl
+            next to the previous runs.
+
+      - alert: VallumTwoHostGateStale
+        expr: time() - vallum_verify_last_success_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The two-host gate has not passed on {{ $labels.host }} in 48 h"
+          description: >-
+            Either the nightly run has been failing for two days, or it has
+            stopped running — a disabled timer, a host that stayed down, a moved
+            checkout. `systemctl list-timers vallum-verify-scheduled.timer` says
+            which, and `vallum_verify_last_success_timestamp_seconds == 0` means
+            it has never passed here at all.
+
+      # A pass that asserts less than the previous pass is the gate getting
+      # weaker without getting red. This is the signal `verdict.sh` exists to
+      # make visible, turned into an alert.
+      - alert: VallumTwoHostGateWeakening
+        expr: vallum_verify_assertions < 0.9 * (vallum_verify_assertions offset 7d)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The two-host gate is asserting less than it did a week ago on {{ $labels.host }}"
+          description: >-
+            Assertion count fell by more than 10% against the same series seven
+            days ago. A gate that stops checking something still reports PASS,
+            which is why the count is tracked. Look for a check that became
+            conditional — the download assertion grew an "if curl is absent"
+            branch, and that is the shape of this.
+
+      # The control plane, not the tunnel. A daemon whose runtime directory
+      # stopped being reachable keeps carrying traffic while nothing can talk to
+      # it: `systemctl is-active` says active, `peer list` works (it reads the
+      # config), and the only symptom is that `vallum` commands cannot reach the
+      # socket. Observed 2026-11-09 and again 2026-11-17 on a live server, both
+      # times after `systemd-tmpfiles --create` reset /run/vallum to root:root.
+      # It does not clear without a restart, so this pages.
+      - alert: VallumControlPlaneUnreachable
+        expr: increase(vallum_control_rebind_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Vallum {{ $labels.interface }} cannot reach its own control socket"
+          description: >-
+            The daemon lost access to its runtime directory and cannot re-bind.
+            The tunnel may still be carrying; nothing can administer it. Fix the
+            directory's group and restart the unit:
+            `sudo chgrp <interface.group> /run/vallum && sudo systemctl restart
+            vallum@<stem>`.
+
       # A client handshakes on rekey, about one every 120 s — 0.008/s per
       # peer. One every 10 s sustained means recovery is looping: reconnect,
       # establish, lose it, repeat. Above steady state by 12x regardless of

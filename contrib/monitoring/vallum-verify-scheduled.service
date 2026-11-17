@@ -1,0 +1,25 @@
+[Unit]
+Description=Run the Vallum two-host gate and record the result
+Documentation=man:vallum(8)
+# A *user* unit: the gate needs a checkout with built binaries, and SSH keys that
+# reach the target. Both live with the operator, not on the server — the server
+# is what the gate runs against, so running it there would make it prove itself.
+# Adjust WorkingDirectory to the checkout; `%h` is the invoking user's home.
+#
+# `systemctl --user enable --now vallum-verify-scheduled.timer`, with lingering
+# on so it runs without a login session (`loginctl enable-linger $USER`).
+#
+# For a root unit on a host that keeps a checkout, drop `User=` and point
+# WorkingDirectory at it. Nothing else changes.
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Coding/Gold/vallum
+Environment=HOST=wingman-vps
+ExecStart=%h/Coding/Gold/vallum/scripts/verify-scheduled.sh
+# The gate exits 1 on a failed run and 3 on a regression; both are the signal,
+# not a broken unit. The journal line and the metric carry the detail.
+SuccessExitStatus=1 3
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle

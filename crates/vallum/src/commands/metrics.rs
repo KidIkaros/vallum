@@ -294,6 +294,11 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             "Datagrams refused by the per-source admission bucket before reassembly.",
         ),
         (
+            uapi::field::VALLUM_CONTROL_REBIND_FAILURES,
+            "control_rebind_failures_total",
+            "Times the control socket could not be re-bound because its runtime directory became unreachable.",
+        ),
+        (
             uapi::field::VALLUM_DROPPED_MALFORMED,
             "loop_dropped_malformed_total",
             "Datagrams dropped because they did not parse as a transport message.",

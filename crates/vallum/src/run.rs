@@ -36,6 +36,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -168,6 +169,7 @@ pub struct SharedStats {
     dropped_malformed: AtomicU64,
     dropped_unknown_index: AtomicU64,
     fragments_rate_limited: AtomicU64,
+    control_rebind_failures: AtomicU64,
 }
 
 impl SharedStats {
@@ -192,6 +194,8 @@ impl SharedStats {
             .store(stats.dropped_unknown_index, Ordering::Relaxed);
         self.fragments_rate_limited
             .store(stats.fragments_rate_limited, Ordering::Relaxed);
+        self.control_rebind_failures
+            .store(stats.control_rebind_failures, Ordering::Relaxed);
     }
 
     /// Read every counter as one [`LoopStats`].
@@ -209,6 +213,7 @@ impl SharedStats {
             dropped_malformed: self.dropped_malformed.load(Ordering::Relaxed),
             dropped_unknown_index: self.dropped_unknown_index.load(Ordering::Relaxed),
             fragments_rate_limited: self.fragments_rate_limited.load(Ordering::Relaxed),
+            control_rebind_failures: self.control_rebind_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -239,6 +244,33 @@ pub struct LoopStats {
     /// Datagrams refused by the per-source admission bucket before reassembly:
     /// sources that are not a configured peer, over their allowance (ADR-0030).
     pub fragments_rate_limited: u64,
+    /// Times the control socket could not be re-bound because the runtime
+    /// directory became unreachable — the daemon can see that something is
+    /// wrong and cannot fix it, so this counter is how a scraper finds out.
+    pub control_rebind_failures: u64,
+}
+
+/// Whether the control socket is there, gone, or cannot be inspected.
+///
+/// The third case is the one that matters and the one `Path::exists()` cannot
+/// express: it collapses every error — including "permission denied" — into
+/// `false`. A daemon that has dropped to `interface.user` and then lost access
+/// to `/run/vallum` (a group reset by `systemd-tmpfiles`, a mode change, a
+/// mount) therefore reads its own live socket as deleted and retries a bind it
+/// can never win.
+#[derive(Debug)]
+enum SocketState {
+    Present,
+    Gone,
+    Unreachable(io::Error),
+}
+
+fn socket_state(path: &Path) -> SocketState {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => SocketState::Present,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => SocketState::Gone,
+        Err(error) => SocketState::Unreachable(error),
+    }
 }
 
 /// Everything the loop needs from the operating system.
@@ -665,6 +697,13 @@ pub fn run(
     let mut silent: HashSet<usize> = HashSet::new();
 
     let mut last_control_check = Instant::now();
+    // Times the control socket could not be re-bound because the runtime
+    // directory became unreachable, and whether that has been explained once.
+    // The daemon cannot heal this — it has already dropped to `interface.user` —
+    // so the honest behaviour is to count it, say what to do exactly once, and
+    // let a scraper page on the counter.
+    let mut control_rebind_failures: u64 = 0;
+    let mut control_unreachable_warned = false;
 
     loop {
         if shutdown.is_triggered() {
@@ -675,29 +714,64 @@ pub fn run(
         if let (Some(path), Some(tx)) = (&control_path, &control_tx) {
             if last_control_check.elapsed() >= tick {
                 last_control_check = Instant::now();
-                if !path.exists() {
-                    log_warn!(
-                        log,
-                        "control socket `{}` was removed; re-binding",
-                        path.display()
-                    );
-                    control_shutdown.trigger();
-                    control_shutdown = Shutdown::new();
-                    match control::serve(
-                        path.clone(),
-                        tx.clone(),
-                        control_shutdown.clone(),
-                        shutdown.clone(),
-                    ) {
-                        Ok(handle) => {
-                            _control_handle = Some(handle);
-                        }
-                        Err(error) => {
+                // `Path::exists()` answers `false` for *every* error, and one of
+                // them is "you may not look": the daemon drops to
+                // `interface.user`, so a `/run/vallum` whose group was reset —
+                // `systemd-tmpfiles --create` does that on every boot and on
+                // every install that runs it — makes `exists()` lie. The daemon
+                // then believes its socket was deleted, retries a bind it cannot
+                // win, and logs the same two warnings every tick while the
+                // control plane is dead. `systemctl is-active` still says
+                // active, `peer list` still works (it reads the config, not the
+                // socket), and the only symptom is `vallum_up 0`.
+                match socket_state(path) {
+                    SocketState::Present => {}
+                    SocketState::Unreachable(error) => {
+                        control_rebind_failures = control_rebind_failures.saturating_add(1);
+                        if !control_unreachable_warned {
+                            control_unreachable_warned = true;
+                            let dir = path.parent().unwrap_or(path);
                             log_warn!(
                                 log,
-                                "failed to re-bind control socket `{}`: {error}",
-                                path.display()
+                                "control socket `{}` is not reachable: {error}. \
+                                 The runtime directory `{}` is no longer accessible to this \
+                                 process, which runs as `interface.user`; the socket is \
+                                 probably still there. Fix the directory and restart: \
+                                 `sudo chgrp <interface.group> {}` then \
+                                 `sudo systemctl restart vallum@<stem>` — this process cannot \
+                                 recover on its own, and it will not retry loudly again. \
+                                 `vallum_up` is 0 until then.",
+                                path.display(),
+                                dir.display(),
+                                dir.display()
                             );
+                        }
+                    }
+                    SocketState::Gone => {
+                        log_warn!(
+                            log,
+                            "control socket `{}` was removed; re-binding",
+                            path.display()
+                        );
+                        control_shutdown.trigger();
+                        control_shutdown = Shutdown::new();
+                        match control::serve(
+                            path.clone(),
+                            tx.clone(),
+                            control_shutdown.clone(),
+                            shutdown.clone(),
+                        ) {
+                            Ok(handle) => {
+                                _control_handle = Some(handle);
+                            }
+                            Err(error) => {
+                                control_rebind_failures = control_rebind_failures.saturating_add(1);
+                                log_warn!(
+                                    log,
+                                    "failed to re-bind control socket `{}`: {error}",
+                                    path.display()
+                                );
+                            }
                         }
                     }
                 }
@@ -730,6 +804,7 @@ pub fn run(
                 stats.reassembled = segments.reassembled();
                 stats.fragments_dropped = segments.dropped();
                 stats.fragments_rate_limited = rate_limited.load(Ordering::Relaxed);
+                stats.control_rebind_failures = control_rebind_failures;
                 stats.dropped_malformed = device.dropped_malformed();
                 stats.dropped_unknown_index = device.dropped_unknown_index();
                 shared_stats.publish(&stats);
@@ -1136,8 +1211,12 @@ fn spawn_udp_reader(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{path_stalled, DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY, UDP_BUFFER};
+    use super::{
+        path_stalled, socket_state, SocketState, DEFAULT_UNDER_LOAD_DEPTH, QUEUE_CAPACITY,
+        UDP_BUFFER,
+    };
 
     #[test]
     fn the_read_buffer_is_one_byte_past_the_message_cap() {
@@ -1207,5 +1286,53 @@ mod tests {
         // No persistent keepalive to calibrate against: fall back to a minute.
         assert!(path_stalled(90_000, 5_000, 0));
         assert!(!path_stalled(30_000, 5_000, 0));
+    }
+
+    #[test]
+    fn a_live_socket_reads_as_present_and_a_deleted_one_as_gone() {
+        let dir = std::env::temp_dir().join(format!("vallum-sock-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("control.sock");
+        std::fs::write(&path, b"").unwrap();
+
+        assert!(matches!(socket_state(&path), SocketState::Present));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(socket_state(&path), SocketState::Gone));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_unreachable_not_gone() {
+        // The bug this encodes: `Path::exists()` answers false for EACCES, so a
+        // daemon that lost access to its runtime directory reads its own live
+        // socket as deleted and re-binds forever. `socket_state` must separate
+        // the two, because only one of them is worth re-binding.
+        //
+        // The directory is created 0000 and owned by this process, so the
+        // traversal failure is real without needing another user — and root in a
+        // container ignores the mode, which is why the assertion accepts Present
+        // as well: what it forbids is reporting Gone.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("vallum-sock-deny-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("control.sock");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let state = socket_state(&path);
+        // Restore before asserting, so a failure cannot leave an unremovable
+        // directory behind.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            !matches!(state, SocketState::Gone),
+            "an unreadable directory must never read as \"the socket was deleted\""
+        );
     }
 }

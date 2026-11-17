@@ -1,0 +1,47 @@
+[Unit]
+Description=Evaluate the Vallum alert rules against VictoriaMetrics
+Documentation=https://docs.victoriametrics.com/vmalert/
+After=victoria-metrics.service
+Wants=victoria-metrics.service
+
+[Service]
+Type=simple
+User=vmalert
+Group=vmalert
+# The rules are the ones the product ships (packaging/vallum-alerts.yml). They
+# are read from /etc/vallum so an operator can edit them without touching a
+# package-managed path, and vmalert re-reads them on SIGHUP.
+ExecStart=/usr/local/bin/vmalert-prod \
+    -rule=/etc/vallum/vallum-alerts.yml \
+    -datasource.url=http://127.0.0.1:8428 \
+    -remoteWrite.url=http://127.0.0.1:8428 \
+    -remoteRead.url=http://127.0.0.1:8428 \
+    -httpListenAddr=127.0.0.1:8880 \
+    -evaluationInterval=30s \
+    -loggerLevel=INFO \
+    -notifier.blackhole
+# `-notifier.blackhole` is deliberate, and vmalert refuses to start without some
+# notifier when the rules are alerting rules. The alternative is Alertmanager: a
+# second daemon, a second config file and a second thing to get wrong, to route
+# alerts to... the same one operator. Instead vmalert evaluates the rules and
+# exposes them at /api/v1/alerts, and `vallum-alert-journal` turns the firing
+# ones into journal lines — so the journal is the pager, which on a single-operator
+# host it already was. Add `-notifier.url=http://127.0.0.1:9093` here on the day
+# an Alertmanager exists; nothing else changes.
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

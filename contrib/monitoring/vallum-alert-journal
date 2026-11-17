@@ -1,0 +1,55 @@
+#!/bin/sh
+# Turn vmalert's firing alerts into journal lines.
+#
+# vmalert evaluates the rules and exposes them at /api/v1/alerts, but it routes
+# them through Alertmanager — which is a second daemon, a second config and a
+# second thing to get wrong for a single-operator box. On this host the journal
+# *is* the pager: anything that matters must be visible to `journalctl -u`, and
+# this bridges the two.
+#
+# Firing alerts are printed once when they start and once when they clear, not
+# every run: the state file is what makes the difference between a signal and a
+# 15-second drip. Exit code is 1 while anything is firing, so a wrapper (or the
+# unit's failed state) shows it.
+set -u
+STATE=${VALLUM_ALERT_STATE:-/run/vallum/alerts.state}
+URL=${VMALERT_URL:-http://127.0.0.1:8880/api/v1/alerts}
+
+current=$(curl -fsS --max-time 5 "$URL" 2>/dev/null \
+    | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for alert in doc.get("data", {}).get("alerts", []):
+    if alert.get("state") != "firing":
+        continue
+    labels = alert.get("labels", {})
+    print("%s|%s|%s" % (
+        labels.get("alertname", "?"),
+        labels.get("instance", labels.get("interface", "-")),
+        (alert.get("annotations", {}).get("summary") or "").replace("|", " "),
+    ))
+' 2>/dev/null) || { echo "vallum-alert-journal: vmalert did not answer at $URL"; exit 2; }
+
+mkdir -p "$(dirname "$STATE")" 2>/dev/null
+previous=$(cat "$STATE" 2>/dev/null || true)
+
+# Started firing since the last run.
+printf '%s\n' "$current" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$previous" | grep -qxF "$line" && continue
+    echo "ALERT FIRING  ${line%%|*}  ${line#*|}"
+done
+
+# Cleared since the last run.
+printf '%s\n' "$previous" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    printf '%s\n' "$current" | grep -qxF "$line" && continue
+    echo "ALERT CLEARED ${line%%|*}  ${line#*|}"
+done
+
+printf '%s\n' "$current" > "$STATE" 2>/dev/null || true
+[ -z "$current" ] || exit 1
+exit 0

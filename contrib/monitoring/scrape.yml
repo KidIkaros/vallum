@@ -1,0 +1,72 @@
+# What VictoriaMetrics scrapes.
+#
+# Two sources, deliberately separate:
+#
+#   * blackbox_exporter, which probes the host from the outside — reachability,
+#     the enrolment port, the desk's TLS certificate;
+#   * nothing else. `vallum metrics` is a one-shot command, not an endpoint, so
+#     its counters arrive by push (`vallum-telemetry-push.sh`) and are already in
+#     the store by the time this file is read.
+#
+# Scrape interval matches the telemetry push (15 s) so the two series line up on
+# the same step and a dashboard can put them on one graph without resampling.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # ICMP takes a bare host, not host:port — a port makes the prober fail on a
+  # target that is perfectly alive, which is how a probe becomes noise. The name
+  # resolves to the host's public address, so this measures the address the
+  # world uses rather than loopback. It still runs *on* the host, so it proves
+  # the interface and the local firewall accept, not the internet path: a true
+  # outside-in probe needs a prober somewhere else, and the nightly two-host gate
+  # is what covers that.
+  - job_name: blackbox
+    metrics_path: /probe
+    params:
+      module: [icmp]
+    static_configs:
+      - targets: ['desk.wingman.gold']
+        labels:
+          probe: icmp
+          target_name: server
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  - job_name: blackbox-dns
+    metrics_path: /probe
+    params:
+      module: [dns_resolver]
+    static_configs:
+      - targets: ['1.1.1.1']
+        labels:
+          probe: dns_resolver
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  - job_name: blackbox-https
+    metrics_path: /probe
+    params:
+      module: [https_desk]
+    static_configs:
+      - targets: ['https://desk.wingman.gold/']
+        labels:
+          probe: https_desk
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
