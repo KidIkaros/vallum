@@ -186,7 +186,16 @@ ssh_signing_supported() {
 # repository is the trust anchor, and an allowed_signers file downloaded
 # alongside the signature could be swapped for an attacker's key. Release
 # assets also ship allowed_signers for manual verification — it must contain
-# exactly this key.
+# exactly these keys.
+#
+# More than one line is allowed, and that is the key-rotation mechanism: a
+# rotation that replaced the pin outright would make this script refuse the
+# *current* release the moment it landed on main, because that release is still
+# signed with the old key and a failed verification here is a hard refusal, not
+# a warning. So the old key stays listed for one release after the new one
+# starts signing, and is removed in the next change. See "Break glass: the
+# signing key" in docs/releasing.md, and scripts/check-trust-anchor.sh, which
+# keeps this list equal to packaging/allowed_signers.
 RELEASE_SIGNING_PUBKEY="vallum-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOcys6KuFRBEnzkhjmC5OvVQDUNCOl39qxrFcQO05dwQ"
 
 # Verify the SSH signature over SHA256SUMS before trusting any checksum in it.
@@ -209,7 +218,9 @@ verify_release_signature() {
         echo "         upgrade openssh-client, or bypass with --no-verify-signature" >&2
         exit 1
     }
-    echo "$RELEASE_SIGNING_PUBKEY" > "$work/allowed_signers"
+    # Multiple pinned keys, one per line: ssh-keygen accepts any principal line
+    # that verifies, which is what lets a rotation cross a release boundary.
+    printf '%s\n' "$RELEASE_SIGNING_PUBKEY" > "$work/allowed_signers"
     if ssh-keygen -Y verify -f "$work/allowed_signers" -n file \
         -s "$work/SHA256SUMS.sig" -I vallum-release < "$work/SHA256SUMS" 2>/dev/null; then
         echo "   ok    release signature verified (vallum-release)"

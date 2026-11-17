@@ -125,9 +125,84 @@ pinned key. `scripts/release.sh` refuses to sign with a key that does not
 match the committed public half.
 
 Key custody is one person + offline storage; the fingerprint is printed in
-every release's notes. Losing the key means generating a new one, committing
-the new public half, and telling users — the same trust model WireGuard's
-minisign releases use.
+every release's notes.
+
+## Break glass: the signing key
+
+The anchor is one *set* of keys held in three places, kept identical by
+`scripts/check-trust-anchor.sh` (a gate: `verify.sh`, CI, `ci-local.sh`):
+
+| File | Holds | Read by |
+|---|---|---|
+| `scripts/install.sh` — `RELEASE_SIGNING_PUBKEY` | the keys, embedded | every user's installer, as its `allowed_signers` |
+| `packaging/vallum-release.pub` | the keys, one line each | `release.sh`'s key check, the docs |
+| `packaging/allowed_signers` | the keys, as signer lines | `release.sh` verifying verdict signatures and `SHA256SUMS` |
+
+**Why the installer carries its own copy.** It is written from the pinned key
+and never downloads one: an `allowed_signers` fetched beside the signature
+could be swapped for an attacker's. The cost is that the anchor must be edited
+in a file that is *not* covered by `release.sh`'s key check — which is exactly
+the gap this gate exists for.
+
+**A rotation that replaces the pin outright breaks every install.** `install.sh`
+is fetched from `main`, so the moment a new key lands there the installer pins
+the new key — while the current release is still signed with the old one, and a
+failed verification is a **hard refusal**, not a warning. Verified, not assumed:
+with both keys listed, a signature by either is accepted; with only the new key
+listed, the old signature is refused.
+
+So a rotation is two changes, one release apart:
+
+1. **Add.** Generate the new key (`ssh-keygen -t ed25519 -f
+   ~/.config/vallum/release-signing-key-<year> -C vallum-release`), put **both**
+   keys in all three files (`check-trust-anchor.sh` prints the commands and
+   accepts a two-key set), and sign that release with the **old** key. Users'
+   installers now trust both.
+2. **Drop.** Once that release has shipped, sign the next release with the new
+   key and delete the old key's lines from all three files. Dropping the old key
+   before a new-signed release is out leaves a window where installs of the
+   current release fail.
+
+**If the private key is lost** (no copy on offline storage): it cannot be
+re-derived, so this is a rotation with no outgoing signature — do step 1 keeping
+the old *public* half listed (still committed, so still trusted) and sign with
+the new key immediately. Users on the current release are unaffected; the next
+release verifies under the new key, and the old public half is dropped the
+release after.
+
+**If the private key is compromised** — the case that cannot be soft-pedalled:
+
+- Rotate immediately with step 1 and **sign the next release with the new key**,
+  so a stolen key cannot produce a release that verifies.
+- Publish the old key's **revocation** in the release notes and the CHANGELOG:
+  the fingerprint, the date, and "releases signed by this key after <date> are
+  not ours". `install.sh` cannot express revocation — it only knows which keys
+  verify — so the announcement is the only channel. That is a real limitation of
+  an SSH-key trust model, not a gap in this repository.
+- Assume the attacker could sign anything the old key could: `SHA256SUMS`,
+  verdicts in `.vallum-verdicts/`, and release notes. The two-host stamp lives
+  outside the signed set, so a forged `verify-remote` verdict is caught by
+  re-running `verify-remote.sh` against a host — say so in the advisory.
+- Check the release history for anything signed with the old key after the
+  compromise date before publishing.
+
+**Making it not be one person.** The key is why the gates can be trusted and why
+none of them can run without the maintainer. Two things fix that, and neither
+changes the trust model:
+
+- a **second signer**: another `vallum-release` line in `allowed_signers` and a
+  second maintainer who can sign, so a release can ship while one person is
+  unavailable. Two signers means either can sign; a threshold would need a
+  different mechanism, which SSH signatures do not express.
+- a **break-glass copy**: the key's location and passphrase recorded with a
+  lawyer or in a sealed envelope with a second person — the argument that a
+  single-point credential needs a documented custody path, not a second live
+  copy on the same disk.
+
+The gate catches the mechanical failure (two of three files updated). It cannot
+catch a compromised host or a forgotten passphrase, which is why the custody
+line above stays short and honest: one person, offline storage, and now a
+written procedure.
 
 ## The two-host stamp
 

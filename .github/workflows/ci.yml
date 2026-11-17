@@ -237,6 +237,10 @@ jobs:
         working-directory: vallum
         run: scripts/check-state-coverage.sh
 
+      - name: Trust anchor is one key set in three places
+        working-directory: vallum
+        run: scripts/check-trust-anchor.sh
+
       - name: Desk database copies and restores (the irreplaceable state)
         working-directory: vallum
         run: scripts/accept-desk-restore.sh

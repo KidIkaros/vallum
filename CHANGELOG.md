@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The release trust anchor is one key set in three places, and a gate keeps it that way.**
+  `scripts/check-trust-anchor.sh` compares `scripts/install.sh`'s embedded
+  `RELEASE_SIGNING_PUBKEY` against `packaging/vallum-release.pub` and
+  `packaging/allowed_signers`; nothing did before, because `release.sh` compares the signing key
+  with `vallum-release.pub` and never reads `install.sh`. A rotation that updated two files and not
+  the third would make every fresh install hard-refuse the next release.
+- **`install.sh` accepts more than one pinned key, which is what makes a rotation possible.**
+  `RELEASE_SIGNING_PUBKEY` may hold one key per line and all are written to `allowed_signers`.
+  Replacing the pin outright would have broken every install the moment the new key landed on
+  `main`, since the current release is still signed with the old one and a failed verification
+  exits 1. `docs/releasing.md` documents the two-release procedure, plus what a lost or compromised
+  key owes its users.
 - **`fuzz.yml` no longer cancels the previous run on `main`.** Its concurrency
   group was `fuzz-<ref>` with `cancel-in-progress: true`, so every push to main
   cancelled the fuzz run for the commit before it — pushing `a8ca825` cancelled
