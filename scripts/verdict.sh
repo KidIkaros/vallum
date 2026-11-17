@@ -36,10 +36,24 @@ COMMIT=$(git -C "$(dirname "$0")/.." rev-parse HEAD 2>/dev/null || echo unknown)
 TREE=$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo unknown)
 STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TARGET=${VERDICT_TARGET:-$(hostname 2>/dev/null || echo unknown)}
-PRODUCER="$(id -un 2>/dev/null || echo unknown)@${TARGET}"
+# The producer is the machine that wrote the record, never the target it names:
+# a two-host pass is produced on the invoking host and names the remote one, and
+# a skip names no host at all (VERDICT_TARGET=unrun) — recording "produced by
+# ikaaros@unrun" would be a fact about nothing.
+PRODUCER="$(id -un 2>/dev/null || echo unknown)@$(hostname 2>/dev/null || echo unknown)"
 SCRIPT_SHA=""
 if [ -n "$SCRIPT_PATH" ] && [ -f "$SCRIPT_PATH" ]; then
     SCRIPT_SHA=$(sha256sum "$SCRIPT_PATH" 2>/dev/null | cut -d' ' -f1)
+fi
+
+# An optional note. A `skipped` record without its reason is a fact with no
+# content — "the two-host gate did not run" is worth little on its own; "it did
+# not run because the only host is the live one" is the thing a later reader
+# needs. The note is inside the signed file, so it cannot be edited afterwards.
+NOTE_LINE=""
+if [ -n "${VERDICT_NOTE:-}" ]; then
+    note=$(printf '%s' "$VERDICT_NOTE" | tr '\n' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+    NOTE_LINE="  \"note\": \"$note\","
 fi
 
 cat >"$DIR/$GATE.json" <<EOF
@@ -52,6 +66,7 @@ cat >"$DIR/$GATE.json" <<EOF
   "target": "$TARGET",
   "producer": "$PRODUCER",
   "script_sha256": "$SCRIPT_SHA",
+$NOTE_LINE
   "recorded_at": "$STAMP"
 }
 EOF

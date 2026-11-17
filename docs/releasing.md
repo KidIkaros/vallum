@@ -38,10 +38,29 @@ two machines, which is what makes the string tables comparable between builds.
 Rebuilding a cached `target/` does not re-apply it, which is why the check greps
 the built binaries rather than trusting the environment.
 
-`--dry-run` runs the cheap checks and prints the rest. `--skip-remote "reason"`
-releases without the two-host pass, and `--skip-arm "reason"` releases without
-the aarch64 artifact; each reason is printed, and it should be a sentence
-someone would be willing to read later.
+`--dry-run` runs the cheap checks and prints the rest.
+
+## A skip is written down
+
+Five escape hatches exist — `--skip-remote`, `--skip-stale`, `--skip-arm`,
+`--skip-fuzz`, `--skip-desktop` — and each takes a reason. Until 2026-11-17 the
+reason was printed to stdout and nothing else happened, so a release that
+shipped without the two-host gate left exactly the same state on disk as one
+that ran it: the stamp still named an older commit, no record said otherwise,
+and the gate chain looked green.
+
+Now a skip writes two records:
+
+- a **signed, commit-bound verdict** with `"status": "skipped"` and the reason
+  in `"note"` (`.vallum-verdicts/<gate>.json`), so a release log says
+  `N gate(s) unproven for this commit` and names them;
+- a **row in `docs/qa/gate-skips.md`**, a tracked file, because verdicts are
+  gitignored and regenerated per run and the history of what shipped unproven
+  has to live somewhere git keeps. `release.sh` prints a reminder to commit it.
+
+The reason should be a sentence someone would be willing to read later. It is
+signed into the record, so it cannot be edited afterwards — which is the point:
+the artefact says what the release did and did not prove.
 
 ## CI on a tag
 

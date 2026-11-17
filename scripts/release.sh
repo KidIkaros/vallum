@@ -101,6 +101,46 @@ fail() {
 }
 ok() { printf '   ok    %s\n' "$*"; }
 
+# ── Skips are evidence too ────────────────────────────────────────────────
+# Every escape hatch used to print its reason and proceed, so a skipped
+# release and a fully gated one left identical state on disk: the stamp still
+# named an older commit, nothing recorded the omission, and the tree looked
+# green. A skip now writes two records — a signed, commit-bound verdict with
+# status `skipped` and the reason in `note`, and a row in a tracked file,
+# because verdicts are gitignored and regenerated and the history of what
+# shipped unproven has to live somewhere git keeps.
+GATE_SKIPS=docs/qa/gate-skips.md
+recorded_this_run=""
+record_skip() { # $1 = gate, $2 = reason
+    local gate=$1 reason=$2 short
+    short=$(git rev-parse --short HEAD)
+    reason=$(printf '%s' "$reason" | tr '\n' ' ' | sed 's/|/\\|/g')
+    recorded_this_run="$recorded_this_run $gate"
+    if [ "$DRY" -eq 1 ]; then
+        printf '   would record %s as skipped (signed verdict + a row in %s)\n' "$gate" "$GATE_SKIPS"
+        return 0
+    fi
+    VERDICT_NOTE="$reason" VERDICT_TARGET=unrun \
+        "$root/scripts/verdict.sh" "$gate" skipped 0 "$0" >/dev/null 2>&1 \
+        || printf '   warn  could not write a verdict for %s\n' "$gate" >&2
+    if [ ! -f "$GATE_SKIPS" ]; then
+        cat > "$GATE_SKIPS" <<'HEADER'
+# Gate skips
+
+One row per gate a release shipped without. Written by `scripts/release.sh`
+when an escape hatch is used (`--skip-remote`, `--skip-stale`, `--skip-arm`,
+`--skip-fuzz`, `--skip-desktop`). A row here is the honest record that the
+artefact went out without that gate; the matching signed verdict lives in
+`.vallum-verdicts/`, which is gitignored and regenerated per run.
+
+| date | commit | gate | reason |
+|---|---|---|---|
+HEADER
+    fi
+    printf '| %s | %s | %s | %s |\n' "$(date -u +%F)" "$short" "$gate" "$reason" >> "$GATE_SKIPS"
+    printf '   note  recorded in %s — commit it before the next release\n' "$GATE_SKIPS"
+}
+
 say "preflight"
 
 # A full release builds two targets plus the gates; v1.7.0 prep once died with
@@ -137,6 +177,7 @@ ok "CHANGELOG.md documents $version"
 stamp="${XDG_STATE_HOME:-$HOME/.local/state}/vallum/remote-verified"
 if [ -n "$SKIP_REMOTE" ]; then
     printf '   skip  two-host verification: %s\n' "$SKIP_REMOTE"
+    record_skip verify-remote "$SKIP_REMOTE"
 elif [ -f "$stamp" ]; then
     # The stamp is structured since 2026-11: a JSON record naming the commit,
     # the remote host, the operator and the gate script's hash. A bare-hash
@@ -166,6 +207,7 @@ fi
 # evidence that can be forged is evidence of nothing.
 VERDICT_DIR="${VERDICT_DIR:-$PWD/.vallum-verdicts}"
 stale_gates=""
+skipped_gates=""
 verdict_signed() {
     [ -f "$1.sig" ] && [ -f packaging/allowed_signers ] && \
         ssh-keygen -Y verify -f packaging/allowed_signers -n file \
@@ -182,6 +224,17 @@ if [ -d "$VERDICT_DIR" ]; then
             if [ "$v_status" = passed ]; then
                 verdict_signed "$vf" || fail "$v_gate's verdict is unsigned or its signature does not verify — a hand-written record is not evidence"
                 ok "$v_gate passed this commit ($v_assert assertions, signed)"
+            elif [ "$v_status" = skipped ]; then
+                # A recorded skip is not a failure and not a pass: the release
+                # may proceed, and the artefact says out loud that this commit
+                # shipped without the gate.
+                v_note=$(sed -n 's/.*"note": "\([^"]*\)".*/\1/p' "$vf")
+                case " $recorded_this_run " in
+                    *" $v_gate "*) ;;   # already announced where it was recorded
+                    *) printf '   skip  %s was skipped for this commit: %s\n' \
+                        "$v_gate" "${v_note:-no reason recorded}" ;;
+                esac
+                skipped_gates="$skipped_gates $v_gate"
             else
                 fail "$v_gate recorded a FAILED verdict for this commit"
             fi
@@ -194,11 +247,20 @@ if [ -d "$VERDICT_DIR" ]; then
 else
     printf '   note  no verdict records in %s\n' "$VERDICT_DIR"
 fi
+if [ -n "$skipped_gates" ]; then
+    # The one line a reader of a release log needs: what this artefact shipped
+    # without. It is also greppable history — docs/qa/gate-skips.md carries a row
+    # per skip, so "how many releases went out unproven" is a query.
+    printf '   note  %s gate(s) unproven for this commit:%s\n' \
+        "$(printf '%s' "$skipped_gates" | wc -w)" "$skipped_gates"
+fi
+
 # A stale verdict used to print and pass, which made shipping on old evidence
 # the default. It is now a refusal; the skip is allowed but must be written down.
 if [ -n "$stale_gates" ]; then
     if [ -n "$SKIP_STALE" ]; then
         printf '   skip  stale verdicts (%s ): %s\n' "${stale_gates# }" "$SKIP_STALE"
+        record_skip accept-verdicts "$SKIP_STALE"
     else
         fail "stale acceptance verdicts:$stale_gates.
    Re-run them on this commit (scripts/accept-*.sh on wingman-vps),
@@ -239,6 +301,7 @@ if [ "$DRY" -eq 1 ]; then
     echo "   would run: ./scripts/fuzz.sh ${FUZZ_SECONDS:-60}"
 elif [ -n "$SKIP_FUZZ" ]; then
     printf '   skip  fuzz: %s\n' "$SKIP_FUZZ"
+    record_skip fuzz "$SKIP_FUZZ"
 else
     say "gate: fuzz"
     cargo +nightly fuzz --version >/dev/null 2>&1 \
@@ -263,6 +326,7 @@ run cargo build --release -p vallum -p vallum-quick
 
 if [ -n "$SKIP_ARM" ]; then
     printf '   skip  aarch64 artifact: %s\n' "$SKIP_ARM"
+    record_skip aarch64-artifact "$SKIP_ARM"
 else
     say "building aarch64"
     if [ "$DRY" -eq 0 ]; then
@@ -353,6 +417,7 @@ if [ "$DRY" -eq 0 ]; then
 
     if [ -n "$SKIP_DESKTOP" ]; then
         printf '   skip  desktop bundle: %s\n' "$SKIP_DESKTOP"
+        record_skip desktop-bundle "$SKIP_DESKTOP"
     elif command -v cargo-tauri >/dev/null 2>&1; then
         say "packaging desktop (vallum-desktop)"
         bash scripts/package-desktop.sh --bundles deb --out-dir dist

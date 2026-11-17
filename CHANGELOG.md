@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A gate skip is now an artefact, not a printed line.** `--skip-remote`,
+  `--skip-stale`, `--skip-arm`, `--skip-fuzz` and `--skip-desktop` each write a
+  **signed, commit-bound verdict** with `status: skipped` and the reason in a
+  new `note` field, plus a row in the tracked `docs/qa/gate-skips.md` (verdicts
+  are gitignored and regenerated, so history needs a file git keeps). The
+  release log now prints `N gate(s) unproven for this commit` and names them,
+  and `release.sh` no longer mistakes a recorded skip for a failed gate. This
+  closes the mode where a skipped release and a fully gated one left identical
+  state on disk.
 - **The desk's account database is copied daily, and the copy is proved.**
   `vallum-desk-backup` + `vallum-desk-backup.timer` ship with the desk and the
   installer enables the timer; the service is conditioned on the database
