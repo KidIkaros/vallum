@@ -458,17 +458,18 @@ class LivenessTests(DeskTestCase):
         self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS, now)[0], "live")
         self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS - 1, now)[0], "offline")
 
-    def test_a_device_the_server_has_no_peer_for_is_missing_not_never(self):
-        # Found on the live server after the first deploy: all 14 desk devices
-        # had no peer on the daemon (the peer table had been rebuilt when the
-        # server was renumbered), and the page said "never connected" — which
-        # reads as "try connecting". It cannot connect; there is nothing to
-        # connect to. The fix is a new ticket.
+    def test_a_device_the_server_has_no_peer_for_is_unredeemed_not_never(self):
+        # The normal outcome of a ticket nobody used: invites live 15 minutes
+        # (`INVITE_TTL_SECS`), so a user who signs up and wanders off leaves
+        # exactly this. It is not "never connected" — connecting is not something
+        # this device can do, because the daemon has no peer to connect to.
+        # Observed on the reference desk, where all 14 rows were unredeemed
+        # tickets from the alpha session of 2026-11-16.
         code, view = self._account({})
         self.assertEqual(code, 200)
         device = view["devices"][0]
         self.assertEqual(device["status"], "active")
-        self.assertEqual(device["connection"], "missing")
+        self.assertEqual(device["connection"], "unredeemed")
         self.assertIsNone(device["last_seen_seconds"])
 
     def test_a_daemon_that_cannot_answer_says_unknown_and_keeps_the_page(self):

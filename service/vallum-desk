@@ -601,11 +601,13 @@ class Desk:
                 device["connection"], device["last_seen_seconds"] = "unknown", None
                 continue
             if device["peer"] not in seen:
-                # The account has a device the server has no peer for. That is
-                # not "never connected" — connecting is not something this device
-                # can do — it is a disagreement between the desk and the daemon,
-                # and the fix is a new ticket, not a retry.
-                device["connection"], device["last_seen_seconds"] = "missing", None
+                # The desk issued a ticket and the device never joined, so the
+                # daemon has no peer. That is not "never connected" — connecting
+                # is not something this device can do — and it is the *normal*
+                # outcome of a ticket nobody redeemed, not a fault: invites live
+                # 15 minutes (`INVITE_TTL_SECS`), and a user who wanders off
+                # leaves exactly this. The fix is a new ticket, not a retry.
+                device["connection"], device["last_seen_seconds"] = "unredeemed", None
                 continue
             device["connection"], device["last_seen_seconds"] = connection_state(
                 seen[device["peer"]], now)
@@ -1045,8 +1047,8 @@ def _connection_cell(device):
         return f"not connected (last seen {when} ago)"
     if state == "never":
         return "never connected"
-    if state == "missing":
-        return "not on the server — this device has no peer; get a new ticket"
+    if state == "unredeemed":
+        return "not set up — the ticket expired before the device joined; get a new one"
     if state is None:
         return "—"
     return "unknown — the server could not be asked"

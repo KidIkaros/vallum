@@ -16,15 +16,16 @@
   not be asked`, never `offline`: telling a user their tunnel is down because the
   operator's daemon was busy is a false alarm in the one place they go to check.
   A revoked device renders `—`, because there is no peer left to ask about. A
-  device the server has **no peer for at all** renders
-  `not on the server — this device has no peer; get a new ticket`, which is a
-  different fact from `never connected` and a different fix. That distinction was
-  found by deploying: all 14 devices on the reference desk had no peer on the
-  daemon (its peer table was rebuilt when the server was renumbered), and the
-  first version of this change called every one of them "never connected" — the
-  same class of false statement it was written to remove.
-  On the reference server this immediately corrects two devices that had been
-  shown as `active` while never having handshaked.
+  device the server has **no peer for** renders `not set up — the ticket expired
+  before the device joined; get a new one`, which is a different fact from
+  `never connected` and a different fix. That distinction was found by deploying:
+  every device on the reference desk had no peer on the daemon, and the first
+  version of this change called them all "never connected" — the same class of
+  false statement it was written to remove. The cause turned out to be mundane:
+  invites live 15 minutes (`INVITE_TTL_SECS`), and those rows are tickets from
+  the alpha session of 2026-11-16 that nobody redeemed. On the reference server
+  this immediately corrects two devices that had been shown as `active` while
+  never having handshaked.
 - **`vallum support-bundle` collects what a support conversation asks for.** The
   gap was never "no diagnostics" — `status --json`, `doctor --json` and `metrics`
   already answer almost everything. It was that a user on a broken tunnel had to
