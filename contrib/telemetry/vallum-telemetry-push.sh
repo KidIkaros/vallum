@@ -62,21 +62,29 @@ fi
 # `<unit> <load> <active> <sub> <description>`, and a unit name is a label value
 # that must not contain a quote.
 FAILED=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
+# The host label is carried explicitly. The first version of this pushed bare
+# series, and the alert's summary read "3 systemd unit(s) on  are failed" — a
+# sentence with a hole in it, because `$labels.instance` had nothing to
+# interpolate. A series that cannot name its own host is not addressable once a
+# second host pushes to the same store.
+HOST=${VALLUM_HOST:-$(hostname -s 2>/dev/null || echo unknown)}
 {
     printf '# HELP vallum_unit_failed 1 when a systemd unit is in the failed state.\n'
     printf '# TYPE vallum_unit_failed gauge\n'
     if [ -n "$FAILED" ]; then
         printf '%s\n' "$FAILED" | while read -r unit; do
             [ -n "$unit" ] || continue
-            printf 'vallum_unit_failed{unit="%s"} 1\n' "${unit//\"/}"
+            printf 'vallum_unit_failed{instance="%s",unit="%s"} 1\n' \
+                "${HOST//\"/}" "${unit//\"/}"
         done
     fi
     printf '# HELP vallum_failed_units_total Units in the failed state.\n'
     printf '# TYPE vallum_failed_units_total gauge\n'
     if [ -n "$FAILED" ]; then
-        printf 'vallum_failed_units_total %s\n' "$(printf '%s\n' "$FAILED" | grep -c .)"
+        printf 'vallum_failed_units_total{instance="%s"} %s\n' \
+            "${HOST//\"/}" "$(printf '%s\n' "$FAILED" | grep -c .)"
     else
-        printf 'vallum_failed_units_total 0\n'
+        printf 'vallum_failed_units_total{instance="%s"} 0\n' "${HOST//\"/}"
     fi
 } | push
 
