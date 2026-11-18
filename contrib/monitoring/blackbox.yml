@@ -58,6 +58,18 @@ modules:
         # the probe must fail when it would fail for a user.
         insecure_skip_verify: false
 
+  # The desk's verdict on itself. The HTTPS probe above asks whether the front
+  # answers; this one asks whether the process behind it can serve, and it is a
+  # 503 the moment the account database or the daemon is unusable — a desk that
+  # renders a page and cannot mint the ticket the page promises. `VallumProbeFailing`
+  # already pages on `probe_success`, so there is no second rule to keep in step.
+  http_desk_health:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: [200]
+
   # The account API, which is what the client actually calls after a join. A
   # 200 here means the desk can answer; the tunnel's metrics cannot see the desk
   # at all.

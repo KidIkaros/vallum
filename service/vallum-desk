@@ -633,6 +633,21 @@ class Desk:
         except (OSError, RuntimeError, subprocess.SubprocessError):
             return None
 
+    def _daemon_counters(self):
+        """The daemon's per-peer counters, or None when it cannot be asked.
+
+        The same two-shape answer as `_daemon_liveness`, and for the same reason:
+        a daemon that is down must not turn the account page into a 500. The
+        quota figure is the one number on that page that comes from the daemon, so
+        it says "unknown" rather than rendering a confident `0.00 GiB` — a zero
+        here is a statement that the account has used nothing, which is exactly
+        the kind of false sentence the liveness work set out to remove.
+        """
+        try:
+            return self.daemon.counters()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+
     def _active_devices(self):
         """Every device the desk believes it has, as `{peer, status}`.
 
@@ -736,7 +751,7 @@ class Desk:
         if not devices and row["peer"]:
             devices = [{"peer": row["peer"], "label": row["label"],
                         "status": "active", "created": row["created"]}]
-        counters = self.daemon.counters()
+        counters = self._daemon_counters()
         live = [d["peer"] for d in devices if d["status"] == "active"]
         # Liveness, not provisioning. `status` above is the *record's* state —
         # "this device was issued a peer and not revoked" — and it was the only
@@ -753,7 +768,16 @@ class Desk:
             "peer": row["peer"], "label": row["label"], "plan": row["plan"],
             "status": row["status"], "expires": row["expires"],
             "paid_until": row["paid_until"], "bytes_cap": row["bytes_cap"],
-            "bytes_used": sum(counters.get(peer, 0) for peer in live),
+            # `None`, not 0, when the daemon cannot be asked: "0 GiB used" about
+            # a daemon the desk could not reach is a confident answer to a
+            # question nobody answered — the false statement this field's
+            # neighbours were rewritten to remove.
+            "bytes_used": (None if counters is None
+                           else sum(counters.get(peer, 0) for peer in live)),
+            # The desk's funnel, for this account: tickets issued against
+            # devices that ever joined. Shown beside the count, never as a bare
+            # rate — see `funnel()` for why the denominator travels with it.
+            "conversion": account_conversion(devices),
             "devices": devices}
 
     def remove_device(self, body):
@@ -786,6 +810,36 @@ class Desk:
 
     # -- status ---------------------------------------------------------
 
+    def health(self):
+        """Can this desk serve? One question, two dependencies.
+
+        A desk process can be up and useless, and neither way shows in a port
+        check: sqlite can fail on its own file (a lost or full disk), and the
+        daemon it enrols against can be down or unreachable through its 0600
+        control socket. `GET /healthz` asks both and answers `503` naming the
+        one that failed, so a front (Caddy, a load balancer) or an outside-in
+        probe can tell "listening" from "working".
+
+        Unauthenticated on purpose: it is the one route a probe hits, and it
+        names no account, no peer and no count — only whether each dependency
+        answered.
+        """
+        checks = {}
+        try:
+            with self.lock:
+                self.db.execute("SELECT 1").fetchone()
+            checks["database"] = "ok"
+        except sqlite3.Error as error:
+            # Unreadable, closed, or a file this build will not open: all of
+            # them mean the desk cannot serve, and the error line is what says
+            # which. No credential is in it.
+            checks["database"] = f"unusable: {error}"
+        # The same read every device's connection state comes from, so a desk
+        # that passes here can also answer "is this device connected?".
+        checks["daemon"] = "ok" if self._daemon_liveness() is not None else "unreachable"
+        ok = all(state == "ok" for state in checks.values())
+        return (200 if ok else 503), {"ok": ok, "checks": checks}
+
     def status(self, token):
         with self.lock:
             row = self.db.execute(
@@ -793,8 +847,8 @@ class Desk:
         if not row:
             return 404, {"error": "unknown account token"}
         peers = self._peers_of(row)
-        counters = self.daemon.counters()
-        used = sum(counters.get(peer, 0) for peer in peers)
+        counters = self._daemon_counters()
+        used = None if counters is None else sum(counters.get(peer, 0) for peer in peers)
         return 200, {"peer": peers[0] if peers else row["peer"], "peers": peers,
                      "plan": row["plan"], "status": row["status"],
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
@@ -810,12 +864,17 @@ class Desk:
         """
         actions = []
         today = datetime.date.today().isoformat()
-        counters = self.daemon.counters()
+        # Counters absent is not counters zero: when the daemon cannot be asked,
+        # quota is not judged this pass — but expiry is, because an expiry needs
+        # no daemon. The alternative, letting the exception out, stopped the
+        # whole pass: one blink of the daemon deferred every revocation with it.
+        counters = self._daemon_counters()
         with self.lock:
             active = self.db.execute(
                 "SELECT * FROM accounts WHERE status='active'").fetchall()
         for row in active:
-            used = sum(counters.get(peer, 0) for peer in self._peers_of(row))
+            used = (None if counters is None
+                    else sum(counters.get(peer, 0) for peer in self._peers_of(row)))
             reason = self._breach_reason(row, used, today)
             if reason:
                 actions.append(self._revoke(row, reason, used))
@@ -867,7 +926,7 @@ class Desk:
         # Inclusive: an account whose expiry is today is already expired.
         if row["expires"] <= today:
             return "expired"
-        if used > row["bytes_cap"]:
+        if used is not None and used > row["bytes_cap"]:
             return "overquota"
         return None
 
@@ -900,7 +959,8 @@ class Desk:
             return action
         with self.lock:
             self.db.execute("UPDATE accounts SET status=? WHERE id=?", (reason, account["id"]))
-        print(f"desk: removed {', '.join(peers) or account['peer']} ({reason}, {used} bytes)")
+        print(f"desk: removed {', '.join(peers) or account['peer']} "
+              f"({reason}, {used if used is not None else 'usage unknown'} bytes)")
         return action
 
     def sweep(self):
@@ -1030,7 +1090,9 @@ class Desk:
         account = self._account_for_peer(peer)
         if not account:
             return 404, {"error": "unknown peer"}
-        used = sum(self.daemon.counters().get(p, 0) for p in self._peers_of(account))
+        counters = self._daemon_counters()
+        used = (None if counters is None
+                else sum(counters.get(p, 0) for p in self._peers_of(account)))
         action = self._revoke(account, "revoked", used)
         if "error" in action:
             return 502, action
@@ -1171,6 +1233,32 @@ def _device_state(device, seen, now):
     # The protocol's own reject window, not a number chosen here: past 180 s the
     # key is not used, so the session is over by construction.
     return ("live" if age <= SESSION_LIVE_SECONDS else "offline"), age
+
+
+def account_conversion(devices):
+    """The alpha's conversion question, asked of one account.
+
+    `funnel()` compares tickets issued with devices that ever handshaked, for
+    the whole desk; the same comparison scoped to one account is the version an
+    owner can act on — and the version that would have shown the 2026-11-16
+    session to the person who created it, instead of reading as fourteen
+    healthy-but-quiet `active` rows.
+
+    `offline` counts. It proves the join path ran end to end, and counting only
+    `live` would report 0 the moment a user closed a laptop — the opposite of
+    the signal. `unredeemed` and `never` do not count.
+
+    `devices_connected` is `None`, not 0, when any device is `unknown`: the
+    daemon could not be asked, and "0 of 2 have connected" would be a claim the
+    desk has no answer for.
+    """
+    total = len(devices)
+    if any(device["connection"] == "unknown" for device in devices):
+        return {"devices_total": total, "devices_connected": None}
+    return {"devices_total": total,
+            "devices_connected": sum(
+                1 for device in devices
+                if device["connection"] in ("live", "offline"))}
 
 
 def funnel_exposition(funnel):
@@ -1330,6 +1418,32 @@ credential — treat it like a password.</p>
 </form>"""
 
 
+def conversion_sentence(conversion):
+    """One line for the account page: the count and the rate, together.
+
+    Counts first and the percentage beside them, for the reason `funnel()`
+    gives: "0 of 0" and "0 of 1" are different situations that a rate alone
+    conflates. The zero sentence also says what to do about it, because 0% on
+    this page means one specific thing — the ticket was issued and nothing ever
+    joined with it — and the fix is a new join, not patience.
+    """
+    total = conversion["devices_total"]
+    connected = conversion["devices_connected"]
+    if total == 0:
+        return "no device has been issued a ticket yet, so there is nothing to convert"
+    if connected is None:
+        return (f"connected: unknown — the server could not be asked "
+                f"({total} issued)")
+    noun = "device" if total == 1 else "devices"
+    verb = "has" if total == 1 else "have"
+    rate = round(100 * connected / total)
+    sentence = f"{connected} of {total} {noun} {verb} connected ({rate}%)"
+    if connected == 0:
+        return (sentence + " — the ticket was issued and nothing has joined "
+                "with it yet; install the client and open the join link again")
+    return sentence
+
+
 def account_page(view, token, notice="", operator="vallum desk"):
     """The "my account" surface: plan, the shared byte pool, every device —
     and the forms that act on them. The token rides hidden inputs, in POST
@@ -1342,16 +1456,19 @@ def account_page(view, token, notice="", operator="vallum desk"):
 <input type="hidden" name="peer" value="{_esc(d['peer'])}">
 <button>remove</button></form>""" if d["status"] == "active" else "")
         + "</td></tr>" for d in view["devices"])
-    used_gib = view["bytes_used"] / (1024 ** 3)
     cap_gib = view["bytes_cap"] / (1024 ** 3)
+    usage = (f"{view['bytes_used'] / (1024 ** 3):.2f} / {cap_gib:.1f} GiB used "
+             "(shared across devices)" if view["bytes_used"] is not None else
+             f"usage unknown — the server could not be asked "
+             f"({cap_gib:.1f} GiB cap, shared across devices)")
     banner = f"<p><b>{_esc(notice)}</b></p>" if notice else ""
     return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
 <p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
 <p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
-expires {_esc(view['expires'])} · {used_gib:.2f} / {cap_gib:.1f} GiB used
-(shared across devices).</p>
+expires {_esc(view['expires'])} · {usage}.</p>
 <h2>Devices</h2>
+<p>{_esc(conversion_sentence(view['conversion']))}.</p>
 <table><tr><th>name</th><th>peer</th><th>status</th><th>connection</th><th></th></tr>{devices}</table>
 <h3>Add a device</h3>
 <form method="post" action="/account/device">
@@ -1379,6 +1496,10 @@ def make_handler(desk):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            # Every JSON answer here carries a ticket, a token or account data;
+            # health carries neither but must not be answered from a cache by a
+            # front that would go on saying "ok" after the daemon died.
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -1430,6 +1551,13 @@ def make_handler(desk):
             self.wfile.write(body.encode())
 
         def do_GET(self):
+            if self.path == "/healthz":
+                # No credential, no account data: the one route a front or a
+                # probe can ask, and the answer that separates "listening"
+                # from "working".
+                code, payload = desk.health()
+                self._send(code, payload)
+                return
             if self.path == "/":
                 self._send_html(index_page(desk.config.open_signup, desk.config.operator_name))
                 return

@@ -179,6 +179,19 @@ vallum-desk-admin --desk http://127.0.0.1:8400 --json accounts   # for scripts
 Everything the CLI does is `POST /api/admin/*` with the admin token in the
 body — the CLI just saves the curl.
 
+`GET /healthz` is the one question a front or a probe can ask without a
+credential. It reads the database and asks the daemon (`vallum show --json`),
+and answers `200` only when both do:
+
+```sh
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8400/healthz
+```
+
+A `503` names what failed — `{"ok": false, "checks": {"database": "ok",
+"daemon": "unreachable"}}` — which is the difference between "the process is
+listening" and "the desk can mint a ticket". It needs no credential and names
+no account, peer or count, so it is safe to expose through the same front.
+
 ## Watch a flow end to end
 
 ```sh
@@ -269,6 +282,7 @@ Tauri bundle's file-association config when those ports ship.
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
+| `GET /healthz` | none | `200` when the database reads and the daemon answers; `503` naming the dependency that did not |
 | `GET /` | none | signup page |
 | `GET /account` | none | the account-number shell page |
 | `POST /signup {code,name}` | invite code (or none, open mode) | no-script signup → ticket page |

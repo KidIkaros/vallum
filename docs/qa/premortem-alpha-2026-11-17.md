@@ -85,7 +85,7 @@ records an intent, and no actor performs it.
 - [ ] `--clean-remote` refuses without a backup it took itself.
 - [ ] A desk backup exists off-host and one restore drill is recorded as a signed verdict.
 - [ ] `--skip-remote` produces a signed `skipped` record.
-- [ ] `GET /healthz` on the desk returns 503 when the database or the daemon socket is unusable.
+- [x] `GET /healthz` on the desk returns 503 when the database or the daemon socket is unusable — **done 2026-11-18**: the route reads the database and asks the daemon (`vallum show --json`), answers `200` only when both do, and names the failed dependency in the body. It also closed the gap the endpoint exposed: the account page and the sweep had read the daemon's counters unguarded, so a down daemon was a 500 on the page and an aborted enforcement pass.
 - [ ] A second key and a second owner exist in the trust anchor.
 
 ## Corrections to the investigations

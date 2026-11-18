@@ -55,6 +55,25 @@ scrape_configs:
       - target_label: __address__
         replacement: 127.0.0.1:9115
 
+  # The desk's self-check. `probe_success == 0` here is a desk that is running
+  # and cannot mint a ticket — a different failure from blackbox-https above,
+  # which fails when the front or the certificate does.
+  - job_name: blackbox-desk-health
+    metrics_path: /probe
+    params:
+      module: [http_desk_health]
+    static_configs:
+      - targets: ['https://desk.wingman.gold/healthz']
+        labels:
+          probe: http_desk_health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
   - job_name: blackbox-https
     metrics_path: /probe
     params:

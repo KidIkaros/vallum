@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **The account page carries its own funnel: tickets issued against devices
+  that ever joined.** The desk's conversion number lived only in
+  `vallum_alpha_*`, which is where an operator looks and a user does not — so
+  the alpha's own failure (14 tickets, 0 handshakes) was invisible on the page
+  that had promised each of them, and read instead as fourteen quiet-but-healthy
+  rows. Above the device table the page now says `0 of 1 device has connected
+  (0%)` with what to do about it, or `1 of 2 devices have connected (50%)`. The
+  count travels with the rate because a percentage hides its denominator — the
+  rule `funnel()` already stated — and `offline` counts as converted, since it
+  proves the join ran, while an unreachable daemon reports `unknown` rather
+  than a confident 0%. `POST /api/account` returns the same counts under
+  `conversion`.
+- **The desk answers `/healthz`, and a down daemon no longer becomes a false
+  zero.** The premortem's checklist owed the endpoint: a desk process can be up
+  and useless — sqlite on a lost disk, the daemon stopped or its 0600 control
+  socket unreadable — and every one of those still answered `200` on `/`,
+  promising a ticket the desk would then fail to mint. `GET /healthz` now asks
+  both dependencies and answers `503` naming the one that failed, with no
+  credential and no account, peer or count in the body. The same slice fixed
+  the lie beside it: `account()` and `status()` read the daemon's counters
+  unguarded, so a daemon that was down turned the account page into a 500 — the
+  page whose own comment promises it survives exactly that — and a byte count
+  it could not read now renders `usage unknown — the server could not be asked`
+  instead of a confident `0.00 GiB used`. The sweep used the same call, so one
+  blink of the daemon aborted the whole enforcement pass; counters absent now
+  means no quota judgement for that pass, while expiry — which needs no daemon
+  — still runs. `contrib/monitoring/` gains an `http_desk_health` blackbox
+  module and a `blackbox-desk-health` scrape job against the endpoint, so
+  `VallumProbeFailing` pages on a desk that is listening and cannot serve.
 - **The account page says whether a device is actually connected.** Its Devices
   table showed only `status`, which is a *provisioning* fact — "a peer was issued
   and not revoked". A device that had never handshaked therefore read as plain

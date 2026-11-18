@@ -25,7 +25,7 @@ blackbox_exporter ──scrape──▶ VictoriaMetrics ◀── vmalert ──
 |---|---|
 | `vmalert.service` | evaluates `packaging/vallum-alerts.yml` against the store |
 | `vallum-alert-journal` + units | turns firing alerts into journal lines, once each |
-| `blackbox.yml` + `blackbox.service` | ICMP, DNS and desk-TLS probes |
+| `blackbox.yml` + `blackbox.service` | ICMP, DNS, desk-TLS and desk-`/healthz` probes |
 | `scrape.yml` | what the store scrapes (blackbox); everything else is pushed |
 | `vallum-verify-scheduled.{service,timer}` | nightly two-host gate, recorded |
 | `grafana/` | datasource + dashboard as files, so a rebuild is a copy |
@@ -46,7 +46,8 @@ loopback; the push rides the same trust path the operator already uses.
    or quietly stopping, or asserting less than it used to.
 3. **Outside-in probes** — `probe_success`, `probe_ssl_earliest_cert_expiry`.
    Catches the path, the resolver and the certificate, none of which the daemon
-   can see.
+   can see — plus the desk's own `/healthz`, which answers `503` when the
+   account database or the daemon behind it is unusable.
 
 A failing probe with `vallum_up 1` is the interesting case: the process is
 healthy and something in front of it is not.

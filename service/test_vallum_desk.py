@@ -40,12 +40,13 @@ class FakeDaemon(desk_module.Daemon):
     """A daemon that is a dictionary with a method or two."""
 
     def __init__(self, counters=None, refuse=False, refuse_remove=False, liveness=None,
-                 refuse_liveness=False):
+                 refuse_liveness=False, refuse_counters=False):
         self._counters = counters or {}
         self._refuse = refuse
         self._refuse_remove = refuse_remove
         self._liveness = liveness or {}
         self._refuse_liveness = refuse_liveness
+        self._refuse_counters = refuse_counters
         self.removed = []
         self.minted = []
 
@@ -56,6 +57,8 @@ class FakeDaemon(desk_module.Daemon):
         return f"vallum1-join:203.0.113.9:51922/{peer}/deadbeef/token/fingerprint"
 
     def counters(self):
+        if self._refuse_counters:
+            raise RuntimeError("the daemon did not answer")
         return dict(self._counters)
 
     def liveness(self):
@@ -572,6 +575,165 @@ class LivenessTests(DeskTestCase):
         now = int(time.time())
         _, view = self._account({"u0001-friend": now + 300})
         self.assertEqual(view["devices"][0]["last_seen_seconds"], 0)
+
+
+class DaemonOutageTests(DeskTestCase):
+    """A daemon that is down degrades the desk; it does not take it down.
+
+    Two false statements were possible here. The account page could fail with a
+    500 for a user whose tunnel was fine — the page whose own comment promises it
+    survives exactly that — and the quota could read `0.00 GiB`, a confident
+    answer to a question the daemon never answered. The third was the sweep:
+    letting the counters exception out meant one blink of the daemon deferred
+    every expiry with it.
+    """
+
+    def _token(self):
+        _, payload = self.signup()
+        return payload["token"]
+
+    def test_the_account_view_keeps_the_page_and_says_usage_unknown(self):
+        token = self._token()
+        self.desk.daemon = FakeDaemon(refuse_counters=True, refuse_liveness=True)
+        code, view = self.desk.account(token)
+        self.assertEqual(code, 200)
+        self.assertIsNone(view["bytes_used"])
+        self.assertEqual(view["devices"][0]["connection"], "unknown")
+
+    def test_status_says_usage_unknown_rather_than_zero(self):
+        token = self._token()
+        self.desk.daemon = FakeDaemon(refuse_counters=True)
+        code, payload = self.desk.status(token)
+        self.assertEqual(code, 200)
+        self.assertIsNone(payload["bytes_used"])
+
+    def test_the_page_says_usage_unknown_rather_than_a_number(self):
+        token = self._token()
+        self.desk.daemon = FakeDaemon(refuse_counters=True, refuse_liveness=True)
+        _, view = self.desk.account(token)
+        page = desk_module.account_page(view, token)
+        self.assertIn("usage unknown", page)
+        self.assertNotIn("GiB used", page)
+
+    def test_an_unreachable_daemon_does_not_stop_expiry(self):
+        # Quota cannot be judged without counters; expiry can, and an account
+        # past its date must still be revoked on that pass.
+        token = self._token()
+        self.desk.db.execute(
+            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (token,))
+        self.desk.daemon = FakeDaemon(refuse_counters=True)
+        actions = self.desk.sweep_once()
+        self.assertEqual([a["reason"] for a in actions], ["expired"])
+        self.assertIsNone(actions[0]["bytes"])
+
+    def test_an_unreachable_daemon_does_not_revoke_a_healthy_account(self):
+        # No counters is not "used 0 bytes" and not "over quota": no judgement
+        # is the only safe answer, because a wrong one removes a working peer.
+        self.signup()
+        self.desk.daemon = FakeDaemon(refuse_counters=True)
+        self.assertEqual(self.desk.sweep_once(), [])
+
+
+class AccountConversionTests(DeskTestCase):
+    """The desk's funnel, on the page its user reads.
+
+    The alpha's fourteen tickets and zero handshakes were legible only in
+    `vallum_alpha_*` — where an operator looks and a user does not. The account
+    page is where the promise was made ("Get my join ticket"), so the
+    ticket-to-connected-device comparison belongs beside the device table, and
+    it has to keep its denominator visible there too.
+    """
+
+    def _page(self, liveness=None, refuse_liveness=False, extra_devices=()):
+        self.signup()
+        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        for name in extra_devices:
+            self.assertEqual(self.desk.add_device({"token": token, "name": name})[0], 200)
+        self.desk.daemon = FakeDaemon(liveness=liveness or {},
+                                      refuse_liveness=refuse_liveness)
+        code, view = self.desk.account(token)
+        self.assertEqual(code, 200)
+        return view, desk_module.account_page(view, token)
+
+    def test_a_ticket_nobody_used_reads_zero_of_one_not_a_bare_rate(self):
+        view, page = self._page()
+        self.assertEqual(view["conversion"],
+                         {"devices_total": 1, "devices_connected": 0})
+        self.assertIn("0 of 1 device has connected (0%)", page)
+        # The sentence names the actual fault: the ticket never became a device.
+        self.assertIn("nothing has joined with it yet", page)
+
+    def test_a_device_that_joined_counts_as_converted(self):
+        view, page = self._page(liveness={"u0001-friend": int(time.time()) - 5})
+        self.assertEqual(view["conversion"]["devices_connected"], 1)
+        self.assertIn("1 of 1 device has connected (100%)", page)
+
+    def test_a_device_that_connected_and_stopped_still_counts(self):
+        # Same rule as `funnel()`: the join path ran end to end, which is the
+        # question. Counting only `live` would report 0% the moment a user
+        # closed a laptop.
+        _, page = self._page(liveness={"u0001-friend": int(time.time()) - 10_000})
+        self.assertIn("not connected", page)
+        self.assertIn("1 of 1 device has connected (100%)", page)
+
+    def test_the_rate_travels_with_its_denominator(self):
+        _, page = self._page(liveness={"u0001-friend": int(time.time()) - 5},
+                             extra_devices=("laptop",))
+        self.assertIn("1 of 2 devices have connected (50%)", page)
+
+    def test_an_unreachable_daemon_says_unknown_rather_than_zero(self):
+        # A 0% here would be a claim about the join that the desk cannot make.
+        view, page = self._page(refuse_liveness=True)
+        self.assertIsNone(view["conversion"]["devices_connected"])
+        self.assertIn("connected: unknown — the server could not be asked", page)
+        self.assertNotIn("0%", page)
+
+
+class HealthTests(HttpTests):
+    """`GET /healthz`: the one route a front or a probe can ask.
+
+    A port that accepts connections proves the process is listening, never that
+    it can serve: the database can be gone and the daemon stopped, and both left
+    a `200` on `/` promising a ticket the desk would then fail to mint.
+    """
+
+    def health(self):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/healthz")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, json.loads(response.read().decode())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read().decode())
+
+    def test_a_working_desk_answers_200_with_each_dependency(self):
+        status, body = self.health()
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["checks"], {"database": "ok", "daemon": "ok"})
+
+    def test_a_daemon_that_cannot_be_asked_is_a_503_that_names_it(self):
+        self.desk.daemon = FakeDaemon(refuse_liveness=True)
+        status, body = self.health()
+        self.assertEqual(status, 503)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["checks"]["daemon"], "unreachable")
+        self.assertEqual(body["checks"]["database"], "ok")
+
+    def test_a_database_that_cannot_be_read_is_a_503(self):
+        self.desk.db.close()
+        status, body = self.health()
+        self.assertEqual(status, 503)
+        self.assertFalse(body["ok"])
+        self.assertIn("unusable", body["checks"]["database"])
+
+    def test_health_carries_no_credential_and_is_not_cached(self):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/healthz")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            headers = dict(response.headers)
+            body = response.read().decode()
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertNotIn("token", body)
+        self.assertNotIn("u0001", body)
 
 
 class FunnelTests(DeskTestCase):
