@@ -620,6 +620,19 @@ class Desk:
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
                      "plan": row["plan"]}
 
+    def _daemon_liveness(self):
+        """The daemon's liveness map, or None when it cannot be asked.
+
+        One place decides what "cannot be asked" means, so `account()` and
+        `funnel()` cannot disagree about it. A daemon that cannot answer must not
+        take the account page down: the session list, the quota and the revoke
+        button are all still true without it.
+        """
+        try:
+            return self.daemon.liveness()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+
     def _active_devices(self):
         """Every device the desk believes it has, as `{peer, status}`.
 
@@ -689,21 +702,14 @@ class Desk:
             # where `account()` reports one, and the two numbers are read side
             # by side.
             peers = self._active_devices()
-        try:
-            seen = self.daemon.liveness()
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            seen = None
-        states = {"live": 0, "offline": 0, "never": 0, "unredeemed": 0, "unknown": 0}
-        for peer in peers:
-            if peer["status"] != "active":
-                continue
-            if seen is None:
-                states["unknown"] += 1
-            elif peer["peer"] not in seen:
-                states["unredeemed"] += 1
-            else:
-                state, _age = connection_state(seen[peer["peer"]], int(time.time()))
-                states[state] = states.get(state, 0) + 1
+        seen = self._daemon_liveness()
+        # The same function the account page uses. A funnel that re-derived the
+        # states would be a second definition of the same words, and the page and
+        # the metric would drift the first time one of them gained a state.
+        states = dict.fromkeys(DEVICE_STATES, 0)
+        for described in describe_devices(peers, seen, int(time.time())):
+            if described["connection"] is not None:
+                states[described["connection"]] += 1
         return {
             "accounts": accounts,
             "attribution": attribution,
@@ -742,32 +748,7 @@ class Desk:
         # session list, the quota and the revoke button are all still true
         # without it. So a read failure leaves `connection` at `unknown`, which
         # is a different sentence from `offline`.
-        try:
-            seen = self.daemon.liveness()
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            seen = None
-        now = int(time.time())
-        for device in devices:
-            if device["status"] != "active":
-                # A revoked device is not a candidate for a connection: the
-                # daemon has no peer to ask about, and "never connected" would be
-                # a statement about a device that no longer exists.
-                device["connection"], device["last_seen_seconds"] = None, None
-                continue
-            if seen is None:
-                device["connection"], device["last_seen_seconds"] = "unknown", None
-                continue
-            if device["peer"] not in seen:
-                # The desk issued a ticket and the device never joined, so the
-                # daemon has no peer. That is not "never connected" — connecting
-                # is not something this device can do — and it is the *normal*
-                # outcome of a ticket nobody redeemed, not a fault: invites live
-                # 15 minutes (`INVITE_TTL_SECS`), and a user who wanders off
-                # leaves exactly this. The fix is a new ticket, not a retry.
-                device["connection"], device["last_seen_seconds"] = "unredeemed", None
-                continue
-            device["connection"], device["last_seen_seconds"] = connection_state(
-                seen[device["peer"]], now)
+        devices = describe_devices(devices, self._daemon_liveness(), int(time.time()))
         return 200, {
             "peer": row["peer"], "label": row["label"], "plan": row["plan"],
             "status": row["status"], "expires": row["expires"],
@@ -1041,24 +1022,113 @@ class Desk:
 
 # ---------------------------------------------------------------- liveness
 
-def connection_state(last_handshake_sec, now):
-    """(word, age_seconds) for a device, from the daemon's last-handshake time.
+# The complete vocabulary. Six words, and every one of them is a different
+# situation with a different fix — which is why they are enumerated here rather
+# than assembled wherever a caller happens to need one:
+#
+#   live        connected now, within the protocol's reject window
+#   offline     connected at some point, not now
+#   never       the peer exists on the server and has never handshaked
+#   unredeemed  the desk issued a ticket and no peer was ever created
+#   unknown     the daemon could not be asked, so nothing is known
+#   (None)      the device is revoked; there is no peer to ask about
+#
+# This list is the single place the set is defined. A state that is not here
+# does not exist, and a state added here gets a sentence from
+# `_SENTENCE` below — the two are read together, which is the point.
+DEVICE_STATES = ("live", "offline", "never", "unredeemed", "unknown")
 
-    Three words, and no fourth for "unknown": a caller that cannot read the
-    daemon gets `None`, which reads as "we do not know" — the honest answer, and
-    different from "never connected". A page that renders `unknown` as `offline`
-    would tell a user their tunnel is down because the operator's daemon was
-    busy.
 
-    `live` uses the protocol's reject window rather than a number chosen here:
-    past 180 s the key is not used, so the session is over by construction.
+def _humanize_age(seconds):
+    """A duration a user reads at a glance; not a precise interval."""
+    if seconds is None:
+        return ""
+    seconds = int(seconds)
+    if seconds < 90:
+        return f"{seconds}s"
+    if seconds < 5400:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+# state → how the account page says it. Every entry is a full sentence because
+# "offline" alone invites "how long?" and "live" alone invites "since when?",
+# and because the reader of this column is a user deciding what to do next, not
+# an operator reading a dashboard.
+_SENTENCE = {
+    "live": lambda age: f"connected ({_humanize_age(age)} ago)",
+    "offline": lambda age: f"not connected (last seen {_humanize_age(age)} ago)",
+    "never": lambda _age: "never connected",
+    # The normal outcome of a ticket nobody used: invites live 15 minutes, so a
+    # user who signs up and wanders off leaves exactly this. The fix is a new
+    # ticket, not a retry — the device cannot connect, because the server has
+    # nothing to connect it to.
+    "unredeemed": lambda _age: "not set up — the ticket expired before the device "
+                               "joined; get a new one",
+    "unknown": lambda _age: "unknown — the server could not be asked",
+    None: lambda _age: "—",
+}
+
+
+def describe_devices(devices, seen, now):
+    """Enrich each device with its connection state, age, and the sentence to show.
+
+    This is the one place the six-state vocabulary is applied. It replaced a
+    split that cost real bugs: `account()` decided the state and
+    `_connection_cell()` separately decided what that state meant, so adding one
+    state meant editing two functions and produced a page that called a device
+    "never connected" when it was in fact unredeemed — a wrong sentence about
+    the right data.
+
+    `seen` is the daemon's answer, and the difference between its two shapes is
+    load-bearing:
+
+    * a **dict** — the daemon answered; a peer mapped to `None` exists and has
+      not handshaked, and a peer *absent* from the dict was never created;
+    * **None** — the daemon could not be asked, so nothing is known.
+
+    Collapsing those into one empty dict is how a page tells a user "never
+    connected" about a device the server has no record of.
+
+    Returns new dicts rather than mutating: a caller that ignores the result
+    cannot half-apply it.
     """
-    if last_handshake_sec is None:
+    described = []
+    for device in devices:
+        state, age = _device_state(device, seen, now)
+        described.append({
+            **device,
+            "connection": state,
+            "last_seen_seconds": age,
+            "connection_sentence": _SENTENCE[state](age),
+        })
+    return described
+
+
+def _device_state(device, seen, now):
+    """(state, age_seconds) for one device. The decision half of describe_devices."""
+    # A revoked device is not a candidate for a connection: the daemon has no
+    # peer to ask about, and "never connected" would be a statement about a
+    # device that no longer exists.
+    if device.get("status") != "active":
+        return None, None
+    if seen is None:
+        return "unknown", None
+    if device.get("peer") not in seen:
+        return "unredeemed", None
+    last = seen[device["peer"]]
+    if last is None:
         return "never", None
     try:
-        age = max(0, int(now) - int(last_handshake_sec))
+        # Clamped at zero: the daemon's clock and the desk's can disagree, and
+        # "-3s ago" is a bug report waiting to happen.
+        age = max(0, int(now) - int(last))
     except (TypeError, ValueError):
         return "unknown", None
+    # The protocol's own reject window, not a number chosen here: past 180 s the
+    # key is not used, so the session is over by construction.
     return ("live" if age <= SESSION_LIVE_SECONDS else "offline"), age
 
 
@@ -1106,20 +1176,6 @@ def funnel_exposition(funnel):
         f'vallum_alpha_shared_ip_accounts {funnel["attribution"]["shared_ip_accounts"]}',
     ]
     return "\n".join(lines) + "\n"
-
-
-def humanize_age(seconds):
-    """A duration a user reads at a glance; not a precise interval."""
-    if seconds is None:
-        return ""
-    seconds = int(seconds)
-    if seconds < 90:
-        return f"{seconds}s"
-    if seconds < 5400:
-        return f"{seconds // 60}m"
-    if seconds < 172800:
-        return f"{seconds // 3600}h"
-    return f"{seconds // 86400}d"
 
 
 # ---------------------------------------------------------------- HTTP
@@ -1233,37 +1289,13 @@ credential — treat it like a password.</p>
 </form>"""
 
 
-def _connection_cell(device):
-    """The one column the user reads to answer "is it working?".
-
-    Rendered as a sentence rather than a flag because "offline" alone invites the
-    question "how long?", and "live" alone invites "since when?". A device that
-    has never been used says so — that is a different problem from one that
-    stopped, and it sends the reader to a different fix.
-    """
-    state = device.get("connection")
-    age = device.get("last_seen_seconds")
-    when = humanize_age(age)
-    if state == "live":
-        return f"connected ({when} ago)"
-    if state == "offline":
-        return f"not connected (last seen {when} ago)"
-    if state == "never":
-        return "never connected"
-    if state == "unredeemed":
-        return "not set up — the ticket expired before the device joined; get a new one"
-    if state is None:
-        return "—"
-    return "unknown — the server could not be asked"
-
-
 def account_page(view, token, notice="", operator="vallum desk"):
     """The "my account" surface: plan, the shared byte pool, every device —
     and the forms that act on them. The token rides hidden inputs, in POST
     bodies, never the URL."""
     devices = "".join(
         f"<tr><td>{_esc(d['label'])}</td><td><code>{_esc(d['peer'])}</code></td>"
-        f"<td>{_esc(d['status'])}</td><td>{_connection_cell(d)}</td><td>"
+        f"<td>{_esc(d['status'])}</td><td>{_esc(d['connection_sentence'])}</td><td>"
         + (f"""<form method="post" action="/account/revoke" style="display:inline">
 <input type="hidden" name="token" value="{_esc(token)}">
 <input type="hidden" name="peer" value="{_esc(d['peer'])}">

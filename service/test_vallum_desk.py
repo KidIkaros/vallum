@@ -31,7 +31,8 @@ _spec.loader.exec_module(desk_module)
 
 Desk = desk_module.Desk
 DeskConfig = desk_module.DeskConfig
-connection_state = desk_module.connection_state
+describe_devices = desk_module.describe_devices
+DEVICE_STATES = desk_module.DEVICE_STATES
 SESSION_LIVE_SECONDS = desk_module.SESSION_LIVE_SECONDS
 
 
@@ -455,8 +456,11 @@ class LivenessTests(DeskTestCase):
         # 180 s is where the daemon stops accepting the session. Off by one here
         # means the page calls a dead tunnel live, so pin both sides.
         now = 1_000_000
-        self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS, now)[0], "live")
-        self.assertEqual(connection_state(now - SESSION_LIVE_SECONDS - 1, now)[0], "offline")
+        device = {"peer": "p", "status": "active"}
+        at_boundary = describe_devices([device], {"p": now - SESSION_LIVE_SECONDS}, now)[0]
+        past_boundary = describe_devices([device], {"p": now - SESSION_LIVE_SECONDS - 1}, now)[0]
+        self.assertEqual(at_boundary["connection"], "live")
+        self.assertEqual(past_boundary["connection"], "offline")
 
     def test_a_device_the_server_has_no_peer_for_is_unredeemed_not_never(self):
         # The normal outcome of a ticket nobody used: invites live 15 minutes
@@ -662,6 +666,82 @@ class SignupAttributionTests(DeskTestCase):
         attribution = desk.funnel()["attribution"]
         self.assertEqual(attribution["unattributed"], 1)
         self.assertEqual(attribution["distinct_ips"], 1)
+
+
+class DeviceVocabularyTests(unittest.TestCase):
+    """The six-state vocabulary lives in one place, and this pins that.
+
+    The bug this prevents: `account()` decided a device's state and the page
+    separately decided what that state meant, so adding one state meant editing
+    two functions — and the intermediate version told users "never connected"
+    about devices that were in fact unredeemed. One function now owns both halves,
+    so the only way to add a state is to add it here, where these tests see it.
+    """
+
+    def test_every_state_has_a_sentence(self):
+        # A state with no sentence would KeyError at page render — i.e. a 500 on
+        # the account page for one unlucky user, which is worse than a wrong word.
+        for state in DEVICE_STATES:
+            described = describe_devices(
+                [{"peer": "p", "status": "active"}], self.seen_for(state), 1_000_000)[0]
+            self.assertEqual(described["connection"], state)
+            self.assertTrue(described["connection_sentence"])
+
+    def test_the_vocabulary_and_the_sentences_cannot_drift(self):
+        # Both directions: no state without a sentence, no sentence without a
+        # state. This is the assertion that makes the single-definition claim real
+        # rather than a comment.
+        sentences = desk_module._SENTENCE
+        self.assertEqual(set(sentences) - {None}, set(DEVICE_STATES))
+
+    def test_no_two_states_share_a_sentence(self):
+        # Each state sends the reader to a different fix, so two states reading
+        # the same is a sign one of them is redundant.
+        said = [sentences(0) for state, sentences in desk_module._SENTENCE.items()
+                if state is not None]
+        self.assertEqual(len(said), len(set(said)), said)
+
+    def test_every_state_is_reachable_from_real_inputs(self):
+        # Not just "the map has entries": each state must be producible by an
+        # input the daemon can actually give. A state nothing can produce is
+        # dead vocabulary that still has to be maintained.
+        now = 1_000_000
+        cases = {
+            "live": ({"peer": "p", "status": "active"}, {"p": now - 10}),
+            "offline": ({"peer": "p", "status": "active"}, {"p": now - 10_000}),
+            "never": ({"peer": "p", "status": "active"}, {"p": None}),
+            "unredeemed": ({"peer": "p", "status": "active"}, {}),
+            "unknown": ({"peer": "p", "status": "active"}, None),
+        }
+        self.assertEqual(set(cases), set(DEVICE_STATES))
+        for expected, (device, seen) in cases.items():
+            self.assertEqual(
+                describe_devices([device], seen, now)[0]["connection"], expected)
+
+    def test_a_revoked_device_has_no_state_at_all(self):
+        # `None`, not a word: there is no peer left to ask about, so any word
+        # would be a claim about something that does not exist.
+        described = describe_devices(
+            [{"peer": "p", "status": "removed"}], {"p": 1}, 1_000_000)[0]
+        self.assertIsNone(described["connection"])
+        self.assertEqual(described["connection_sentence"], "—")
+
+    def seen_for(self, state):
+        now = 1_000_000
+        return {
+            "live": {"p": now - 10},
+            "offline": {"p": now - 10_000},
+            "never": {"p": None},
+            "unredeemed": {},
+            "unknown": None,
+        }[state]
+
+    def test_describe_does_not_mutate_its_input(self):
+        # It returns new dicts, so a caller that ignores the result cannot
+        # half-apply it and leave a device with a state but no sentence.
+        device = {"peer": "p", "status": "active"}
+        describe_devices([device], {"p": None}, 1_000_000)
+        self.assertEqual(device, {"peer": "p", "status": "active"})
 
 
 class AccountPageTests(HttpTests):
