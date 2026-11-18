@@ -30,7 +30,7 @@ cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh scripts/check-doc-addresses.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== durable state coverage"
@@ -39,6 +39,12 @@ echo "== durable state coverage"
 # against the document, so it costs nothing and fires on the next component
 # that keeps state rather than on the incident.
 scripts/check-state-coverage.sh
+echo "== documents do not describe the test harness as production"
+# A published verdict recorded the two-host test's addresses as the live
+# deployment's, and two later readers built wrong stories on top of it before
+# anyone checked the host. The check is mechanical because the mistake is: a doc
+# talking about production, using an address the harness owns.
+scripts/check-doc-addresses.sh
 echo "== desk database copy/restore"
 # The account database is the only state in the product that cannot be
 # rebuilt, so the copy-and-restore path is a gate rather than a paragraph in

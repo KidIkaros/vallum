@@ -223,6 +223,72 @@ class StatusTests(DeskTestCase):
         self.assertEqual(code, 404)
 
 
+class OrphanSweepTests(DeskTestCase):
+    """A peer row under a non-active account is unreachable, so the sweep clears it.
+
+    The sweep only visits active accounts, so a row left `active` under a revoked
+    one is never revisited. Ten accumulated on the reference desk, and
+    `vallum-desk-admin devices` reported fourteen active devices against four
+    active accounts.
+    """
+
+    def _revoke_account_directly(self, peer):
+        """Revoke the account row without the peer cleanup — the historical state
+        the sweep has to recover from."""
+        self.desk.db.execute(
+            "UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
+
+    def test_a_peer_under_a_revoked_account_is_marked_removed(self):
+        self.signup()
+        self._revoke_account_directly("u0001-friend")
+        actions = self.desk.sweep_once()
+        self.assertEqual(
+            [a for a in actions if a.get("reason") == "orphaned"],
+            [{"peer": "u0001-friend", "reason": "orphaned"}])
+        row = self.desk.db.execute(
+            "SELECT status FROM peers WHERE peer='u0001-friend'").fetchone()
+        self.assertEqual(row["status"], "removed")
+
+    def test_the_sweep_asks_the_daemon_to_remove_the_orphan(self):
+        # An orphaned row can be a peer still live on the server and no longer
+        # enforced, which is worse than a stale row. Marking the row alone would
+        # leave that peer carrying traffic.
+        self.signup()
+        self._revoke_account_directly("u0001-friend")
+        self.desk.sweep_once()
+        self.assertIn("u0001-friend", self.daemon.removed)
+
+    def test_a_peer_the_daemon_never_had_is_already_in_the_goal_state(self):
+        # The normal case: a ticket nobody redeemed has no peer on the server.
+        self.signup()
+        self.daemon.missing_peers = ("u0001-friend",)
+        self._revoke_account_directly("u0001-friend")
+        actions = self.desk.sweep_once()
+        self.assertEqual(
+            [a for a in actions if a.get("reason") == "orphaned"],
+            [{"peer": "u0001-friend", "reason": "orphaned"}])
+
+    def test_a_peer_that_cannot_be_removed_stays_active_for_the_next_pass(self):
+        # If the daemon refuses for a reason other than "no such peer", the row
+        # must stay active: marking it removed would make an enforced-nowhere
+        # peer look handled, and nothing would ever retry it.
+        self.signup()
+        self._revoke_account_directly("u0001-friend")
+        self.desk.daemon = FakeDaemon(refuse_remove=True)
+        actions = self.desk.sweep_once()
+        self.assertEqual([a for a in actions if a.get("reason") == "orphaned"], [])
+        row = self.desk.db.execute(
+            "SELECT status FROM peers WHERE peer='u0001-friend'").fetchone()
+        self.assertEqual(row["status"], "active")
+
+    def test_a_peer_under_an_active_account_is_left_alone(self):
+        self.signup()
+        self.desk.sweep_once()
+        row = self.desk.db.execute(
+            "SELECT status FROM peers WHERE peer='u0001-friend'").fetchone()
+        self.assertEqual(row["status"], "active")
+
+
 class EnforcementTests(DeskTestCase):
 
     def account_row(self, peer):

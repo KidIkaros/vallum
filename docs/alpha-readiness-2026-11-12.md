@@ -431,29 +431,42 @@ answer. Every clause now has an artefact:
   dependency); `install.sh --from-release` fetches the signed v1.7.0 tarball
   with no token and no `gh`; `ssh-keygen -Y verify` against the committed
   `allowed_signers` passes and the tarball checksum matches the signed sums.
-- **A stranger can join and be served.** `desk.wingman.gold` (Caddy →
-  `vallum-desk@vallumrc`, open signup) hands a visitor the install command and
-  mints a real join ticket. Proven from outside on 2026-11-16: anonymous
-  `/api/signup` → `vallum setup --join` → a working full-tunnel config
-  (`10.99.90.8/32` via `107.175.238.82:51921`, pushed DNS), the peer visible
-  server-side and then revoked. The ticket page now also tells the visitor how
-  to get `vallum` — the earlier version handed out a command for a binary the
-  stranger did not have.
+- **A stranger can join and be served.** `desk.wingman.gold` (Caddy → the desk,
+  open signup) hands a visitor the install command and mints a real join ticket.
+  Proven from outside on 2026-11-16: anonymous `/api/signup` →
+  `vallum setup --join` → a working full-tunnel config with pushed DNS, the peer
+  visible server-side and then revoked. The ticket page now also tells the
+  visitor how to get `vallum` — the earlier version handed out a command for a
+  binary the stranger did not have.
+  <!-- The deployment names, addresses and ports that stood here — the unit
+  `vallum-desk@vallumrc`, the peer address `10.99.90.8/32`, the port `51921` —
+  were the test harness's, not the live server's. Removed rather than corrected
+  in place: a wrong address is worse than no address, and the paragraph's claim
+  is about capability, which does not need one. See the correction below. -->
 
-  > **CORRECTION 2026-11-17 — the deployment this paragraph describes is no
-  > longer the one serving.** Inspected live: the host has exactly one config,
+  > **CORRECTION 2026-11-17 — these addresses are the TEST HARNESS's, not the
+  > live deployment's.** <!-- harness-address-ok: this block exists to name the
+  > harness's values; the exemption is the point of the paragraph. -->
+  > `10.99.90.0/24`, the interface name `vallumrc` and UDP port `51921` are
+  > `scripts/verify-remote.sh`'s scratch defaults (`SUBNET`, `CIFACE`, `PORT` at
+  > lines 116–128), used so the two-host test can run beside a live server
+  > without touching it. This paragraph recorded them as if they were the public
+  > deployment's addressing.
+  >
+  > What the host actually runs, inspected 2026-11-17: one config,
   > `/etc/vallum/vallum0.toml`, `10.7.0.1/24`, `listen 0.0.0.0:51820`, unchanged
-  > since 2026-11-11. There is no `vallumrc.toml`; the desk, the enrolment
-  > responder and the tunnel all run as `@vallum0`; `vallum-quick@vallumrc` has
-  > been in `failed` since 2026-11-16 17:01. A ticket minted today reads
-  > `107.175.238.82:51821`, not `:51921`. So the renumber to
-  > `vallumrc`/`10.99.90.0/24`/`51921` described above was either reverted or
-  > never left the state recorded here, and the `10.99.90.8/32` path cannot be
-  > reproduced against this host. The *capability* claim — a stranger can sign
-  > up and be served — was re-verified against the live deployment on 2026-11-17
-  > (desk answers 200 publicly, `peer invite` mints a real ticket naming the live
-  > responder); the *addresses* in this paragraph are stale and are kept only
-  > because deleting a historical claim hides that it went stale unnoticed.
+  > since 2026-11-11; there is no `vallumrc.toml`; the desk, the enrolment
+  > responder and the tunnel all run as `@vallum0`; a ticket minted today names
+  > `107.175.238.82:51821`. So the stranger signup was real and the *capability*
+  > claim holds — re-verified 2026-11-17, the desk answers 200 publicly and
+  > `peer invite` mints a real ticket naming the live responder — but the peer
+  > that join produced cannot have had address `10.99.90.8/32`, because that
+  > subnet belongs to the harness.
+  >
+  > Kept rather than deleted: a published verdict that described a test rig as
+  > production is the thing a future reader most needs to see. `scripts/
+  > check-doc-addresses.sh` now fails when a doc's live-deployment claim uses a
+  > harness default.
 - **The validation is reproducible.** All gates are in the tree and runnable;
   verdicts are signed and commit-bound; the remote stamp names the host, the
   script hash, and the assertion count.

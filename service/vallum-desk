@@ -819,6 +819,47 @@ class Desk:
             reason = self._breach_reason(row, used, today)
             if reason:
                 actions.append(self._revoke(row, reason, used))
+        actions.extend(self._sweep_orphans())
+        return actions
+
+    def _sweep_orphans(self):
+        """Mark removed every peer row whose account is no longer active.
+
+        The sweep only visits active accounts, so a peer row left `active` under
+        a revoked or expired account is unreachable for ever: nothing revisits
+        it, and the admin listing keeps counting it as a live device. Ten such
+        rows accumulated on the reference desk, so `vallum-desk-admin devices`
+        reported fourteen active devices against four active accounts.
+
+        The daemon removal is attempted, not assumed: an orphaned row can be a
+        peer that is *still live on the server and no longer enforced*, which is
+        worse than a stale row. A peer the daemon has never heard of — the normal
+        case for a ticket nobody redeemed — is already in the goal state, which
+        is why "no peer named" is not a failure here (the same reasoning as
+        `_revoke`).
+
+        Returns the actions taken, so a sweep reports what it did.
+        """
+        with self.lock:
+            orphans = [dict(row) for row in self.db.execute(
+                "SELECT p.peer AS peer FROM peers p JOIN accounts a ON a.id=p.account_id "
+                "WHERE p.status='active' AND a.status!='active' ORDER BY p.id")]
+        actions = []
+        for orphan in orphans:
+            peer = orphan["peer"]
+            try:
+                self.daemon.remove(peer)
+            except RuntimeError as error:
+                if "no peer named" not in str(error):
+                    # Still live on the daemon and still not enforced: leave the
+                    # row active so the next pass tries again, and say so.
+                    print(f"desk: could not remove orphan {peer}; will retry: {error}")
+                    continue
+            with self.lock:
+                self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
+            actions.append({"peer": peer, "reason": "orphaned"})
+        if actions:
+            print(f"desk: cleared {len(actions)} orphaned peer row(s)")
         return actions
 
     @staticmethod

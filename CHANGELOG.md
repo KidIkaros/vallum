@@ -26,6 +26,25 @@
   the alpha session of 2026-11-16 that nobody redeemed. On the reference server
   this immediately corrects two devices that had been shown as `active` while
   never having handshaked.
+- **A published verdict no longer describes the test harness as production.**
+  <!-- harness-address-ok: this entry exists to name the harness's values. -->
+  `docs/alpha-readiness-2026-11-12.md` recorded a stranger's join as
+  `10.99.90.8/32 via 107.175.238.82:51921` and the public desk as
+  `vallum-desk@vallumrc`. Every one of those is `scripts/verify-remote.sh`'s
+  scratch default — `SUBNET=10.99.90.0/24`, `CIFACE=vallumrc0`, `PORT=51921` —
+  which exists so the two-host test can run beside a live server without touching
+  it. The live host runs `vallum0` on `10.7.0.0/24` at `:51820` with an enrolment
+  responder at `:51821`, unchanged since 2026-11-11. The addresses are removed
+  from the claim (a wrong address is worse than none) and the correction says
+  what happened; `scripts/check-doc-addresses.sh` now fails the gate when a doc
+  makes a live-deployment claim using an address the harness owns.
+- **The sweep clears peer rows left under non-active accounts.** The sweep only
+  visits active accounts, so a row left `active` under a revoked or expired one
+  was unreachable for ever: `vallum-desk-admin devices` reported fourteen active
+  devices against four active accounts. It now attempts the daemon removal (an
+  orphaned row can be a peer still live and no longer enforced, which is worse
+  than a stale row) and marks the row removed, leaving it active for the next
+  pass when the daemon refuses for any reason other than "no such peer".
 - **A signup records its address, and the anonymous limit survives a restart.**
   The `accounts` table gains `signup_ip` (schema v2, additive: the fourteen rows
   from the alpha session migrate to `NULL`, which is the honest answer since

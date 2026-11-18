@@ -237,6 +237,10 @@ jobs:
         working-directory: vallum
         run: scripts/check-state-coverage.sh
 
+      - name: Documents do not describe the test harness as production
+        working-directory: vallum
+        run: scripts/check-doc-addresses.sh
+
       - name: Trust anchor is one key set in three places
         working-directory: vallum
         run: scripts/check-trust-anchor.sh
