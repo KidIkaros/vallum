@@ -366,7 +366,12 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $value }} devices are tracked but none has ever connected"
+          # Not `{{ $value }}`: the value here is the left-hand side of the `and`
+          # (handshaked == 0), so it rendered "0 devices are tracked" while 14
+          # were. A summary that names a number it did not measure is the exact
+          # defect this slice exists to remove, and it reappeared in the first
+          # alert written to catch it.
+          summary: "No device has ever connected, and join tickets are outstanding"
           description: >-
             The desk has minted join tickets and no device has reached a
             handshake. Either nobody is trying (the alpha has no audience yet,
