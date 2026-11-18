@@ -12,6 +12,10 @@ PartOf=vallum@%i.service
 # with VALLUM_DESK_EXTRA_ARGS in /etc/vallum/desk.env (e.g.
 # "--open-signup --open-trial-bytes 5368709120 --max-active-accounts 200").
 EnvironmentFile=-/etc/vallum/desk.env
+# Defined empty for the same reason as the backup unit: systemd expands the
+# variable itself, so with no EnvironmentFile it logged "Referenced but unset
+# environment variable evaluates to an empty string" on every start.
+Environment=VALLUM_DESK_EXTRA_ARGS=
 ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk --config /etc/vallum/%i.toml --bind 127.0.0.1 --port 8400 $VALLUM_DESK_EXTRA_ARGS
 Restart=on-failure
 RestartSec=2

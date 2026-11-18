@@ -26,6 +26,19 @@
   the alpha session of 2026-11-16 that nobody redeemed. On the reference server
   this immediately corrects two devices that had been shown as `active` while
   never having handshaked.
+- **A signup records its address, and the anonymous limit survives a restart.**
+  The `accounts` table gains `signup_ip` (schema v2, additive: the fourteen rows
+  from the alpha session migrate to `NULL`, which is the honest answer since
+  their addresses were never captured), and the per-address throttle moves from
+  a Python dict into a `signups(ip, day, count)` table. The dict reset on every
+  restart, so on a public desk with `--open-signup` restarting the service was a
+  free reset of `--signup-ip-day-limit`. The day boundary is now UTC rather than
+  local. The funnel reports the attribution it now has:
+  `vallum_alpha_signup_ips`, `vallum_alpha_unattributed_accounts` and
+  `vallum_alpha_shared_ip_accounts` — the last is the "one machine, many
+  accounts" signal that would have shown an entire alpha session of self-testing
+  at a glance instead of after someone read the labels. `vallum-desk-admin
+  devices` also prints the address.
 - **The alpha's funnel is now a measurement.** `vallum-desk --metrics` prints
   the alpha's one number as Prometheus text: `vallum_alpha_devices{state}` split
   into `live`/`offline`/`never`/`unredeemed`/`unknown`, plus

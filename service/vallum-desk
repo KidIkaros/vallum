@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -65,7 +65,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     expires    TEXT NOT NULL,             -- ISO date; trial end / paid_until
     bytes_cap  INTEGER NOT NULL,          -- rolling total across the period
     status     TEXT NOT NULL DEFAULT 'active',  -- active|expired|overquota|revoked
-    paid_until TEXT
+    paid_until TEXT,
+    -- The address the signup came from, kept because nothing else identifies a
+    -- device: without it, fourteen accounts from one laptop are fourteen
+    -- unrelated rows, which is exactly how a whole alpha session went unnoticed.
+    signup_ip  TEXT
 );
 CREATE TABLE IF NOT EXISTS peers (
     id         INTEGER PRIMARY KEY,
@@ -74,6 +78,18 @@ CREATE TABLE IF NOT EXISTS peers (
     label      TEXT NOT NULL,             -- the device name the user chose
     created    TEXT NOT NULL,
     status     TEXT NOT NULL DEFAULT 'active'   -- active|removed
+);
+-- The anonymous-signup throttle, persisted.
+--
+-- It used to be a Python dict (`self.signups_today`), which meant every restart
+-- reset the limit to zero: on a public desk with open signup, restarting the
+-- service was a free way to mint unlimited trials. A limit that lives in the
+-- process is a limit the operator can accidentally disable.
+CREATE TABLE IF NOT EXISTS signups (
+    ip    TEXT NOT NULL,
+    day   TEXT NOT NULL,                  -- ISO date, UTC
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip, day)
 );
 CREATE TABLE IF NOT EXISTS codes (
     code     TEXT PRIMARY KEY,
@@ -106,6 +122,19 @@ def _migrate_v0(conn):
         "WHERE NOT EXISTS (SELECT 1 FROM peers WHERE peers.peer = accounts.peer)")
 
 
+def _migrate_v1(conn):
+    """v1 → v2: accounts gain `signup_ip`, and the throttle becomes a table.
+
+    Both are additive, so an existing database keeps every row and simply gains
+    the new column as NULL — the fourteen accounts from the alpha session of
+    2026-11-16 will read `signup_ip = NULL`, which is the honest answer: their
+    addresses were never recorded and cannot be recovered.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+    if "signup_ip" not in columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN signup_ip TEXT")
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -128,8 +157,15 @@ def open_database(path):
             f"desk database is version {version}; this build speaks {SCHEMA_VERSION} "
             "— refusing to run a schema it does not know")
     conn.executescript(SCHEMA)
-    if version == 0:
+    # Migrations run in order from whatever version the file is at, so a v0
+    # database passes through v1 and lands on v2 in one start. Each step is
+    # idempotent because `executescript(SCHEMA)` above has already created any
+    # table the step expects.
+    if version < 1:
         _migrate_v0(conn)
+    if version < 2:
+        _migrate_v1(conn)
+    if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
 
@@ -304,7 +340,6 @@ class Desk:
         # may already hold it when calling them — every self.db access runs
         # under it, since one sqlite3.Connection is not concurrent-safe.
         self.lock = threading.RLock()
-        self.signups_today = {}  # ip → (day, count): anonymous signups per IP
 
     # -- inputs ---------------------------------------------------------
 
@@ -404,9 +439,11 @@ class Desk:
             token = secrets.token_hex(16)
             origin = code if code else "open"
             cursor = self.db.execute(
-                "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (peer, label, token, origin, plan, self._now(), expires, cap, "active"))
+                "INSERT INTO accounts "
+                "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (peer, label, token, origin, plan, self._now(), expires, cap, "active",
+                 client_ip if client_ip and client_ip != "unknown" else None))
             self._insert_peer(cursor.lastrowid, peer, label)
             if not code:
                 self._count_signup(client_ip)
@@ -423,19 +460,43 @@ class Desk:
                      "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
 
     def _signup_limit_left(self, client_ip):
-        """How many anonymous signups this IP has left today (None = no limit)."""
+        """How many anonymous signups this address has left today (None = no limit).
+
+        Read from the database, not from process memory. The memory version reset
+        on every restart, which on a public desk with open signup meant restarting
+        the service was a free way past the limit.
+        """
         limit = self.config.signup_ip_day_limit
         if limit <= 0:
             return None
-        day, count = self.signups_today.get(client_ip, ("", 0))
-        today = datetime.date.today().isoformat()
-        return 0 if day == today and count >= limit else limit - count
+        with self.lock:
+            row = self.db.execute(
+                "SELECT count FROM signups WHERE ip=? AND day=?",
+                (client_ip, self._today())).fetchone()
+        used = row["count"] if row else 0
+        return max(0, limit - used)
 
     def _count_signup(self, client_ip):
-        day, count = self.signups_today.get(client_ip, ("", 0))
-        today = datetime.date.today().isoformat()
-        fresh = count + 1 if day == today else 1
-        self.signups_today[client_ip] = (today, fresh)
+        """Record one anonymous signup against its address, durably.
+
+        Upsert rather than read-modify-write: two requests from one address can
+        arrive on two threads, and a lost update here is a lost limit.
+        """
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO signups (ip, day, count) VALUES (?,?,1) "
+                "ON CONFLICT(ip, day) DO UPDATE SET count = count + 1",
+                (client_ip, self._today()))
+
+    @staticmethod
+    def _today():
+        """The throttle's day boundary, in UTC.
+
+        `date.today()` is local, and a desk whose clock crosses midnight in a
+        non-UTC zone would reset the limit early or late. UTC is what every other
+        timestamp in this service uses.
+        """
+        return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
 
     def _next_peer_name(self, label):
         """Peer names share their first eight characters on the kernel's
@@ -605,6 +666,22 @@ class Desk:
             for row in self.db.execute(
                     "SELECT status, COUNT(*) AS n FROM accounts GROUP BY status"):
                 accounts[row["status"]] = row["n"]
+            # Attribution. Without this, fourteen accounts from one machine are
+            # fourteen unrelated rows — which is exactly how an entire alpha
+            # session of self-testing went unnoticed until someone read the
+            # labels. `signup_ip` is NULL for rows that predate v2, so the count
+            # of unattributed accounts is reported rather than hidden.
+            attribution = {
+                "distinct_ips": self.db.execute(
+                    "SELECT COUNT(DISTINCT signup_ip) FROM accounts "
+                    "WHERE signup_ip IS NOT NULL").fetchone()[0],
+                "unattributed": self.db.execute(
+                    "SELECT COUNT(*) FROM accounts WHERE signup_ip IS NULL").fetchone()[0],
+                "shared_ip_accounts": self.db.execute(
+                    "SELECT COALESCE(SUM(n), 0) FROM ("
+                    "  SELECT COUNT(*) AS n FROM accounts WHERE signup_ip IS NOT NULL "
+                    "  GROUP BY signup_ip HAVING COUNT(*) > 1)").fetchone()[0],
+            }
             # Every active device the desk believes it has, including the
             # pre-migration rows whose device is the account's own `peer`
             # column. Sharing this with `account()` is deliberate: a funnel that
@@ -629,6 +706,7 @@ class Desk:
                 states[state] = states.get(state, 0) + 1
         return {
             "accounts": accounts,
+            "attribution": attribution,
             "devices": states,
             "devices_total": sum(states.values()),
             # A device that reached a handshake at some point. `live` is now,
@@ -946,7 +1024,7 @@ class Desk:
         with self.lock:
             rows = self.db.execute(
                 "SELECT p.peer, p.label AS device, p.status, p.created, "
-                "a.label AS account, a.plan AS account_plan "
+                "a.label AS account, a.plan AS account_plan, a.signup_ip "
                 "FROM peers p JOIN accounts a ON a.id=p.account_id ORDER BY p.id").fetchall()
         return 200, {"devices": [dict(row) for row in rows]}
 
@@ -1017,6 +1095,15 @@ def funnel_exposition(funnel):
         "# HELP vallum_alpha_daemon_answered Whether the daemon could be asked about liveness.",
         "# TYPE vallum_alpha_daemon_answered gauge",
         f'vallum_alpha_daemon_answered {1 if funnel["daemon_answered"] else 0}',
+        "# HELP vallum_alpha_signup_ips Distinct addresses that created an account.",
+        "# TYPE vallum_alpha_signup_ips gauge",
+        f'vallum_alpha_signup_ips {funnel["attribution"]["distinct_ips"]}',
+        "# HELP vallum_alpha_unattributed_accounts Accounts created before addresses were recorded.",
+        "# TYPE vallum_alpha_unattributed_accounts gauge",
+        f'vallum_alpha_unattributed_accounts {funnel["attribution"]["unattributed"]}',
+        "# HELP vallum_alpha_shared_ip_accounts Accounts whose address also created another account.",
+        "# TYPE vallum_alpha_shared_ip_accounts gauge",
+        f'vallum_alpha_shared_ip_accounts {funnel["attribution"]["shared_ip_accounts"]}',
     ]
     return "\n".join(lines) + "\n"
 

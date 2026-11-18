@@ -14,6 +14,12 @@ Type=oneshot
 # An operator can point copies somewhere else without editing the unit:
 #   VALLUM_DESK_BACKUP_ARGS=--dest /mnt/backups/vallum --keep 30
 EnvironmentFile=-/etc/vallum/desk-backup.env
+# Defined empty, not just defaulted in the shell: systemd expands
+# `$VALLUM_DESK_BACKUP_ARGS` itself, and with the EnvironmentFile absent it
+# logged "Referenced but unset environment variable evaluates to an empty
+# string" on every run. A daily unit that writes a warning every day is a
+# journal that trains its reader to ignore warnings.
+Environment=VALLUM_DESK_BACKUP_ARGS=
 ExecStart=/usr/bin/python3 /usr/local/lib/vallum/vallum-desk-backup $VALLUM_DESK_BACKUP_ARGS
 # Root is required: the database is 0600 under /var/lib/vallum and the copy is
 # written 0600, which is the same reason the desk itself runs as root.
@@ -23,7 +29,14 @@ ProtectSystem=strict
 # The source is read through SQLite's read-only URI; the destination is the
 # only thing this unit writes.
 ReadOnlyPaths=/var/lib/vallum
-ReadWritePaths=/var/backups/vallum
+# `/var/backups`, not `/var/backups/vallum`: systemd resolves this at namespace
+# setup, and a path that does not exist yet is a hard failure (status=226/
+# NAMESPACE) rather than something the script can create. The leaf directory is
+# made by the script on its first run — which is why this names the parent. Found
+# by installing the unit on the reference host, where it failed to start for
+# exactly this reason: the mechanism had never been deployed, so nothing had ever
+# exercised it.
+ReadWritePaths=/var/backups
 
 [Install]
 WantedBy=multi-user.target

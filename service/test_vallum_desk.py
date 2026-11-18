@@ -576,6 +576,94 @@ class FunnelTests(DeskTestCase):
             float(value)
 
 
+class SignupAttributionTests(DeskTestCase):
+    """Where a signup came from, and a limit that survives a restart.
+
+    Both exist because an entire alpha session — fourteen accounts from one
+    laptop — went unnoticed: nothing recorded an address, so the rows looked like
+    fourteen unrelated people, and the only brake on repeat signups lived in
+    process memory, so restarting the service reset it.
+    """
+
+    def open_desk(self):
+        config = dataclasses.replace(self.config, open_signup=True)
+        return Desk(config, FakeDaemon())
+
+    def test_a_signup_records_its_address(self):
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        code, payload = desk.signup({"name": "friend"}, client_ip="203.0.113.7")
+        self.assertEqual(code, 200)
+        row = desk.db.execute(
+            "SELECT signup_ip FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+        self.assertEqual(row["signup_ip"], "203.0.113.7")
+
+    def test_an_unknown_address_is_recorded_as_absent_not_as_the_string(self):
+        # "unknown" is the default argument, not an address. Storing it would put
+        # every unattributable signup in one fake bucket and make
+        # `shared_ip_accounts` fire on them.
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        _, payload = desk.signup({"name": "friend"})
+        row = desk.db.execute(
+            "SELECT signup_ip FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+        self.assertIsNone(row["signup_ip"])
+
+    def test_the_limit_survives_a_restart(self):
+        # The bug this encodes: `signups_today` was a dict on the Desk instance,
+        # so `systemctl restart` was a free reset of `--signup-ip-day-limit` on a
+        # public desk with open signup.
+        first = self.open_desk()
+        first.config = dataclasses.replace(first.config, signup_ip_day_limit=2)
+        for _ in range(2):
+            self.assertEqual(first.signup({"name": "friend"}, client_ip="198.51.100.4")[0], 200)
+        first.db.close()
+
+        second = self.open_desk()
+        self.addCleanup(second.db.close)
+        second.config = dataclasses.replace(second.config, signup_ip_day_limit=2)
+        code, payload = second.signup({"name": "again"}, client_ip="198.51.100.4")
+        self.assertEqual(code, 429, payload)
+
+    def test_a_different_address_gets_its_own_limit(self):
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        desk.config = dataclasses.replace(desk.config, signup_ip_day_limit=1)
+        self.assertEqual(desk.signup({"name": "a"}, client_ip="198.51.100.1")[0], 200)
+        self.assertEqual(desk.signup({"name": "b"}, client_ip="198.51.100.1")[0], 429)
+        self.assertEqual(desk.signup({"name": "c"}, client_ip="198.51.100.2")[0], 200)
+
+    def test_the_throttle_day_is_utc(self):
+        # A desk whose local clock is not UTC would reset the limit early or
+        # late; every other timestamp in this service is UTC.
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        desk._count_signup("203.0.113.9")
+        row = desk.db.execute("SELECT day FROM signups WHERE ip='203.0.113.9'").fetchone()
+        self.assertEqual(row["day"], datetime.datetime.now(datetime.timezone.utc)
+                         .date().isoformat())
+
+    def test_the_funnel_reports_one_machine_many_accounts(self):
+        # The signal that would have shown "fourteen accounts, one laptop".
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        for name in ("a", "b", "c"):
+            desk.signup({"name": name}, client_ip="203.0.113.50")
+        attribution = desk.funnel()["attribution"]
+        self.assertEqual(attribution["distinct_ips"], 1)
+        self.assertEqual(attribution["shared_ip_accounts"], 3)
+        self.assertEqual(attribution["unattributed"], 0)
+
+    def test_accounts_with_no_address_are_counted_not_hidden(self):
+        desk = self.open_desk()
+        self.addCleanup(desk.db.close)
+        desk.signup({"name": "no-ip"})
+        desk.signup({"name": "has-ip"}, client_ip="203.0.113.60")
+        attribution = desk.funnel()["attribution"]
+        self.assertEqual(attribution["unattributed"], 1)
+        self.assertEqual(attribution["distinct_ips"], 1)
+
+
 class AccountPageTests(HttpTests):
     """The account surface: the bearer token travels POST bodies only —
     never the request line — and every rendered page is private."""
@@ -754,7 +842,9 @@ class MigrationTests(DeskTestCase):
         desk = Desk(config, self.daemon)
         self.addCleanup(desk.db.close)
         version = desk.db.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(version, 1)
+        # v0 → v2 in one start: every step runs in order, so a database from the
+        # alpha desk lands on the current version without an intermediate stop.
+        self.assertEqual(version, desk_module.SCHEMA_VERSION)
         rows = desk.db.execute("SELECT peer, status FROM peers ORDER BY peer").fetchall()
         self.assertEqual([r["peer"] for r in rows], ["u0001-old", "u0002-old"])
         # The legacy column stays populated — the expand step keeps old
@@ -763,6 +853,30 @@ class MigrationTests(DeskTestCase):
         self.assertEqual([a["peer"] for a in accounts], ["u0001-old", "u0002-old"])
         columns = {r[1] for r in desk.db.execute("PRAGMA table_info(codes)")}
         self.assertTrue({"days", "bytes", "plan"} <= columns)
+
+    def test_a_v1_database_gains_the_signup_address_column(self):
+        # The fourteen accounts from 2026-11-16 predate address recording, so
+        # they migrate to `signup_ip = NULL`. That is the honest answer — their
+        # addresses were never captured — and the funnel reports the count of
+        # unattributed rows rather than pretending they were attributed.
+        path = os.path.join(self.tempdir.name, "v1.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript(desk_module.SCHEMA)
+        conn.execute("PRAGMA user_version=1")
+        conn.execute(
+            "INSERT INTO accounts (peer,label,token,code,created,expires,bytes_cap,status) "
+            "VALUES ('u0001-old','old','tok','legacy','2026-11-16','2027-01-01',1000,'active')")
+        conn.commit()
+        conn.close()
+
+        config = dataclasses.replace(self.config, state=path)
+        desk = Desk(config, self.daemon)
+        self.addCleanup(desk.db.close)
+        self.assertEqual(
+            desk.db.execute("PRAGMA user_version").fetchone()[0], desk_module.SCHEMA_VERSION)
+        row = desk.db.execute("SELECT signup_ip FROM accounts WHERE peer='u0001-old'").fetchone()
+        self.assertIsNone(row["signup_ip"])
+        self.assertEqual(desk.funnel()["attribution"]["unattributed"], 1)
 
     def test_a_database_newer_than_this_build_is_refused(self):
         path = os.path.join(self.tempdir.name, "newer.sqlite")
