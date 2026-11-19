@@ -57,7 +57,7 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
 | WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up DONE in 450c322: service/README config table +2 flags |
 | WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | DONE (5cae2fc) — accept-isolation 15 assertions; accept-pair 88; verify.sh PASS; DEPLOY-HOLD |
-| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DOING — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; 224 tests OK, verify.sh PASS. Slices b (pinned invite), c (rotation), d (reconciliation) TODO. DEPLOY-HOLD for live signup flip |
+| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DOING — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; slice (b) DONE (821087b + review 6eb03da): add_device mints PINNED invite via --public-key (canonicalized, validated pre-reservation) + `vallum join --key` redemption + place_config idempotent key + UTCP/README/glossary; desk 236 OK, verify.sh PASS, real-binary two-netns probe 22 checks FAIL=0 (handshake + ping 3/3 + wrong-key refusal). Slices c (rotation), d (reconciliation) TODO. DEPLOY-HOLD for live signup flip |
 | WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up DONE in 450c322: journey step1 + agent API block re-worded for account-only signup (live journey re-proof rides WS6's headless gate) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
@@ -151,3 +151,29 @@ remaining gaps. Lead with findings in words, numbers as backup.
   set_status token addressing (both directions verified live). Review-fix commit 9d70fd3; gates re-run
   on the final tree: desk 224 OK, verify.sh PASS. Lessons saved to vallum-operations
   references/service-layer.md. DEPLOY-HOLD unchanged. Next: WS4 slice (b).
+- 2026-11-19 05:19 EST — WS4 slice (b) DONE (821087b + review 6eb03da): pinned device enrolment,
+  the full vertical path. Desk add_device accepts the device's public line (public_key),
+  canonicalizes it (lowercase hex, 4-digit suite, whitespace stripped — the responder's pin is a
+  whole-line byte comparison against encode_public's canonical form), validates structure BEFORE
+  the reservation (400 burns no slot, no daemon call; non-string → 400 not 500), and mints via
+  `peer invite --public-key` (one argv element, never shell). Response carries `pinned: true|false`;
+  absent/empty line = the unchanged web path (single-use, unpinned, key at join time). Client half:
+  `vallum join --key <file>` (join_identity helper: mode check before read, global
+  --allow-insecure-key-permissions plumbed; custody preserved — placed key byte-identical to the
+  device's); place_config skips a byte-identical key already at its destination (a spent invite must
+  not strand on an overwrite refusal), different key still refuses. Docs same edit: service README,
+  UTCP desk manual (public_key required-with-empty convention, like signup's code — the manual
+  discipline test demands required placeholders), UTCP vallum manual (vallum_join_pinned), CONTEXT.md
+  Pinned invite entry. TDD throughout (12 desk tests + 7 Rust tests RED→GREEN). Gates: desk 236 OK
+  (discover), verify.sh PASS on the final tree (workspace 1013 tests, clippy -D warnings, fmt, lean
+  leg, supply chain, copy/restore, TUI, signature). Real-binary proof: two-netns veth probe (host
+  /etc+/run hidden behind tmpfs) — keygen→pubkey→pinned invite→join --key→handshake both ends→ping
+  3/3 through the tunnel; wrong key refused naming the pin, no config, no server peer; 22 checks
+  FAIL=0. Suite-alarm: desk canonicalization mutant + Rust ignore-the-key mutant each caught,
+  reverted, green. Two-axis review: Spec faithful (single-use, custody, atomic cap, legacy path,
+  open questions untouched); Standards 1 hard (duplicated decision comment → deduped) + non-string
+  400 (reproduced, regression-tested) + glossary entry; waived with reason: dry-run/live match blocks
+  are different speech acts. Probe topology lesson: a loopback endpoint in one netns is the client's
+  own address — the product's self-tunnel refusal is correct, the probe needed two namespaces.
+  Lessons saved to vallum-operations references/service-layer.md. DEPLOY-HOLD — live alpha untouched.
+  Next: WS4 slice (c) — rotation endpoint calling `peer rotate --public-key`, preserving the device count.
