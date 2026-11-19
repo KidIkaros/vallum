@@ -561,9 +561,12 @@ pub fn rotate(
     file.validate().map_err(|error| error.to_string())?;
     file.save()
         .map_err(|error| privileged(config, "rotate", error))?;
-    let _ = vallum::commands::control::syncconf_running(config);
+    let outcome = vallum::commands::control::syncconf_running(config).map_err(|error| {
+        format!("`{name}` saved, but applying it to the daemon failed: {error}")
+    })?;
     Ok(Done::message(format!(
-        "rotated `{name}` — the old key is accepted until you finalise"
+        "rotated `{name}` — the old key is accepted until you finalise; applied: {}",
+        outcome.describe()
     )))
 }
 
@@ -581,9 +584,12 @@ pub fn finalize(config: &Path, name: &str) -> Result<Done, String> {
     file.validate().map_err(|error| error.to_string())?;
     file.save()
         .map_err(|error| privileged(config, "finalize", error))?;
-    let _ = vallum::commands::control::syncconf_running(config);
+    let outcome = vallum::commands::control::syncconf_running(config).map_err(|error| {
+        format!("`{name}` saved, but applying it to the daemon failed: {error}")
+    })?;
     Ok(Done::message(format!(
-        "finalised `{name}` — previous key retired"
+        "finalised `{name}` — previous key retired; applied: {}",
+        outcome.describe()
     )))
 }
 
@@ -1500,6 +1506,107 @@ mod config_tests {
         )
         .expect("fixture config");
         path
+    }
+
+    #[test]
+    fn rotate_reports_whether_the_daemon_applied_it() {
+        // #34 root cause: rotate saved the config then discarded the apply
+        // outcome (`let _ = syncconf_running`), reporting success even when the
+        // daemon never learned the new key — the config/session drift the alpha
+        // server shipped. The message must carry the apply outcome, like the
+        // CLI's `applied` line, so a skipped apply is visible, not silent.
+        let dir = std::env::temp_dir().join(format!("vallum-gui-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("vallum0.toml");
+        let old = vallum::keys::encode_public(
+            0x0003,
+            &vallum_core::PeerIdentity::kem_only(vallum_crypto::KemPublicKey::new(vec![
+                0xab;
+                1190
+            ])),
+        );
+        let new = vallum::keys::encode_public(
+            0x0003,
+            &vallum_core::PeerIdentity::kem_only(vallum_crypto::KemPublicKey::new(vec![
+                0xcd;
+                1190
+            ])),
+        );
+        // A peer and NO control socket: the apply cannot reach a daemon.
+        std::fs::write(
+            &path,
+            format!(
+                r#"[interface]
+name = "vallum0"
+private_key="***"
+addresses = ["10.7.0.1/32"]
+
+[[peer]]
+name = "laptop"
+public_key = "{old}"
+"#
+            ),
+        )
+        .expect("fixture");
+        let done = rotate(&path, "laptop", &new, None).expect("rotate saves the config");
+        assert!(
+            done.message.contains("applied:"),
+            "the message must report the apply outcome: {}",
+            done.message
+        );
+        assert!(
+            done.message.contains("no control socket")
+                || done.message.contains("declares no control"),
+            "with no control socket the daemon was not told: {}",
+            done.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_reports_whether_the_daemon_applied_it() {
+        let dir = std::env::temp_dir().join(format!("vallum-gui-finalize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("vallum0.toml");
+        let old = vallum::keys::encode_public(
+            0x0003,
+            &vallum_core::PeerIdentity::kem_only(vallum_crypto::KemPublicKey::new(vec![
+                0xab;
+                1190
+            ])),
+        );
+        let new = vallum::keys::encode_public(
+            0x0003,
+            &vallum_core::PeerIdentity::kem_only(vallum_crypto::KemPublicKey::new(vec![
+                0xcd;
+                1190
+            ])),
+        );
+        std::fs::write(
+            &path,
+            format!(
+                r#"[interface]
+name = "vallum0"
+private_key="***"
+addresses = ["10.7.0.1/32"]
+
+[[peer]]
+name = "laptop"
+public_key = "{old}"
+"#
+            ),
+        )
+        .expect("fixture");
+        rotate(&path, "laptop", &new, None).expect("rotate first");
+        let done = finalize(&path, "laptop").expect("finalize saves the config");
+        assert!(
+            done.message.contains("applied:"),
+            "the message must report the apply outcome: {}",
+            done.message
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

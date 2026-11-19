@@ -264,9 +264,15 @@ fn rotate_peer(app: &mut App, form: &super::app::Form, index: usize) -> FormResu
     file.validate()
         .map_err(|e| form_error(None, e.to_string()))?;
     file.save().map_err(|e| form_error(None, e.to_string()))?;
-    let _ = crate::commands::control::syncconf_running(&config_path);
+    let outcome = crate::commands::control::syncconf_running(&config_path).map_err(|e| {
+        form_error(
+            None,
+            format!("`{peer_name}` saved, but applying it to the daemon failed: {e}"),
+        )
+    })?;
     Ok(format!(
-        "rotated `{peer_name}` — old key kept until finalize (press f)"
+        "rotated `{peer_name}` — old key kept until finalize (press f); applied: {}",
+        outcome.describe()
     ))
 }
 
@@ -279,8 +285,12 @@ fn finalize_peer_rotation(app: &mut App, name: &str) -> Result<String, String> {
     file.finalize_peer(name).map_err(|e| e.to_string())?;
     file.validate().map_err(|e| e.to_string())?;
     file.save().map_err(|e| e.to_string())?;
-    let _ = crate::commands::control::syncconf_running(&config_path);
-    Ok(format!("finalized `{name}` — previous key retired"))
+    let outcome = crate::commands::control::syncconf_running(&config_path)
+        .map_err(|e| format!("`{name}` saved, but applying it to the daemon failed: {e}"))?;
+    Ok(format!(
+        "finalized `{name}` — previous key retired; applied: {}",
+        outcome.describe()
+    ))
 }
 
 fn add_peer(app: &mut App, form: &super::app::Form) -> FormResult {
