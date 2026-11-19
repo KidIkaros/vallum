@@ -962,17 +962,19 @@ fn check_peer_sync(
     let _ = control;
     let response = uapi::parse_response(reply?);
     let session_peers: Vec<(String, String)> = (0..response.peers.len())
-        .map(|index| {
-            (
-                response
-                    .peer_field(index, uapi::field::VALLUM_NAME)
-                    .map(String::from)
-                    .unwrap_or_default(),
-                response
-                    .peer_field(index, uapi::field::VALLUM_FINGERPRINT)
-                    .map(String::from)
-                    .unwrap_or_default(),
-            )
+        .filter_map(|index| {
+            let name = response
+                .peer_field(index, uapi::field::VALLUM_NAME)
+                .map(String::from)
+                .unwrap_or_default();
+            // Compare like-for-like: fingerprint the daemon's public-key LINE
+            // with the same line-hash the config side uses. The raw
+            // `vallum_fingerprint` field is the daemon's 8-byte device
+            // fingerprint — a different algorithm and length — so comparing it
+            // to the config's 6-byte line-hash always reported false drift.
+            // The public line is the same form both sides hold.
+            let line = response.peer_field(index, uapi::field::VALLUM_PUBLIC_LINE)?;
+            Some((name, crate::keys::fingerprint(line)))
         })
         .collect();
     let config_peers: Vec<(String, String)> = config
@@ -1990,10 +1992,12 @@ mod tests {
         )
         .unwrap();
         let config = vallum_config::Config::load(&config_path).expect("config parses");
-        // The daemon answers with a fingerprint that is NOT the config key's.
+        // The daemon answers with a public-key LINE that is NOT the config key's.
+        // The real get=1 emits vallum_public_line; the check fingerprints it the
+        // same way as the config side. (Comparing the raw 8-byte vallum_fingerprint
+        // field would be a different algorithm and length, and always false-drift.)
         let reply = format!(
-            "private_key=(hidden)\nvallum_interface=peersync\nlisten_port=51990\nerrno=0\n\npublic_key=zzz\nvallum_name=laptop\nvallum_fingerprint={}\nrx_bytes=0\ntx_bytes=0\nerrno=0\n",
-            crate::keys::fingerprint(line_b)
+            "private_key=(hidden)\nvallum_interface=peersync\nlisten_port=51990\nerrno=0\n\npublic_key=zzz\nvallum_name=laptop\nvallum_public_line={line_b}\nrx_bytes=0\ntx_bytes=0\nerrno=0\n",
         );
         let check = super::check_peer_sync(&config, &socket_path, Some(&reply))
             .expect("the daemon answered, so the check runs");
@@ -2005,10 +2009,7 @@ mod tests {
         );
 
         // When the keys agree, the check passes.
-        let agreeing_reply = reply.replace(
-            &crate::keys::fingerprint(line_b),
-            &crate::keys::fingerprint(line_a),
-        );
+        let agreeing_reply = reply.replace(line_b, line_a);
         let check = super::check_peer_sync(&config, &socket_path, Some(&agreeing_reply))
             .expect("the daemon answered");
         assert_eq!(check.status, super::Status::Pass);

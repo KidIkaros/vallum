@@ -8,9 +8,12 @@ host*, not the published-release stranger path.
 > **Correction (2026-11-19, premortem).** Three claims in the original verdict were
 > falsified and are corrected in place: (1) `accept-install` installs the **local main
 > build** (`install.sh --local`), never the published release — the stranger
-> download+signature path is exercised by **no gate**; (2) the `laptop`/`lab8` drift was
-> not "experiment residue" but a **live write-without-apply bug** in TUI/GUI rotate/finalize,
-> now fixed (`32f181d`); (3) "the published 1.9.0 install path is proven working" was never
+> download+signature path is exercised by **no gate**; (2) the TUI/GUI rotate/finalize
+> **write-without-apply bug** (discarded daemon apply outcome) is real and fixed (`32f181d`) —
+> but the `laptop`/`lab8` "drift" cited as its evidence was a **false positive** in the doctor
+> peer-sync check (it compared a 6-byte config line-hash to an 8-byte daemon device fingerprint,
+> so it always warned); that check is fixed too and live peer-sync now PASSes (the keys match);
+> (3) "the published 1.9.0 install path is proven working" was never
 > tested. Full analysis: `docs/qa/premortem-alpha-verification.md`.
 
 ## The battery (all measured today, commit `006c105`)
@@ -47,13 +50,16 @@ host*, not the published-release stranger path.
   signature verified stranger-style earlier today.
 
 ## Honest residuals (named, not hidden)
-1. **Two desynced peers on the alpha server** (`laptop`, `lab8`): config keys ≠ daemon
-   session keys. The premortem found the **root cause** — TUI/GUI rotate/finalize discarded
-   the daemon apply outcome (`let _ = syncconf_running`) and reported success regardless;
-   fixed in `32f181d` (the apply outcome is now surfaced). `vallum doctor` warns on both
-   (detection, deployed). The 17 dead dogfood accounts were cleared to one test account that now
-   owns `laptop`/`lab8`; the stale session keys still need an operator re-apply (`syncconf`) or
-   delete-and-re-enrol. New rotations no longer drift silently.
+1. **The reported `laptop`/`lab8` peer drift was a FALSE POSITIVE — RESOLVED.** The doctor
+   peer-sync check compared the config's 6-byte line-hash fingerprint (`keys::fingerprint`,
+   12 hex) against the daemon's 8-byte device fingerprint (`vallum_fingerprint`, 16 hex) —
+   different algorithms and lengths, so it *always* warned even when the keys matched. Fixed:
+   the check now fingerprints the daemon's `vallum_public_line` like-for-like; live peer-sync
+   PASSes ("every peer's key in the config matches the running daemon"). The keys were never
+   actually desynced. The related **apply-outcome hardening** (`32f181d`, surfacing the discarded
+   `syncconf_running` result on rotate/finalize) remains valid — it prevents a *future* rotation
+   from silently failing to apply. The 17 dead dogfood accounts were cleared to one test account
+   that owns `laptop`/`lab8`.
 2. **GUI is beta** (ADR-0039 excludes it from the alpha): #35 (privilege read path —
    the console can't see a root-owned daemon as a normal user) and #36 (status/legend/
    contrast) are tracked. The alpha ships CLI/TUI/UTCP, all verified above.
@@ -74,6 +80,7 @@ The tunnel carries, the guard holds under outage, nothing leaks, an agent can en
 headless, strangers on a shared server can be isolated, and the secrets audit is clean.
 **Ready for alpha operation on the operator's environment** — but the premortem scoped
 this: the published-release stranger path is untested, the conversion funnel cannot see
-the install drop-off, and the drift bug (now fixed) was a real data-path bug. The
+the install drop-off, and the apply-outcome bug (now fixed) was a real data-path bug — though the
+cited peer drift itself was a doctor false positive, also fixed. The
 revisions in `docs/qa/premortem-alpha-verification.md` are the path to a stranger-facing
 "ready".

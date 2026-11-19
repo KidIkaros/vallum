@@ -87,13 +87,17 @@ system trusts its own records over performed, verified reality for the real user
    **FIXED:** signup shows a recovery code once (sha256-hashed, schema v5); `reset-token
    --recovery-code[-file]` verifies ownership before re-issuing a number. Residual: a peer name is
    not proof; a device-less account with neither number nor code is rebuilt from a minted code.
-8. **Config↔daemon drift: a live write-without-apply bug** — **FOUND AND FIXED (`32f181d`).**
+8. **Config↔daemon drift: a write-without-apply bug + a false-positive detector** — **BOTH FIXED.**
    TUI `tui/actions.rs:267,282` and GUI `vallum-gui/src/actions.rs:564,584` did
    `let _ = syncconf_running(...)` then reported unconditional success; `control.rs:692-705`
-   returns `Ok(NoControlSocket/NoControlDeclared)` or `Err`, all discarded. This generated the
-   live `laptop`/`lab8` drift (config≠session, no window). Now all four sites propagate the error
-   and append `ApplyOutcome::describe()`. *Assumption:* a successful config save *is* the rotation.
-   *Watch for:* a "rotated/finalized" message while `show` still answers the old fingerprint.
+   returns `Ok(NoControlSocket/NoControlDeclared)` or `Err`, all discarded. That discard is a real
+   bug, fixed in `32f181d` (all four sites propagate the error + append `ApplyOutcome::describe()`).
+   **Correction:** the live `laptop`/`lab8` "drift" cited as evidence was a FALSE POSITIVE — the
+   doctor peer-sync check (`ada4b20`) compared the config's 6-byte line-hash to the daemon's 8-byte
+   device fingerprint (different algorithms/lengths), so it always warned. Fixed to fingerprint the
+   daemon's `vallum_public_line` like-for-like; live peer-sync PASSes, the keys match. *Assumption:*
+   a successful config save *is* the rotation. *Watch for:* a "rotated/finalized" message while
+   `show` still answers the old fingerprint.
 9. **Capacity unmeasured under load** — `docs/requirements.md:22-25` "Derived, not measured…
    never observed under load"; `:33` 2,000 peers is a "Stated target"; memory measured at 1,000
    (`:59`) but throughput/concurrency never; `accept-isolation.sh:176` creates **two** clients
@@ -107,7 +111,8 @@ system trusts its own records over performed, verified reality for the real user
 ## Revised plan (each maps to a mode; doable this week)
 
 1. **[DONE `32f181d`]** Surface the daemon apply outcome on TUI/GUI rotate/finalize (mode 8).
-   TDD red→green; 458 lib + GUI tests, clippy clean. The drift no longer generates silently.
+   TDD red→green; 458 lib + GUI tests, clippy clean. A failed apply no longer reports success; the
+   false-positive peer-sync detector is fixed too (live peer-sync PASSes).
 2. **[DONE — v1.10.0 published]** Cut a release and gate the published artifact (modes 2, 1):
    bumped to 1.10.0, tagged, `release.sh` published all eight signed assets; `accept-install.sh`
    gained `--from-release` and **passed against the published v1.10.0** (download → signature
