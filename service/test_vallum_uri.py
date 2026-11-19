@@ -29,16 +29,20 @@ TICKET = ("vallum1-join:203.0.113.9:51922/laptop/"
           f"{TOKEN32}/aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111/aabbccdd")
 
 
-def uri(ticket=TICKET, account=TOKEN32):
-    return f"vallum://join?ticket={urllib.parse.quote(ticket, safe='')}&account={account}"
+def uri(ticket=TICKET, account=TOKEN32, desk=None):
+    built = f"vallum://join?ticket={urllib.parse.quote(ticket, safe='')}&account={account}"
+    if desk is not None:
+        built += f"&desk={urllib.parse.quote(desk, safe='')}"
+    return built
 
 
 class ParseTests(unittest.TestCase):
 
     def test_a_real_uri_parses(self):
-        ticket, account = parse_uri(uri())
+        ticket, account, desk = parse_uri(uri())
         self.assertEqual(ticket, TICKET)
         self.assertEqual(account, TOKEN32)
+        self.assertIsNone(desk)  # a desk-less URI (older desk) still parses
 
     def test_the_scheme_is_checked(self):
         with self.assertRaises(ValueError):
@@ -70,10 +74,27 @@ class ParseTests(unittest.TestCase):
             parse_uri(uri(account="not-hex"))
 
     def test_a_bare_hex_token_ticket_is_accepted(self):
-        ticket, _ = parse_uri(uri(ticket=TICKET.replace(
+        ticket, _, _ = parse_uri(uri(ticket=TICKET.replace(
             "aaaa-bbbb-cccc-dddd-eeee-ffff-0000-1111",
             "aaaabbbbccccddddeeeeffff00001111")))
         self.assertIn("aaaabbbb", ticket)
+
+    def test_the_desk_origin_parses(self):
+        _, _, desk = parse_uri(uri(desk="https://desk.wingman.gold"))
+        self.assertEqual(desk, "https://desk.wingman.gold")
+        _, _, desk = parse_uri(uri(desk="https://127.0.0.1:8400"))
+        self.assertEqual(desk, "https://127.0.0.1:8400")
+
+    def test_a_garbage_desk_origin_is_refused(self):
+        # The endpoint is where the account token will be sent: an origin
+        # that is not exactly https://host[:port] is a refusal, not a shrug.
+        for bad in ("http://desk.wingman.gold",           # not https
+                    "https://desk.wingman.gold/account",  # a path rides along
+                    "https://user@desk.wingman.gold",     # userinfo
+                    "https://desk.wingman.gold?x=1",      # a query
+                    "javascript:alert(1)"):
+            with self.assertRaises(ValueError):
+                parse_uri(uri(desk=bad))
 
 
 class MainTests(unittest.TestCase):
@@ -86,7 +107,8 @@ class MainTests(unittest.TestCase):
         stub = os.path.join(self.tempdir.name, "vallum")
         with open(stub, "w") as f:
             f.write("#!/bin/sh\nread -r ticket\n"
-                    "echo \"args:$* ticket:$ticket account:$VALLUM_ACCOUNT\" "
+                    "echo \"args:$* ticket:$ticket account:$VALLUM_ACCOUNT "
+                    "desk:$VALLUM_DESK_ENDPOINT\" "
                     f"> {self.capture}\n")
         os.chmod(stub, 0o755)
         self.old_path = os.environ["PATH"]
@@ -107,6 +129,32 @@ class MainTests(unittest.TestCase):
         self.assertIn("args:join -", out)
         self.assertIn(f"ticket:{TICKET}", out)
         self.assertIn(f"account:{TOKEN32}", out)
+
+    def test_the_desk_origin_rides_the_environment(self):
+        # ADR-0046: the client records the desk it enrolled through as the
+        # account's endpoint. The handler passes desk=<origin> to `vallum
+        # join` as VALLUM_DESK_ENDPOINT — same-uid env, never argv.
+        code = uri_module.main([uri(desk="https://desk.wingman.gold")])
+        self.assertEqual(code, 0)
+        out = self.read_capture()
+        self.assertIn("args:join -", out)
+        self.assertIn("desk:https://desk.wingman.gold", out)
+
+    def test_a_desk_less_uri_sets_no_endpoint_even_over_a_stale_one(self):
+        # Older desks emit no desk=; the enrolment must still work, and an
+        # inherited endpoint must not leak into a desk-less join.
+        os.environ["VALLUM_DESK_ENDPOINT"] = "https://stale.example"
+        self.addCleanup(os.environ.__delitem__, "VALLUM_DESK_ENDPOINT")
+        code = uri_module.main([uri()])
+        self.assertEqual(code, 0)
+        out = self.read_capture()
+        self.assertIn(f"account:{TOKEN32}", out)
+        self.assertIn("desk:\n", out)
+
+    def test_a_garbage_desk_origin_never_reaches_the_client(self):
+        code = uri_module.main([uri(desk="http://desk.wingman.gold")])
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.capture))
 
     def test_a_refused_uri_never_reaches_the_client(self):
         code = uri_module.main([f"vallum://exec?ticket=x&account={TOKEN32}"])

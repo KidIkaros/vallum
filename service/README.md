@@ -72,7 +72,19 @@ A **plan** is data on the account row: `plan` label, `expires`,
 `--days/--bytes/--plan` — which a signup lands instead of the trial, or a
 voucher applies to a live account. Voucher semantics are **additive**:
 days extend expiry, bytes grow the cap, the label replaces `plan`;
-consumed bytes stay consumed.
+consumed bytes stay consumed. The ticket page renders the plan label the
+account actually landed — a `plus` code reads "plus until …", never a
+hardcoded "trial".
+
+A **join ticket** lives **15 minutes** (`INVITE_TTL_SECS = 15 * 60` in
+`crates/vallum/src/enroll.rs`) — one sitting, enough to walk to the other
+machine. The ticket page says the window out loud, and that installing the
+client can come after signup: the account number outlives the ticket. An
+expired ticket is not a lost account and not a reason to ask for another
+invite code — the account page's **Add a device** mints a fresh ticket under
+the same account (bearer token, no code), bound to the same plan and expiry.
+That is the recovery path the 2026-11-16 open experiment lacked: 14 tickets,
+0 handshakes, every code burned before its user installed.
 
 ## Deploy it
 
@@ -229,8 +241,14 @@ Every ticket-bearing response (`signup`, `devices`) carries a `connect` URI,
 and the ticket page renders it as a Connect button:
 
 ```
-vallum://join?ticket=<url-encoded ticket>&account=<account number>
+vallum://join?ticket=<url-encoded ticket>&account=<account number>&desk=<origin>
 ```
+
+`desk` is the issuing desk's origin — `https://` plus the Host header the
+front forwards (ADR-0046). The client records it at join as the account's
+endpoint, so it reads its account state from the desk it enrolled through.
+Older clients ignore the param; a request that arrives without a Host header
+omits it. The origin is URL-encoded like the ticket.
 
 The page fires it with `window.location` — never an `href`, where prefetch
 and Referer would carry the credential. Two handlers can receive the
@@ -238,10 +256,13 @@ scheme, and the desktop picks by which `.desktop` files exist:
 
 - **`vallum-uri` (baseline, ships everywhere).** Validates the URI
   byte-strictly — the `vallum1-join:` grammar for the ticket, 32 hex for
-  the account — then runs `vallum join -`: the ticket on stdin, the
-  account in `VALLUM_ACCOUNT`. Nothing secret is ever an argv member, and
-  nothing is shell-evaluated. `vallum join` seals the account into the
-  config's `[account]` table, in the key's 0600 custody.
+  the account, `https://host[:port]` for the desk origin — then runs
+  `vallum join -`: the ticket on stdin, the account in `VALLUM_ACCOUNT`,
+  the desk origin in `VALLUM_DESK_ENDPOINT` (set only when the URI carries
+  `desk=`; an inherited value never leaks into a desk-less join, and a
+  malformed origin refuses the whole URI). Nothing secret is ever an argv
+  member, and nothing is shell-evaluated. `vallum join` seals the account
+  into the config's `[account]` table, in the key's 0600 custody.
 - **`vallum-gui` (takeover when installed).** Its desktop entry also owns
   `x-scheme-handler/vallum`; the mimeapps default decides between the two.
   The GUI parses the URI at launch, shows a confirm surface (server
@@ -271,7 +292,10 @@ Tauri bundle's file-association config when those ports ship.
   bytes, capacity, per-IP rate — because the peer table is a /24.
 - **Tickets are capabilities.** A minted join ticket redeems once whenever
   presented; revoking the account in the gap between mint and redeem does
-  not un-mint it. The window is seconds on the normal path.
+  not un-mint it. The window is seconds on the normal path. The ticket
+  itself lives **15 minutes** (`INVITE_TTL_SECS`); the ticket page warns of
+  the window and points an expired ticket at the account page's **Add a
+  device** — a fresh ticket under the same account, no new invite code.
 - **The admin token lives in a file, mode 0600.** It is read, never passed
   as an argument — argv shows up in `ps`.
 - **Concurrency is real.** The server threads requests; every check-then-act

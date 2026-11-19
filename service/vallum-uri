@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """vallum-uri — the x-scheme-handler target for vallum:// URIs.
 
-A browser-opened `vallum://join?ticket=…&account=…` arrives here as
-argv[1]. The URI is validated byte-strictly, then enrolment runs:
+A browser-opened `vallum://join?ticket=…&account=…[&desk=…]` arrives here
+as argv[1]. The URI is validated byte-strictly, then enrolment runs:
 
     vallum join -          (the ticket arrives on stdin)
     VALLUM_ACCOUNT=<token> (the account number rides the environment)
+    VALLUM_DESK_ENDPOINT=<origin>  (the desk the account lives on, ADR-0046;
+                                    absent when the URI carries no desk=)
 
 Nothing secret ever sits on a command line — argv is world-readable in
 ps; stdin and a same-uid environment are not. And nothing is ever
 shell-evaluated: the URI is parsed, not executed.
 
-Usage: vallum-uri 'vallum://join?ticket=<urlencoded>&account=<hex>'
+Usage: vallum-uri 'vallum://join?ticket=<urlencoded>&account=<hex>[&desk=<origin>]'
 """
 
 import os
@@ -29,12 +31,17 @@ TICKET = re.compile(
     r"/(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{4}(?:-[0-9a-fA-F]{4}){7})"  # token, bare or dashed
     r"/(?:[0-9a-fA-F]{2}){4,}$")          # fingerprint, >=8 hex chars
 ACCOUNT = re.compile(r"[0-9a-f]{32}$")    # the desk's token_hex(16)
+# The desk origin (ADR-0046): https + host[:port], nothing else — no userinfo,
+# path, query or fragment. The endpoint is where the account token will be
+# sent, so a malformed origin is a refusal, not a shrug.
+DESK = re.compile(r"https://[A-Za-z0-9.-]+(?::\d{1,5})?")
 
 
 def parse_uri(uri):
-    """The URI's ticket and account token, or a refusal. Strictness here is
-    the boundary between 'a browser asked' and 'a browser got root to run
-    vallum': the shape is all that is trusted, and it is checked fully."""
+    """The URI's ticket, account token and desk origin, or a refusal.
+    Strictness here is the boundary between 'a browser asked' and 'a browser
+    got root to run vallum': the shape is all that is trusted, and it is
+    checked fully. `desk` is None for a URI without the param (older desks)."""
     parsed = urllib.parse.urlparse(uri)
     if parsed.scheme != "vallum":
         raise ValueError("not a vallum:// URI")
@@ -43,11 +50,14 @@ def parse_uri(uri):
     fields = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     ticket = fields.get("ticket", [""])[0]
     account = fields.get("account", [""])[0]
+    desk = fields.get("desk", [""])[0]
     if not TICKET.fullmatch(ticket):
         raise ValueError("the ticket is not a vallum1-join: ticket")
     if not ACCOUNT.fullmatch(account):
         raise ValueError("the account number is 32 hex characters")
-    return ticket, account
+    if desk and not DESK.fullmatch(desk):
+        raise ValueError("the desk origin is not an https://host[:port] origin")
+    return ticket, account, desk or None
 
 
 def main(argv=None):
@@ -57,11 +67,16 @@ def main(argv=None):
               file=sys.stderr)
         return 2
     try:
-        ticket, account = parse_uri(argv[0])
+        ticket, account, desk = parse_uri(argv[0])
     except ValueError as error:
         print(f"vallum-uri: refused — {error}", file=sys.stderr)
         return 2
     env = dict(os.environ, VALLUM_ACCOUNT=account)
+    # The endpoint comes from the URI or not at all: an inherited value would
+    # point a desk-less enrolment at whatever desk the caller last used.
+    env.pop("VALLUM_DESK_ENDPOINT", None)
+    if desk:
+        env["VALLUM_DESK_ENDPOINT"] = desk
     result = subprocess.run(
         ["vallum", "join", "-"], input=ticket, env=env, text=True)
     return result.returncode

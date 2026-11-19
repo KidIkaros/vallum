@@ -53,6 +53,13 @@ SCHEMA_VERSION = 2
 # `vallum status` and a user reading the account page are told the same thing.
 SESSION_LIVE_SECONDS = 180
 
+# How long a join ticket lives: `INVITE_TTL_SECS = 15 * 60` in
+# crates/vallum/src/enroll.rs — "one sitting: enough to walk to the other
+# machine". The ticket page says this window out loud (#27): the alpha's
+# 14 tickets / 0 handshakes were users who installed first and joined after
+# the ticket expired, with their invite code already burned.
+TICKET_TTL_MINUTES = 15
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
@@ -394,13 +401,19 @@ class Desk:
 
     # -- signup ---------------------------------------------------------
 
-    def signup(self, body, client_ip="unknown"):
+    def signup(self, body, client_ip="unknown", desk_origin=None):
         """An invite code — or, in open mode, nothing — becomes a join ticket
-        and an account. Anonymous signup is bounded per IP and by capacity."""
+        and an account. Anonymous signup is bounded per IP and by capacity.
+        `desk_origin` is this desk's public origin (https + Host), carried in
+        the connect URI so the client knows where its account lives."""
         code = (body.get("code") or "").strip()
         label = (body.get("name") or "").strip()[:40]
         if not code and not self.config.open_signup:
-            return 403, {"error": "unknown invite code — this desk is invite-only"}
+            # An empty field is a missing input, not a bad credential. Saying
+            # "unknown invite code" here sent users hunting for a code they
+            # never typed (#27); the unknown-code refusal below is a different
+            # sentence for a different mistake.
+            return 403, {"error": "enter your invite code — this desk is invite-only"}
         if not code:
             limit = self._signup_limit_left(client_ip)
             if limit is not None and limit <= 0:
@@ -453,7 +466,8 @@ class Desk:
                 self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
                                 (code, self._now(), peer))
         return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
-                     "bytes_cap": cap, "connect": connect_uri(ticket, token),
+                     "plan": plan, "bytes_cap": cap,
+                     "connect": connect_uri(ticket, token, desk_origin),
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
                                "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
                                " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
@@ -518,10 +532,11 @@ class Desk:
 
     # -- devices ----------------------------------------------------------
 
-    def add_device(self, body):
+    def add_device(self, body, desk_origin=None):
         """A second (third…) device on an existing account: the bearer token
         authenticates, and the new peer's ticket binds the account's plan —
-        same expiry, same shared byte pool."""
+        same expiry, same shared byte pool. This is also the expired-ticket
+        recovery path (#27): a fresh ticket, no invite code needed."""
         token = body.get("token") or ""
         label = (body.get("name") or "").strip()[:40]
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
@@ -562,7 +577,7 @@ class Desk:
             return 409, {"error": "the account was revoked while the ticket was minting"}
         return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
                      "expires": account["expires"], "bytes_cap": account["bytes_cap"],
-                     "connect": connect_uri(ticket, token)}
+                     "connect": connect_uri(ticket, token, desk_origin)}
 
     def voucher(self, body):
         """A code's payload applied to an existing account — Mullvad's
@@ -1342,12 +1357,18 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 </form>"""
 
 
-def connect_uri(ticket, token):
-    """vallum://join?ticket=<t>&account=<token> — the webpage→client bridge.
-    The ticket is URL-encoded; the account token rides the URI, never the
-    enrolment wire (ADR-0044)."""
+def connect_uri(ticket, token, desk=None):
+    """vallum://join?ticket=<t>&account=<token>[&desk=<origin>] — the
+    webpage→client bridge. The ticket is URL-encoded; the account token rides
+    the URI, never the enrolment wire (ADR-0044). `desk` is the issuing desk's
+    origin ('https://' + the Host header the front forwards): the client
+    records it as the account's endpoint at join (ADR-0046). Old clients
+    ignore the param; a desk with no Host header omits it."""
     from urllib.parse import quote
-    return f"vallum://join?ticket={quote(ticket, safe='')}&account={token}"
+    uri = f"vallum://join?ticket={quote(ticket, safe='')}&account={token}"
+    if desk:
+        uri += f"&desk={quote(desk, safe='')}"
+    return uri
 
 
 def ticket_page(payload, operator="vallum desk"):
@@ -1357,6 +1378,9 @@ def ticket_page(payload, operator="vallum desk"):
     peer = _esc(payload.get("peer", ""))
     expires = _esc(payload.get("expires", ""))
     token = _esc(payload.get("token", ""))
+    # The plan is a row, not a constant: a payload code lands its own label
+    # ("plus"), and the page must say which plan the expiry belongs to (#27).
+    plan = _esc(payload.get("plan") or "trial")
     gib = payload.get("bytes_cap", 0) // (1024 ** 3)
     manage = (f"""<form method="post" action="/account">
 <input type="hidden" name="token" value="{token}">
@@ -1365,11 +1389,14 @@ def ticket_page(payload, operator="vallum desk"):
     connect = ""
     if payload.get("ticket") and token:
         # Fired by script, never an href: a link attribute would leak the
-        # token to prefetchers and Referer headers.
+        # token to prefetchers and Referer headers. The payload's connect URI
+        # is the one derivation (it carries the desk origin, ADR-0046); the
+        # fallback keeps a bare payload renderable.
+        uri = payload.get("connect") or connect_uri(payload["ticket"], payload["token"])
         connect = f"""
 <p><button id="connect">Connect this device</button></p>
 <script>document.getElementById("connect").onclick = function() {{
-  window.location = {json.dumps(connect_uri(payload["ticket"], token))};
+  window.location = {json.dumps(uri)};
 }};</script>"""
     return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
@@ -1377,7 +1404,14 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 <h1>Your join ticket</h1>
 <p><small>{_esc(operator)}</small></p>
 <p>Shown once. Copy it now — the desk does not keep it.
-Peer <code>{peer}</code>, trial until {expires} or {gib} GiB.</p>
+Peer <code>{peer}</code>, {plan} until {expires} or {gib} GiB.</p>
+<p><b>This join ticket is valid for {TICKET_TTL_MINUTES} minutes.</b>
+Installing the client can come after this page — your account number outlives
+the ticket, so a slow install does not lose your account.</p>
+<p>If the ticket expires before you join, open your account page —
+<b>Manage this account</b> below, or <code>/account</code> with your account
+number — and use <b>Add a device</b> to mint a fresh ticket. Your invite code
+is already spent and is not needed again.</p>
 <pre>{ticket}</pre>
 {connect}
 <p>Your account number: <code>{token}</code> — the only credential this
@@ -1539,6 +1573,14 @@ def make_handler(desk):
                     return hop
             return direct
 
+        def _desk_origin(self):
+            """This desk's public origin: https + the Host header. Caddy (the
+            documented front) forwards Host, so the URI tells the client which
+            desk its account lives on (ADR-0046). No Host, no desk param —
+            never a guess."""
+            host = self.headers.get("Host")
+            return f"https://{host}" if host else None
+
         def _send_html(self, body, status=200, private=False):
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1577,18 +1619,18 @@ def make_handler(desk):
             try:
                 body = self._body()
                 if self.path == "/api/signup":
-                    code, payload = desk.signup(body, self._client_ip())
+                    code, payload = desk.signup(body, self._client_ip(), self._desk_origin())
                 elif self.path == "/signup":
                     # The no-script path: a plain form post, answered with a
                     # page. Agents keep /api/signup and its JSON.
-                    code, payload = desk.signup(body, self._client_ip())
+                    code, payload = desk.signup(body, self._client_ip(), self._desk_origin())
                     if code == 200:
                         self._send_html(ticket_page(payload, desk.config.operator_name))
                     else:
                         self._send_html(error_page(payload.get("error", "")), status=code)
                     return
                 elif self.path == "/api/devices":
-                    code, payload = desk.add_device(body)
+                    code, payload = desk.add_device(body, self._desk_origin())
                 elif self.path == "/api/devices/revoke":
                     code, payload = desk.remove_device(body)
                 elif self.path == "/api/voucher":
@@ -1608,7 +1650,7 @@ def make_handler(desk):
                                         status=code, private=True)
                     return
                 elif self.path == "/account/device":
-                    code, payload = desk.add_device(body)
+                    code, payload = desk.add_device(body, self._desk_origin())
                     if code == 200:
                         # The page needs the token for its manage-account
                         # form; the caller sent it, so this is no new echo.

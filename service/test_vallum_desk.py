@@ -408,12 +408,12 @@ class OnDemandTests(DeskTestCase):
         self.assertEqual(code, 403)
 
 
-class HttpTests(DeskTestCase):
-    """The wire, not just the logic: a bad body is answered, never dropped."""
+class WireTestCase(DeskTestCase):
+    """A desk behind a real loopback HTTP server — the wire seam, shared by
+    the open-mode and closed-mode suites."""
 
     def setUp(self):
         super().setUp()
-        self.config.open_signup = True
         self.server = desk_module.ThreadingHTTPServer(("127.0.0.1", 0), desk_module.make_handler(self.desk))
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -435,6 +435,15 @@ class HttpTests(DeskTestCase):
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode()
+
+
+class HttpTests(WireTestCase):
+    """The wire, not just the logic: a bad body is answered, never dropped.
+    Open mode — the anonymous posture; closed mode has its own suite below."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.open_signup = True
 
     def test_the_page_header_renders_the_operator_name(self):
         self.desk.config.operator_name = "wingman tunnel"
@@ -468,6 +477,27 @@ class HttpTests(DeskTestCase):
         self.assertEqual(status, 200)
         self.assertIn("vallum1-join:", body)
 
+    def test_the_connect_uri_carries_the_desk_origin(self):
+        # ADR-0046: the client records where its account lives from desk=<origin>
+        # in the connect URI. The origin is https + the Host header the front
+        # (Caddy) forwards — here, the loopback authority the request used.
+        from urllib.parse import quote
+        status, body = self.post("/api/signup", '{"name":"json-user"}', "application/json")
+        self.assertEqual(status, 200)
+        connect = json.loads(body)["connect"]
+        origin = f"https://127.0.0.1:{self.port}"
+        self.assertIn(f"&desk={quote(origin, safe='')}", connect)
+
+    def test_the_ticket_pages_connect_button_carries_the_desk_origin(self):
+        # The button fires the payload's connect URI — the same string the
+        # JSON API returns, desk origin included, not a second derivation.
+        from urllib.parse import quote
+        status, page = self.post("/signup", "name=form-user",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        origin = f"https://127.0.0.1:{self.port}"
+        self.assertIn(f"&desk={quote(origin, safe='')}", page)
+
     def test_the_per_ip_limit_sees_the_visitor_behind_the_proxy(self):
         # The desk is loopback-only and fronted by Caddy. Reading
         # client_address would make every visitor 127.0.0.1 and turn the
@@ -481,6 +511,73 @@ class HttpTests(DeskTestCase):
         other = {"X-Forwarded-For": "198.51.100.10"}
         self.assertEqual(
             self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
+
+
+class ClosedModeHttpTests(WireTestCase):
+    """Closed (invite-only) is the shipped default posture. The wire must
+    render the code field, tell an empty code from an unknown one, and make
+    the 15-minute ticket survivable (#27)."""
+
+    def get(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as r:
+            return r.status, r.read().decode()
+
+    def test_the_closed_index_renders_the_required_code_field(self):
+        status, page = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("invite code", page)
+        self.assertIn('<input name="code" required>', page)
+
+    def test_an_empty_code_asks_for_the_code_not_an_unknown_one(self):
+        # An empty field is a missing input, not a bad credential: "unknown
+        # invite code" sent alpha users hunting for a code they never typed.
+        status, page = self.post("/signup", "name=walk-in",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 403)
+        self.assertIn("enter your invite code", page)
+        self.assertNotIn("unknown invite code", page)
+
+    def test_an_unknown_code_still_says_unknown(self):
+        status, page = self.post("/signup", "code=not-a-code&name=walk-in",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 403)
+        self.assertIn("unknown invite code", page)
+        self.assertNotIn("enter your invite code", page)
+
+    def test_the_ticket_page_states_the_fifteen_minute_window(self):
+        # INVITE_TTL_SECS = 15 * 60 (crates/vallum/src/enroll.rs): the alpha's
+        # 14 tickets / 0 handshakes were users who installed first and joined
+        # after the ticket expired. The page must say the window out loud.
+        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("15 minutes", page)
+
+    def test_the_ticket_page_guides_an_expired_ticket_to_add_a_device(self):
+        # The recovery path: the account page's Add a device mints a FRESH
+        # ticket under the existing account (bearer token, no code) — the
+        # burned invite code is not needed again.
+        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("expires before you join", page)
+        self.assertIn("Add a device", page)
+        self.assertIn("not needed again", page)
+
+    def test_the_ticket_page_renders_the_codes_plan_label(self):
+        # A code carrying plan "plus" lands a plus account; the page said
+        # "trial until" regardless — a false sentence about the plan row.
+        status, body = self.post(
+            "/api/admin/code",
+            json.dumps({"admin_token": "admin-secret", "days": 30, "plan": "plus"}),
+            "application/json")
+        self.assertEqual(status, 200)
+        code = json.loads(body)["code"]
+        status, page = self.post("/signup", f"code={code}&name=member",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("plus until", page)
+        self.assertNotIn("trial until", page)
 
 
 class LivenessTests(DeskTestCase):
@@ -1105,6 +1202,19 @@ class AccountPageTests(HttpTests):
             "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         self.assertIn("vallum1-join:", page)
+
+    def test_the_add_device_ticket_carries_the_desk_origin(self):
+        # The expired-ticket recovery path ends here: the fresh ticket's
+        # connect URI must carry the desk origin too, or the recovered device
+        # never learns where its account lives (ADR-0046).
+        from urllib.parse import quote
+        token = self._token()
+        status, _, page = self.post_headers(
+            "/account/device", f"token={token}&name=laptop",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        origin = f"https://127.0.0.1:{self.port}"
+        self.assertIn(f"&desk={quote(origin, safe='')}", page)
 
     def test_the_voucher_box_applies_the_code(self):
         token = self._token()
