@@ -1,0 +1,14 @@
+[Unit]
+Description=Vallum independent dead-man's switch (watches a remote host's monitoring)
+# Install on a SECOND always-on host, not the host being watched. See
+# contrib/ops/vallum-watchdog.sh and docs/deployment/monitoring.md.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/vallum-watchdog
+ExecStart=/usr/local/bin/vallum-watchdog.sh
+# The watchdog must not itself become a silent failure: a non-zero exit (host
+# unreachable) is recorded by the unit state, and the script pages directly.
+Nice=10

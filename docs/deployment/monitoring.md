@@ -90,7 +90,7 @@ series in it convincingly imitates.
 
 ## Alert rules
 
-`packaging/vallum-alerts.yml` ships starting-point rules in two groups. The
+`packaging/vallum-alerts.yml` ships starting-point rules in three groups. The
 `vallum` group is server-side: `VallumDown` (`vallum_up == 0`),
 `VallumPeerHandshakeStale` (peer past two rekey intervals),
 `VallumHandshakesRefused`, `VallumFragmentsDropped`, `VallumPeerDeliveryLow`,
@@ -132,3 +132,50 @@ four verdict states above — the same states the browsing suite asserts.
   counters, invite/rotation actions.
 - The units are `Type=notify` with `WatchdogSec=30s`: a wedged run loop is
   restarted by systemd rather than hanging silently.
+
+## The monitoring watches itself
+
+Every rule above depends on two things staying alive: the telemetry pusher
+(`vallum-telemetry.timer`, ~15 s) that moves metrics into VictoriaMetrics, and
+Alertmanager, which routes firing alerts to the ntfy pager. If either dies, the
+rules go silent — and silence reads as green. That is the same absence that let
+three failed units hide for thirty hours with every rule green, one layer up.
+Three guards close it (the `vallum-monitoring` rule group):
+
+- **Heartbeat.** Each push emits `vallum_monitoring_heartbeat_seconds` (unix
+  time). `VallumMonitoringSilent` fires when `time() - heartbeat > 180` for a
+  minute: the pusher stopped, or the store stopped accepting pushes. Treat every
+  other alert's silence as *unknown*, not green, while this fires.
+- **Pager-path self-check.** Each push also probes Alertmanager
+  (`/api/v2/status`) and emits `vallum_pager_path_ok`. When Alertmanager is
+  unreachable the pusher pages ntfy **directly**, bypassing the broken router —
+  the pusher is a separate timer, so it survives Alertmanager's death.
+  `VallumPagerPathBroken` records the state for the dashboard; the direct page is
+  the live notice (that alert cannot route through the very router that is down).
+  The direct page needs the topic URL in `/etc/vallum/pager-url` (0600, the same
+  unguessable topic Alertmanager uses, never committed); a five-minute cooldown
+  stops a sustained outage from flooding the topic.
+- **Independent watchdog.** `contrib/ops/vallum-watchdog.sh` runs on a *second*
+  always-on host, not the one it watches. Over ssh it checks the watched host's
+  heartbeat freshness and Alertmanager health, and pages ntfy directly if either
+  is bad — or if the host does not answer at all. A dead-man's switch that shares
+  the failure it watches is not one; this is the layer that survives the watched
+  host dying completely. Install `vallum-watchdog.{service,timer}` there with
+  `VALLUM_WATCH_HOST` and `VALLUM_PAGER_URL` in `/etc/default/vallum-watchdog`.
+
+**Prove the pager fires.** A pager path that has never delivered a page is a
+guess. After installing or changing it, send a test alert through the whole
+chain and confirm it lands on the phone:
+
+```sh
+curl -sS -X POST http://127.0.0.1:9093/api/v2/alerts \
+  -H 'Content-Type: application/json' -d '[{
+    "labels": {"alertname":"VallumPagerTest","severity":"warning","instance":"manual-test"},
+    "annotations": {"summary":"Vallum pager test — confirm you received this"},
+    "startsAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"
+  }]'
+```
+
+If it does not arrive, walk the chain backwards: ntfy topic reachable?
+Alertmanager routing (`/api/v2/status`)? vmalert notifying (`-notifier.url`)?
+The pusher pushing (`journalctl -u vallum-telemetry -n 50`)?

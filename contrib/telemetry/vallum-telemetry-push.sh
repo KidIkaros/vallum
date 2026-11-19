@@ -88,6 +88,51 @@ HOST=${VALLUM_HOST:-$(hostname -s 2>/dev/null || echo unknown)}
     fi
 } | push
 
+# The monitoring pipeline's own heartbeat. Every other alert depends on this
+# pusher running; if it stops, the rules go silent and silence reads as green —
+# the same absence that let three failed units hide for thirty hours. A present,
+# fresh series lets `time() - heartbeat > N` alert on the absence of monitoring
+# itself. Pushed even when the daemon scrape was empty: the pusher ran, which is
+# the fact this series records, not whether the daemon answered.
+{
+    printf '# HELP vallum_monitoring_heartbeat_seconds Unix time of the last telemetry push.\n'
+    printf '# TYPE vallum_monitoring_heartbeat_seconds gauge\n'
+    printf 'vallum_monitoring_heartbeat_seconds{instance="%s"} %s\n' \
+        "${HOST//\"/}" "$(date +%s)"
+} | push
+
+# The pager path itself. Alertmanager routes every alert to ntfy; if it is down,
+# the rules fire into a void and the heartbeat alert above cannot route either.
+# The pusher is a separate timer, so it can notice Alertmanager is gone and page
+# ntfy DIRECTLY, bypassing the broken router. PAGER_URL is the same unguessable
+# topic Alertmanager uses, kept 0600 beside the admin token and never committed.
+# A cooldown stops a down Alertmanager from paging every fifteen seconds.
+PAGER_URL=${VALLUM_PAGER_URL:-$(cat /etc/vallum/pager-url 2>/dev/null)}
+PAGER_STATE=${VALLUM_PAGER_STATE:-/var/lib/vallum/pager-direct-last}
+AM_CODE=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+    http://127.0.0.1:9093/api/v2/status 2>/dev/null || echo 000)
+{
+    printf '# HELP vallum_pager_path_ok 1 when Alertmanager is reachable.\n'
+    printf '# TYPE vallum_pager_path_ok gauge\n'
+    if [ "$AM_CODE" = "200" ]; then
+        printf 'vallum_pager_path_ok{instance="%s"} 1\n' "${HOST//\"/}"
+    else
+        printf 'vallum_pager_path_ok{instance="%s"} 0\n' "${HOST//\"/}"
+    fi
+} | push
+if [ "$AM_CODE" != "200" ] && [ -n "$PAGER_URL" ]; then
+    NOW=$(date +%s)
+    PREV=$(cat "$PAGER_STATE" 2>/dev/null || echo 0)
+    if [ $((NOW - PREV)) -ge 300 ]; then
+        echo "$NOW" > "$PAGER_STATE" 2>/dev/null
+        curl -sS --max-time 10 \
+            -H "Title: Vallum pager path broken" -H "Priority: urgent" \
+            -H "Tags: rotating_light" \
+            -d "Alertmanager on $HOST is unreachable (HTTP $AM_CODE). Alerts are not being routed. The telemetry pusher is still alive and paging you directly. Check: systemctl status alertmanager; journalctl -u alertmanager -n 50." \
+            "$PAGER_URL" >/dev/null 2>&1
+    fi
+fi
+
 # A scrape that produced nothing is a scrape that did not happen; exit nonzero so
 # the unit's state says so, and let `vallum_up 0` be the alert.
 [ -n "$OUT" ] || exit 1

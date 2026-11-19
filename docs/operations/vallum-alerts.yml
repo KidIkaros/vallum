@@ -415,3 +415,41 @@ groups:
             why. A failed `vallum-quick@` or `vallum@` unit means the tunnel is
             not carrying; a failed unit that is not Vallum's is still worth
             knowing about on the box that terminates the VPN.
+
+  # The monitoring watches itself. Every rule above depends on the telemetry
+  # pusher running and on Alertmanager routing; if either dies, the rules go
+  # silent and silence reads as green — the same absence that hid three failed
+  # units for thirty hours. These two alert on the absence of the pipeline
+  # itself: the dead-man's switch. The pusher also pages ntfy DIRECTLY when
+  # Alertmanager is unreachable, so a broken router still reaches the operator.
+  - name: vallum-monitoring
+    rules:
+      - alert: VallumMonitoringSilent
+        expr: time() - vallum_monitoring_heartbeat_seconds > 180
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The telemetry pusher on {{ $labels.instance }} has not reported in over three minutes"
+          description: >-
+            The monitoring pipeline itself is silent: the pusher timer may be
+            dead, or VictoriaMetrics is not accepting pushes. Every other alert
+            depends on this pipeline, so treat their silence as unknown, not
+            green. Check `systemctl status vallum-telemetry.timer` and
+            `journalctl -u vallum-telemetry.service -n 50`; confirm the store
+            answers on 127.0.0.1:8428. See docs/deployment/monitoring.md.
+
+      - alert: VallumPagerPathBroken
+        expr: vallum_pager_path_ok == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alertmanager on {{ $labels.instance }} is unreachable — alerts are not being routed"
+          description: >-
+            vmalert can evaluate rules but cannot hand them to Alertmanager, so
+            firing alerts reach nobody through the normal path. The telemetry
+            pusher pages ntfy directly while this is broken (a separate timer,
+            independent of the router). Check `systemctl status alertmanager`
+            and `journalctl -u alertmanager -n 50`. This alert itself routes
+            only once Alertmanager recovers; the direct page is the live notice.
