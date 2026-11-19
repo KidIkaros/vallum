@@ -2823,5 +2823,33 @@ class ReconciliationTests(DeskTestCase):
         self.assertEqual(self._status(ghost["peer"]), "removed")
 
 
+class BrandTests(unittest.TestCase):
+    """The desk pages carry the Vallum brandkit (obsidian + signal cyan + ◆),
+    and the re-skin keeps the markup the rest of the suite reads intact."""
+
+    def test_every_page_carries_the_brand(self):
+        pages = [
+            desk_module.index_page(False),
+            desk_module.index_page(True),
+            desk_module.account_created_page({"token": "t", "expires": "2026-12-03",
+                                              "plan": "trial", "bytes_cap": 50 * 1024**3}),
+            desk_module.ticket_page({"ticket": "x", "peer": "u0001-a", "token": "t",
+                                     "expires": "2026-12-03", "plan": "trial",
+                                     "bytes_cap": 50 * 1024**3}),
+            desk_module.error_page("boom"),
+            desk_module.account_shell_page(),
+        ]
+        for page in pages:
+            self.assertIn("#39c5cf", page)                       # signal cyan
+            self.assertIn("#0d1117", page)                       # obsidian
+            self.assertIn("every boundary under watch", page)    # tagline footer
+            self.assertIn("h1::before", page)                    # ◆ in CSS, not markup
+
+    def test_the_reskin_keeps_the_h1_markup_plain(self):
+        # the ◆ rides h1::before so the operator name stays readable markup
+        self.assertIn("<h1>wingman tunnel</h1>",
+                      desk_module.index_page(False, operator="wingman tunnel"))
+
+
 if __name__ == "__main__":
     unittest.main()

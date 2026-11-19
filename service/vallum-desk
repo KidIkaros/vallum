@@ -1708,16 +1708,15 @@ def index_page(open_signup, operator="vallum desk",
              "An invite code gets you an account; add devices from your account "
              "page — your key never leaves your machine.")
     return f"""<!doctype html><title>{_esc(operator)}</title>
-<style>body{{font:16px/1.6 system-ui;max-width:36em;margin:10vh auto;padding:0 1em}}
-input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}
-pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
+{DESK_STYLE}
 <h1>{_esc(operator)}</h1>
 <p>Self-service enrolment for this Vallum server. {intro}</p>
 {install_blurb(install_source, repo_url)}
 <form method="post" action="/signup">
 {code_field}
 <button>Create my account</button>
-</form>"""
+</form>
+{DESK_FOOTER}"""
 
 
 def account_created_page(payload, operator="vallum desk",
@@ -1735,8 +1734,7 @@ def account_created_page(payload, operator="vallum desk",
 <button>Manage this account</button></form>"""
               if token else "")
     return f"""<!doctype html><title>your account — {_esc(operator)}</title>
-<style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
-pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
+{DESK_STYLE}
 <h1>Your account</h1>
 <p><small>{_esc(operator)}</small></p>
 <p>Shown once. Copy your account number now — the desk does not send it
@@ -1753,7 +1751,8 @@ first; your account outlives any ticket.</p>
 <li><p>Open your account — <b>Manage this account</b> below, or
 <code>/account</code> with your account number — and add your first device.</p></li>
 </ol>
-{manage}"""
+{manage}
+{DESK_FOOTER}"""
 
 
 def connect_uri(ticket, token, desk=None):
@@ -1799,8 +1798,7 @@ def ticket_page(payload, operator="vallum desk",
   window.location = {json.dumps(uri)};
 }};</script>"""
     return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
-<style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
-pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
+{DESK_STYLE}
 <h1>Your join ticket</h1>
 <p><small>{_esc(operator)}</small></p>
 <p>Shown once. Copy it now — the desk does not keep it.
@@ -1822,21 +1820,55 @@ account ever has. Save it; the desk does not send it anywhere else.</p>
 <p>Paste the ticket between the quotes. To keep it out of shell history:
 <code>sudo vallum join -</code> reads it from stdin.</p></li>
 </ol>
-{manage}"""
+{manage}
+{DESK_FOOTER}"""
 
 
 def error_page(message, operator="vallum desk"):
     return f"""<!doctype html><title>signup failed — {_esc(operator)}</title>
-<style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}</style>
+{DESK_STYLE}
 <p><small>{_esc(operator)}</small></p>
-<h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>"""
+<h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>
+{DESK_FOOTER}"""
 
 
-ACCOUNT_STYLE = ("<style>body{font:16px/1.6 system-ui;max-width:44em;margin:8vh auto;"
-                 "padding:0 1em}input,button{font:inherit;padding:.4em .6em}"
-                 "table{border-collapse:collapse}td,th{padding:.3em .8em .3em 0;"
-                 "text-align:left}pre{white-space:pre-wrap;word-break:break-all;"
-                 "padding:1em;border:1px solid #888}</style>")
+# The Vallum brandkit, shared by every desk page (obsidian + signal cyan + ◆,
+# "every boundary under watch"). One stylesheet, dark-only, no webfont fetch —
+# the same tokens as the landing page (site/style.css). The ◆ rides h1::before
+# and footer::before so the markup (and the tests that read it) stays plain.
+DESK_STYLE = (
+    "<style>"
+    ":root{--bg:#0d1117;--panel:#161b22;--deep:#090d12;--rule:#30363d;"
+    "--text:#e6edf3;--subtext:#8b949e;--signal:#39c5cf;--signal-step:#4ecbd4;"
+    "--live:#3fb950;--stale:#d29922;--fault:#ff7b72;"
+    "--mono:'JetBrains Mono','DejaVu Sans Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;"
+    "--sans:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
+    "html{background:var(--bg)}"
+    "body{font:16px/1.6 var(--sans);color:var(--text);background:var(--bg);"
+    "max-width:40em;margin:8vh auto;padding:0 1.2em}"
+    "h1{font:600 1.5rem/1.3 var(--mono);color:var(--text)}"
+    "h1::before{content:'◆ ';color:var(--signal)}"
+    "h2,h3{font:600 1.05rem/1.3 var(--mono);color:var(--signal);margin-top:1.6em}"
+    "a{color:var(--signal)}a:hover{color:var(--signal-step)}"
+    "small{color:var(--subtext)}"
+    "input,button{font:inherit;padding:.5em .7em;border-radius:6px}"
+    "input{background:var(--panel);border:1px solid var(--rule);color:var(--text)}"
+    "input:focus{outline:2px solid var(--signal);outline-offset:1px}"
+    "button{cursor:pointer;background:var(--signal);border:1px solid var(--signal);"
+    "color:#0d1117;font-weight:600}"
+    "button:hover{background:var(--signal-step);border-color:var(--signal-step)}"
+    "pre{white-space:pre-wrap;word-break:break-all;padding:1em;background:var(--deep);"
+    "border:1px solid var(--rule);border-radius:8px;font:.9rem/1.5 var(--mono);color:var(--signal)}"
+    "code{font:.9em var(--mono);color:var(--signal)}"
+    "table{border-collapse:collapse}"
+    "td,th{padding:.4em .8em .4em 0;text-align:left;border-bottom:1px solid var(--rule)}"
+    "th{font:600 .8rem var(--mono);color:var(--subtext)}"
+    "footer{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);"
+    "color:var(--subtext);font:.8rem var(--mono)}"
+    "footer::before{content:'◆ ';color:var(--signal)}"
+    "</style>")
+ACCOUNT_STYLE = DESK_STYLE
+DESK_FOOTER = "<footer>every boundary under watch</footer>"
 
 
 def account_shell_page(operator="vallum desk"):
@@ -1850,7 +1882,8 @@ the only credential — treat it like a password.</p>
 <form method="post" action="/account">
 <label>account number<br><input name="token" required></label><br><br>
 <button>Open my account</button>
-</form>"""
+</form>
+{DESK_FOOTER}"""
 
 
 def conversion_sentence(conversion):
@@ -1918,7 +1951,8 @@ expires {_esc(view['expires'])} · {usage}.</p>
 <button>Apply</button>
 </form>
 <p><small>Your account number: <code>{_esc(token)}</code> — keep it safe;
-it is the only credential.</small></p>"""
+it is the only credential.</small></p>
+{DESK_FOOTER}"""
 
 
 def make_handler(desk):
