@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-11-19
+
+- **`vallum account` reads the desk, and join records where the account lives.**
+  A new read verb posts the bearer token to the desk's `/api/account` over
+  certificate-verified HTTPS — the enrolment front's no-verify verifier is
+  deliberately not reused, because the account read has no inner handshake to
+  authenticate the desk, so outer TLS must do it (ADR-0046). `[account]` gains an
+  `endpoint`, recorded at join from the connect URI's `desk=` origin; a desk that
+  cannot be reached renders `unknown`, never a false zero. `--json` for agents;
+  the UTCP manual carries the verb. (#28)
+- **The TUI shows the account, and failure hints name it.** The Trial view becomes
+  an Account panel (usage vs cap, expiry, devices) read off the render path;
+  `doctor` and `status` point a refused client that carries a desk account at the
+  desk instead of advising a server-side `peer add`; the join form carries the
+  account token into `[account]`. (#29)
+- **The invite-code path is survivable.** The ticket page states the 15-minute
+  window and guides an expired ticket to the account page's Add a device (a fresh
+  ticket, no new code); an empty code is told apart from an unknown one; payload
+  plans render their own label; the connect URI carries the desk origin end to
+  end into `VALLUM_DESK_ENDPOINT`. The alpha's 0/14 ticket→handshake cause is
+  fixed. (#27)
+- **Off-host backup and a real pager.** A laptop pull timer copies the desk's
+  backups off the VPS (a copy on the same disk is not disaster recovery); vmalert
+  routes through Alertmanager to an ntfy topic instead of the blackhole. The
+  two-week alpha exit bar is pre-registered
+  (`docs/qa/alpha-exit-bar-2026-11-19.md`). (#30)
 
 - **The account page carries its own funnel: tickets issued against devices
   that ever joined.** The desk's conversion number lived only in
