@@ -1445,9 +1445,10 @@ account ever has. Save it; the desk does not send it anywhere else.</p>
 {manage}"""
 
 
-def error_page(message):
-    return f"""<!doctype html><title>signup failed</title>
+def error_page(message, operator="vallum desk"):
+    return f"""<!doctype html><title>signup failed — {_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:32em;margin:10vh auto;padding:0 1em}}</style>
+<p><small>{_esc(operator)}</small></p>
 <h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>"""
 
 
@@ -1649,7 +1650,8 @@ def make_handler(desk):
                         self._send_html(ticket_page(payload, desk.config.operator_name,
                                                     desk.config.install_source, desk.config.repo_url))
                     else:
-                        self._send_html(error_page(payload.get("error", "")), status=code)
+                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
+                                        status=code)
                     return
                 elif self.path == "/api/devices":
                     code, payload = desk.add_device(body, self._desk_origin())
@@ -1668,7 +1670,7 @@ def make_handler(desk):
                     if code == 200:
                         self._send_html(account_page(view, body["token"], operator=desk.config.operator_name), private=True)
                     else:
-                        self._send_html(error_page(view.get("error", "")),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/device":
@@ -1681,7 +1683,7 @@ def make_handler(desk):
                                                     desk.config.install_source, desk.config.repo_url),
                                         private=True)
                     else:
-                        self._send_html(error_page(payload.get("error", "")),
+                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/revoke":
@@ -1690,7 +1692,7 @@ def make_handler(desk):
                               else payload.get("error", "remove failed"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", "")),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
@@ -1703,7 +1705,7 @@ def make_handler(desk):
                               else payload.get("error", "code refused"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", "")),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),

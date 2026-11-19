@@ -578,6 +578,12 @@ class ClosedModeHttpTests(WireTestCase):
         self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
         self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
 
+    def test_the_error_page_carries_the_default_brand(self):
+        status, page = self.post("/signup", "name=walk-in",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 403)
+        self.assertIn("vallum desk", page)
+
     def test_the_ticket_page_renders_the_codes_plan_label(self):
         # A code carrying plan "plus" lands a plus account; the page said
         # "trial until" regardless — a false sentence about the plan row.
@@ -1780,6 +1786,14 @@ class WhiteLabelHttpTests(WireTestCase):
         for page in pages:
             self.assertNotIn("KidIkaros", page)
             self.assertNotIn("raw.githubusercontent", page)
+
+    def test_the_error_page_carries_the_operator_name(self):
+        # The one page that had no brand: a refusal is still the operator's
+        # service speaking, not an anonymous upstream desk.
+        status, page = self.post("/signup", "code=not-a-code&name=walk-in",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 403)
+        self.assertIn("example tunnel", page)
 
     def test_the_repo_link_is_html_escaped(self):
         # The URL is operator input now: an ampersand in a query string must
