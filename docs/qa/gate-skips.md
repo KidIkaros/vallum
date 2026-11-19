@@ -13,3 +13,5 @@ than its changelog claims.
 | date | commit | gate | reason |
 |---|---|---|---|
 | 2026-11-19 | aff6a37 | desktop-bundle | the console does not ship in the alpha (ADR-0039); desktop bundle + GUI version bump deferred to beta |
+| 2026-11-19 | 54a2da4 | accept-verdicts | accept-desktop + desktop-bundle verdicts are beta-desktop scope (#33); all alpha-surface gates re-run at HEAD |
+| 2026-11-19 | 54a2da4 | desktop-bundle | beta desktop bundle, #33 tauri version mismatch; GUI excluded from alpha by ADR-0039 |

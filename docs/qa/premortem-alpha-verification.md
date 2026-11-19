@@ -102,10 +102,13 @@ system trusts its own records over performed, verified reality for the real user
 
 1. **[DONE `32f181d`]** Surface the daemon apply outcome on TUI/GUI rotate/finalize (mode 8).
    TDD red→green; 458 lib + GUI tests, clippy clean. The drift no longer generates silently.
-2. **Cut a release and gate the published artifact** (modes 2, 1): bump the version, tag, run
-   `release.sh`; change `accept-install.sh` to `install.sh --from-release` (or add
-   `accept-release-install.sh`) so the download+signature path is exercised; add a `verify.sh`
-   check that warns when `HEAD` ≠ latest tag.
+2. **[DONE — v1.10.0 published]** Cut a release and gate the published artifact (modes 2, 1):
+   bumped to 1.10.0, tagged, `release.sh` published all eight signed assets; `accept-install.sh`
+   gained `--from-release` and **passed against the published v1.10.0** (download → signature
+   verify → install → join → carry → purge). `verify.sh` now warns when HEAD ≠ latest tag.
+   The gate immediately caught a real stranger prerequisite the `--local` path never could:
+   a minimal machine lacks `openssh-client`, so `install.sh` fail-closed refuses the signature
+   check — the gate now provisions it (mode 1 made concrete).
 3. **Verify the binary restore** (mode 3): after `mv -f`, run the restored `/usr/bin/vallum
    --version` and assert the daemon carries; refuse the stamp on failure; do not overwrite an
    existing `.pre-verify-remote` (refuse or timestamp it).
@@ -126,8 +129,8 @@ system trusts its own records over performed, verified reality for the real user
 
 ## Before you commit (pre-launch checklist)
 
-- [ ] A release is cut; a clean-container gate installs `--from-release` and a stranger's
-      `vallum --version` carries the fixes (mode 2).
+- [x] A release is cut; a clean-container gate installs `--from-release` and a stranger's
+      `vallum --version` carries the fixes (mode 2). **Done: v1.10.0, `accept-install --from-release` PASS.**
 - [ ] `verify-remote` verifies the restored binary runs and the daemon carries; the aside-copy
       cannot be poisoned by a killed run (mode 3).
 - [ ] The watchdog runs on a second host; a test page is *received* on the phone, not just sent

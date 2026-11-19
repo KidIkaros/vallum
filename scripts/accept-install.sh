@@ -66,7 +66,7 @@ done
 say "systemd: $(docker exec "$NAME" systemctl is-system-running 2>/dev/null || echo unknown)"
 
 say "network tools (a missing ip reads exactly like a dead tunnel)"
-docker exec "$NAME" bash -c 'apt-get update -qq && apt-get install -y -qq iproute2 curl iputils-ping >/dev/null 2>&1' || true
+docker exec "$NAME" bash -c 'apt-get update -qq && apt-get install -y -qq iproute2 curl iputils-ping openssh-client ca-certificates >/dev/null 2>&1' || true
 
 say "copying install media to /opt/vallum (the layout install.sh expects)"
 docker exec "$NAME" mkdir -p /opt/vallum/target/release
