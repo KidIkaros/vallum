@@ -4,8 +4,11 @@
 **Enrolment:** single-use invite codes at `desk.wingman.gold`, closed mode
 (operator distributes codes out-of-band; 20 minted at start, 14-day / 50 GiB
 trial payload). **Posture:** the desk is the enrolment front, not a service
-launch — the alpha proves the protocol and harness work and that the proof is
-reproducible (ADR-0039, ADR-0044, ADR-0046, `CONTEXT.md` "Alpha").
+launch — the alpha proves the protocol and harness work AND whether real
+strangers want a post-quantum VPN with this account model. Operational
+correctness (M1–M4) is necessary but not sufficient: M5 asks whether the idea
+validates (validation premortem 2026-11-19). (ADR-0039, ADR-0044, ADR-0046,
+`CONTEXT.md` "Alpha").
 
 Every number below is **measured (with source) or explicitly marked unmeasured**
 (`docs/requirements.md` discipline). A criterion that cannot fail is not a
@@ -29,6 +32,17 @@ criterion.
 - **M4 — Adversarial floor.** Cookie-gate behavior under a bounded fragment
   replay is measured **locally** (`references/capacity.md` §8), never on the live
   box. The amplifier cost and the admission-placement lever are recorded.
+- **M5 — Desire and learning (validation).** The alpha must produce demand
+  signal, not just a working demo:
+  - **≥ 5 real strangers** (not the operator, not colleagues) request an invite
+    via the desk's request channel and enrol. Source: the contact channel +
+    `signup_ip` attribution (distinct origins, not one laptop).
+  - **Return usage:** ≥ 2 stranger accounts connect on ≥ 2 distinct days
+    (`connection_days`), so "wanted" is measured by coming back, not one join.
+  - **Why:** ≥ 3 strangers can state why they want a PQ VPN (feedback channel),
+    and every drop-off has a captured reason — a preference to learn, not only a
+    bug to fix. If strangers cannot say why they want it, the value pitch
+    (README/site) is the defect, not the stranger.
 
 ## Safety net — must be live before the clock starts
 
@@ -38,11 +52,14 @@ criterion.
 - [x] Gate of record: `scripts/verify.sh` PASS on main.
 - [x] Two-host stamp fresh at the release commit (`verify-remote` at aff6a37, 42 assertions, signed).
 - [x] Signed restore-drill verdict at the release commit (`accept-desk-restore`, 8 assertions).
+- [ ] Recruitment: the desk request channel live (`contact` set) and a defined
+      step for where strangers discover Vallum; the cohort is strangers, not the
+      operator's own devices (validation premortem mode 6).
 
 ## Out of scope for the alpha (beta or later)
 
 GUI account card (the console does not ship — ADR-0039); the desk endpoint across
-sudo (#32); enrolment-front TLS decision (#31); per-app split; L4 carriers; any
+sudo (#32 — fixed); enrolment-front TLS decision (#31); per-app split; L4 carriers; any
 uptime SLA (the requirement is failure behavior, not uptime — `requirements.md`).
 
 Deviations are recorded with a reason, never silent.

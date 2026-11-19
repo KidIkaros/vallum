@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS funnel_events (
     reason  TEXT NOT NULL DEFAULT '',   -- refusal class; '' for ok
     n       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (step, outcome, reason)
+);
+CREATE TABLE IF NOT EXISTS connection_days (
+    account_id INTEGER NOT NULL,
+    day        TEXT NOT NULL,           -- UTC date a device of this account handshaked
+    PRIMARY KEY (account_id, day)
 );
 CREATE TABLE IF NOT EXISTS codes (
     code     TEXT PRIMARY KEY,
@@ -236,6 +241,15 @@ def _migrate_v4(conn):
         conn.execute("ALTER TABLE accounts ADD COLUMN recovery_code_hash TEXT")
 
 
+def _migrate_v5(conn):
+    """v5 → v6: the connection_days table (return-usage, validation premortem
+    B2 / exit bar M5). Additive — executescript(SCHEMA) creates it for a fresh
+    database; existing accounts, peers and codes pass through untouched."""
+    conn.execute("CREATE TABLE IF NOT EXISTS connection_days ("
+                 "account_id INTEGER NOT NULL, day TEXT NOT NULL, "
+                 "PRIMARY KEY (account_id, day))")
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -272,6 +286,8 @@ def open_database(path):
         _migrate_v3(conn)
     if version < 5:
         _migrate_v4(conn)
+    if version < 6:
+        _migrate_v5(conn)
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
@@ -1320,6 +1336,43 @@ class Desk:
         except (OSError, subprocess.SubprocessError):
             return "unknown"
 
+    def record_connection_days(self):
+        """Return-usage (validation premortem B2 / exit bar M5): record each
+        distinct UTC day an account's device handshaked, so 'wanted' can be
+        measured by coming back, not a single join. The daemon's last_handshake
+        is the source; a daemon that cannot be asked records nothing (no guess).
+        Returns the number of new (account, day) rows."""
+        try:
+            live = self.daemon.liveness()
+        except Exception:
+            return 0
+        if not live:
+            return 0
+        recorded = 0
+        with self.lock:
+            active = self.db.execute(
+                "SELECT * FROM accounts WHERE status='active'").fetchall()
+            for row in active:
+                days = set()
+                for peer in self._peers_of(row):
+                    sec = live.get(peer)
+                    if sec:
+                        days.add(datetime.datetime.fromtimestamp(
+                            sec, datetime.timezone.utc).date().isoformat())
+                for day in days:
+                    cur = self.db.execute(
+                        "INSERT OR IGNORE INTO connection_days (account_id, day) "
+                        "VALUES (?,?)", (row["id"], day))
+                    recorded += cur.rowcount
+        return recorded
+
+    def days_connected(self, account_id):
+        """Distinct UTC days this account's devices handshaked (return-usage)."""
+        with self.lock:
+            return self.db.execute(
+                "SELECT COUNT(*) FROM connection_days WHERE account_id=?",
+                (account_id,)).fetchone()[0]
+
     def status(self, token):
         with self.lock:
             row = self.db.execute(
@@ -1332,7 +1385,7 @@ class Desk:
         return 200, {"peer": peers[0] if peers else row["peer"], "peers": peers,
                      "plan": row["plan"], "status": row["status"],
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
-                     "bytes_used": used}
+                     "bytes_used": used, "days_connected": self.days_connected(row["id"])}
 
     # -- enforcement ----------------------------------------------------
 
@@ -1360,6 +1413,7 @@ class Desk:
                 actions.append(self._revoke(row, reason, used))
         actions.extend(self._sweep_orphans())
         actions.extend(self._sweep_ghost_reservations(active, self._daemon_peers()))
+        self.record_connection_days()
         return actions
 
     def _sweep_orphans(self):

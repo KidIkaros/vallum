@@ -1383,6 +1383,56 @@ class ContactChannelTests(unittest.TestCase):
         self.assertEqual(html.count("data-copy="), 2)
 
 
+class ReturnUsageTests(DeskTestCase):
+    """Return-usage (validation premortem B2 / exit bar M5): 'wanted' is measured
+    by coming back on distinct days, not a single join."""
+
+    def _id(self, account):
+        return self.desk.db.execute(
+            "SELECT id FROM accounts WHERE token=?",
+            (account["token"],)).fetchone()["id"]
+
+    def test_records_distinct_connection_days(self):
+        import datetime as dt
+        account, device = self.account_with_device()
+        peer = device["peer"]
+        day1 = dt.datetime(2026, 11, 16, 10, 0, tzinfo=dt.timezone.utc).timestamp()
+        day2 = dt.datetime(2026, 11, 17, 10, 0, tzinfo=dt.timezone.utc).timestamp()
+        self.desk.daemon = FakeDaemon(liveness={peer: day1})
+        self.assertEqual(self.desk.record_connection_days(), 1)
+        self.desk.daemon = FakeDaemon(liveness={peer: day2})
+        self.assertEqual(self.desk.record_connection_days(), 1)
+        self.assertEqual(self.desk.days_connected(self._id(account)), 2)
+
+    def test_same_day_handshakes_count_once(self):
+        import datetime as dt
+        account, device = self.account_with_device()
+        peer = device["peer"]
+        morning = dt.datetime(2026, 11, 16, 8, 0, tzinfo=dt.timezone.utc).timestamp()
+        evening = dt.datetime(2026, 11, 16, 20, 0, tzinfo=dt.timezone.utc).timestamp()
+        self.desk.daemon = FakeDaemon(liveness={peer: morning})
+        self.desk.record_connection_days()
+        self.desk.daemon = FakeDaemon(liveness={peer: evening})
+        self.desk.record_connection_days()
+        self.assertEqual(self.desk.days_connected(self._id(account)), 1)
+
+    def test_status_reports_days_connected(self):
+        import datetime as dt
+        account, device = self.account_with_device()
+        sec = dt.datetime(2026, 11, 16, 10, 0, tzinfo=dt.timezone.utc).timestamp()
+        self.desk.daemon = FakeDaemon(liveness={device["peer"]: sec})
+        self.desk.record_connection_days()
+        code, payload = self.desk.status(account["token"])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["days_connected"], 1)
+
+    def test_unreachable_daemon_records_nothing(self):
+        account, _ = self.account_with_device()
+        self.desk.daemon = FakeDaemon(refuse_liveness=True)
+        self.assertEqual(self.desk.record_connection_days(), 0)
+        self.assertEqual(self.desk.days_connected(self._id(account)), 0)
+
+
 class FunnelStepTests(DeskTestCase):
     """Per-step journey counters (premortem 2026-11-19, mode 5): the funnel must
     show WHERE conversion drops, not just the terminal state. A stranger who dies
