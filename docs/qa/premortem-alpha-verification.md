@@ -109,9 +109,14 @@ system trusts its own records over performed, verified reality for the real user
    The gate immediately caught a real stranger prerequisite the `--local` path never could:
    a minimal machine lacks `openssh-client`, so `install.sh` fail-closed refuses the signature
    check — the gate now provisions it (mode 1 made concrete).
-3. **Verify the binary restore** (mode 3): after `mv -f`, run the restored `/usr/bin/vallum
-   --version` and assert the daemon carries; refuse the stamp on failure; do not overwrite an
-   existing `.pre-verify-remote` (refuse or timestamp it).
+3. **[DONE]** Verify the binary restore (mode 3): the `mv -f` must succeed AND the restored
+   `/usr/bin/vallum --version` must run; on a live deployment the daemon is restarted onto the
+   restored binary and asserted active. Any failure sets `BINARY_RESTORE_FAILED`, which revokes
+   the stamp and fails the run (the same revoke-on-failure pattern as the NAT guard). The
+   aside-copy now **refuses** when a `.pre-verify-remote` already exists, so an interrupted run
+   cannot launder the gate's binary into the "production" backup. Tested both ways: a normal run
+   asserts "the restored binary runs" + "the daemon is active on the restored binary"; a planted
+   leftover backup makes the gate refuse at the ssh transport with the host left intact.
 4. **Make the dead-man's switch independent** (mode 4): install `vallum-watchdog` on a second
    always-on host (or an external dead-man's service); add a periodic delivery proof (a test page
    whose receipt is asserted, or a second channel); write the cooldown state *after* a successful
@@ -131,8 +136,8 @@ system trusts its own records over performed, verified reality for the real user
 
 - [x] A release is cut; a clean-container gate installs `--from-release` and a stranger's
       `vallum --version` carries the fixes (mode 2). **Done: v1.10.0, `accept-install --from-release` PASS.**
-- [ ] `verify-remote` verifies the restored binary runs and the daemon carries; the aside-copy
-      cannot be poisoned by a killed run (mode 3).
+- [x] `verify-remote` verifies the restored binary runs and the daemon carries; the aside-copy
+      cannot be poisoned by a killed run (mode 3). **Done: verified restore + refuse-on-leftover, tested both ways.**
 - [ ] The watchdog runs on a second host; a test page is *received* on the phone, not just sent
       (mode 4).
 - [ ] Per-step funnel counters exist and the signup→install drop-off alert fires on a synthetic

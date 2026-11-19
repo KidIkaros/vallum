@@ -191,6 +191,10 @@ LIVE_DEPLOYMENT=0
 # Set when enrol_ssh moved a host's own /usr/bin/vallum aside; cleanup puts it
 # back. Without this a gate run replaces production binaries with the tree's.
 BINARY_RESTORE=0
+# Set when cleanup could not restore the host's own binaries (the mv failed or the
+# restored binary does not run) or its daemon did not come back. Revokes the stamp —
+# a host left running the gate's build is not a verified host (premortem 2026-11-19, mode 3).
+BINARY_RESTORE_FAILED=0
 # Set only when this run actually installed a binary at /usr/bin/vallum. Cleanup
 # removes that binary, and ONLY that one — see the note at the removal.
 BINARY_INSTALLED=0
@@ -493,10 +497,29 @@ cleanup() {
             # both are needed: one restores what was moved aside, the other
             # refuses to delete what was never installed.
             if [ "$BINARY_RESTORE" = 1 ]; then
-                rsh "set +e
-                    sudo mv -f /usr/bin/vallum.pre-verify-remote /usr/bin/vallum
-                    sudo mv -f /usr/bin/vallum-quick.pre-verify-remote /usr/bin/vallum-quick" >/dev/null 2>&1
-                note "restored the host's own /usr/bin/vallum{,-quick}"
+                # Verify the restore, don't assume it: the mv must succeed AND the
+                # restored binary must run. Copying files back is not restoring a
+                # service (premortem 2026-11-19, mode 3) — the old `set +e; mv -f`
+                # discarded errors under an unconditional "restored" note, so a failed
+                # restore left the host on the gate's build, stamped PASS.
+                if rsh "sudo mv -f /usr/bin/vallum.pre-verify-remote /usr/bin/vallum && \
+                        sudo mv -f /usr/bin/vallum-quick.pre-verify-remote /usr/bin/vallum-quick && \
+                        /usr/bin/vallum --version >/dev/null 2>&1"; then
+                    ok "restored the host's own /usr/bin/vallum{,-quick} — the restored binary runs"
+                    # The running daemon still holds the gate's build in memory until it
+                    # restarts; load the restored production binary and prove it is up.
+                    if [ "$LIVE_DEPLOYMENT" = 1 ]; then
+                        if rsh "sudo systemctl restart vallum@vallum0 && sleep 3 && systemctl is-active vallum@vallum0 >/dev/null 2>&1"; then
+                            ok "the host's daemon is active on the restored binary"
+                        else
+                            BINARY_RESTORE_FAILED=1
+                            fail "the host's daemon did not come back active on the restored binary"
+                        fi
+                    fi
+                else
+                    BINARY_RESTORE_FAILED=1
+                    fail "the host's own /usr/bin/vallum{,-quick} could NOT be restored — the host may run the gate's build or none"
+                fi
             elif [ "$BINARY_INSTALLED" = 1 ]; then
                 rsh "sudo rm -f /usr/bin/vallum /usr/bin/vallum-quick" >/dev/null 2>&1
             else
@@ -532,6 +555,14 @@ cleanup() {
         # broken, that stamp is a lie - revoke it and fail the run.
         rm -f "$(verified_stamp)" 2>/dev/null
         fail "the commit was NOT recorded as verified: the host was left unrestored"
+        exit 1
+    fi
+    if [ "$BINARY_RESTORE_FAILED" = 1 ]; then
+        # Same lie, different artefact: the host's binaries or daemon were left
+        # unrestored, so the stamp must not vouch for this commit (mode 3).
+        rm -f "$(verified_stamp)" 2>/dev/null
+        fail "the commit was NOT recorded as verified: the host's binaries/daemon were left unrestored"
+        fail "   restore /usr/bin/vallum{,-quick} from the .pre-verify-remote backups or backup-deployment.sh on $TARGET"
         exit 1
     fi
     ssh_mux_close
@@ -905,6 +936,13 @@ enrol_ssh() {
     # the version that neither keeps nor destroys what was there.
     if [ "$PRODUCT" != 1 ]; then
         if rsh "sudo test -e /usr/bin/vallum" 2>/dev/null; then
+            # A leftover .pre-verify-remote means a previous run was interrupted before
+            # it restored: /usr/bin/vallum may be that run's gate build, not production.
+            # Copying it aside as "production" would launder the gate's binary into the
+            # backup (premortem 2026-11-19, mode 3). Refuse instead of poisoning it.
+            if rsh "sudo test -e /usr/bin/vallum.pre-verify-remote" 2>/dev/null; then
+                bad "a previous verify-remote run left /usr/bin/vallum.pre-verify-remote on $TARGET — the host may run that run's gate build; restore /usr/bin/vallum{,-quick} from those backups manually, then re-run"
+            fi
             rsh "sudo cp -p /usr/bin/vallum /usr/bin/vallum.pre-verify-remote \
                  && sudo cp -p /usr/bin/vallum-quick /usr/bin/vallum-quick.pre-verify-remote" 2>/dev/null \
                 || bad "could not set the host's own binaries aside"
