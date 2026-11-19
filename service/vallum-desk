@@ -1368,6 +1368,7 @@ class Desk:
             "/api/admin/plan": self._set_plan,
             "/api/admin/revoke": self._revoke_peer,
             "/api/admin/revoke-account": self._revoke_account,
+            "/api/admin/reset-token": self._reset_token,
             "/api/admin/peers": self._list_peers,
             "/api/admin/devices": self._list_devices,
             "/api/admin/codes": self._list_codes,
@@ -1469,6 +1470,26 @@ class Desk:
             return 502, action
         return 200, {"revoked": self._account_name(account),
                      "peers": action["peers"]}
+
+    def _reset_token(self, body):
+        """Issue a fresh account number for an account that lost it.
+
+        The number is shown once at signup and there is no self-service
+        recovery (ADR-0047 Q3): the operator is the recovery path. The old
+        number stops working immediately — it is the bearer credential — while
+        the account's devices, plan, quota and expiry are untouched. Addressed
+        by peer or by the current account number, like the other admin verbs.
+        """
+        account = self._account_for_body(body)
+        if not account:
+            return 404, {"error": "unknown peer or account token"}
+        token = secrets.token_hex(16)
+        with self.lock:
+            self.db.execute("UPDATE accounts SET token=? WHERE id=?",
+                            (token, account["id"]))
+        return 200, {"account": self._account_name(account),
+                     "token": token, "status": account["status"],
+                     "note": "shown once — the previous account number no longer works"}
 
     def _list_peers(self, body):
         with self.lock:

@@ -125,6 +125,68 @@ class DeskTestCase(unittest.TestCase):
         return account, device
 
 
+class ResetTokenTests(DeskTestCase):
+    """ADR-0047 Q3: the account number is shown once at signup and there is no
+    self-service recovery — the operator is the recovery path. reset-token
+    issues a fresh number and retires the old, leaving the account's devices,
+    plan, quota and expiry untouched."""
+
+    def test_reset_by_token_issues_a_new_number_and_retires_the_old(self):
+        _, account = self.signup()
+        old = account["token"]
+        code, payload = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "token": old})
+        self.assertEqual(code, 200)
+        new = payload["token"]
+        self.assertNotEqual(new, old)
+        self.assertEqual(len(new), 32)
+        # The old number is the bearer credential: it stops working at once.
+        self.assertEqual(self.desk.status(old)[0], 404)
+        self.assertEqual(self.desk.status(new)[0], 200)
+
+    def test_reset_by_peer_addressing(self):
+        account, device = self.account_with_device()
+        code, payload = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "peer": device["peer"]})
+        self.assertEqual(code, 200)
+        self.assertNotEqual(payload["token"], account["token"])
+        self.assertEqual(self.desk.status(payload["token"])[0], 200)
+
+    def test_reset_preserves_devices_plan_and_quota(self):
+        account, device = self.account_with_device()
+        self.desk.admin(
+            "/api/admin/plan",
+            {"admin_token": "admin-secret", "token": account["token"],
+             "plan": "plus", "bytes_cap": 5000})
+        code, payload = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "token": account["token"]})
+        self.assertEqual(code, 200)
+        _, status = self.desk.status(payload["token"])
+        self.assertEqual(status["peers"], [device["peer"]])
+        row = self.desk.db.execute(
+            "SELECT plan, bytes_cap, status FROM accounts WHERE token=?",
+            (payload["token"],)).fetchone()
+        self.assertEqual(row["plan"], "plus")
+        self.assertEqual(row["bytes_cap"], 5000)
+        self.assertEqual(row["status"], "active")
+
+    def test_reset_unknown_account_is_404(self):
+        code, _ = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "peer": "nobody"})
+        self.assertEqual(code, 404)
+
+    def test_reset_requires_the_admin_token(self):
+        _, account = self.signup()
+        code, _ = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "wrong", "token": account["token"]})
+        self.assertEqual(code, 403)
+
+
 class StateFileModeTests(DeskTestCase):
     """The account database holds the only credential the desk issues."""
 

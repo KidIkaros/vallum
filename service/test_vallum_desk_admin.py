@@ -180,6 +180,31 @@ class AdminCliTests(unittest.TestCase):
         row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
         self.assertEqual(row["status"], "revoked")
 
+    def test_reset_token_prints_a_new_number_and_retires_the_old(self):
+        payload = self.signup()
+        old = payload["token"]
+        out = self.cli("reset-token", "--token", old)
+        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertNotEqual(new, old)
+        self.assertIn(new, out)  # the new number is shown once, on stdout
+        self.assertEqual(self.desk.status(old)[0], 404)
+        self.assertEqual(self.desk.status(new)[0], 200)
+
+    def test_reset_token_by_peer_reaches_the_account(self):
+        payload, device = self.signup_with_device()
+        self.cli("reset-token", "--peer", device["peer"])
+        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertNotEqual(new, payload["token"])
+
+    def test_reset_token_by_token_file_keeps_the_number_out_of_ps(self):
+        payload = self.signup()
+        number_file = os.path.join(self.tempdir.name, "account-number")
+        with open(number_file, "w") as f:
+            f.write(payload["token"] + "\n")
+        self.cli("reset-token", "--token-file", number_file)
+        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertNotEqual(new, payload["token"])
+
     def test_per_device_revoke_needs_a_peer(self):
         payload = self.signup()
         with self.assertRaises(SystemExit) as raised:

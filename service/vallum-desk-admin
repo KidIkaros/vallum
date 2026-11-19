@@ -11,6 +11,7 @@ token on a command line is a token in ps and shell history.
     vallum-desk-admin revoke --peer u0007-laptop --account # the whole account
     vallum-desk-admin revoke --token <account-number> --account  # device-less account
     vallum-desk-admin revoke --token-file <file> --account     # number stays out of ps
+    vallum-desk-admin reset-token --peer u0007-laptop          # new number; the old stops working
     vallum-desk-admin sweep
 """
 
@@ -125,6 +126,13 @@ def main(argv=None):
     revoke.add_argument("--account", action="store_true",
                         help="revoke the whole account, every device")
 
+    reset = sub.add_parser("reset-token",
+                           help="issue a new account number; the old one stops working")
+    reset.add_argument("--peer", help="address the account by one of its device peers")
+    reset.add_argument("--token", help="address the account by its current account number. "
+                                       "Visible in ps and shell history — prefer --token-file")
+    reset.add_argument("--token-file", help="read the current account number from a file")
+
     adopt = sub.add_parser("adopt", help="register an existing daemon peer")
     adopt.add_argument("--peer", required=True)
     adopt.add_argument("--label")
@@ -181,6 +189,13 @@ def main(argv=None):
                 raise SystemExit("vallum-desk-admin: per-device revoke needs --peer "
                                  "(use --account to revoke a whole account)")
             show(call(args.desk, "/api/admin/revoke", token, {"peer": args.peer}), args.json)
+    elif args.command == "reset-token":
+        result = call(args.desk, "/api/admin/reset-token", token, account_key(args))
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(result["token"])
+            print(f"  {result['note']}")
     elif args.command == "adopt":
         body = {"peer": args.peer, "label": args.label, "bytes_cap": args.bytes_cap}
         show(call(args.desk, "/api/admin/adopt", token,
