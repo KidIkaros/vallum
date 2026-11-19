@@ -2421,3 +2421,103 @@ fn the_palette_offers_the_desk_account_read() {
     assert!(names.contains(&"read desk account…"), "{names:?}");
 }
 
+/// Set a form field by label — the join form's contract is about what the
+/// privileged invocation receives, not field order.
+fn set_form_field(form: &mut Form, label: &str, value: &str) {
+    form.fields
+        .iter_mut()
+        .find(|field| field.label == label)
+        .unwrap_or_else(|| panic!("the form has no `{label}` field"))
+        .value = value.to_owned();
+}
+
+const JOIN_TICKET: &str = "vallum1-join:198.51.100.10:51821/laptop/invite1/token1/fp1";
+const JOIN_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+#[test]
+fn the_join_form_carries_the_account_token_into_the_privileged_join() {
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", JOIN_TICKET);
+    set_form_field(&mut form, "account token (optional)", JOIN_TOKEN);
+    set_form_field(
+        &mut form,
+        "desk endpoint (optional)",
+        "https://desk.wingman.gold",
+    );
+    let request = super::actions::join_request(&form).expect("a valid join request");
+    assert_eq!(request.ops_args, vec!["join".to_owned()]);
+    // The ticket rides stdin line 1, the token line 2 — the dispatcher
+    // re-exports line 2 as VALLUM_ACCOUNT for `vallum join` to seal into
+    // [account]. The desk origin rides the environment, as in vallum-uri.
+    assert_eq!(
+        request.stdin.as_deref(),
+        Some(format!("{JOIN_TICKET}\n{JOIN_TOKEN}").as_str())
+    );
+    assert!(request.env.contains(&(
+        "VALLUM_DESK_ENDPOINT",
+        "https://desk.wingman.gold".to_owned()
+    )));
+    // Nothing secret ever sits in argv — ps is world-readable.
+    assert!(!request.ops_args.iter().any(|arg| arg.contains(JOIN_TOKEN)));
+}
+
+#[test]
+fn the_join_form_without_an_account_keeps_the_ticket_only_payload() {
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", JOIN_TICKET);
+    let request = super::actions::join_request(&form).expect("a valid join request");
+    assert_eq!(request.ops_args, vec!["join".to_owned()]);
+    assert_eq!(request.stdin.as_deref(), Some(JOIN_TICKET));
+    assert!(request.env.is_empty());
+}
+
+#[test]
+fn the_join_form_refuses_a_malformed_account_token() {
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", JOIN_TICKET);
+    set_form_field(&mut form, "account token (optional)", "not-32-hex");
+    let error = super::actions::join_request(&form).expect_err("a malformed token");
+    assert_eq!(error.field, Some("account token (optional)"));
+}
+
+#[test]
+fn the_join_form_refuses_a_bad_desk_endpoint() {
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", JOIN_TICKET);
+    set_form_field(&mut form, "account token (optional)", JOIN_TOKEN);
+    // Off loopback the token would cross a network in cleartext.
+    set_form_field(
+        &mut form,
+        "desk endpoint (optional)",
+        "http://desk.example.com",
+    );
+    let error = super::actions::join_request(&form).expect_err("a cleartext desk");
+    assert_eq!(error.field, Some("desk endpoint (optional)"));
+    // An endpoint without a token has no account to belong to.
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", JOIN_TICKET);
+    set_form_field(
+        &mut form,
+        "desk endpoint (optional)",
+        "https://desk.wingman.gold",
+    );
+    let error = super::actions::join_request(&form).expect_err("an endpoint without a token");
+    assert_eq!(error.field, Some("account token (optional)"));
+}
+
+#[test]
+fn the_ssh_join_path_carries_no_desk_account() {
+    let mut form = Form::join_network();
+    set_form_field(&mut form, "ticket or user@host", "user@vpn.example.com");
+    let request = super::actions::join_request(&form).expect("a valid SSH enrolment");
+    assert_eq!(
+        request.ops_args,
+        vec!["setup-remote".to_owned(), "user@vpn.example.com".to_owned()]
+    );
+    assert!(request.stdin.is_none());
+    assert!(request.env.is_empty());
+    // A token pasted beside an SSH target cannot be recorded — say so.
+    set_form_field(&mut form, "account token (optional)", JOIN_TOKEN);
+    let error = super::actions::join_request(&form).expect_err("a token without a ticket");
+    assert_eq!(error.field, Some("account token (optional)"));
+}

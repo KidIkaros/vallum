@@ -1477,6 +1477,18 @@ pub(crate) use crate::form::{parse_endpoint, parse_keepalive, parse_prefixes, pa
 /// carries the exact `sudo vallum-ops …` command — the TUI never raises a
 /// password prompt mid-dashboard.
 fn run_privileged(ops_args: &[&str], stdin_data: Option<&str>) -> Result<String, String> {
+    run_privileged_with_env(ops_args, stdin_data, &[])
+}
+
+/// `run_privileged` with extra environment for the spawned dispatcher. The
+/// direct (root) path inherits it; the sudo path strips it (sudoers grants
+/// the dispatcher only, no SETENV) — secrets that must cross sudo ride
+/// stdin, the way the join token does.
+fn run_privileged_with_env(
+    ops_args: &[&str],
+    stdin_data: Option<&str>,
+    env: &[(&str, String)],
+) -> Result<String, String> {
     use std::process::Stdio;
     let attempts: Vec<(String, Vec<String>)> = if nix::unistd::geteuid().is_root() {
         vec![
@@ -1513,6 +1525,9 @@ fn run_privileged(ops_args: &[&str], stdin_data: Option<&str>) -> Result<String,
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         if stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -1629,10 +1644,24 @@ fn show_invite(app: &mut App, name: &str, ticket: &str, responder_label: &str) -
     ))
 }
 
-/// Join this machine to a network: a pasted `vallum1-join:` ticket goes to
-/// `vallum-ops join` on stdin (never in argv); anything else is an SSH target
-/// for zero-custody enrolment via `vallum-ops setup-remote`.
-fn join_network(_app: &mut App, form: &super::app::Form) -> FormResult {
+/// What the privileged join invocation carries (ADR-0046).
+///
+/// The ticket rides stdin line 1; an optional desk account token rides
+/// line 2, which `vallum-ops join` re-exports as `VALLUM_ACCOUNT` for
+/// `vallum join` to seal into `[account]`. The desk origin rides the
+/// environment as `VALLUM_DESK_ENDPOINT` — the same channels
+/// `service/vallum-uri` uses. Nothing secret sits in argv: `ps` is
+/// world-readable. (The sudo path strips the environment; recording the
+/// endpoint there needs a dispatcher stdin line — a packaging change.)
+#[derive(Debug)]
+pub(crate) struct JoinRequest {
+    pub ops_args: Vec<String>,
+    pub stdin: Option<String>,
+    pub env: Vec<(&'static str, String)>,
+}
+
+/// Validate the join form and build the privileged invocation's channels.
+pub(crate) fn join_request(form: &super::app::Form) -> Result<JoinRequest, FormError> {
     let target = form.field("ticket or user@host").trim();
     if target.is_empty() {
         return Err(field_error(
@@ -1651,12 +1680,52 @@ fn join_network(_app: &mut App, form: &super::app::Form) -> FormResult {
             "letters, digits, '.', '_', '-' only",
         ));
     }
-    let output = if let Some(ticket) = target
+    let account = form.field("account token (optional)").trim();
+    let desk = form.field("desk endpoint (optional)").trim();
+    if let Some(ticket) = target
         .split_whitespace()
         .find(|token| token.starts_with("vallum1-join:"))
     {
-        run_privileged(&["join"], Some(ticket)).map_err(|e| form_error(None, e))?
+        if !account.is_empty()
+            && (account.len() != 32 || !account.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(field_error(
+                "account token (optional)",
+                "the account number is 32 hex characters",
+            ));
+        }
+        if !desk.is_empty() {
+            if account.is_empty() {
+                return Err(field_error(
+                    "account token (optional)",
+                    "a desk endpoint needs an account token",
+                ));
+            }
+            crate::commands::account::parse_desk_endpoint(desk)
+                .map_err(|e| field_error("desk endpoint (optional)", e.to_string()))?;
+        }
+        let stdin = if account.is_empty() {
+            ticket.to_owned()
+        } else {
+            format!("{ticket}\n{account}")
+        };
+        let env = if desk.is_empty() {
+            Vec::new()
+        } else {
+            vec![("VALLUM_DESK_ENDPOINT", desk.to_owned())]
+        };
+        Ok(JoinRequest {
+            ops_args: vec!["join".to_owned()],
+            stdin: Some(stdin),
+            env,
+        })
     } else {
+        if !account.is_empty() {
+            return Err(field_error(
+                "account token (optional)",
+                "a desk account token rides with a vallum1-join: ticket, not an SSH target",
+            ));
+        }
         if target.starts_with('-')
             || !target
                 .chars()
@@ -1667,12 +1736,26 @@ fn join_network(_app: &mut App, form: &super::app::Form) -> FormResult {
                 "not a ticket — enter a valid SSH host (user@host or alias)",
             ));
         }
-        let mut args = vec!["setup-remote", target];
+        let mut args = vec!["setup-remote".to_owned(), target.to_owned()];
         if !name.is_empty() {
-            args.push(name);
+            args.push(name.to_owned());
         }
-        run_privileged(&args, None).map_err(|e| form_error(None, e))?
-    };
+        Ok(JoinRequest {
+            ops_args: args,
+            stdin: None,
+            env: Vec::new(),
+        })
+    }
+}
+
+/// Join this machine to a network: a pasted `vallum1-join:` ticket goes to
+/// `vallum-ops join` on stdin (never in argv); anything else is an SSH target
+/// for zero-custody enrolment via `vallum-ops setup-remote`.
+fn join_network(_app: &mut App, form: &super::app::Form) -> FormResult {
+    let request = join_request(form)?;
+    let args: Vec<&str> = request.ops_args.iter().map(String::as_str).collect();
+    let output = run_privileged_with_env(&args, request.stdin.as_deref(), &request.env)
+        .map_err(|e| form_error(None, e))?;
     let summary = output
         .lines()
         .find(|line| line.contains("enrolled ") || line.contains("handshake with the server"))

@@ -732,7 +732,10 @@ impl Form {
 
     /// First-contact client onboarding: paste a `vallum1-join:` ticket, or an
     /// SSH target (`user@host` / config alias) for zero-custody enrolment.
-    /// Both paths keep this device's private key on the device.
+    /// Both paths keep this device's private key on the device. A desk
+    /// account token (and its desk origin) may ride along with a ticket, so
+    /// a manual join records `[account]` the way the `vallum://` URI does
+    /// (ADR-0046).
     #[must_use]
     pub fn join_network() -> Self {
         Self {
@@ -749,6 +752,18 @@ impl Form {
                     value: String::new(),
                     masked: false,
                     placeholder: "SSH enrolment only — empty picks hostname",
+                },
+                Field {
+                    label: "account token (optional)",
+                    value: String::new(),
+                    masked: true,
+                    placeholder: "32-hex desk account number — rides with a ticket only",
+                },
+                Field {
+                    label: "desk endpoint (optional)",
+                    value: String::new(),
+                    masked: false,
+                    placeholder: "https://desk.example.com — the desk the account lives on",
                 },
             ],
             focus: 0,
