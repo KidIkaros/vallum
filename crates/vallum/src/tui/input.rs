@@ -44,7 +44,7 @@ pub fn handle_mouse_at(app: &mut App, mouse: MouseEvent, (width, height): (u16, 
     match mouse.kind {
         MouseEventKind::ScrollDown => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_add(3),
-            View::Trial => app.trial_scroll = app.trial_scroll.saturating_add(3),
+            View::Account => app.trial_scroll = app.trial_scroll.saturating_add(3),
             View::Health => app.health_scroll = app.health_scroll.saturating_add(3),
             View::Diff => app.diff_scroll = app.diff_scroll.saturating_add(3),
             View::Help => app.help_scroll = app.help_scroll.saturating_add(3),
@@ -52,7 +52,7 @@ pub fn handle_mouse_at(app: &mut App, mouse: MouseEvent, (width, height): (u16, 
         },
         MouseEventKind::ScrollUp => match app.view {
             View::Logs => app.logs_scroll = app.logs_scroll.saturating_sub(3),
-            View::Trial => app.trial_scroll = app.trial_scroll.saturating_sub(3),
+            View::Account => app.trial_scroll = app.trial_scroll.saturating_sub(3),
             View::Health => app.health_scroll = app.health_scroll.saturating_sub(3),
             View::Diff => app.diff_scroll = app.diff_scroll.saturating_sub(3),
             View::Help => app.help_scroll = app.help_scroll.saturating_add(0).saturating_sub(3),
@@ -423,7 +423,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             }
             return;
         }
-        View::Trial => {
+        View::Account => {
             // Modal context, fixed keys by design (see keymap docs): `a` arms
             // and `p` panics only while the plan is open — nothing global.
             match key.code {
@@ -667,6 +667,7 @@ fn dispatch(app: &mut App, action: Action) {
         Action::Health => actions::health_check(app),
         Action::TrialPlan => actions::trial_plan(app),
         Action::TrialRevert => actions::trial_revert(app),
+        Action::AccountPanel => actions::account_panel(app),
     }
 }
 

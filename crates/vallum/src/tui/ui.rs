@@ -17,7 +17,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     match app.view {
         View::Help => draw_help(frame, app),
         View::Logs => draw_logs(frame, app),
-        View::Trial => draw_trial(frame, app),
+        View::Account => draw_account(frame, app),
         View::Health => draw_health(frame, app),
         View::Diff => draw_diff(frame, app),
         View::Dashboard => draw_dashboard(frame, app),
@@ -1456,25 +1456,25 @@ fn draw_logs(frame: &mut Frame<'_>, app: &App) {
     );
 }
 
-fn draw_trial(frame: &mut Frame<'_>, app: &App) {
-    let lines: Vec<Line<'_>> = if app.trial_lines.is_empty() {
-        vec![Line::from("No trial plan loaded.")]
-    } else {
-        app.trial_lines
-            .iter()
-            .map(|line| Line::from(line.as_str()))
-            .collect()
-    };
+/// The account panel (ADR-0046): the desk read leads, the full-tunnel trial
+/// plan keeps its place below. Everything here is cached state — the desk
+/// call itself runs off the render path (`actions::poll_account`).
+fn draw_account(frame: &mut Frame<'_>, app: &App) {
+    let mut body = super::account::lines(&app.account);
+    if !app.trial_lines.is_empty() {
+        body.push(String::new());
+        body.extend(app.trial_lines.iter().cloned());
+    }
+    let lines: Vec<Line<'_>> = body.iter().map(|line| Line::from(line.as_str())).collect();
     let visible = usize::from(frame.area().height.saturating_sub(2));
-    let scroll_y =
-        (app.trial_scroll as u16).min(app.trial_lines.len().saturating_sub(visible) as u16);
+    let scroll_y = (app.trial_scroll as u16).min(body.len().saturating_sub(visible) as u16);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((scroll_y, 0))
             .block(modal_block(format!(
-                "FULL-TUNNEL TRIAL [line {}/{}] (a arm, p panic, r refresh, Esc)",
+                "ACCOUNT [line {}/{}] (a arm trial, p panic, r refresh, Esc)",
                 scroll_y + 1,
-                app.trial_lines.len()
+                body.len()
             ))),
         frame.area(),
     );

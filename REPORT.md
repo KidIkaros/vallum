@@ -20,3 +20,22 @@ Gate env: CARGO_TARGET_DIR=/home/ikaaros/Coding/Gold/vallum/target
 
 ## Log
 - (init) baseline captured; docs read; code surveyed.
+- **Slice 1 — seam** `bf55026`: `read_report` → `pub(crate)` (Report fields already pub); seam test `the_tui_reuses_the_desk_read_seam` in tui::tests. RED: E0603 private. 526 green.
+- **Slice 2 — TUI account panel** (commit pending): new `tui/account.rs` (AccountState + lines), App cache fields, `View::Trial`→`View::Account`, `draw_trial`→`draw_account` (account section leads, trial plan below, a/p keys unchanged), `actions::poll_account` (worker thread + mpsc, polled each event-loop tick; refresh on open / 30 s / interface change), palette command "read desk account…" (Action::AccountPanel, palette-only). Report boxed in AccountState (clippy large_enum_variant).
+  - New tests: `account_panel_renders_the_desk_read` (snapshot), `an_unreachable_desk_renders_unknown_with_the_raw_line`, `a_config_without_a_desk_account_says_so_plainly`, `the_account_read_runs_off_the_render_path` (real config + closed-port desk; first poll returns with pending, answer lands cached), `the_palette_offers_the_desk_account_read`. Each watched RED first.
+  - Hand-verified render (TestBackend 100x16, full desk answer):
+    ```
+    ╭◆ Vallum ❯ ACCOUNT [line 1/10] (a arm trial, p panic, r refresh, Esc)─╮
+    │desk       https://desk.wingman.gold                                  │
+    │account    u0001 — laptop                                             │
+    │plan       trial                                                      │
+    │status     active                                                     │
+    │expires    2026-12-02                                                 │
+    │bytes      1.00 / 5.0 GiB used (shared across devices)                │
+    │devices    2 on this account                                          │
+    │connected  1 of 2 devices have connected                              │
+    │                                                                      │
+    │FULL-TUNNEL TRIAL — route all host traffic through the tunnel.        │
+    ╰──────────────────────────────────────────────────────────────────────╯
+    ```
+  - Gates: 531 passed / 0 failed; fmt OK; clippy -D warnings clean.

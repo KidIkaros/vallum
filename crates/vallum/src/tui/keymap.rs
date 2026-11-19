@@ -68,6 +68,7 @@ pub enum Action {
     RestartService,
     TrialPlan,
     TrialRevert,
+    AccountPanel,
 }
 
 /// One command-palette entry: category badge, name shown, keywords searched.
@@ -285,6 +286,12 @@ pub const COMMANDS: &[Command] = &[
         category: "TRIAL",
         name: "revert full-tunnel trial (panic)",
         keywords: "trial revert panic undo split restore",
+    },
+    Command {
+        action: Action::AccountPanel,
+        category: "ACCOUNT",
+        name: "read desk account…",
+        keywords: "account desk plan quota expiry bytes devices usage cap",
     },
     Command {
         action: Action::NextInterface,
@@ -510,6 +517,9 @@ impl KeyMap {
             // The TRIAL view's own `a`/`p` keys arm and panic once open.
             ("trial_plan", Action::TrialPlan, &[]),
             ("trial_revert", Action::TrialRevert, &[]),
+            // The desk account read is palette-only: a read, not a reroute,
+            // but the dashboard's single letters are all spoken for.
+            ("account_panel", Action::AccountPanel, &[]),
         ];
         defaults
             .iter()

@@ -2,6 +2,7 @@
 
 //! The terminal operations console.
 
+pub mod account;
 pub mod actions;
 pub mod app;
 pub mod bundle;
@@ -101,6 +102,7 @@ fn event_loop(
         }
         app.expire_toast();
         app.poll_ping();
+        actions::poll_account(app);
         if let Some(qr) = app.qr.as_mut() {
             qr.tick();
         }

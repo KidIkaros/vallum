@@ -1287,6 +1287,66 @@ pub fn load_logs(app: &mut App) {
     }
 }
 
+/// Refresh the cached desk account read — never on the render path.
+///
+/// The read is a blocking HTTPS call (up to the desk's own timeouts), so it
+/// runs on a worker thread and the panel renders the last cached answer, or
+/// `unknown` until the first one lands. While the panel is open the read is
+/// refreshed on open, every 30 s, and whenever the selected interface's
+/// config changes — the same off-render discipline as the background ping.
+pub fn poll_account(app: &mut App) {
+    if let Some(receiver) = app.account_pending.take() {
+        match receiver.try_recv() {
+            Ok(state) => {
+                app.account = state;
+                app.account_fetched_at = Some(std::time::Instant::now());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => app.account_pending = Some(receiver),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                app.account = super::account::AccountState::Unreadable(
+                    "account worker exited without a result".to_owned(),
+                );
+            }
+        }
+        return;
+    }
+    if app.view != View::Account {
+        return;
+    }
+    let Some(path) = app.current().and_then(|iface| iface.config_path.clone()) else {
+        // Socket-discovered interfaces carry no config: there is no [account]
+        // to read, and saying "no desk account" would be a confident guess.
+        app.account = super::account::AccountState::NoConfig;
+        return;
+    };
+    let fresh_for = app.account_for.as_ref() == Some(&path);
+    let due = app
+        .account_fetched_at
+        .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(30));
+    if fresh_for && !due {
+        return;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.account_pending = Some(receiver);
+    app.account_for = Some(path.clone());
+    std::thread::spawn(move || {
+        let state = match vallum_config::Config::load(&path) {
+            Ok(config) => super::account::AccountState::Read(Box::new(
+                crate::commands::account::read_report(&config),
+            )),
+            Err(error) => super::account::AccountState::Unreadable(error.to_string()),
+        };
+        let _ = sender.send(state);
+    });
+}
+
+/// Open the account panel: the desk read on top, the full-tunnel trial plan
+/// below (the view's own `a`/`p` keys). The read itself lands off the render
+/// path via `poll_account`; opening forces a fresh one.
+pub fn account_panel(app: &mut App) {
+    trial_plan(app);
+}
+
 /// The full-tunnel trial preview. Read-only: `vallum-ops status` needs no
 /// privilege, so the plan renders for every operator. Arming stays behind the
 /// privilege rule in `run_ops` below.
@@ -1316,7 +1376,9 @@ pub fn trial_plan(app: &mut App) {
     }
     app.trial_lines = lines;
     app.trial_scroll = 0;
-    app.view = View::Trial;
+    app.view = View::Account;
+    // Opening (or refreshing) the panel asks the desk again on the next tick.
+    app.account_fetched_at = None;
 }
 
 /// Run a privileged ops subcommand, or hand its command over. The TUI never
@@ -1336,7 +1398,7 @@ fn run_ops(app: &mut App, subcommand: &str) {
             );
             app.trial_lines = text.lines().map(str::to_owned).collect();
             app.trial_scroll = 0;
-            app.view = View::Trial;
+            app.view = View::Account;
             app.notify(if output.status.success() {
                 format!("vallum-ops {subcommand}: ok")
             } else {

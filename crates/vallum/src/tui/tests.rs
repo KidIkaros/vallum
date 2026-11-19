@@ -2009,7 +2009,7 @@ fn trial_plan_opens_the_trial_view_with_host_status() {
 
     let mut app = App::new(Vec::new());
     super::actions::trial_plan(&mut app);
-    assert_eq!(app.view, super::app::View::Trial);
+    assert_eq!(app.view, super::app::View::Account);
     assert!(!app.trial_lines.is_empty());
     let joined = app.trial_lines.join("\n");
     assert!(joined.contains("FULL-TUNNEL TRIAL"));
@@ -2067,7 +2067,7 @@ fn trial_view_arms_and_panics_from_its_own_keys() {
         app.toast
             .as_ref()
             .is_some_and(|toast| toast.message.contains("vallum-ops full-tunnel"))
-            || app.view == super::app::View::Trial
+            || app.view == super::app::View::Account
     );
     // `p` panics back to split under the same privilege rule.
     super::actions::trial_plan(&mut app);
@@ -2079,7 +2079,7 @@ fn trial_view_arms_and_panics_from_its_own_keys() {
         app.toast
             .as_ref()
             .is_some_and(|toast| toast.message.contains("vallum-ops revert"))
-            || app.view == super::app::View::Trial
+            || app.view == super::app::View::Account
     );
     // Esc leaves the trial view.
     super::input::handle(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2242,3 +2242,182 @@ fn the_tui_reuses_the_desk_read_seam() {
     assert_eq!(report.reachable, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn account_panel_renders_the_desk_read() {
+    use crate::commands::account::{Conversion, Device, Report};
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Vec::new());
+    app.view = super::app::View::Account;
+    app.account = super::account::AccountState::Read(Box::new(Report {
+        has_account: true,
+        endpoint: Some("https://desk.example.com".to_owned()),
+        reachable: Some(true),
+        detail: "the desk answered".to_owned(),
+        peer: Some("u0001".to_owned()),
+        label: Some("laptop".to_owned()),
+        plan: Some("trial".to_owned()),
+        status: Some("active".to_owned()),
+        expires: Some("2026-12-02".to_owned()),
+        bytes_cap: Some(5_368_709_120),
+        bytes_used: Some(1_073_741_824),
+        conversion: Some(Conversion {
+            devices_total: 2,
+            devices_connected: Some(1),
+        }),
+        devices: Some(vec![
+            Device {
+                peer: Some("u0001".to_owned()),
+                label: Some("laptop".to_owned()),
+                connection_sentence: Some("connected now".to_owned()),
+                ..Device::default()
+            },
+            Device {
+                peer: Some("u0002".to_owned()),
+                label: Some("phone".to_owned()),
+                connection_sentence: Some("never connected".to_owned()),
+                ..Device::default()
+            },
+        ]),
+        ..Report::default()
+    }));
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw account panel");
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("ACCOUNT"), "{text}");
+    assert!(text.contains("https://desk.example.com"), "{text}");
+    assert!(text.contains("trial"), "{text}");
+    assert!(text.contains("2026-12-02"), "{text}");
+    assert!(text.contains("1.00 / 5.0 GiB"), "{text}");
+    assert!(text.contains("2 on this account"), "{text}");
+    assert!(text.contains("1 of 2"), "{text}");
+}
+
+#[test]
+fn an_unreachable_desk_renders_unknown_with_the_raw_line() {
+    use crate::commands::account::Report;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Vec::new());
+    app.view = super::app::View::Account;
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    let draw_text = |terminal: &mut Terminal<TestBackend>, app: &App| -> String {
+        terminal
+            .draw(|frame| super::ui::draw(frame, app))
+            .expect("draw account panel");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    };
+    // Before the first read lands the panel says unknown — never a guess.
+    let text = draw_text(&mut terminal, &app);
+    assert!(text.contains("unknown"), "{text}");
+
+    // A desk that refused keeps its raw line, the way failure cards do.
+    app.account = super::account::AccountState::Read(Box::new(Report {
+        has_account: true,
+        endpoint: Some("https://desk.example.com".to_owned()),
+        reachable: Some(false),
+        detail: "connect to the desk 192.0.2.1:443: connection refused".to_owned(),
+        ..Report::default()
+    }));
+    let text = draw_text(&mut terminal, &app);
+    assert!(text.contains("unknown"), "{text}");
+    assert!(text.contains("connection refused"), "{text}");
+    assert!(text.contains("https://desk.example.com"), "{text}");
+}
+
+#[test]
+fn a_config_without_a_desk_account_says_so_plainly() {
+    use crate::commands::account::Report;
+
+    // A file/SSH enrolment has no token: the panel says so in plain words,
+    // not "unknown" (there is nothing to ask a desk).
+    let report = Report {
+        detail: "this config has no desk account — it was enrolled from a file \
+                 or over SSH, so there is nothing to ask a desk"
+            .to_owned(),
+        ..Report::default()
+    };
+    let lines = super::account::lines(&super::account::AccountState::Read(Box::new(report)));
+    let joined = lines.join("\n");
+    assert!(joined.contains("no desk account"), "{joined}");
+}
+
+#[test]
+fn the_account_read_runs_off_the_render_path() {
+    use super::app::Interface;
+    use std::time::{Duration, Instant};
+
+    // A real config whose desk is a closed loopback port: the read fails
+    // fast (connection refused) without a network.
+    let dir = std::env::temp_dir().join(format!("vallum-tui-account-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let path = dir.join("client.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[account]\n\
+             token = \"0123456789abcdef0123456789abcdef\"\nendpoint = \"{origin}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new(vec![Interface::new(
+        "v0".to_owned(),
+        Some(path.clone()),
+        dir.join("c.sock"),
+    )]);
+    app.view = super::app::View::Account;
+    // The first poll spawns the read and returns at once — the render path
+    // never waits on the desk's timeouts.
+    super::actions::poll_account(&mut app);
+    assert!(
+        app.account_pending.is_some(),
+        "the read must run off-thread"
+    );
+    assert!(matches!(
+        app.account,
+        super::account::AccountState::NotFetched
+    ));
+    // Poll until the worker's answer lands (bounded).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while app.account_pending.is_some() && Instant::now() < deadline {
+        super::actions::poll_account(&mut app);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    match &app.account {
+        super::account::AccountState::Read(report) => {
+            assert!(report.has_account);
+            assert_eq!(report.reachable, Some(false));
+        }
+        other => panic!("expected a cached desk read, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_palette_offers_the_desk_account_read() {
+    let names: Vec<&str> = super::keymap::matching_commands("account")
+        .iter()
+        .map(|command| command.name)
+        .collect();
+    assert!(names.contains(&"read desk account…"), "{names:?}");
+}
+

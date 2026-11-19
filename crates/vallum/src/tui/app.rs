@@ -338,7 +338,9 @@ pub enum View {
     Help,
     Logs,
     Diff,
-    Trial,
+    /// The account panel (ADR-0046): the desk read on top, the full-tunnel
+    /// trial plan below it — the trial's `a`/`p` keys stay the view's own.
+    Account,
     Health,
 }
 
@@ -985,6 +987,16 @@ pub struct App {
     pub palette: Option<PaletteState>,
     pub logs: Vec<String>,
     pub trial_lines: Vec<String>,
+    /// The cached desk account read (ADR-0046). Rendered as-is; refreshed off
+    /// the render path by `actions::poll_account`, never fetched while drawing.
+    pub account: super::account::AccountState,
+    /// The in-flight account read, polled each tick like the background ping.
+    pub account_pending: Option<std::sync::mpsc::Receiver<super::account::AccountState>>,
+    /// When the cached account read landed; `None` forces the next poll to fetch.
+    pub account_fetched_at: Option<Instant>,
+    /// The config path the cached account read describes — switching interfaces
+    /// invalidates it.
+    pub account_for: Option<PathBuf>,
     pub health_lines: Vec<String>,
     pub health_tone: super::health::Level,
     pub last_refresh: Instant,
@@ -1058,6 +1070,10 @@ impl App {
             palette: None,
             logs: Vec::new(),
             trial_lines: Vec::new(),
+            account: super::account::AccountState::default(),
+            account_pending: None,
+            account_fetched_at: None,
+            account_for: None,
             health_lines: Vec::new(),
             health_tone: super::health::Level::Warn,
             last_refresh: Instant::now() - Duration::from_secs(2),
