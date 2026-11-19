@@ -122,9 +122,11 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
     // desk hint (ADR-0046). A config that will not parse has already failed
     // the config check — no hint is guessed from it.
     let mut account_table: Option<vallum_config::Account> = None;
+    let mut file_config: Option<vallum_config::Config> = None;
     let config = match args.config.as_deref() {
         Some(path) => match check_config(path, allow_insecure_key) {
             Ok((config, key_path)) => {
+                file_config = vallum_config::Config::load(path).ok();
                 account_table = vallum_config::Config::load(path).ok().map(|c| c.account);
                 checks.push(Check::new(
                     "config",
@@ -217,6 +219,18 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
                     // matters — a path that dies while the daemon keeps dialling.
                     checks.push(check_path_liveness(path));
                     checks.push(check_handshake_drops(path));
+                    // The config and the running daemon must agree about each
+                    // peer's key. They can disagree silently (#34) — this is
+                    // the surface that says so.
+                    if let Some(file_cfg) = file_config.as_ref() {
+                        if let Some(check) = check_peer_sync(
+                            file_cfg,
+                            path,
+                            control::request(path, "get=1\n").ok().as_deref(),
+                        ) {
+                            checks.push(check);
+                        }
+                    }
                 }
                 Err(error) => {
                     let is_offline = match &error {
@@ -895,6 +909,104 @@ fn handshake_verdict(
              it sends is going out in the clear. {cause}"
         ),
     )
+}
+
+/// One peer whose config key and daemon-session key disagree.
+struct PeerDesync {
+    name: String,
+    config_fingerprint: String,
+    session_fingerprint: String,
+}
+
+/// Compare the config's peers against the daemon's session, by name.
+///
+/// `config_peers` and `session_peers` are (peer, fingerprint) pairs. Only
+/// peers present on BOTH sides can desync: a peer the daemon has not loaded
+/// is the tunnel check's domain, and a session peer the config dropped was
+/// already removed from one side.
+fn peer_desyncs(
+    config_peers: &[(String, String)],
+    session_peers: &[(String, String)],
+) -> Vec<PeerDesync> {
+    config_peers
+        .iter()
+        .filter_map(|(name, config_fp)| {
+            session_peers
+                .iter()
+                .find(|(session_name, _)| session_name == name)
+                .and_then(|(_, session_fp)| {
+                    (session_fp != config_fp).then(|| PeerDesync {
+                        name: name.clone(),
+                        config_fingerprint: config_fp.clone(),
+                        session_fingerprint: session_fp.clone(),
+                    })
+                })
+        })
+        .collect()
+}
+
+/// The config and the session must agree about each peer's key.
+///
+/// They can disagree silently — a config edit without a sync, a rotation that
+/// was never applied — and the tunnel keeps answering while neither surface
+/// says a word. The alpha server shipped exactly that state (#34): `peer show
+/// laptop` answered one fingerprint, `show` and `metrics` another, and nothing
+/// warned. `reply` is injected so tests can feed a fixture; the caller passes
+/// the `get=1` reply, `None` when the daemon cannot be asked (the tunnel check
+/// already warns about that, so this check stays out of the report).
+fn check_peer_sync(
+    config: &vallum_config::Config,
+    control: &Path,
+    reply: Option<&str>,
+) -> Option<Check> {
+    let _ = control;
+    let response = uapi::parse_response(reply?);
+    let session_peers: Vec<(String, String)> = (0..response.peers.len())
+        .map(|index| {
+            (
+                response
+                    .peer_field(index, uapi::field::VALLUM_NAME)
+                    .map(String::from)
+                    .unwrap_or_default(),
+                response
+                    .peer_field(index, uapi::field::VALLUM_FINGERPRINT)
+                    .map(String::from)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    let config_peers: Vec<(String, String)> = config
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            let line = peer.public_key.as_deref()?;
+            Some((peer.name.clone(), crate::keys::fingerprint(line)))
+        })
+        .collect();
+    if config_peers.is_empty() || session_peers.is_empty() {
+        return None;
+    }
+    let desyncs = peer_desyncs(&config_peers, &session_peers);
+    if desyncs.is_empty() {
+        return Some(Check::new(
+            "peer sync",
+            Status::Pass,
+            "every peer's key in the config matches the running daemon",
+        ));
+    }
+    let detail = desyncs
+        .iter()
+        .map(|desync| {
+            format!(
+                "peer {}: the config holds key {} but the running daemon holds {} — \
+                 the tunnel is not running what the config says; re-apply the config \
+                 (syncconf) or restart the daemon",
+                desync.name, desync.config_fingerprint, desync.session_fingerprint
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(Check::new("peer sync", Status::Warn, detail))
 }
 
 fn check_tunnel(
@@ -1832,6 +1944,81 @@ fn check_config_mode(config: Option<&Path>) -> Check {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::bisect_mtu;
+
+    #[test]
+    fn peer_sync_names_a_config_daemon_key_mismatch() {
+        // Issue #34, live on the alpha server: `peer show laptop` answered one
+        // fingerprint (the config) while `show`/`metrics` answered another (the
+        // daemon session), with no rotation window in the config and no surface
+        // saying so. The config-vs-session comparison is what makes it visible.
+        let config_peers = vec![
+            ("laptop".to_owned(), "7db904af471a".to_owned()),
+            ("lab8".to_owned(), "7252c337c2a77406".to_owned()),
+        ];
+        let session_peers = vec![
+            ("laptop".to_owned(), "abc04277bba25668".to_owned()),
+            ("lab8".to_owned(), "7252c337c2a77406".to_owned()),
+        ];
+        let desyncs = super::peer_desyncs(&config_peers, &session_peers);
+        assert_eq!(desyncs.len(), 1, "laptop is the desync; lab8 agrees");
+        assert_eq!(desyncs[0].name, "laptop");
+        assert_eq!(desyncs[0].config_fingerprint, "7db904af471a");
+        assert_eq!(desyncs[0].session_fingerprint, "abc04277bba25668");
+
+        // Keys that agree are not a desync.
+        assert!(super::peer_desyncs(&config_peers, &config_peers).is_empty());
+        // A config peer the daemon has not loaded yet is the tunnel check's
+        // domain, not a key mismatch.
+        assert!(super::peer_desyncs(&config_peers, &[]).is_empty());
+    }
+
+    #[test]
+    fn peer_sync_check_warns_and_points_at_the_fix() {
+        let line_a = "vallum1:0003:aa:bb:-";
+        let line_b = "vallum1:0003:cc:dd:-";
+        let dir = std::env::temp_dir().join(format!("vallum-peer-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("peersync.toml");
+        let socket_path = dir.join("peersync.sock");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[interface]\nname = \"peersync\"\nprivate_key = \"k\"\nlisten = \"127.0.0.1:0\"\ncontrol = \"{}\"\n\n[[peer]]\nname = \"laptop\"\npublic_key = \"{line_a}\"\n",
+                socket_path.display()
+            ),
+        )
+        .unwrap();
+        let config = vallum_config::Config::load(&config_path).expect("config parses");
+        // The daemon answers with a fingerprint that is NOT the config key's.
+        let reply = format!(
+            "private_key=(hidden)\nvallum_interface=peersync\nlisten_port=51990\nerrno=0\n\npublic_key=zzz\nvallum_name=laptop\nvallum_fingerprint={}\nrx_bytes=0\ntx_bytes=0\nerrno=0\n",
+            crate::keys::fingerprint(line_b)
+        );
+        let check = super::check_peer_sync(&config, &socket_path, Some(&reply))
+            .expect("the daemon answered, so the check runs");
+        assert_eq!(check.status, super::Status::Warn);
+        assert!(check.detail.contains("laptop"));
+        assert!(
+            check.detail.contains("syncconf"),
+            "the detail names the fix"
+        );
+
+        // When the keys agree, the check passes.
+        let agreeing_reply = reply.replace(
+            &crate::keys::fingerprint(line_b),
+            &crate::keys::fingerprint(line_a),
+        );
+        let check = super::check_peer_sync(&config, &socket_path, Some(&agreeing_reply))
+            .expect("the daemon answered");
+        assert_eq!(check.status, super::Status::Pass);
+
+        // An unreachable daemon means the check cannot run: the tunnel check
+        // already warns about that, so this one stays out of the report.
+        assert!(super::check_peer_sync(&config, &socket_path, None).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_search_finds_the_threshold() {
