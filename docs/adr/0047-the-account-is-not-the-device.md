@@ -103,9 +103,42 @@ model. Three forces push a redesign:
 - **Vertical-only scaling** (single-thread data plane); horizontal scaling un-designed. State
   the single-server capacity model honestly; name multi-server as future.
 
-## Open questions (await operator ratification — do NOT decide unilaterally)
-1. Tenancy isolation mechanism: per-account subnets vs nft tunnel→tunnel drop keyed by account.
-2. Agent device class: ephemeral/auto-expiring slots vs a separate agent quota.
-3. Account token lifecycle: rotation/recovery vs the PII-free no-recovery stance (ADR-0045).
-4. Web→client token handoff: shown-once vs a `vallum://account` URI.
-5. Protocol wire-versioning rule for adding enrolment fields without breaking old clients.
+## Proposed resolutions (2026-11-19, post-dogfood — pending operator ratification)
+
+The overnight dogfood (TUI/GUI/UTCP against the live server) and issue #34 turned
+each open question from abstract to concrete. The recommendations below are the
+agent's; the ADR stays `proposed` until the operator ratifies.
+
+1. **Isolation mechanism** → Ship the built **full client isolation** for the alpha
+   (colleagues need no inter-peer traffic); design **per-account subnets** as the beta
+   path: the desk assigns each account a slice of the interface prefix, nft drops
+   cross-subnet tunnel→tunnel, and the daemon **stays account-ignorant** (ADR-0044
+   holds — the desk owns the slice, the daemon just routes).
+2. **Agent device class** → **Ephemeral TTL devices**: a device enrolled with
+   `ephemeral: true, ttl: N` is swept (daemon peer + row) by the existing sweep —
+   the same machinery that already releases ghost reservations (WS4d). A separate
+   agent quota is more state for the same need; deferred.
+3. **Account token lifecycle** → **Keep the PII-free no-recovery stance** (ADR-0045)
+   and add an *operator-side* `vallum-desk-admin reset-token <account>` later:
+   re-issuance out-of-band, zero PII. Recovery-by-email is rejected; permanent
+   lockout with no operator escape is rejected for a paid service.
+4. **Web→client token handoff** → **Both**: shown-once stays primary (works for
+   agents and every browser); add a script-fired `vallum://account?token=…` deep
+   link — the same pattern the ticket page already uses to keep tokens out of
+   browser history and prefetchers. Old clients ignore the parameter safely.
+5. **Wire-versioning rule** → **Strict parsing stays** (fail-closed is a security
+   property). New rule: additive fields ride a new flag bit; parsers reject what
+   they do not understand, loudly; compatibility is proven by golden-fixture
+   tests (old-client bytes must still parse), never hoped for.
+
+### New invariant (demonstrated, not sloganized)
+
+**Device identity is stable across every surface that counts, labels, or joins on
+it.** Violated in the wild three times this week: fingerprint-keyed metrics labels
+fork on rotation (fixed, `ad1afb1`); the desk's scrape joined on fingerprint and
+matched nothing (fixed earlier); and the alpha server's `laptop` peer answers
+`peer show` and `show`/`metrics` with *different* fingerprints — a config↔daemon
+desync with no rotation window and no surface saying so (#34). A device's name is
+its identity; keys, fingerprints and documents are rotating attributes.
+
+
