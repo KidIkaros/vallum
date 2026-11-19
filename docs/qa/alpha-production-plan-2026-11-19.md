@@ -87,3 +87,11 @@ remaining gaps. Lead with findings in words, numbers as backup.
   dispatched to background children in worktrees vallum-ws2 / vallum-ws5. Overnight deploy policy
   set to HOLD ALL live deploys for operator review. Cron loop `vallum-alpha-loop` to continue
   WS4/WS3/WS6/WS7 and merge verified child worktrees.
+- 2026-11-19 00:1x EST — DOGFOOD (clientele): the vallum-fox agent lane on the operator host is
+  DOWN (daemon+quick inactive, egress unreachable, fail-closed). It is an on-demand member
+  namespace (vallum-quick app), not a persistent unit; local sudo needs a password so /etc/vallum
+  is inspectable only via the VPS (passwordless). WS6 must verify the fox setup + headless agent
+  enrolment (signup→devices→join) and the lane's start path. Finding recorded, not fixed tonight.
+- 2026-11-19 00:1x EST — Foundation complete: plan + ADR-0047 committed (13e8a78 + plan commit);
+  WS2/WS5 children running; cron loop 45dc5f86ee11 scheduled (first tick 00:57). Parent turn ends;
+  the loop carries WS3/WS4/WS6/WS7 and merges verified worktrees through the night.
