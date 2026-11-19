@@ -1,0 +1,22 @@
+# Alertmanager for the Vallum single-operator host — TEMPLATE.
+# Copy to /etc/prometheus/alertmanager.yml and replace <NTFY_TOPIC> with an
+# unguessable topic (openssl rand -hex 8). Do NOT commit the real topic: anyone
+# who knows it can read or publish alerts. Subscribe on your phone at
+# https://ntfy.sh/<NTFY_TOPIC> (ntfy app, or `ntfy subscribe <NTFY_TOPIC>`).
+#
+# vmalert reaches this at -notifier.url=http://127.0.0.1:9093 (see
+# contrib/ops/vmalert-notifier.conf). ntfy parses the Alertmanager webhook
+# payload at its /alertmanager endpoint — no bridge daemon needed.
+global:
+  resolve_timeout: 5m
+route:
+  receiver: ntfy
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 3h
+receivers:
+  - name: ntfy
+    webhook_configs:
+      - url: 'https://ntfy.sh/<NTFY_TOPIC>/alertmanager'
+        send_resolved: true
