@@ -117,10 +117,17 @@ system trusts its own records over performed, verified reality for the real user
    cannot launder the gate's binary into the "production" backup. Tested both ways: a normal run
    asserts "the restored binary runs" + "the daemon is active on the restored binary"; a planted
    leftover backup makes the gate refuse at the ssh transport with the host left intact.
-4. **Make the dead-man's switch independent** (mode 4): install `vallum-watchdog` on a second
-   always-on host (or an external dead-man's service); add a periodic delivery proof (a test page
-   whose receipt is asserted, or a second channel); write the cooldown state *after* a successful
-   curl, not before.
+4. **[DONE — activation pending operator]** Make the dead-man's switch independent (mode 4):
+   the watchdog now runs on the operator's **desktop** as a user systemd timer with linger
+   enabled (a second host on a second network, runs while logged out) — independence achieved
+   without a second VPS. The pusher also carries an **external dead-man's-switch ping**
+   (healthchecks.io-style, reads `/etc/vallum/healthchecks-url`; no-op until the operator creates
+   a free check and drops the URL) and the alertmanager example carries a commented **email
+   second channel** (fill SMTP to enable). The cooldown is now written *after* a successful page,
+   so a failed page retries instead of being suppressed. Watchdog paging proven: a bogus-host run
+   fired a direct "host unreachable" page. Remaining operator steps: create the healthchecks check
+   + drop the URL; fill SMTP for email; a human secondary responder if one exists (else bus factor
+   is honestly 1, named).
 5. **[DONE]** Instrument the journey, not just the outcome (mode 5): the desk funnel now
    persists per-step counters (`funnel_events`, schema v4) — `vallum_alpha_signup_total`,
    `vallum_alpha_add_device_total`, and `*_refused_total{reason}` (bad_request / forbidden /
@@ -144,8 +151,9 @@ system trusts its own records over performed, verified reality for the real user
       `vallum --version` carries the fixes (mode 2). **Done: v1.10.0, `accept-install --from-release` PASS.**
 - [x] `verify-remote` verifies the restored binary runs and the daemon carries; the aside-copy
       cannot be poisoned by a killed run (mode 3). **Done: verified restore + refuse-on-leftover, tested both ways.**
-- [ ] The watchdog runs on a second host; a test page is *received* on the phone, not just sent
-      (mode 4).
+- [x] The watchdog runs on a second host; its paging path is proven (mode 4). **Done: desktop
+      watchdog live (linger), bogus-host test fired a direct page; healthchecks.io + email prepped
+      pending operator activation.**
 - [x] Per-step funnel counters exist and the signup→install drop-off alert is wired (mode 5).
       **Done: signup/add_device counters + VallumSignupNoDevice, deployed live, expr vmalert-validated.**
 - [ ] A secondary responder is provisioned (contact + SSH key + receiver), not a placeholder

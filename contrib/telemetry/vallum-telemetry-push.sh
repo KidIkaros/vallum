@@ -124,13 +124,28 @@ if [ "$AM_CODE" != "200" ] && [ -n "$PAGER_URL" ]; then
     NOW=$(date +%s)
     PREV=$(cat "$PAGER_STATE" 2>/dev/null || echo 0)
     if [ $((NOW - PREV)) -ge 300 ]; then
-        echo "$NOW" > "$PAGER_STATE" 2>/dev/null
-        curl -sS --max-time 10 \
+        # Cooldown only after a page actually lands: a failed page must retry next
+        # cycle, not be suppressed for five minutes (premortem mode 4).
+        if curl -fsS --max-time 10 \
             -H "Title: Vallum pager path broken" -H "Priority: urgent" \
             -H "Tags: rotating_light" \
             -d "Alertmanager on $HOST is unreachable (HTTP $AM_CODE). Alerts are not being routed. The telemetry pusher is still alive and paging you directly. Check: systemctl status alertmanager; journalctl -u alertmanager -n 50." \
-            "$PAGER_URL" >/dev/null 2>&1
+            "$PAGER_URL" >/dev/null 2>&1; then
+            echo "$NOW" > "$PAGER_STATE" 2>/dev/null
+        fi
     fi
+fi
+
+# External dead-man's switch (premortem 2026-11-19, mode 4): ping a
+# healthchecks.io-style check each cycle. If this host dies — or the pusher stops —
+# the pings stop and the external service alerts independently of everything on
+# this host, which no on-host watchdog can. The URL lives in a 0600 file (or
+# VALLUM_HEALTHCHECKS_URL); absent, this is a no-op, so the wiring ships before the
+# operator creates the check. Create a free check, then:
+#   sudo sh -c 'umask 077; echo https://hc-ping.com/<uuid> > /etc/vallum/healthchecks-url'
+HC_URL=${VALLUM_HEALTHCHECKS_URL:-$(cat /etc/vallum/healthchecks-url 2>/dev/null)}
+if [ -n "$HC_URL" ]; then
+    curl -fsS --max-time 10 -o /dev/null "$HC_URL" >/dev/null 2>&1 || true
 fi
 
 # A scrape that produced nothing is a scrape that did not happen; exit nonzero so

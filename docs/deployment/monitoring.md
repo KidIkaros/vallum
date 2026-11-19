@@ -163,6 +163,30 @@ Three guards close it (the `vallum-monitoring` rule group):
   host dying completely. Install `vallum-watchdog.{service,timer}` there with
   `VALLUM_WATCH_HOST` and `VALLUM_PAGER_URL` in `/etc/default/vallum-watchdog`.
 
+**No second VPS? Two ways to get independence anyway.** The watchdog only needs a
+second *vantage point*, not a second server:
+
+- **The operator's own desktop.** Install the watchdog as a *user* systemd timer
+  (`~/.config/systemd/user/vallum-watchdog.{service,timer}`, `EnvironmentFile`
+  pointing at a 0600 `~/.config/vallum-watchdog.env`), then
+  `systemctl --user enable --now vallum-watchdog.timer` and `loginctl enable-linger`
+  so it runs while logged out. It is a separate host on a separate network; the
+  only limit is the desktop must be powered on.
+- **An external dead-man's switch (always-on, recommended).** The pusher pings a
+  healthchecks.io-style check each cycle; if the host or pusher dies the pings stop
+  and the service alerts independently of everything on the host. Create a free
+  check, then `sudo sh -c 'umask 077; echo https://hc-ping.com/<uuid> >
+  /etc/vallum/healthchecks-url'`. Absent that file the ping is a no-op, so the
+  wiring ships before the check exists.
+
+**A second alert channel.** A single ntfy topic is one delivery path; an ntfy.sh
+outage or a silenced phone blinds it. Uncomment the `email_configs` block in
+`contrib/monitoring/alertmanager.yml.example` (fill the SMTP placeholders, keep the
+file 0600) so the same alerts reach email too. The *secondary responder* is a
+person, not a host — a trusted contact with the ntfy topic, an SSH key and this
+runbook; with none, the bus factor is honestly 1, mitigated by off-host backups,
+this runbook, and the independent watchdog above.
+
 **Prove the pager fires.** A pager path that has never delivered a page is a
 guess. After installing or changing it, send a test alert through the whole
 chain and confirm it lands on the phone:

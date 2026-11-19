@@ -26,9 +26,12 @@ page() { # $1 title, $2 body — cooldown so an outage pages once per 5 min
     PREV=$(cat "$STATE" 2>/dev/null || echo 0)
     if [ $((NOW - PREV)) -ge 300 ]; then
         mkdir -p "$(dirname "$STATE")" 2>/dev/null
-        echo "$NOW" > "$STATE" 2>/dev/null
-        curl -sS --max-time 10 -H "Title: $1" -H "Priority: urgent" \
-            -H "Tags: rotating_light" -d "$2" "$PAGER_URL" >/dev/null 2>&1
+        # Cooldown only after a page lands; a failed page retries next cycle
+        # rather than being suppressed (premortem mode 4).
+        if curl -fsS --max-time 10 -H "Title: $1" -H "Priority: urgent" \
+            -H "Tags: rotating_light" -d "$2" "$PAGER_URL" >/dev/null 2>&1; then
+            echo "$NOW" > "$STATE" 2>/dev/null
+        fi
     fi
 }
 

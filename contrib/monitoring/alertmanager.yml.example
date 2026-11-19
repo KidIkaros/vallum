@@ -20,3 +20,14 @@ receivers:
     webhook_configs:
       - url: 'https://ntfy.sh/<NTFY_TOPIC>/alertmanager'
         send_resolved: true
+    # Second channel (premortem 2026-11-19, modes 4/6): email alongside ntfy, so an
+    # ntfy.sh outage or a silenced phone does not blind the operator. Uncomment and
+    # fill the SMTP placeholders to enable; the same alerts then reach both channels.
+    # The SMTP password is a secret — keep this file 0600, never commit the real one.
+    # email_configs:
+    #   - to: '<OPERATOR_EMAIL>'
+    #     from: '<ALERT_FROM_EMAIL>'
+    #     smarthost: '<SMTP_HOST:587>'
+    #     auth_username: '<SMTP_USER>'
+    #     auth_password: '<SMTP_PASSWORD>'
+    #     send_resolved: true
