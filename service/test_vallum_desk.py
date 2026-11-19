@@ -187,6 +187,21 @@ class SignupTests(DeskTestCase):
         _, device = self.desk.add_device({"token": first["token"], "name": "laptop"})
         self.assertEqual(device["peer"], "u0001-laptop")
 
+    def test_a_failed_signup_write_leaves_no_half_account(self):
+        # The account row, its label and the signup count are one transaction:
+        # a failure part-way must not leave an account behind (and, on the
+        # coded path, a burned code with no account to show for it).
+        self.config.open_signup = True
+        def boom(ip):
+            raise RuntimeError("disk on fire")
+        self.desk._count_signup = boom
+        with self.assertRaises(RuntimeError):
+            self.desk.signup({})
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 0)
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM signups").fetchone()[0], 0)
+
 
 class DaemonCliTests(unittest.TestCase):
     """The CLI port: what the desk reads from the daemon's own output."""
@@ -1233,6 +1248,15 @@ class AccountPageTests(HttpTests):
         self.assertEqual(headers.get("X-Robots-Tag"), "noindex")
         self.assertIn("u0001-friend", page)
 
+    def test_the_account_created_page_is_private_and_noindexed(self):
+        # The signup answer carries the only credential — it must not be
+        # cached or crawled, exactly like every other credential-bearing page.
+        status, headers, page = self.post_headers(
+            "/signup", "", "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertEqual(headers.get("X-Robots-Tag"), "noindex")
+
     def test_the_account_shell_needs_no_script(self):
         status, _, page = self.get("/account")
         self.assertEqual(status, 200)
@@ -1520,6 +1544,28 @@ class MigrationTests(DeskTestCase):
         self.assertEqual(
             second.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 1)
 
+    def test_an_interrupted_rebuild_recovers_on_the_next_start(self):
+        # A crash mid-rebuild can leave the scratch table (accounts_v3)
+        # behind. The next start must clear it and finish the migration —
+        # not wedge on "table already exists", and not silently rebuild over
+        # an empty accounts table.
+        path = self.v2_db()
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE accounts_v3 (id INTEGER PRIMARY KEY)")
+        conn.close()
+        config = dataclasses.replace(self.config, state=path)
+        desk = Desk(config, self.daemon)
+        self.addCleanup(desk.db.close)
+        self.assertEqual(
+            desk.db.execute("PRAGMA user_version").fetchone()[0],
+            desk_module.SCHEMA_VERSION)
+        self.assertEqual(
+            desk.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+        self.assertEqual(
+            desk.db.execute("SELECT peer FROM accounts").fetchone()["peer"], "u0001-old")
+        self.assertIsNone(desk.db.execute(
+            "SELECT name FROM sqlite_master WHERE name='accounts_v3'").fetchone())
+
 
 class PeersRelationTests(DeskTestCase):
     """Every reader consults the peers relation, not the legacy column."""
@@ -1761,6 +1807,15 @@ class DevicesTests(DeskTestCase):
         self.assertEqual(
             self.desk.db.execute(
                 "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 0)
+
+    def test_removing_a_device_needs_a_peer_name_even_with_devices(self):
+        # The ownership check compares against the legacy column, which is
+        # NULL for every new-contract account — even one carrying devices.
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        code, payload = self.desk.remove_device({"token": token})
+        self.assertEqual(code, 400)
+        self.assertEqual(self.daemon.removed, [])
 
 
 class VoucherTests(DeskTestCase):
@@ -2138,6 +2193,16 @@ class AccountOnlyTests(DeskTestCase):
         _, account = self.signup()
         code, payload = self.desk.remove_device({"token": account["token"], "peer": "u0001-x"})
         self.assertEqual(code, 404)
+
+    def test_removing_a_device_needs_a_peer_name(self):
+        # A missing peer must not slip past the ownership check: on a
+        # new-contract account the legacy column is NULL, and `None != None`
+        # is False — the old comparison would pass and call daemon.remove(None).
+        _, account = self.signup()
+        code, payload = self.desk.remove_device({"token": account["token"]})
+        self.assertEqual(code, 400)
+        self.assertIn("peer", payload["error"])
+        self.assertEqual(self.daemon.removed, [])
 
 
 if __name__ == "__main__":

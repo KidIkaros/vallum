@@ -161,7 +161,7 @@
     },
     {
       "name": "vallum_desk_set_plan",
-      "description": "Set an account's plan on the desk: byte cap and expiry. A paid tier is a row, not code.",
+      "description": "Set an account's plan on the desk: byte cap and expiry. A paid tier is a row, not code. Address the account by peer (one of its device names) OR by token (its account number — the only handle on a device-less account); pass an empty string for the unused one.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -175,7 +175,11 @@
           },
           "peer": {
             "type": "string",
-            "description": "The peer name on the server."
+            "description": "A device peer name on the server; empty when addressing by token."
+          },
+          "token": {
+            "type": "string",
+            "description": "The account number; empty when addressing by peer."
           },
           "bytes_cap": {
             "type": "integer",
@@ -190,6 +194,7 @@
           "url",
           "admin_token",
           "peer",
+          "token",
           "bytes_cap",
           "expires"
         ]
@@ -206,7 +211,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"bytes_cap\":UTCP_ARG_bytes_cap_UTCP_END,\"expires\":\"UTCP_ARG_expires_UTCP_END\"}'",
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"token\":\"UTCP_ARG_token_UTCP_END\",\"bytes_cap\":UTCP_ARG_bytes_cap_UTCP_END,\"expires\":\"UTCP_ARG_expires_UTCP_END\"}'",
             "append_to_final_output": true
           }
         ]
@@ -300,7 +305,7 @@
     },
     {
       "name": "vallum_desk_set_status",
-      "description": "Set an account's status on the desk: reinstate the row (active), or mark it expired, overquota or revoked. This changes the desk's record only; if the sweep already removed the peer, enrol a new ticket to reconnect.",
+      "description": "Set an account's status on the desk: reinstate the row (active), or mark it expired, overquota or revoked. This changes the desk's record only; if the sweep already removed the peer, enrol a new ticket to reconnect. Address the account by peer OR by token (its account number — the only handle on a device-less account); pass an empty string for the unused one.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -314,7 +319,11 @@
           },
           "peer": {
             "type": "string",
-            "description": "The peer name on the server."
+            "description": "A device peer name on the server; empty when addressing by token."
+          },
+          "token": {
+            "type": "string",
+            "description": "The account number; empty when addressing by peer."
           },
           "status": {
             "type": "string",
@@ -325,6 +334,7 @@
           "url",
           "admin_token",
           "peer",
+          "token",
           "status"
         ]
       },
@@ -340,7 +350,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"status\":\"UTCP_ARG_status_UTCP_END\"}'",
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"admin_token\":\"UTCP_ARG_admin_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"token\":\"UTCP_ARG_token_UTCP_END\",\"status\":\"UTCP_ARG_status_UTCP_END\"}'",
             "append_to_final_output": true
           }
         ]

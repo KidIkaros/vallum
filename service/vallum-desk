@@ -151,16 +151,27 @@ def _migrate_v2(conn):
     column refuses it.
 
     SQLite cannot drop a NOT NULL constraint in place, so the table is rebuilt:
-    copy every row into the new shape, drop the old, rename. Idempotent — a
-    database already created at v3 has a nullable peer and skips the rebuild.
-    The legacy rows keep their peer values: migration changes the shape, never
-    the facts, and `peers` (the relation) is untouched.
+    copy every row into the new shape, drop the old, rename. The destructive
+    steps run in ONE transaction — a crash part-way rolls back, leaving the
+    original accounts intact for the next start to retry. A leftover scratch
+    table from an interrupted run is cleared first, so a retry cannot wedge on
+    "table already exists". Idempotent: a database already created at v3 has a
+    nullable peer and skips the rebuild. The legacy rows keep their peer
+    values: migration changes the shape, never the facts, and `peers` (the
+    relation) is untouched.
+
+    The DROP relies on `PRAGMA foreign_keys` being OFF (the sqlite default;
+    this service never enables it): peers references accounts by name, and
+    the reference follows the rename. If foreign keys are ever enabled, this
+    rebuild must be revisited.
     """
     peer_column = [row for row in conn.execute("PRAGMA table_info(accounts)")
                    if row[1] == "peer"]
     if not peer_column or peer_column[0][3] == 0:
         return  # already nullable (a fresh v3 database)
     conn.executescript("""
+        DROP TABLE IF EXISTS accounts_v3;
+        BEGIN IMMEDIATE;
         CREATE TABLE accounts_v3 (
             id         INTEGER PRIMARY KEY,
             peer       TEXT UNIQUE,
@@ -180,6 +191,7 @@ def _migrate_v2(conn):
             FROM accounts;
         DROP TABLE accounts;
         ALTER TABLE accounts_v3 RENAME TO accounts;
+        COMMIT;
     """)
 
 
@@ -271,8 +283,9 @@ class DaemonCli(Daemon):
             out = subprocess.run([self.cli, *args, "--config", self.config],
                                  capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
-            # The desk holds its lock across this call: an unbounded wait would
-            # wedge every other request behind one stuck daemon.
+            # A stuck daemon must not wedge this request thread forever; the
+            # desk lock is NOT held across daemon calls, so other requests
+            # keep moving while this one waits out its bound.
             raise RuntimeError(f"vallum {' '.join(args[:2])}: no answer within 60s")
         if out.returncode != 0:
             raise RuntimeError(f"vallum {' '.join(args[:2])}: {out.stderr.strip()[:200]}")
@@ -426,8 +439,8 @@ class Desk:
     def _peers_of(self, account):
         """The account's device peer names. The peers table is the relation;
         the legacy `accounts.peer` column is the fallback for a row written
-        before the backfill — and still populated on new rows, so older
-        readers keep working during the expand."""
+        before the backfill. It is populated only for pre-migration and
+        adopted rows — new signups leave it NULL (ADR-0047)."""
         with self.lock:
             rows = self.db.execute(
                 "SELECT peer FROM peers WHERE account_id=? AND status='active'",
@@ -535,22 +548,32 @@ class Desk:
             # peer stays NULL and no peers row is written: the account is not
             # a device. The label carries the id so the operator's listing can
             # tell accounts apart without using the credential as a name.
-            cursor = self.db.execute(
-                "INSERT INTO accounts "
-                "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip) "
-                "VALUES (NULL,?,?,?,?,?,?,?,?,?)",
-                ("account", token, origin, plan, self._now(), expires, cap, "active",
-                 client_ip if client_ip and client_ip != "unknown" else None))
-            label = f"account-{cursor.lastrowid}"
-            self.db.execute("UPDATE accounts SET label=? WHERE id=?",
-                            (label, cursor.lastrowid))
-            if not code:
-                self._count_signup(client_ip)
-            elif known:
-                self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (label, code))
-            else:
-                self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
-                                (code, self._now(), label))
+            # One transaction: the row, its label and the code burn (or the
+            # signup count) stand or fall together — a crash part-way must not
+            # leave a burned code with no account, or an account whose code is
+            # still reusable.
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self.db.execute(
+                    "INSERT INTO accounts "
+                    "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip) "
+                    "VALUES (NULL,?,?,?,?,?,?,?,?,?)",
+                    ("account", token, origin, plan, self._now(), expires, cap, "active",
+                     client_ip if client_ip and client_ip != "unknown" else None))
+                label = f"account-{cursor.lastrowid}"
+                self.db.execute("UPDATE accounts SET label=? WHERE id=?",
+                                (label, cursor.lastrowid))
+                if not code:
+                    self._count_signup(client_ip)
+                elif known:
+                    self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (label, code))
+                else:
+                    self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
+                                    (code, self._now(), label))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
         return 200, {"token": token, "expires": expires,
                      "plan": plan, "bytes_cap": cap,
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
@@ -720,7 +743,7 @@ class Desk:
             row = self.db.execute(
                 "SELECT expires, bytes_cap, plan FROM accounts WHERE id=?",
                 (account["id"],)).fetchone()
-        return 200, {"peer": account["peer"], "applied": code,
+        return 200, {"peer": self._account_name(account), "applied": code,
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
                      "plan": row["plan"]}
 
@@ -889,6 +912,11 @@ class Desk:
         the peer. Same removal-first order as the admin path."""
         token = body.get("token") or ""
         peer = body.get("peer")
+        if not peer:
+            # A missing peer must not reach the ownership check: the legacy
+            # column is NULL on new-contract accounts, and `None != None`
+            # is False — the comparison would pass and remove nothing.
+            return 400, {"error": "peer is required — name the device to remove"}
         with self.lock:
             account = self.db.execute(
                 "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
@@ -1149,7 +1177,6 @@ class Desk:
         """A plan is a row: cap, expiry, plan name, or status. A paid tier is
         data, and reinstating a mis-quota'd account is the same change.
         Addressed by peer or by account token (device-less accounts)."""
-        peer = body.get("peer")
         account = self._account_for_body(body)
         if not account:
             return 404, {"error": "unknown peer or account token"}
@@ -1170,7 +1197,8 @@ class Desk:
         with self.lock:
             self.db.execute(f"UPDATE accounts SET {', '.join(columns)} WHERE id=?",
                             (*values, account["id"]))
-        return 200, {"peer": peer, "updated": [c.split("=")[0] for c in columns]}
+        return 200, {"peer": self._account_name(account),
+                     "updated": [c.split("=")[0] for c in columns]}
 
     def _revoke_peer(self, body):
         """Per-device: one peer goes, the account survives — its other
@@ -1763,7 +1791,8 @@ def make_handler(desk):
                     code, payload = desk.signup(body, self._client_ip())
                     if code == 200:
                         self._send_html(account_created_page(payload, desk.config.operator_name,
-                                                             desk.config.install_source, desk.config.repo_url))
+                                                             desk.config.install_source, desk.config.repo_url),
+                                        private=True)
                     else:
                         self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
                                         status=code)

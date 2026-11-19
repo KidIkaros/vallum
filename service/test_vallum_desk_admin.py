@@ -90,10 +90,14 @@ class AdminCliTests(unittest.TestCase):
                          (30, 2 * 1024 ** 3, "plus"))
 
     def test_accounts_lists_the_accounts(self):
-        self.signup()
+        payload = self.signup()
         out = self.cli("accounts")
         self.assertIn("account-1", out)  # the label identifies the account
         self.assertIn("trial", out)
+        # The human view masks the account number — a credential must not
+        # land in scrollback or CI logs; --json carries it in full.
+        self.assertNotIn(payload["token"], out)
+        self.assertIn(payload["token"][:8], out)
 
     def test_devices_lists_each_account_device(self):
         payload = self.signup()
@@ -129,13 +133,24 @@ class AdminCliTests(unittest.TestCase):
         row = self.desk.db.execute("SELECT bytes_cap FROM accounts").fetchone()
         self.assertEqual(row["bytes_cap"], 9000)
 
+    def test_set_plan_by_token_file_keeps_the_number_out_of_argv(self):
+        payload = self.signup()
+        number_file = os.path.join(self.tempdir.name, "account-number")
+        with open(number_file, "w") as f:
+            f.write(payload["token"] + "\n")
+        self.cli("set-plan", "--token-file", number_file, "--bytes-cap", "9000")
+        row = self.desk.db.execute("SELECT bytes_cap FROM accounts").fetchone()
+        self.assertEqual(row["bytes_cap"], 9000)
+
     def test_set_plan_needs_exactly_one_of_peer_and_token(self):
         self.signup()
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as raised:
             self.cli("set-plan", "--peer", "u0001-friend", "--token", "x",
                      "--bytes-cap", "1")
-        with self.assertRaises(SystemExit):
+        self.assertIn("exactly one", str(raised.exception))
+        with self.assertRaises(SystemExit) as raised:
             self.cli("set-plan", "--bytes-cap", "1")
+        self.assertIn("exactly one", str(raised.exception))
 
     def test_revoke_removes_one_device(self):
         self.signup_with_device()
@@ -156,10 +171,20 @@ class AdminCliTests(unittest.TestCase):
         self.assertEqual(row["status"], "revoked")
         self.assertEqual(self.daemon.removed, [])
 
+    def test_revoke_account_by_token_file(self):
+        payload = self.signup()
+        number_file = os.path.join(self.tempdir.name, "account-number")
+        with open(number_file, "w") as f:
+            f.write(payload["token"] + "\n")
+        self.cli("revoke", "--token-file", number_file, "--account")
+        row = self.desk.db.execute("SELECT status FROM accounts").fetchone()
+        self.assertEqual(row["status"], "revoked")
+
     def test_per_device_revoke_needs_a_peer(self):
         payload = self.signup()
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as raised:
             self.cli("revoke", "--token", payload["token"])
+        self.assertIn("--peer", str(raised.exception))
 
     def test_sweep_runs_an_enforcement_pass(self):
         self.signup_with_device()
