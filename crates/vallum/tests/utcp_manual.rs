@@ -74,6 +74,46 @@ fn sample(tool: &Value, name: &str) -> String {
     }
 }
 
+/// ADR-0046 and the console's reader rule (CONTEXT.md): the account read
+/// is a read verb an agent is handed, so the manual must speak it, and it
+/// must answer `--json` with the fields an agent branches on.
+#[test]
+fn the_account_read_is_in_the_manual_and_answers_json() {
+    let manual = manual();
+    let tool = tools(&manual)
+        .iter()
+        .find(|tool| tool["name"] == "vallum_account")
+        .expect("the manual must list vallum_account (ADR-0046)");
+    let command = template(tool);
+    assert!(command.starts_with("vallum account "), "{command}");
+    assert!(command.contains("--json"), "{command}");
+    assert!(command.contains("UTCP_ARG_config_UTCP_END"), "{command}");
+    let required = tool["inputs"]["required"]
+        .as_array()
+        .expect("`required` is an array");
+    assert!(
+        required.iter().any(|r| r.as_str() == Some("config")),
+        "config must be a required input"
+    );
+    for key in [
+        "has_account",
+        "endpoint",
+        "reachable",
+        "plan",
+        "status",
+        "expires",
+        "bytes_cap",
+        "bytes_used",
+        "conversion",
+        "devices",
+    ] {
+        assert!(
+            tool["outputs"]["properties"].get(key).is_some(),
+            "the outputs must document `{key}`"
+        );
+    }
+}
+
 #[test]
 fn every_tool_can_actually_be_called() {
     let manual = manual();

@@ -1,5 +1,5 @@
 {
-  "manual_version": "1.1.0",
+  "manual_version": "1.2.0",
   "utcp_version": "1.0.1",
   "tools": [
     {
@@ -557,6 +557,185 @@
         "commands": [
           {
             "command": "vallum status --config UTCP_ARG_config_UTCP_END --json",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_account",
+      "description": "Read this config's desk account (ADR-0046): the plan, status, expiry, byte usage, devices and conversion the desk reports for the bearer token in [account]. Calls POST {endpoint}/api/account on the desk recorded at join and shows that endpoint, so the caller can see where the token goes; the token travels in the POST body, never a URL. Best-effort: an unreachable desk renders every field unknown (reachable=false), and bytes_used is null when the desk could not ask the daemon — never a confident zero. A config with no desk account (file/SSH enrolment) answers has_account=false. Exits 0 even when the desk is unreachable; branch on has_account and reachable.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Path to the client's TOML config (the one `vallum join` wrote)."
+          }
+        },
+        "required": [
+          "config"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {
+          "has_account": {
+            "type": "boolean",
+            "description": "Whether [account] carries a desk token."
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The desk origin being called, as recorded at join."
+          },
+          "reachable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "true when the desk answered; false when it could not be reached or refused; null when no call was attempted."
+          },
+          "detail": {
+            "type": "string",
+            "description": "One sentence: the desk's refusal, the unreachable reason, or why no call was attempted."
+          },
+          "peer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO date; trial end / paid_until."
+          },
+          "paid_until": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes_cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The account's shared byte pool."
+          },
+          "bytes_used": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "null when the desk could not ask the daemon — unknown, not zero."
+          },
+          "conversion": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "devices_total": {
+                "type": "integer"
+              },
+              "devices_connected": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "null when any device's connection is unknown."
+              }
+            }
+          },
+          "devices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "properties": {
+                "peer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "connection": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The desk's six-state vocabulary: live, offline, never, unredeemed, revoked, unknown."
+                },
+                "last_seen_seconds": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "connection_sentence": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "tags": [
+        "diagnostics",
+        "account"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum account --config UTCP_ARG_config_UTCP_END --json",
             "append_to_final_output": true
           }
         ]
