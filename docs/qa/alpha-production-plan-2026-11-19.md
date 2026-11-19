@@ -15,10 +15,11 @@ of production perfection.
    (desk) and/or `bash scripts/verify.sh` (Rust) green BEFORE commit. TDD: failing test first.
 3. **Backup before any live deploy.** `sudo bash scripts/backup-deployment.sh --dest
    /var/backups --label before-<change>` on wingman-vps. Keep rollback ready.
-4. **Deploy policy.** Backward-compatible improvements (white-label config, web re-skin,
-   opt-in isolation, reconciliation) MAY deploy after gate+backup. **Breaking flow changes
-   (account-only signup) develop+gate+commit but HOLD the live deploy for operator review**
-   — mark `DEPLOY-HOLD` in the status table. Do not flip the live signup flow overnight.
+4. **Deploy policy (OVERNIGHT = HOLD ALL).** While the operator sleeps, develop+gate+commit
+   only; **do NOT deploy anything to the live desk/daemon overnight.** Mark every live change
+   `DEPLOY-HOLD`. The operator reviews and deploys when awake (gate+backup+rollback then).
+   This keeps the live alpha safe for the cohort. Rationale: an unsupervised bad deploy could
+   break the running alpha; verified committed progress is the deliverable tonight.
 5. **No irreversible architecture calls unilaterally.** Record hard-to-reverse decisions as
    ADRs (proposed) for operator review. The personal-vs-service tenancy spine is decided in
    ADR-0047; its *open questions* stay open until the operator ratifies.
@@ -53,11 +54,11 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 
 | # | Workstream | Acceptance (runnable) | Status |
 |---|---|---|---|
-| WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE |
-| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | TODO |
+| WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
+| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DOING (child sa-0, worktree vallum-ws2, branch ws2-white-label) |
 | WS3 | Multi-tenant isolation (opt-in service mode): nft drops tunnel→tunnel across accounts; personal flat default | new gate: 2 peers different accounts cannot ping; same account can; default off = flat (accept-pair still green) | TODO |
 | WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | TODO (DEPLOY-HOLD for live signup flip) |
-| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html + desk pages use brand tokens; no wingman-gold; renders; links valid | TODO |
+| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DOING (child sa-1, worktree vallum-ws5, branch ws5-brand-site; site/* only) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
 
@@ -82,3 +83,7 @@ remaining gaps. Lead with findings in words, numbers as backup.
 
 ## State log (append-only)
 - 2026-11-19 00:07 EST — plan created; main@37c0cbc; desk tests green; WS1 (ADR-0047) in progress.
+- 2026-11-19 00:1x EST — WS1 DONE (13e8a78: ADR-0047 + plan). WS2 (white-label) + WS5 (brand site)
+  dispatched to background children in worktrees vallum-ws2 / vallum-ws5. Overnight deploy policy
+  set to HOLD ALL live deploys for operator review. Cron loop `vallum-alpha-loop` to continue
+  WS4/WS3/WS6/WS7 and merge verified child worktrees.
