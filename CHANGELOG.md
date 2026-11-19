@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.0 — 2026-11-19
+## 1.9.0 — 2026-11-19
 
 - **`vallum account` reads the desk, and join records where the account lives.**
   A new read verb posts the bearer token to the desk's `/api/account` over
