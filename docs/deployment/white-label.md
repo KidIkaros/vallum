@@ -27,7 +27,8 @@ daemon's own counters, so a desk bug can mint or remove a peer but cannot
 weaken the tunnel. Identity is keys-only and Mullvad-shaped: the account
 number is the only credential. Lose it and the operator can re-issue one with
 `reset-token` if the account still has a device to address (§5); a device-less
-account with a lost number has no handle, which is why the account database is
+account with a lost number is recovered by the operator reading its number from
+`accounts --json` (no PII verifies ownership — §7), which is why the account database is
 the one file you must back up ([backup.md](backup.md)).
 
 ## 2. Install and run
@@ -456,12 +457,15 @@ and `bytes_cap`), so treat it as bookkeeping until you wire it.
 The constraints a paid service must say out loud to its customers:
 
 - **The account number is the only credential.** No email, no password
-  reset. A customer who loses it has two operator recovery paths:
+  reset. A customer who loses it has operator recovery paths:
   `vallum-desk-admin reset-token --peer <device>` re-issues a fresh number for
   an account that still has a device (the old number stops working; plan and
-  quota survive), or `adopt` re-registers their live peers into a fresh account.
-  A device-less account whose number is lost has no handle to address — rebuild
-  it from a minted code
+  quota survive); `adopt` re-registers their live peers into a fresh account;
+  and for a device-less account the operator can read the number from
+  `vallum-desk-admin accounts --json` by its label. **None of these verifies the
+  requester owns the account** — there is no PII — so recovery is a social-engineering
+  surface: confirm ownership out-of-band before handing over a number, or rebuild
+  from a minted code when you cannot
   ([ADR-0047](../adr/0047-the-account-is-not-the-device.md) Q3).
 - **One host, one interface.** No high availability, no horizontal scaling
   story yet; capacity is the box (the /24 peer table, the address pool,
