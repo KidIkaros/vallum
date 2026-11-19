@@ -1284,6 +1284,56 @@ class FunnelTests(DeskTestCase):
             float(value)
 
 
+class FunnelStepTests(DeskTestCase):
+    """Per-step journey counters (premortem 2026-11-19, mode 5): the funnel must
+    show WHERE conversion drops, not just the terminal state. A stranger who dies
+    at install never adds a device, so devices_total stays 0 and the
+    ticket-vs-handshake alert cannot fire — the signup/add_device attempt and
+    refusal counters locate the drop."""
+
+    def test_signup_ok_and_refused_are_counted_by_reason(self):
+        self.desk.signup({"code": "friend-code-1"})   # ok
+        self.desk.signup({"code": "nope"})             # forbidden: unknown code
+        self.desk.signup({"code": "friend-code-1"})    # forbidden: already used
+        events = self.desk.funnel()["events"]["signup"]
+        self.assertEqual(events["ok"], 1)
+        self.assertEqual(events["refused"].get("forbidden"), 2)
+
+    def test_add_device_ok_and_refused_are_counted_by_reason(self):
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        self.desk.add_device({"token": account["token"], "name": "laptop"})  # ok
+        self.desk.add_device({"token": "nope", "name": "phone"})             # unknown
+        events = self.desk.funnel()["events"]["add_device"]
+        self.assertEqual(events["ok"], 1)
+        self.assertEqual(events["refused"].get("unknown"), 1)
+
+    def test_device_cap_refusal_is_counted_as_limited(self):
+        self.desk.config.device_cap = 1
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        self.desk.add_device({"token": account["token"], "name": "laptop"})  # ok
+        code, _ = self.desk.add_device({"token": account["token"], "name": "phone"})
+        self.assertEqual(code, 429)
+        events = self.desk.funnel()["events"]["add_device"]
+        self.assertEqual(events["refused"].get("limited"), 1)
+
+    def test_step_counters_are_emitted_even_at_zero(self):
+        text = desk_module.funnel_exposition(self.desk.funnel())
+        self.assertIn("vallum_alpha_signup_total 0", text)
+        self.assertIn("vallum_alpha_add_device_total 0", text)
+        for reason in ("bad_request", "forbidden", "unknown", "conflict",
+                       "limited", "daemon", "capacity"):
+            self.assertIn(f'vallum_alpha_signup_refused_total{{reason="{reason}"}} 0', text)
+            self.assertIn(f'vallum_alpha_add_device_refused_total{{reason="{reason}"}} 0', text)
+
+    def test_step_counters_survive_a_restart(self):
+        self.desk.signup({"code": "friend-code-1"})
+        self.desk.signup({"code": "nope"})
+        reopened = desk_module.Desk(self.desk.config, FakeDaemon())
+        events = reopened.funnel()["events"]["signup"]
+        self.assertEqual(events["ok"], 1)
+        self.assertEqual(events["refused"].get("forbidden"), 1)
+
+
 class SignupAttributionTests(DeskTestCase):
     """Where a signup came from, and a limit that survives a restart.
 

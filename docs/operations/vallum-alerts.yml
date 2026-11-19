@@ -398,6 +398,27 @@ groups:
             connection column does not. Check that the desk's `--config` path is
             readable by the unit's user and that `vallum@<stem>` is running.
 
+      # The signup→install drop-off (premortem 2026-11-19, mode 5). The
+      # ticket-vs-handshake alert above guards `devices_total > 0`, so it is blind
+      # to people who signed up but never added a device — they died at the install
+      # step, before any ticket existed. Active accounts with zero devices is that
+      # gap; the funnel's signup counters say how many tried, this says they stalled.
+      - alert: VallumSignupNoDevice
+        expr: sum(vallum_alpha_accounts{status="active"}) > 0 and vallum_alpha_devices_total == 0
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Accounts exist but no device has ever been added — the signup→install step is dropping people"
+          description: >-
+            People signed up (active accounts) yet devices_total is zero: nobody
+            reached add_device. The drop is between signup and adding a device —
+            most often the install step (the client never installed, or installed
+            but never opened the account page). VallumNoDeviceEverConnected cannot
+            see this because its devices_total>0 guard is false here. Read
+            vallum_alpha_signup_total and vallum_alpha_signup_refused_total, and
+            check the install link the signup page serves.
+
       # The rule that would have caught a 30-hour failure. Every other alert here
       # reads Vallum's own metrics, and a unit that is not running emits none —
       # so a dead unit was invisible by construction. This reads the host's own

@@ -45,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -101,6 +101,13 @@ CREATE TABLE IF NOT EXISTS signups (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (ip, day)
 );
+CREATE TABLE IF NOT EXISTS funnel_events (
+    step    TEXT NOT NULL,              -- 'signup' | 'add_device'
+    outcome TEXT NOT NULL,              -- 'ok' | 'refused'
+    reason  TEXT NOT NULL DEFAULT '',   -- refusal class; '' for ok
+    n       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (step, outcome, reason)
+);
 CREATE TABLE IF NOT EXISTS codes (
     code     TEXT PRIMARY KEY,
     created  TEXT NOT NULL,
@@ -112,6 +119,19 @@ CREATE TABLE IF NOT EXISTS codes (
 """
 
 ACCOUNT_STATUSES = ("active", "expired", "overquota", "revoked")
+
+# Refusal classes for the conversion funnel's per-step counters (premortem
+# 2026-11-19, mode 5). The HTTP code maps to a stable, readable reason label so a
+# scrape shows WHERE signup/add_device drops people, not just that it did.
+FUNNEL_REFUSAL_REASONS = {
+    400: "bad_request",
+    403: "forbidden",
+    404: "unknown",
+    409: "conflict",
+    429: "limited",
+    502: "daemon",
+    503: "capacity",
+}
 
 
 def _migrate_v0(conn):
@@ -195,6 +215,12 @@ def _migrate_v2(conn):
     """)
 
 
+def _migrate_v3(conn):
+    """v3 → v4: the funnel_events table (per-step conversion counters). Purely
+    additive — `executescript(SCHEMA)` has already created it; there is no data
+    to transform, so existing accounts, peers and codes pass through untouched."""
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -227,6 +253,8 @@ def open_database(path):
         _migrate_v1(conn)
     if version < 3:
         _migrate_v2(conn)
+    if version < 4:
+        _migrate_v3(conn)
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
@@ -552,6 +580,13 @@ class Desk:
     # -- signup ---------------------------------------------------------
 
     def signup(self, body, client_ip="unknown"):
+        """Create an account from an invite code (or open signup); counts the
+        outcome for the conversion funnel (premortem mode 5)."""
+        code, payload = self._signup_impl(body, client_ip)
+        self._record_funnel_event("signup", code)
+        return code, payload
+
+    def _signup_impl(self, body, client_ip="unknown"):
         """An invite code — or, in open mode, nothing — becomes an ACCOUNT,
         never a device (ADR-0047). Devices enrol later, client-driven, through
         `add_device`; centring the flow on the durable account is what defines
@@ -797,6 +832,13 @@ class Desk:
         return f"vallum1:{int(suite, 16):04x}:{kem.lower()}:{signing.lower()}"
 
     def add_device(self, body, desk_origin=None):
+        """Mint a device's join ticket under an account; counts the outcome for
+        the conversion funnel (premortem mode 5)."""
+        code, payload = self._add_device_impl(body, desk_origin)
+        self._record_funnel_event("add_device", code)
+        return code, payload
+
+    def _add_device_impl(self, body, desk_origin=None):
         """A second (third…) device on an existing account: the bearer token
         authenticates, and the new peer's ticket binds the account's plan —
         same expiry, same shared byte pool. This is also the expired-ticket
@@ -976,6 +1018,18 @@ class Desk:
                 seen_accounts.add(row["peer"])
         return devices
 
+    def _record_funnel_event(self, step, code):
+        """Count one signup/add_device outcome for the conversion funnel. Persisted
+        in funnel_events so the totals survive a restart — a counter that reset on
+        every deploy would lose the alpha's history."""
+        outcome = "ok" if code == 200 else "refused"
+        reason = "" if code == 200 else FUNNEL_REFUSAL_REASONS.get(code, str(code))
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO funnel_events (step, outcome, reason, n) VALUES (?,?,?,1) "
+                "ON CONFLICT(step, outcome, reason) DO UPDATE SET n = n + 1",
+                (step, outcome, reason))
+
     def funnel(self):
         """What the alpha is actually producing: tickets minted versus devices
         that ever handshaked.
@@ -1018,6 +1072,18 @@ class Desk:
             # where `account()` reports one, and the two numbers are read side
             # by side.
             peers = self._active_devices()
+            events = {
+                "signup": {"ok": 0, "refused": {}},
+                "add_device": {"ok": 0, "refused": {}},
+            }
+            for row in self.db.execute(
+                    "SELECT step, outcome, reason, n FROM funnel_events"):
+                if row["step"] not in events:
+                    continue
+                if row["outcome"] == "ok":
+                    events[row["step"]]["ok"] = row["n"]
+                else:
+                    events[row["step"]]["refused"][row["reason"]] = row["n"]
         seen = self._daemon_liveness()
         # The same function the account page uses. A funnel that re-derived the
         # states would be a second definition of the same words, and the page and
@@ -1036,6 +1102,7 @@ class Desk:
             # path runs end to end, which is the question an alpha asks.
             "handshaked": states["live"] + states["offline"],
             "daemon_answered": seen is not None,
+            "events": events,
         }
 
     def account(self, token):
@@ -1697,6 +1764,26 @@ def funnel_exposition(funnel):
         "# TYPE vallum_alpha_shared_ip_accounts gauge",
         f'vallum_alpha_shared_ip_accounts {funnel["attribution"]["shared_ip_accounts"]}',
     ]
+    # Per-step journey counters (premortem mode 5). The terminal gauges above say
+    # how many devices connected; these say where the people who did NOT connect
+    # dropped out — signup refused, or signed up but never added a device (the
+    # install step). Every reason class is emitted even at zero, for the same
+    # reason the device states are: a vanishing series reads as a broken scrape.
+    events = funnel.get("events", {})
+    for step in ("signup", "add_device"):
+        ev = events.get(step, {"ok": 0, "refused": {}})
+        refused = ev.get("refused", {})
+        total = ev.get("ok", 0) + sum(refused.values())
+        lines += [
+            f"# HELP vallum_alpha_{step}_total {step} attempts, ok plus refused.",
+            f"# TYPE vallum_alpha_{step}_total counter",
+            f"vallum_alpha_{step}_total {total}",
+            f"# HELP vallum_alpha_{step}_refused_total {step} refusals by reason.",
+            f"# TYPE vallum_alpha_{step}_refused_total counter",
+        ]
+        for reason in sorted(set(FUNNEL_REFUSAL_REASONS.values()) | set(refused)):
+            lines.append(
+                f'vallum_alpha_{step}_refused_total{{reason="{reason}"}} {refused.get(reason, 0)}')
     return "\n".join(lines) + "\n"
 
 

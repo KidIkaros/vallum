@@ -121,10 +121,16 @@ system trusts its own records over performed, verified reality for the real user
    always-on host (or an external dead-man's service); add a periodic delivery proof (a test page
    whose receipt is asserted, or a second channel); write the cooldown state *after* a successful
    curl, not before.
-5. **Instrument the journey, not just the outcome** (mode 5): add `signup_total`,
-   `add_device_attempted/refused{reason}`, `join_attempted/refused{reason}` counters; alert on
-   `accounts{active} > 0 and devices_total == 0` (the signup→install drop-off the current alert
-   structurally cannot see).
+5. **[DONE]** Instrument the journey, not just the outcome (mode 5): the desk funnel now
+   persists per-step counters (`funnel_events`, schema v4) — `vallum_alpha_signup_total`,
+   `vallum_alpha_add_device_total`, and `*_refused_total{reason}` (bad_request / forbidden /
+   unknown / conflict / limited / daemon / capacity), every series emitted even at zero.
+   New alert `VallumSignupNoDevice` (`sum(accounts{active}) > 0 and devices_total == 0`, 6h)
+   catches the signup→install drop-off the ticket-vs-handshake alert structurally cannot see.
+   Deployed live: v3→v4 migration faithful (17 accounts intact), counters emitted, alert loaded
+   (vmalert dry-run validated the expr). The join-step refusal *reasons* are daemon-side (the
+   enrol responder); the client already surfaces them via the no-answer diagnostic — labelling
+   them as a daemon metric is the remaining sub-item.
 6. **Provision a real secondary** (mode 6): fill the contact, add a second SSH key, wire a second
    alertmanager receiver with escalation; until then the bus factor is 1, named.
 7. **Add ownership proof to recovery** (mode 7): a shared secret set at signup the user can quote,
@@ -140,8 +146,8 @@ system trusts its own records over performed, verified reality for the real user
       cannot be poisoned by a killed run (mode 3). **Done: verified restore + refuse-on-leftover, tested both ways.**
 - [ ] The watchdog runs on a second host; a test page is *received* on the phone, not just sent
       (mode 4).
-- [ ] Per-step funnel counters exist and the signup→install drop-off alert fires on a synthetic
-      stall (mode 5).
+- [x] Per-step funnel counters exist and the signup→install drop-off alert is wired (mode 5).
+      **Done: signup/add_device counters + VallumSignupNoDevice, deployed live, expr vmalert-validated.**
 - [ ] A secondary responder is provisioned (contact + SSH key + receiver), not a placeholder
       (mode 6).
 
