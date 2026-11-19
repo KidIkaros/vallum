@@ -22,7 +22,7 @@ From a release:
 
 ```sh
 curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
-  && sudo bash /tmp/vallum-install.sh -- --from-release --install-only
+  && sudo bash /tmp/vallum-install.sh --from-release --install-only
 ```
 
 The release assets are public, so this needs nothing but `curl`. Installing from

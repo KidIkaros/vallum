@@ -96,7 +96,7 @@ DR is: install Vallum, restore the directory, start the units.
 ```sh
 # On the replacement host
 curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
-  && sudo bash /tmp/vallum-install.sh -- --from-release --install-only
+  && sudo bash /tmp/vallum-install.sh --from-release --install-only
 sudo tar -xzpf vallum-etc-YYYY-MM-DD.tar.gz -C /
 sudo systemctl enable --now vallum@vallum0
 sudo vallum doctor --config /etc/vallum/vallum0.toml
