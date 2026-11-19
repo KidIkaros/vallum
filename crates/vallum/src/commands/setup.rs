@@ -355,6 +355,9 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
         force: false,
         json: false,
         enroll: args.enroll || (!args.yes && ask_enroll(&args.listen)?),
+        // The interactive walk keeps the personal default; service isolation
+        // is an explicit choice (`--client-isolation` or the config key).
+        client_isolation: false,
     };
 
     if interactive && !args.dry_run {

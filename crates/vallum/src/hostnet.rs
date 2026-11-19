@@ -508,12 +508,20 @@ fn plan_active_firewall(state: &HostState, port: u16, interface: &str) -> Vec<Ho
     }
 }
 
-/// Install the masquerade rule for the tunnel's own subnets.
+/// Install the masquerade rule for the tunnel's own subnets, and — when
+/// `isolate` names the tunnel interface — drop tunnel-to-tunnel forwarding.
 ///
 /// The table is Vallum's own (`inet vallum`), so it can be replaced wholesale on
 /// every run without touching the operator's rules, and deleted on uninstall.
+/// That wholesale replace is also what makes the isolation toggle converge:
+/// re-running the plan with the flag off removes the drop chain again.
+///
+/// Isolation lives in this table rather than the host's filter chains because
+/// a drop in *any* base chain at the forward hook wins over an accept in
+/// another, so it holds under ufw, firewalld and plain nftables alike without
+/// editing a single operator rule (ADR-0047, service tenancy).
 #[must_use]
-pub fn plan_nat(v4: &[IpNet], v6: &[IpNet]) -> Vec<HostStep> {
+pub fn plan_nat(v4: &[IpNet], v6: &[IpNet], isolate: Option<&str>) -> Vec<HostStep> {
     if v4.is_empty() && v6.is_empty() {
         return Vec::new();
     }
@@ -527,7 +535,19 @@ pub fn plan_nat(v4: &[IpNet], v6: &[IpNet]) -> Vec<HostStep> {
     for subnet in v6 {
         script.push_str(&format!("    ip6 saddr {subnet} masquerade\n"));
     }
-    script.push_str("  }\n}\n");
+    script.push_str("  }\n");
+    if let Some(interface) = isolate {
+        // Entering and leaving the same tunnel interface is peer-to-peer
+        // traffic; client-to-internet leaves a different interface and
+        // client-to-server is input, not forward, so neither is touched.
+        script.push_str("  chain forward {\n");
+        script.push_str("    type filter hook forward priority filter; policy accept;\n");
+        script.push_str(&format!(
+            "    iifname \"{interface}\" oifname \"{interface}\" drop\n"
+        ));
+        script.push_str("  }\n");
+    }
+    script.push_str("}\n");
     vec![
         HostStep::Run {
             summary: format!("replace the `inet {NAT_TABLE}` NAT table"),
@@ -841,7 +861,7 @@ mod tests {
     fn the_nat_script_names_both_families_and_owns_its_table() {
         let v4: Vec<IpNet> = vec!["10.7.0.0/24".parse().unwrap()];
         let v6: Vec<IpNet> = vec!["fd00:7::/64".parse().unwrap()];
-        let steps = plan_nat(&v4, &v6);
+        let steps = plan_nat(&v4, &v6, None);
         let script = steps
             .iter()
             .find_map(|step| match step {
@@ -852,10 +872,54 @@ mod tests {
         assert!(script.contains("ip saddr 10.7.0.0/24 masquerade"));
         assert!(script.contains("ip6 saddr fd00:7::/64 masquerade"));
         assert!(script.contains("table inet vallum"));
+        // The personal default is flat: no forward chain, no drop (ADR-0047).
+        assert!(!script.contains("chain forward"));
+        assert!(!script.contains("drop"));
+    }
+
+    #[test]
+    fn isolation_drops_tunnel_to_tunnel_in_vallums_own_table() {
+        // A drop in any base chain at the hook wins over an accept elsewhere,
+        // so Vallum's own table enforces isolation under every host firewall
+        // without touching the operator's rules.
+        let v4: Vec<IpNet> = vec!["10.7.0.0/24".parse().unwrap()];
+        let steps = plan_nat(&v4, &[], Some("vallum0"));
+        let script = steps
+            .iter()
+            .find_map(|step| match step {
+                HostStep::Run { stdin, .. } => stdin.clone(),
+                HostStep::Write { .. } => None,
+            })
+            .unwrap();
+        assert!(script.contains("table inet vallum"));
+        assert!(script.contains("chain forward"));
+        assert!(script.contains("type filter hook forward priority filter; policy accept;"));
+        assert!(script.contains("iifname \"vallum0\" oifname \"vallum0\" drop"));
+        // Isolation must not eat the egress path: masquerade stays.
+        assert!(script.contains("ip saddr 10.7.0.0/24 masquerade"));
+        // The wholesale replace is what makes a toggle converge.
+        assert!(steps.iter().any(|step| step.summary().contains("replace")));
+    }
+
+    #[test]
+    fn isolation_is_family_agnostic() {
+        // iifname/oifname match in the inet table regardless of family, so a
+        // v6-only tunnel is isolated by the same rule.
+        let v6: Vec<IpNet> = vec!["fd00:7::/64".parse().unwrap()];
+        let steps = plan_nat(&[], &v6, Some("vallum9"));
+        let script = steps
+            .iter()
+            .find_map(|step| match step {
+                HostStep::Run { stdin, .. } => stdin.clone(),
+                HostStep::Write { .. } => None,
+            })
+            .unwrap();
+        assert!(script.contains("iifname \"vallum9\" oifname \"vallum9\" drop"));
     }
 
     #[test]
     fn no_subnets_means_no_nat() {
-        assert!(plan_nat(&[], &[]).is_empty());
+        assert!(plan_nat(&[], &[], None).is_empty());
+        assert!(plan_nat(&[], &[], Some("vallum0")).is_empty());
     }
 }

@@ -369,6 +369,13 @@ pub struct InitArgs {
     #[arg(long)]
     pub enroll: bool,
 
+    /// Drop tunnel-to-tunnel forwarding between peers (service tenancy).
+    /// The default is flat: peers reach each other (personal tenancy).
+    /// Persisted as `[interface] client_isolation`; on a re-run the config
+    /// is the source of truth, so toggle it there and re-run `server init`.
+    #[arg(long)]
+    pub client_isolation: bool,
+
     /// A DNS server to push to clients through `[quick]`. Repeatable.
     #[arg(long, value_name = "ADDR")]
     pub dns: Vec<String>,
@@ -423,6 +430,7 @@ struct Report {
     public_key: String,
     firewall: &'static str,
     host_steps: Vec<String>,
+    client_isolation: bool,
     service: String,
     control: Option<String>,
     next: String,
@@ -518,6 +526,26 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
         key_created,
         endpoint.as_deref(),
     )?;
+    let isolation = isolation_setting(args, config_created)?;
+    if isolation && args.no_nat && !args.no_host {
+        // The drop chain is installed with the NAT table; skipping the table
+        // would persist the flag and enforce nothing.
+        return Err(Error::Precondition(
+            "client_isolation is installed with the NAT table, which --no-nat skips; \
+             drop --no-nat, or turn client_isolation off"
+                .to_owned(),
+        ));
+    }
+    if isolation {
+        // The name is about to be embedded in an nft script run as root; the
+        // kernel would reject a bad interface name later, but the firewall
+        // write happens first. Apply the kernel's own limits here (the same
+        // check both config loaders run).
+        vallum_config::validate_interface_name(&interface).map_err(|message| Error::Invalid {
+            path: args.config.clone(),
+            what: format!("interface name: {message}"),
+        })?;
+    }
 
     let host = hostnet::inspect();
     let mut steps: Vec<hostnet::HostStep> = Vec::new();
@@ -548,7 +576,11 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
             }
         }
         if !args.no_nat {
-            steps.extend(hostnet::plan_nat(&v4, &v6));
+            steps.extend(hostnet::plan_nat(
+                &v4,
+                &v6,
+                isolation.then_some(interface.as_str()),
+            ));
         }
     }
     let host_steps = hostnet::apply(&steps, args.dry_run)?;
@@ -586,6 +618,7 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
             public_key,
             firewall: host.firewall.as_str(),
             host_steps,
+            client_isolation: isolation,
             service: service.clone(),
             control: reachable.map(|_| control_path.display().to_string()),
             next,
@@ -736,6 +769,30 @@ fn key_path_for(config: &Path, directory: &Path) -> PathBuf {
     directory.join(format!("{stem}.key"))
 }
 
+/// Whether the host plan should drop peer-to-peer forwarding.
+///
+/// At creation the flag decides and is persisted. On a re-run the config is
+/// the source of truth — `server init` converges the host to the file, so the
+/// operator toggles `client_isolation` there and re-runs. Passing the flag
+/// against a preserved config that disagrees is refused: silently ignoring it
+/// would break the flag's promise, and silently applying it would leave the
+/// file and the host disagreeing.
+fn isolation_setting(args: &InitArgs, config_created: bool) -> Result<bool, Error> {
+    if config_created {
+        return Ok(args.client_isolation);
+    }
+    let config = Config::load(&args.config)?;
+    let on = config.interface.client_isolation.unwrap_or(false);
+    if args.client_isolation && !on {
+        return Err(Error::Precondition(format!(
+            "{} already exists with client_isolation off; set `client_isolation = true` \
+             in it (or re-init with --force) — the config is the source of truth",
+            args.config.display()
+        )));
+    }
+    Ok(on)
+}
+
 fn write_config(
     args: &InitArgs,
     interface: &str,
@@ -789,6 +846,11 @@ fn write_config(
     // The flag says so, or the egress source check eats those replies (the
     // failure `verify-remote.sh` caught live). See ADR-0020.
     body.push_str("forward = true\n");
+    if args.client_isolation {
+        // Service tenancy (ADR-0047): strangers on one server must not reach
+        // each other. Absent means the flat personal default.
+        body.push_str("client_isolation = true\n");
+    }
     if let Some(endpoint) = public_endpoint {
         body.push_str(&format!("public_endpoint = \"{endpoint}\"\n"));
     }
@@ -1233,6 +1295,7 @@ mod tests {
             dry_run: true,
             force: false,
             json: false,
+            client_isolation: false,
         };
         self::init(&args).unwrap();
         assert!(!config.exists());
@@ -1263,6 +1326,7 @@ mod tests {
             dry_run: false,
             force: false,
             json: false,
+            client_isolation: false,
         };
         self::init(&args).unwrap();
         let loaded = Config::load(&config).unwrap();
@@ -1322,5 +1386,94 @@ mod tests {
         .unwrap();
         assert_eq!(key_path_for(&config, &dir), dir.join("server.key"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A base for the isolation tests: everything host-side off, so the test
+    /// exercises the config and the decision, not the operator's machine.
+    fn isolation_args(config: PathBuf, flag: bool) -> InitArgs {
+        InitArgs {
+            enroll: false,
+            config,
+            name: Some("vallum0".to_owned()),
+            addresses: vec!["10.7.0.1/24".to_owned()],
+            listen: "0.0.0.0:51820".to_owned(),
+            endpoint: Some("vpn.example.com:51820".to_owned()),
+            control: None,
+            dns: Vec::new(),
+            user: None,
+            no_nat: true,
+            no_firewall: true,
+            no_forward: true,
+            no_service: true,
+            no_host: true,
+            dry_run: false,
+            force: false,
+            json: false,
+            client_isolation: flag,
+        }
+    }
+
+    #[test]
+    fn init_persists_client_isolation_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("vallum-iso-{}-a", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vallum0.toml");
+        self::init(&isolation_args(config.clone(), true)).unwrap();
+        let loaded = Config::load(&config).unwrap();
+        assert_eq!(loaded.interface.client_isolation, Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = std::env::temp_dir().join(format!("vallum-iso-{}-b", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vallum0.toml");
+        self::init(&isolation_args(config.clone(), false)).unwrap();
+        let loaded = Config::load(&config).unwrap();
+        assert_eq!(loaded.interface.client_isolation, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rerun_converges_to_the_configs_isolation_not_the_flag() {
+        let dir = std::env::temp_dir().join(format!("vallum-iso-{}-c", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("vallum0.toml");
+        // Created with isolation on; the operator later re-runs init without
+        // the flag. The config is the source of truth: the host stays isolated.
+        self::init(&isolation_args(config.clone(), true)).unwrap();
+        assert!(isolation_setting(&isolation_args(config.clone(), false), false).unwrap());
+        // And the reverse: a flat config re-run with the flag is refused, not
+        // silently applied (host) or silently ignored (flag) — the two stores
+        // must not diverge.
+        let flat = dir.join("flat.toml");
+        self::init(&isolation_args(flat.clone(), false)).unwrap();
+        let error = isolation_setting(&isolation_args(flat.clone(), true), false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("client_isolation"), "{message}");
+        assert!(message.contains("flat.toml"), "{message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn at_creation_the_flag_decides() {
+        let dir = std::env::temp_dir().join(format!("vallum-iso-{}-d", std::process::id()));
+        let config = dir.join("vallum0.toml");
+        assert!(isolation_setting(&isolation_args(config.clone(), true), true).unwrap());
+        assert!(!isolation_setting(&isolation_args(config, false), true).unwrap());
+    }
+
+    #[test]
+    fn isolation_with_no_nat_is_refused_not_silently_skipped() {
+        // The drop chain rides in the NAT table; --no-nat would persist the
+        // flag and install nothing — a security control that reads as on.
+        let dir = std::env::temp_dir().join(format!("vallum-iso-{}-e", std::process::id()));
+        let mut args = isolation_args(dir.join("vallum0.toml"), true);
+        args.no_host = false;
+        args.no_nat = true;
+        args.dry_run = true;
+        let error = self::init(&args).unwrap_err();
+        assert!(error.to_string().contains("--no-nat"), "{error}");
     }
 }

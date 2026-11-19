@@ -451,6 +451,16 @@ pub struct Interface {
     /// a link. See ADR-0020.
     #[serde(default)]
     pub forward: Option<bool>,
+    /// Drop tunnel-to-tunnel forwarding between peers — service tenancy.
+    ///
+    /// Absent or `false` is the personal default: peers reach each other (a
+    /// feature, ADR-0047). `true` makes the server's host plan drop packets
+    /// that enter and leave the same tunnel interface, so strangers sharing
+    /// one server cannot reach each other while both still reach the internet
+    /// and the server itself. Only the server's host networking reads this;
+    /// a client config may carry it, but nothing on the client enforces it.
+    #[serde(default)]
+    pub client_isolation: Option<bool>,
     /// A Unix socket to serve the control UAPI on.
     ///
     /// Absent means no control plane. The socket is `0600`; a relative path is
@@ -1314,6 +1324,19 @@ pub fn with_outer_mtu(config_text: &str, outer_mtu: u16) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_isolation_is_opt_in_and_absent_means_flat() {
+        // ADR-0047: personal tenancy is flat by default; service isolation is
+        // an explicit operator choice, never an inferred one.
+        let base = "[interface]\nname = \"vallum0\"\nprivate_key = \"k\"\n";
+        let absent: Config = toml::from_str(base).unwrap();
+        assert_eq!(absent.interface.client_isolation, None);
+        let on: Config = toml::from_str(&format!("{base}client_isolation = true\n")).unwrap();
+        assert_eq!(on.interface.client_isolation, Some(true));
+        let off: Config = toml::from_str(&format!("{base}client_isolation = false\n")).unwrap();
+        assert_eq!(off.interface.client_isolation, Some(false));
+    }
 
     #[test]
     fn a_parse_error_does_not_quote_a_preshared_key() {

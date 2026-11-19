@@ -458,6 +458,17 @@ fn plan_forwarding_nat(
     }))
 }
 
+/// The nft cleanup quick runs before re-installing its masquerade chain.
+///
+/// Chain-scoped, never table-scoped: `inet vallum` is shared with
+/// `vallum server init`, whose plan may also carry a `forward` chain that
+/// isolates peers (ADR-0047 service tenancy). Deleting the whole table here
+/// would wipe that isolation on every attach — a security control silently
+/// failing open — so quick replaces only the chain it owns.
+fn nat_cleanup_args() -> &'static [&'static str] {
+    &["delete", "chain", "inet", "vallum", "postrouting"]
+}
+
 /// Reconcile kernel IP forwarding and the `inet vallum` NAT masquerade table so
 /// gateway routing survives host reboots cleanly.
 fn ensure_forwarding_and_nat(
@@ -486,9 +497,7 @@ fn ensure_forwarding_and_nat(
         fs::write("/proc/sys/net/ipv6/conf/all/forwarding", "1\n")?;
     }
 
-    let _ = Command::new("nft")
-        .args(["delete", "table", "inet", "vallum"])
-        .output();
+    let _ = Command::new("nft").args(nat_cleanup_args()).output();
     let mut child = Command::new("nft")
         .args(["-f", "-"])
         .stdin(std::process::Stdio::piped())
@@ -1847,8 +1856,23 @@ mod tests {
         assert!(!plan.has_v6);
         assert!(plan.sysctl_text.contains("net.ipv4.ip_forward = 1"));
         assert!(plan.nft_script.contains("ip saddr 10.7.0.0/24 masquerade"));
+        // quick owns the masquerade chain only; the peer-isolation forward
+        // chain (ADR-0047) belongs to server init's plan, not this one.
+        assert!(!plan.nft_script.contains("chain forward"));
         ensure_forwarding_and_nat(&config, true).unwrap();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nat_reconcile_replaces_only_quicks_own_chain() {
+        // `inet vallum` is shared: server init may have installed a forward
+        // chain that isolates peers. A table-scoped delete here would wipe
+        // that isolation on every attach — a security control silently
+        // failing open — so the cleanup must target quick's own chain.
+        assert_eq!(
+            nat_cleanup_args(),
+            ["delete", "chain", "inet", "vallum", "postrouting"]
+        );
     }
 
     #[test]

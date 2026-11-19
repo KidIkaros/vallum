@@ -81,6 +81,7 @@ unless you pass `--force`.
 | `--dns ADDR` | repeatable; written to `[quick] dns` and pushed to clients |
 | `--user USER` | drop to this user after the interface and socket are open |
 | `--no-nat` / `--no-firewall` / `--no-forward` | skip that host change |
+| `--client-isolation` | service tenancy: drop tunnel-to-tunnel forwarding so peers cannot reach each other (both still reach the internet). Persisted as `[interface] client_isolation`; default is flat (personal tenancy, ADR-0047) |
 | `--control PATH` | the control socket; default `/run/vallum/<name>.sock` |
 | `--no-host` | skip all three (config and service only) |
 | `--no-service` | write the config, do not touch systemd |
@@ -102,6 +103,20 @@ ready: server `vallum0`
 add a client:
    vallum peer add laptop --config /etc/vallum/vallum0.toml --ship-key --bundle-out laptop.vallum-bundle
 ```
+
+### Service tenancy: isolating strangers' devices
+
+The default is **personal**: every peer can reach every other peer through the
+server — a feature for your own devices. A server offered to strangers wants
+the opposite. Set `client_isolation = true` under `[interface]` (or pass
+`--client-isolation` at creation) and re-run `vallum server init`: the host
+plan converges, adding a drop rule for traffic that enters and leaves the
+tunnel interface in Vallum's own `inet vallum` table. Peers then cannot reach
+each other, while both still reach the internet and the server itself. Set it
+back to `false` (or remove the line) and re-run to return to flat. The config
+is the source of truth: on a re-run the flag is refused if it disagrees with
+the preserved config. `scripts/accept-isolation.sh` proves both directions
+and the preserved egress in namespaces, with no container runtime required.
 
 ## 3. Verify
 
