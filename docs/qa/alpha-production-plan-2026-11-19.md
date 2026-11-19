@@ -60,7 +60,7 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DONE — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; slice (b) DONE (821087b + review 6eb03da): add_device mints PINNED invite via --public-key (canonicalized, validated pre-reservation) + `vallum join --key` redemption + place_config idempotent key + UTCP/README/glossary; desk 236 OK, verify.sh PASS, real-binary two-netns probe 22 checks FAIL=0 (handshake + ping 3/3 + wrong-key refusal). Slices c (rotation) DONE (c1dc595), d (reconciliation) DONE (a12f425, full CI 261 OK, verify.sh PASS). DEPLOY-HOLD for live signup flip |
 | WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up DONE in 450c322: journey step1 + agent API block re-worded for account-only signup (live journey re-proof rides WS6's headless gate) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
-| WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
+| WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | DOING — accept-isolation wired into E2E (e47dc8a, 15 assertions PASS); capacity ALREADY stated+sourced in requirements.md (54.27ms tri-hybrid, /20=4094, 8.9KB/peer, 2000 target); accept-agent-enrol wiring pending WS6 |
 
 ## Loop procedure (each cron tick)
 1. Read this file + ADR-0047 + `git log --oneline -5` + the state log.
@@ -114,6 +114,15 @@ remaining gaps. Lead with findings in words, numbers as backup.
   released past reservation_ttl (1200s), pending kept, redeemed kept regardless of age, unreachable
   daemon fail-closed; sweep clears ghosts on active accounts. TDD 6 red->green; full CI 261 OK;
   verify.sh PASS. WS4 a-d all DONE. Next: WS6 (agent dogfood + headless enrolment gate), WS7.
+- 2026-11-19 06:4x EST — WS7 partial (e47dc8a): accept-isolation wired into verify.sh E2E leg +
+  syntax check; ran it standalone PASS 15 assertions (signed). requirements.md Capacity already
+  states the measured ceilings with sources — no new number needed. accept-agent-enrol wiring waits
+  on WS6 (child sa-0, worktree vallum-ws6, building the headless gate). CLIENTELE dogfood: the VPS
+  vallum0 peer table has only `laptop` + `lab8` — NO fox peer enrolled, so the vallum-fox agent lane
+  was never set up on this deployment. Fix = `agent/vallum-fox setup wingman-vps` (enrols the peer +
+  writes the app_class config + a local polkit/sudoers prompt). Needs the operator's local sudo
+  password AND is a live change -> HELD for operator. The headless enrolment gate (WS6) is the
+  agent-on-demand proof that does not depend on the fox lane being pre-provisioned.
 - 2026-11-19 01:37 EST — WS3 DONE (5cae2fc): opt-in `[interface] client_isolation` + `--client-isolation`
   flag; drop chain in the wholesale-replaced `inet vallum` table (converges both ways; teardown already
   removes it); config is source of truth on re-init (flag/config conflict refused); `--no-nat`+isolation
