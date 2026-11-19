@@ -1236,6 +1236,31 @@ fn ephemeral_answer(hello: &Hello) -> Result<(Vec<u8>, Vec<u8>), Error> {
 // ---------------------------------------------------------------------------
 // Client side: two round trips, then the answer.
 
+/// The no-answer diagnostic shared by the UDP and front enrolment paths.
+///
+/// Three causes end a join with no reply, and they need different fixes; the
+/// message names all three rather than guessing the least likely (a stale
+/// invite). The port is filtered upstream of the host far more often than a
+/// token is stale. Causes 2 and 3 are the server operator's to fix — a stranger
+/// running the client cannot sudo the server — so the message says whose job
+/// each one is, making it forwardable rather than a dead end.
+fn no_answer_diagnostic(target: &str, name: &str, detail: &str) -> String {
+    format!(
+        "no answer from {target}: {detail}.\n\
+         Three different things end here, and they need different fixes:\n\
+         \n   1. the port is not reachable. The responder answers on the port in \
+         `{target}`, which must be open in the cloud security group as well as \
+         on the host, and only while enrolling. Check that first — it is the one \
+         you can verify from your own side.\n\
+         \n   2. the responder is not running. On the server: \
+         sudo systemctl start vallum-enroll@<interface>\n\
+         \n   3. the invite is stale, or it was made for another device. Mint a \
+         new one: sudo vallum peer invite {name}\n\
+         \n   If you are not the server's operator, steps 2 and 3 are theirs — \
+         forward this message to them; step 1 is yours to check.",
+    )
+}
+
 /// Ask `server` (a `host:port` string) to enrol `name` with `public_line`.
 ///
 /// Returns the JSON report the server produced, or an error explaining why not.
@@ -1311,21 +1336,10 @@ pub fn join(
             }
         }
     }
-    // The old message pointed at one cause - a stale invite - when there are
-    // three, and the one it pointed at is the least likely: the port is
-    // filtered upstream of the host far more often than a token is stale.
-    Err(Error::Usage(format!(
-        "no answer from {server}: {}.\n\
-         Three different things end here, and they need different fixes:\n\
-         \n   1. the port is not reachable. The responder answers on the port in \
-         `{server}`, which must be open in the cloud security group as well as \
-         on the host, and only while enrolling. Check that first.\n\
-         \n   2. the responder is not running. On the server: \
-         sudo systemctl start vallum-enroll@<interface>\n\
-         \n   3. the invite is stale, or it was made for another device. Mint a \
-         new one: sudo vallum peer invite {name}",
-        last_error.unwrap_or_else(|| "no response".to_owned()),
-        name = name,
+    Err(Error::Usage(no_answer_diagnostic(
+        server,
+        name,
+        &last_error.unwrap_or_else(|| "no response".to_owned()),
     )))
 }
 
@@ -1518,8 +1532,10 @@ pub fn join_via_front(
             };
         }
     }
-    Err(Error::Usage(format!(
-        "no valid enrolment reply from front endpoint {front_url} for `{name}`"
+    Err(Error::Usage(no_answer_diagnostic(
+        front_url,
+        name,
+        "no valid enrolment reply",
     )))
 }
 
@@ -1528,6 +1544,22 @@ pub fn join_via_front(
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn no_answer_diagnostic_names_all_three_causes_and_whose_job_each_is() {
+        let msg = no_answer_diagnostic("1.2.3.4:51821", "laptop", "timed out");
+        assert!(msg.contains("1.2.3.4:51821"), "names the target: {msg}");
+        assert!(msg.contains("laptop"), "names the invite: {msg}");
+        assert!(msg.contains("timed out"), "carries the detail: {msg}");
+        // All three causes, not just the least likely one.
+        assert!(msg.contains("the port is not reachable"), "{msg}");
+        assert!(msg.contains("the responder is not running"), "{msg}");
+        assert!(msg.contains("the invite is stale"), "{msg}");
+        // A stranger running the client cannot sudo the server: the message
+        // says whose job steps 2 and 3 are, so it is forwardable, not a dead end.
+        assert!(msg.contains("not the server's operator"), "{msg}");
+        assert!(msg.contains("forward this message"), "{msg}");
+    }
 
     fn nonce(byte: u8) -> [u8; NONCE_LEN] {
         [byte; NONCE_LEN]
