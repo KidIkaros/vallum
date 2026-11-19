@@ -2295,7 +2295,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vallum"
-version = "1.8.0"
+version = "1.10.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-config"
-version = "1.8.0"
+version = "1.10.0"
 dependencies = [
  "serde",
  "toml",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-core"
-version = "1.8.0"
+version = "1.10.0"
 dependencies = [
  "ipnet",
  "vallum-crypto",
@@ -2346,11 +2346,11 @@ dependencies = [
 
 [[package]]
 name = "vallum-crypto"
-version = "1.8.0"
+version = "1.10.0"
 
 [[package]]
 name = "vallum-crypto-sdk"
-version = "1.8.0"
+version = "1.10.0"
 dependencies = [
  "origin-crypto-sdk",
  "vallum-crypto",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "vallum-tunnel"
-version = "1.8.0"
+version = "1.10.0"
 dependencies = [
  "ipnet",
  "vallum-core",
