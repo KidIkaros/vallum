@@ -150,7 +150,7 @@ main {
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
   gap: 3rem;
   align-items: center;
-  padding: 4rem 0 3rem;
+  padding: 4rem 0 2rem;
 }
 
 .tagline {
@@ -251,14 +251,18 @@ h1 {
   height: auto;
 }
 
+.seal text {
+  font: 500 13px var(--mono);
+}
+
 .seal figcaption {
   margin-top: 0.75rem;
 }
 
 /* ---- Sections: ◆ label ────── (the TUI rule with the brand mark) ---- */
 
-main > section {
-  margin-top: 4rem;
+main > section + section {
+  margin-top: 3.5rem;
 }
 
 h2 {
@@ -511,6 +515,11 @@ figcaption {
   color: var(--muted);
 }
 
+.flat strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
 .link-row {
   display: flex;
   flex-wrap: wrap;
@@ -599,7 +608,7 @@ footer p {
     padding-top: 0;
   }
 
-  main > section {
+  main > section + section {
     margin-top: 3rem;
   }
 }
@@ -628,6 +637,11 @@ footer p {
 
   .hero-meta {
     gap: 0.5rem 1.25rem;
+  }
+
+  /* SVG user units scale with the viewBox; keep rendered labels ≥ 11px. */
+  .seal text {
+    font-size: 18px;
   }
 }
 
