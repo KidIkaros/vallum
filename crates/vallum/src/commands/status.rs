@@ -88,7 +88,7 @@ impl Verdict {
                 "the daemon is running, but its last handshake is past the 180 s reject \
                  window — the session is dead, so traffic is not getting through"
             }
-            Self::Starting => "the daemon is running but no handshake has completed yet",
+            Self::Starting => "the daemon is running but no peer is connected yet",
             Self::Blocked => "the daemon is not running; egress is blocked, so nothing leaks",
             Self::Leaking => {
                 "the daemon is not running and no guard is installed — traffic is leaving \
@@ -275,7 +275,7 @@ fn control_socket(config_path: &Path, config: &Config, interface: &str) -> PathB
 /// The account-cause hint for a handshake-failure verdict (ADR-0046).
 ///
 /// `stale` (the daemon answers but the session is past the reject window)
-/// and `starting` (no handshake has completed) are the two verdicts where a
+/// and `starting` (no peer is connected) are the two verdicts where a
 /// desk account — expired or at its byte cap — is a plausible cause. The
 /// wording is the doctor's, so the two surfaces speak with one voice; a
 /// config without a token gets `None` and the existing advice stands.
@@ -394,6 +394,19 @@ mod tests {
         assert!(!Verdict::Down.is_working());
         assert!(!Verdict::Unknown.is_working());
         assert!(!Verdict::Leaking.is_working());
+    }
+
+    /// The status line speaks about NOW. A cumulative counter elsewhere can
+    /// truthfully say a handshake completed earlier in this daemon's life —
+    /// a peer connected and went quiet — so the Starting detail must not
+    /// claim "no handshake has completed". On the alpha server that sentence
+    /// contradicted `handshakes_established_total 1` in the same scrape, and
+    /// a user cannot tell which of the two sentences is the lie.
+    #[test]
+    fn the_starting_detail_claims_present_state_not_absent_history() {
+        let detail = Verdict::Starting.detail();
+        assert!(!detail.contains("no handshake has completed"));
+        assert!(detail.contains("no peer is connected"));
     }
 
     /// The clock every age rule is judged against: the fixture stamps below
