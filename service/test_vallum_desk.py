@@ -51,6 +51,7 @@ class FakeDaemon(desk_module.Daemon):
         self.removed = []
         self.minted = []
         self.pins = {}
+        self.rotated = []
 
     def mint_ticket(self, peer, public_key=None):
         if self._refuse:
@@ -75,6 +76,16 @@ class FakeDaemon(desk_module.Daemon):
         if peer in getattr(self, "missing_peers", ()):
             raise RuntimeError(f"vallum: no peer named `{peer}`")
         self.removed.append(peer)
+
+    def rotate(self, peer, public_key):
+        if getattr(self, "_refuse_rotate", False):
+            raise RuntimeError("the daemon said no")
+        self.rotated.append((peer, public_key))
+        report = {"fingerprint": f"fp-{peer}", "applied": True, "finalized": True}
+        if getattr(self, "_refuse_finalize", False):
+            report["finalized"] = False
+            report["finalize_error"] = "vallum peer finalize: the daemon said no"
+        return report
 
 
 class DeskTestCase(unittest.TestCase):
@@ -304,6 +315,61 @@ class DaemonCliTests(unittest.TestCase):
         # daemon answered and has no peers — and conflating the two is how a page
         # tells a user "never connected" about a device the server never had.
         self.assertIsNone(desk_module.Daemon().liveness())
+
+    def _cli_recording_calls(self, tempdir, finalize_fails=False, rotate_body=None):
+        """A fake `vallum` that appends each call's argv (CALL-marked blocks)
+        and answers `peer rotate` with `rotate_body`."""
+        cli = os.path.join(tempdir, "vallum")
+        args_file = os.path.join(tempdir, "args")
+        body = rotate_body if rotate_body is not None else '{"fingerprint":"fp123","applied":true}'
+        finalize_branch = ('echo "finalize: boom" >&2; exit 1' if finalize_fails
+                           else "printf '%s\\n' '{\"retired\":true}'")
+        with open(cli, "w") as f:
+            f.write("#!/bin/sh\n"
+                    "printf 'CALL\\n' >> " + shlex.quote(args_file) + "\n"
+                    "printf '%s\\n' \"$@\" >> " + shlex.quote(args_file) + "\n"
+                    "if [ \"$1 $2\" = 'peer finalize' ]; then " + finalize_branch + "; fi\n"
+                    "printf '%s\\n' " + shlex.quote(body) + "\n")
+        os.chmod(cli, 0o755)
+        return desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli), args_file
+
+    def test_rotation_passes_the_line_to_peer_rotate_then_finalizes(self):
+        # The port's contract with the CLI: the line rides as ONE argv
+        # element to `peer rotate --public-key … --json`, then `peer
+        # finalize` retires the old key (ADR-0047 §4). The fingerprint and
+        # applied verdict come from the JSON field, never a text scrape.
+        line = "vallum1:0003:" + "ab" * 32 + ":-"
+        with tempfile.TemporaryDirectory() as tempdir:
+            daemon, args_file = self._cli_recording_calls(tempdir)
+            report = daemon.rotate("laptop", line)
+            self.assertEqual(report, {"fingerprint": "fp123", "applied": True,
+                                      "finalized": True})
+            with open(args_file) as f:
+                blocks = f.read().split("CALL\n")[1:]
+            self.assertEqual(len(blocks), 2)
+            rotate_argv = blocks[0].splitlines()
+            self.assertEqual(rotate_argv[:6],
+                             ["peer", "rotate", "laptop", "--public-key", line, "--json"])
+            self.assertEqual(rotate_argv[-2:], ["--config", "/etc/vallum/server.toml"])
+            finalize_argv = blocks[1].splitlines()
+            self.assertEqual(finalize_argv[:3], ["peer", "finalize", "laptop"])
+
+    def test_a_failed_finalize_reports_finalized_false(self):
+        # The rotation already happened when finalize fails: the port must
+        # report both facts, not raise — a 502 would misname what did.
+        line = "vallum1:0003:" + "ab" * 32 + ":-"
+        with tempfile.TemporaryDirectory() as tempdir:
+            daemon, _ = self._cli_recording_calls(tempdir, finalize_fails=True)
+            report = daemon.rotate("laptop", line)
+            self.assertIs(report["finalized"], False)
+            self.assertIn("boom", report["finalize_error"])
+            self.assertEqual(report["fingerprint"], "fp123")
+
+    def test_rotate_json_that_does_not_parse_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            daemon, _ = self._cli_recording_calls(tempdir, rotate_body="not json")
+            with self.assertRaises(RuntimeError):
+                daemon.rotate("laptop", "vallum1:0003:" + "ab" * 32 + ":-")
 
 
 class StatusTests(DeskTestCase):
@@ -585,6 +651,36 @@ class HttpTests(WireTestCase):
         status, body = self.post(
             "/api/devices",
             json.dumps({"token": token, "name": "bad", "public_key": "nope"}),
+            "application/json")
+        self.assertEqual(status, 400)
+        self.assertIn("public_key", json.loads(body)["error"])
+
+    def test_the_rotate_wire_preserves_the_slot(self):
+        # The API seam an agent uses (ADR-0047 §4): enrol a device, then
+        # rotate its key over the wire — same peer, no new ticket, and a
+        # bad line is a 400 on the wire too, not a dropped connection.
+        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1"}',
+                                   "application/json")
+        token = json.loads(signup_body)["token"]
+        line = "vallum1:0003:" + "cd" * 32 + ":-"
+        status, body = self.post(
+            "/api/devices", json.dumps({"token": token, "name": "agent"}),
+            "application/json")
+        self.assertEqual(status, 200)
+        peer = json.loads(body)["peer"]
+        status, body = self.post(
+            "/api/devices/rotate",
+            json.dumps({"token": token, "peer": peer, "public_key": line}),
+            "application/json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["rotated"], peer)
+        self.assertIs(payload["finalized"], True)
+        self.assertNotIn("ticket", payload)  # rotation mints nothing
+        self.assertEqual(self.daemon.rotated, [(peer, line)])
+        status, body = self.post(
+            "/api/devices/rotate",
+            json.dumps({"token": token, "peer": peer, "public_key": "nope"}),
             "application/json")
         self.assertEqual(status, 400)
         self.assertIn("public_key", json.loads(body)["error"])
@@ -1988,6 +2084,189 @@ class DevicesTests(DeskTestCase):
         code, payload = self.desk.remove_device({"token": token})
         self.assertEqual(code, 400)
         self.assertEqual(self.daemon.removed, [])
+
+
+class RotationTests(DeskTestCase):
+    """ADR-0047 §4: rotation replaces a device's key under its stable name.
+    The slot is preserved — no reservation, no cap check, no ticket — and the
+    old key is retired (finalize) in the same operation, because the caller
+    generated and holds the new key: the grace window would protect nothing
+    and only extend a compromised old key's life."""
+
+    LINE = "vallum1:0003:" + "cd" * 32 + ":-"
+
+    def test_rotation_replaces_the_key_under_the_stable_name(self):
+        account, device = self.account_with_device()
+        peer = device["peer"]
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": peer, "public_key": self.LINE})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["rotated"], peer)
+        self.assertTrue(payload["fingerprint"])
+        self.assertIs(payload["finalized"], True)
+        # The daemon rotated exactly this peer to exactly this line…
+        self.assertEqual(self.daemon.rotated, [(peer, self.LINE)])
+        # …and nothing was minted, reserved or removed: the slot is the same.
+        self.assertEqual(self.daemon.minted, [peer])  # only the enrolment mint
+        self.assertEqual(self.daemon.removed, [])
+        rows = self.desk.db.execute(
+            "SELECT peer, status FROM peers ORDER BY peer").fetchall()
+        self.assertEqual([(r["peer"], r["status"]) for r in rows], [(peer, "active")])
+
+    def test_rotation_preserves_the_device_count_at_the_cap(self):
+        # The load-bearing acceptance (ADR-0047 §4): a capped account must
+        # still be able to rotate — rotation is never add_device, so it
+        # neither checks nor burns the cap.
+        self.config.device_cap = 1
+        account, device = self.account_with_device()
+        code, _ = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 200)
+        self.assertEqual(
+            self.desk.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
+        # The cap itself still bites for a NEW device — unchanged.
+        code, _ = self.desk.add_device({"token": account["token"], "name": "second"})
+        self.assertEqual(code, 429)
+
+    def test_rotation_requires_a_public_key(self):
+        # There is no unpinned rotation: the point is the client's OWN new
+        # key (custody, ADR-0013). Server-generation (--ship-key) is an
+        # explicit operator opt-in, not this path. Absent/empty is a 400
+        # naming the fix, and makes no daemon call.
+        account, device = self.account_with_device()
+        for missing in ({}, {"public_key": ""}, {"public_key": "   "}):
+            with self.subTest(missing=missing):
+                body = {"token": account["token"], "peer": device["peer"]}
+                body.update(missing)
+                code, payload = self.desk.rotate_device(body)
+                self.assertEqual(code, 400)
+                self.assertIn("public_key", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_refuses_a_non_string_public_key(self):
+        # Same rule as add_device: a JSON number/list/bool where a line
+        # belongs is a 400 naming the field, not an AttributeError behind
+        # a 500 — and no daemon call.
+        account, device = self.account_with_device()
+        for bad in (123, ["vallum1:0003:abcd:-"], {"line": "x"}, True):
+            with self.subTest(bad=bad):
+                code, payload = self.desk.rotate_device(
+                    {"token": account["token"], "peer": device["peer"], "public_key": bad})
+                self.assertEqual(code, 400)
+                self.assertIn("public_key", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_refuses_a_malformed_line_before_any_daemon_call(self):
+        account, device = self.account_with_device()
+        bad_lines = [
+            "not-a-line",
+            "vallum2:0003:abcd:-",
+            "vallum1:0003:abcd",
+            "vallum1:zzzz:abcd:-",
+            "vallum1:0003::-",
+            "vallum1:0003:abc:-",
+        ]
+        for line in bad_lines:
+            with self.subTest(line=line):
+                code, payload = self.desk.rotate_device(
+                    {"token": account["token"], "peer": device["peer"], "public_key": line})
+                self.assertEqual(code, 400)
+                self.assertIn("public_key", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_canonicalizes_a_wrapped_public_key(self):
+        # Same whole-line discipline as the pin: the daemon stores the line
+        # verbatim, so a wrapped/uppercase paste must be normalized to the
+        # canonical `vallum pubkey` form before it reaches the config.
+        account, device = self.account_with_device()
+        code, _ = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"],
+             "public_key": "vallum1:3:CD\n  EF:-"})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.daemon.rotated, [(device["peer"], "vallum1:0003:cdef:-")])
+
+    def test_rotation_needs_a_peer_name_even_with_devices(self):
+        # The ownership check compares against the legacy column, which is
+        # NULL on every new-contract account: `None != None` is False, so a
+        # missing peer would slip through and rotate nothing (the slice-a
+        # remove_device bug, pinned here for the new verb).
+        account, _ = self.account_with_device()
+        for missing in ({}, {"peer": None}, {"peer": ""}):
+            with self.subTest(missing=missing):
+                body = {"token": account["token"], "public_key": self.LINE}
+                body.update(missing)
+                code, payload = self.desk.rotate_device(body)
+                self.assertEqual(code, 400)
+                self.assertIn("peer", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_checks_ownership(self):
+        account, device = self.account_with_device()
+        other = self.desk.signup({"code": "friend-code-2"})[1]
+        code, payload = self.desk.rotate_device(
+            {"token": other["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 404)
+        self.assertIn("unknown device", payload["error"])
+        code, payload = self.desk.rotate_device(
+            {"token": "no-such-token", "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 404)
+        self.assertIn("unknown account token", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_on_a_revoked_account_is_refused(self):
+        account, device = self.account_with_device()
+        self.desk.admin("/api/admin/revoke-account",
+                        {"admin_token": "admin-secret", "token": account["token"]})
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 403)
+        self.assertIn("revoked", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_of_a_removed_device_is_refused(self):
+        account, device = self.account_with_device()
+        self.desk.remove_device({"token": account["token"], "peer": device["peer"]})
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 404)
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_of_a_legacy_device_works(self):
+        # Pre-migration accounts carry their device in accounts.peer with no
+        # peers row; the legacy column IS the device, and it rotates too.
+        _, account = self.signup()
+        self.desk.db.execute("UPDATE accounts SET peer='u0001-old' WHERE token=?",
+                             (account["token"],))
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": "u0001-old", "public_key": self.LINE})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.daemon.rotated, [("u0001-old", self.LINE)])
+
+    def test_a_daemon_refusal_is_a_502_and_changes_nothing(self):
+        account, device = self.account_with_device()
+        self.daemon._refuse_rotate = True
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 502)
+        self.assertIn("daemon refused", payload["error"])
+        self.assertEqual(
+            self.desk.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
+
+    def test_a_failed_finalize_is_reported_not_hidden(self):
+        # The rotation happened; the old key is still accepted. Saying 502
+        # would misname what did — the answer carries both facts and the
+        # recovery (retry the rotation: re-rotating retires the previous).
+        account, device = self.account_with_device()
+        self.daemon._refuse_finalize = True
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": device["peer"], "public_key": self.LINE})
+        self.assertEqual(code, 200)
+        self.assertIs(payload["finalized"], False)
+        self.assertIn("old key", payload["warning"])
+        self.assertIn("retry", payload["warning"])
+        self.assertEqual(self.daemon.rotated, [(device["peer"], self.LINE)])
 
 
 class VoucherTests(DeskTestCase):

@@ -261,6 +261,18 @@ curl -X POST https://desk.example.com/api/devices \
 #   → {"ticket": …, "pinned": true, …}
 vallum join '<ticket>' --key agent.key   # redeems the pin with the matching key
 
+# 4c. the agent rotates its key — the slot is preserved (ADR-0047 §4)
+vallum keygen --key agent-new.key        # on the device; custody stays here
+vallum pubkey --key agent-new.key
+curl -X POST https://desk.example.com/api/devices/rotate \
+     -H 'content-type: application/json' \
+     -d '{"token":"<account number>","peer":"<peer>","public_key":"<new public line>"}'
+#   → {"rotated": …, "fingerprint": …, "finalized": true}
+#   No ticket, no new device, no cap check: the key changes under the stable
+#   name and the old key is retired in the same call. The device then uses
+#   the new key file (its config is untouched). If `finalized` is false the
+#   old key is still accepted — the warning says so; retry the same call.
+
 # 5. they top up
 vallum-desk-admin mint-code --gib 100
 curl -X POST https://desk.example.com/api/voucher \
@@ -354,6 +366,7 @@ Tauri bundle's file-association config when those ports ship.
 | `POST /api/account {token}` | account number | the full account view: plan, pool, devices |
 | `POST /api/devices {token,name[,public_key]}` | account number | mint a device ticket bound to the account; pinned to the key when a public line is presented |
 | `POST /api/devices/revoke {token,peer}` | account number | remove one of the account's devices |
+| `POST /api/devices/rotate {token,peer,public_key}` | account number | replace a device's key under its stable name (`peer rotate --public-key` + `peer finalize`); preserves the device count — no reservation, no cap check, no ticket |
 | `POST /api/voucher {token,code}` | account number | apply an unused code's payload to the account |
 | `POST /api/admin/code {admin_token,…}` | admin | mint a code (`days`/`bytes`/`plan` optional) |
 | `POST /api/admin/adopt {admin_token,peer}` | admin | adopt a live daemon peer as an account |

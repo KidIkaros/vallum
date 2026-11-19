@@ -90,6 +90,54 @@
       }
     },
     {
+      "name": "vallum_desk_rotate_device",
+      "description": "Rotate a device's key on a Vallum desk account (ADR-0047 §4): generate the NEW key on the device (`vallum keygen --key device-new.key`), read its public line (`vallum pubkey --key device-new.key`), and present it here. The desk replaces the key under the device's stable name (`peer rotate --public-key`) and retires the old key (`peer finalize`) in the same call — the device slot, address and plan are preserved, so this never burns the device cap and mints no ticket. The device then uses the new key file; its config is untouched. If the answer carries finalized=false and a warning, the old key is still accepted — call this again with the same line to retire it. The account number is a secret — never log it.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's rotate endpoint, e.g. http://127.0.0.1:8400/api/devices/rotate."
+          },
+          "token": {
+            "type": "string",
+            "description": "The account number returned at signup (a secret)."
+          },
+          "peer": {
+            "type": "string",
+            "description": "The device's peer name to rotate (the `peer` field of its enrolment answer, e.g. u0001-laptop)."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "The device's NEW public line from `vallum pubkey --key <file>` (vallum1:<suite>:<kem>:<signing|->). Required — rotation always presents the device's own new key; there is no server-generated path here."
+          }
+        },
+        "required": [
+          "url",
+          "token",
+          "peer",
+          "public_key"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"token\":\"UTCP_ARG_token_UTCP_END\",\"peer\":\"UTCP_ARG_peer_UTCP_END\",\"public_key\":\"UTCP_ARG_public_key_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
       "name": "vallum_desk_status",
       "description": "Read an account's standing from the desk: plan, expiry, byte cap, bytes used.",
       "inputs": {

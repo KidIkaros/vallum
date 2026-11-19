@@ -278,6 +278,16 @@ class Daemon:
         """Revoke a peer on the server."""
         raise NotImplementedError
 
+    def rotate(self, peer, public_key):
+        """Replace a peer's key under its stable name, then retire the old
+        one (ADR-0047 §4). Returns a report dict: `fingerprint` (the new
+        key's), `applied` (a running daemon took the change), `finalized`
+        (the old key is no longer accepted) and, when finalize failed,
+        `finalize_error`. Rotation preserves the slot: no address is
+        allocated and no peer is created, so the device count is unchanged.
+        """
+        raise NotImplementedError
+
 
 class DaemonCli(Daemon):
     """The daemon, reached only through its own CLI."""
@@ -373,6 +383,36 @@ class DaemonCli(Daemon):
 
     def remove(self, peer):
         self._run("peer", "remove", peer)
+
+    def rotate(self, peer, public_key):
+        """`peer rotate --public-key` then `peer finalize`, as one act.
+
+        The rotate keeps the old key accepted as `previous_*` until
+        finalize; the desk finalizes immediately because this path is
+        client-driven — the caller holds the new private key, so the grace
+        window protects nothing and only extends a compromised old key's
+        life. Established sessions survive finalize: a previous identity is
+        only an extra *handshake* identity, never session state.
+
+        A failed finalize is reported, not raised: the rotation already
+        happened, and claiming failure would misname what did. Retrying the
+        whole rotation converges — re-rotating to the same line retires the
+        previous key — so the caller's recovery is the same call again.
+        """
+        out = self._run("peer", "rotate", peer, "--public-key", public_key, "--json")
+        try:
+            report = json.loads(out)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"rotate's JSON did not parse: {error}") from error
+        result = {"fingerprint": report.get("fingerprint"),
+                  "applied": bool(report.get("applied")),
+                  "finalized": True}
+        try:
+            self._run("peer", "finalize", peer)
+        except RuntimeError as error:
+            result["finalized"] = False
+            result["finalize_error"] = str(error)
+        return result
 
 
 # ---------------------------------------------------------------- config
@@ -1000,6 +1040,67 @@ class Desk:
         with self.lock:
             self.db.execute("UPDATE peers SET status='removed' WHERE peer=?", (peer,))
         return 200, {"removed": peer}
+
+    def rotate_device(self, body):
+        """Replace a device's key under its stable name (ADR-0047 §4).
+
+        Rotation is never add_device: no reservation, no cap check, no
+        ticket — the slot, the address and the plan are untouched, so the
+        device count is preserved even at the cap. The bearer token must
+        own the peer, exactly as for removal.
+        """
+        token = body.get("token") or ""
+        peer = body.get("peer")
+        if not peer:
+            # A missing peer must not reach the ownership check: the legacy
+            # column is NULL on new-contract accounts, and `None != None`
+            # is False — the comparison would pass and rotate nothing.
+            return 400, {"error": "peer is required — name the device to rotate"}
+        # The device's OWN new public line is required: there is no unpinned
+        # rotation (custody, ADR-0013 — server-generation is the operator's
+        # explicit `--ship-key` opt-in, not this path). Validate before any
+        # daemon call; a non-string is the same mistake as a malformed line.
+        raw_key = body.get("public_key")
+        if raw_key is not None and not isinstance(raw_key, str):
+            return 400, {"error": "public_key must be a string — the device's new public "
+                                  "line from `vallum pubkey --key <file>`"}
+        public_key = (raw_key or "").strip()
+        if not public_key:
+            return 400, {"error": "public_key is required — generate the new key on the "
+                                  "device (`vallum keygen --key <file>`) and present its "
+                                  "public line (`vallum pubkey --key <file>`)"}
+        public_key = self._canonical_public_line(public_key)
+        if public_key is None:
+            return 400, {"error": "public_key must be the device's public line — "
+                                  "vallum1:<suite>:<kem>:<signing|->, from "
+                                  "`vallum pubkey --key <file>`"}
+        with self.lock:
+            account = self.db.execute(
+                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            if not account:
+                return 404, {"error": "unknown account token"}
+            if account["status"] != "active":
+                return 403, {"error": f"account is {account['status']} — "
+                                      "devices can only rotate on an active account"}
+            owned = self.db.execute(
+                "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
+                (account["id"], peer)).fetchone()
+        if not owned and peer != account["peer"]:
+            return 404, {"error": "unknown device"}
+        try:
+            report = self.daemon.rotate(peer, public_key)
+        except RuntimeError as error:
+            return 502, {"error": f"the daemon refused the rotation: {error}"}
+        payload = {"rotated": peer, "fingerprint": report["fingerprint"],
+                   "applied": report["applied"], "finalized": report["finalized"]}
+        if not report["finalized"]:
+            # The rotation happened; the old key is still accepted. Name both
+            # facts and the recovery — a retry of this same call retires the
+            # previous key (re-rotating moves it out of `previous_*`).
+            payload["warning"] = ("the old key is still accepted: "
+                                  f"{report.get('finalize_error', 'finalize failed')} "
+                                  "— retry the rotation to retire it")
+        return 200, payload
 
     @staticmethod
     def _now():
@@ -1866,6 +1967,8 @@ def make_handler(desk):
                     code, payload = desk.add_device(body, self._desk_origin())
                 elif self.path == "/api/devices/revoke":
                     code, payload = desk.remove_device(body)
+                elif self.path == "/api/devices/rotate":
+                    code, payload = desk.rotate_device(body)
                 elif self.path == "/api/voucher":
                     code, payload = desk.voucher(body)
                 elif self.path == "/api/status":

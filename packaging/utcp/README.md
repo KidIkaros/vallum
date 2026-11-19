@@ -68,6 +68,7 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_fox_budget_set` / `vallum_fox_budget_list` | `vallum-fox budget …` | Per-domain request caps (the volume governor). |
 | `vallum_desk_signup` | `POST <desk>/api/signup` | Invite code → account number (self-service; no device at signup). |
 | `vallum_desk_add_device` | `POST <desk>/api/devices` | Enrol a device on the account → single-use join ticket; pinned to the device's key when `public_key` is presented. |
+| `vallum_desk_rotate_device` | `POST <desk>/api/devices/rotate` | Replace a device's key with its own new public line; the slot is preserved and the old key is retired. |
 | `vallum_desk_status` | `POST <desk>/api/status` | Plan, expiry, bytes used. |
 | `vallum_desk_mint_code` | `POST <desk>/api/admin/code` | Mint a single-use invite code. |
 | `vallum_desk_set_plan` | `POST <desk>/api/admin/plan` | Set a cap or expiry — a paid tier is a row. |
