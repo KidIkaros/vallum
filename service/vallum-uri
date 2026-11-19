@@ -2,16 +2,21 @@
 """vallum-uri — the x-scheme-handler target for vallum:// URIs.
 
 A browser-opened `vallum://join?ticket=…&account=…[&desk=…]` arrives here
-as argv[1]. The URI is validated byte-strictly, then enrolment runs:
+as argv[1]. The URI is validated byte-strictly, then enrolment runs through
+the privileged dispatcher when passwordless sudo grants it:
 
-    vallum join -          (the ticket arrives on stdin)
-    VALLUM_ACCOUNT=<token> (the account number rides the environment)
-    VALLUM_DESK_ENDPOINT=<origin>  (the desk the account lives on, ADR-0046;
-                                    absent when the URI carries no desk=)
+    sudo -n vallum-ops join   (ticket/token/desk on stdin lines 1/2/3, #32)
 
-Nothing secret ever sits on a command line — argv is world-readable in
-ps; stdin and a same-uid environment are not. And nothing is ever
-shell-evaluated: the URI is parsed, not executed.
+As root, `vallum join` installs the service and proves the tunnel, so the
+single-use ticket buys a working tunnel — not a user config and a burned
+ticket with zero packets. Without the dispatcher it falls back to a same-uid
+`vallum join -` (ticket on stdin, VALLUM_ACCOUNT / VALLUM_DESK_ENDPOINT in the
+environment, ADR-0046) and says how to bring the tunnel up.
+
+Nothing secret ever sits on a command line — argv is world-readable in ps;
+stdin and a same-uid environment are not. Nothing is shell-evaluated: the URI
+is parsed, not executed. A browser-triggered URI only ever reaches root
+through the named, audited `vallum-ops join` verb, never a wildcard.
 
 Usage: vallum-uri 'vallum://join?ticket=<urlencoded>&account=<hex>[&desk=<origin>]'
 """
@@ -60,6 +65,20 @@ def parse_uri(uri):
     return ticket, account, desk or None
 
 
+def _privileged_join_available():
+    """True when passwordless sudo grants the audited dispatcher — the same
+    trust boundary the TUI/GUI join uses. Probing `sudo -n -l` avoids running
+    the join twice (a failed privileged join must not fall through to a second
+    attempt that spends the ticket again)."""
+    try:
+        probe = subprocess.run(
+            ["sudo", "-n", "-l", "/usr/local/sbin/vallum-ops"],
+            capture_output=True, text=True)
+    except FileNotFoundError:
+        return False
+    return probe.returncode == 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 1:
@@ -71,6 +90,18 @@ def main(argv=None):
     except ValueError as error:
         print(f"vallum-uri: refused — {error}", file=sys.stderr)
         return 2
+    # Prefer the privileged dispatcher: as root, `vallum join` installs the
+    # service and proves the tunnel, so the single-use ticket buys a working
+    # tunnel. The ticket/token/desk ride stdin (sudo strips env; #32), never
+    # argv. This is the primary alpha enrolment path (ADR-0044/0046).
+    if _privileged_join_available():
+        stdin = ticket + "\n" + account + ("\n" + desk if desk else "") + "\n"
+        result = subprocess.run(
+            ["sudo", "-n", "/usr/local/sbin/vallum-ops", "join"],
+            input=stdin, text=True)
+        return result.returncode
+    # No dispatcher: a same-uid join writes a user config. Say how to bring the
+    # tunnel up so this is a guided step, not a silent no-op with a spent ticket.
     env = dict(os.environ, VALLUM_ACCOUNT=account)
     # The endpoint comes from the URI or not at all: an inherited value would
     # point a desk-less enrolment at whatever desk the caller last used.
@@ -79,6 +110,11 @@ def main(argv=None):
         env["VALLUM_DESK_ENDPOINT"] = desk
     result = subprocess.run(
         ["vallum", "join", "-"], input=ticket, env=env, text=True)
+    if result.returncode == 0:
+        print("vallum-uri: wrote a user config (no privileged dispatcher). "
+              "Bring the tunnel up with `sudo vallum run --config <the path "
+              "printed above>`, or install the dispatcher so Connect enrols "
+              "as a service.", file=sys.stderr)
     return result.returncode
 
 

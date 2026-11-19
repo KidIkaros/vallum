@@ -528,6 +528,11 @@ install_docs() {
             run su - "$SUDO_USER" -c \
                 "xdg-mime default vallum-uri.desktop x-scheme-handler/vallum" \
                 2>/dev/null || true
+        else
+            # Root-shell install: no invoking desktop user to bind for. Say so
+            # rather than leaving Connect silently dead (validation premortem A3).
+            echo "note: to enable Connect links, run this as your desktop user:" >&2
+            echo "  xdg-mime default vallum-uri.desktop x-scheme-handler/vallum" >&2
         fi
     fi
     # The console's privileged path and the full-tunnel deploy scripts ship

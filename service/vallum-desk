@@ -1298,7 +1298,27 @@ class Desk:
         # that passes here can also answer "is this device connected?".
         checks["daemon"] = "ok" if self._daemon_liveness() is not None else "unreachable"
         ok = all(state == "ok" for state in checks.values())
+        # Informational, not a health gate: the enrolment responder is started
+        # for enrolment, not boot-armed (ADR-0034), so "inactive" is normal
+        # between enrolments. It tells the operator whether a minted ticket will
+        # currently join — arm the responder before distributing tickets.
+        checks["enrolment"] = self._enrolment_state()
         return (200 if ok else 503), {"ok": ok, "checks": checks}
+
+    def _enrolment_state(self):
+        """Whether the enrolment responder is currently listening. By design
+        (ADR-0034) it is started for enrolment, not boot-armed, so "inactive"
+        is normal between enrolments — informational, never a health failure.
+        The operator arms it (vallum enroll --enable) before distributing
+        tickets; a ticket minted while it is down times out for the stranger."""
+        instance = os.path.splitext(os.path.basename(self.config.config))[0]
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", f"vallum-enroll@{instance}"],
+                capture_output=True, text=True, timeout=5)
+            return result.stdout.strip() or "unknown"
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
 
     def status(self, token):
         with self.lock:

@@ -111,6 +111,13 @@ class MainTests(unittest.TestCase):
                     "desk:$VALLUM_DESK_ENDPOINT\" "
                     f"> {self.capture}\n")
         os.chmod(stub, 0o755)
+        # Stub sudo so the dispatcher probe is deterministic: these tests
+        # exercise the same-uid fallback, so the probe must report "no
+        # passwordless dispatcher" regardless of the host's real sudo state.
+        sudo_stub = os.path.join(self.tempdir.name, "sudo")
+        with open(sudo_stub, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(sudo_stub, 0o755)
         self.old_path = os.environ["PATH"]
         os.environ["PATH"] = f"{self.tempdir.name}:{self.old_path}"
         self.addCleanup(os.environ.__setitem__, "PATH", self.old_path)
@@ -160,6 +167,48 @@ class MainTests(unittest.TestCase):
         code = uri_module.main([f"vallum://exec?ticket=x&account={TOKEN32}"])
         self.assertEqual(code, 2)
         self.assertFalse(os.path.exists(self.capture))
+
+
+class PrivilegedJoinTests(unittest.TestCase):
+    """When passwordless sudo grants the dispatcher, Connect enrols through it
+    (root → service install + tunnel proof), so the single-use ticket buys a
+    working tunnel. Ticket/token/desk ride stdin lines 1/2/3 (#32), not argv."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.capture = os.path.join(self.tempdir.name, "capture")
+        sudo_stub = os.path.join(self.tempdir.name, "sudo")
+        with open(sudo_stub, "w") as f:
+            f.write("#!/bin/sh\n"
+                    'if [ "$1" = "-n" ] && [ "$2" = "-l" ]; then exit 0; fi\n'
+                    "read -r ticket\nread -r account\nread -r desk || desk=''\n"
+                    f'echo "privileged ticket:$ticket account:$account desk:$desk" > {self.capture}\n'
+                    "exit 0\n")
+        os.chmod(sudo_stub, 0o755)
+        self.old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.tempdir.name}:{self.old_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", self.old_path)
+
+    def read_capture(self):
+        with open(self.capture) as f:
+            return f.read()
+
+    def test_connect_enrols_through_the_dispatcher_with_stdin_channels(self):
+        code = uri_module.main([uri(desk="https://desk.wingman.gold")])
+        self.assertEqual(code, 0)
+        out = self.read_capture()
+        self.assertIn("privileged", out)
+        self.assertIn(f"ticket:{TICKET}", out)
+        self.assertIn(f"account:{TOKEN32}", out)
+        self.assertIn("desk:https://desk.wingman.gold", out)
+
+    def test_desk_less_uri_sends_no_third_line(self):
+        code = uri_module.main([uri()])
+        self.assertEqual(code, 0)
+        out = self.read_capture()
+        self.assertIn(f"account:{TOKEN32}", out)
+        self.assertIn("desk:\n", out)
 
 
 if __name__ == "__main__":

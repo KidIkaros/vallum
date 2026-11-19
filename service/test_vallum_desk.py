@@ -1185,7 +1185,11 @@ class HealthTests(HttpTests):
         status, body = self.health()
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
-        self.assertEqual(body["checks"], {"database": "ok", "daemon": "ok"})
+        self.assertEqual(body["checks"]["database"], "ok")
+        self.assertEqual(body["checks"]["daemon"], "ok")
+        # enrolment is informational (ADR-0034 started-not-armed): present, but
+        # never a health gate — a working desk is 200 even when it is inactive.
+        self.assertIn("enrolment", body["checks"])
 
     def test_a_daemon_that_cannot_be_asked_is_a_503_that_names_it(self):
         self.desk.daemon = FakeDaemon(refuse_liveness=True)
