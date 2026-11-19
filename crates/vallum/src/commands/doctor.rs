@@ -117,9 +117,15 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
         ),
     ));
 
+    // The [account] table is not part of the resolved runtime config (the
+    // daemon is account-ignorant, ADR-0044); read it from the file for the
+    // desk hint (ADR-0046). A config that will not parse has already failed
+    // the config check — no hint is guessed from it.
+    let mut account_table: Option<vallum_config::Account> = None;
     let config = match args.config.as_deref() {
         Some(path) => match check_config(path, allow_insecure_key) {
             Ok((config, key_path)) => {
+                account_table = vallum_config::Config::load(path).ok().map(|c| c.account);
                 checks.push(Check::new(
                     "config",
                     Status::Pass,
@@ -204,6 +210,7 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
                         config.as_ref().map(|resolved| resolved.carrier),
                         is_client,
                         reachable,
+                        account_table.as_ref(),
                     ));
                     // Handshake age says the keys were agreed; this says data is
                     // still moving. The two come apart in the one failure that
@@ -801,6 +808,26 @@ fn check_path_liveness(path: &Path) -> Check {
     verdict.unwrap_or_else(|| Check::new("path", Status::Warn, "no peers configured"))
 }
 
+/// The account-cause hint (ADR-0046): a config that carries a desk account
+/// may be refused because the account expired or hit its byte cap — and an
+/// invite-code user cannot run `vallum peer add` on the server, so the next
+/// step is the desk. `None` when no token is recorded: the existing advice
+/// stands unchanged. Shared with `vallum status` so the two surfaces speak
+/// with one voice.
+pub(crate) fn desk_account_hint(account: &vallum_config::Account) -> Option<String> {
+    account.token.as_deref()?;
+    Some(match account.endpoint.as_deref() {
+        Some(endpoint) => format!(
+            "this config carries a desk account - it may have expired or hit its byte cap; \
+             run `vallum account` or open {}/account",
+            endpoint.trim_end_matches('/')
+        ),
+        None => "this config carries a desk account - it may have expired or hit its byte cap; \
+                 run `vallum account` (no desk endpoint is recorded)"
+            .to_owned(),
+    })
+}
+
 /// The verdict for a tunnel that has never handshook.
 ///
 /// Separated from the socket so both branches are testable without a daemon.
@@ -816,29 +843,50 @@ fn check_path_liveness(path: &Path) -> Check {
 /// `reachable` is what the path probe found, when it ran: `Some(true)` means
 /// the server answered, so the silence is the server refusing this client
 /// rather than the path being down.
-fn handshake_verdict(is_client: bool, reachable: Option<bool>) -> (Status, String) {
+///
+/// `account` is the config's `[account]` table, when a config was given: a
+/// recorded token turns the refusal advice into the desk hint (ADR-0046).
+fn handshake_verdict(
+    is_client: bool,
+    reachable: Option<bool>,
+    account: Option<&vallum_config::Account>,
+) -> (Status, String) {
     if !is_client {
         return (
             Status::Warn,
             "no handshake since the daemon started: the peers may simply be offline".to_owned(),
         );
     }
+    let hint = account.and_then(desk_account_hint);
     let cause = match reachable {
-        Some(true) => {
-            "the server answers on the wire but does not complete a handshake with this client, \
-             so it is refusing this client - most likely the server no longer has this client's \
-             key (it was re-enrolled, or this config is stale). Re-enrol with `vallum peer add`"
-                .to_owned()
-        }
+        Some(true) => match hint {
+            Some(hint) => format!(
+                "the server answers on the wire but does not complete a handshake with this \
+                 client, so it is refusing this client - {hint}"
+            ),
+            None => {
+                "the server answers on the wire but does not complete a handshake with this client, \
+                 so it is refusing this client - most likely the server no longer has this client's \
+                 key (it was re-enrolled, or this config is stale). Re-enrol with `vallum peer add`"
+                    .to_owned()
+            }
+        },
         Some(false) => {
             "the server does not answer on the wire at all, so the path is down - a firewall \
              between the two, or the server's daemon is not running"
                 .to_owned()
         }
-        None => "the likely causes, in the order to check them: the server does not have this \
-             client's key (it was re-enrolled, or this config is stale) - re-enrol with `vallum \
-             peer add`; the endpoint is wrong or filtered; or the server's daemon is not running"
-            .to_owned(),
+        None => match hint {
+            Some(hint) => format!(
+                "the likely causes, in the order to check them: {hint}; the server no longer \
+                 has this client's key (it was re-enrolled, or this config is stale); the \
+                 endpoint is wrong or filtered; or the server's daemon is not running"
+            ),
+            None => "the likely causes, in the order to check them: the server does not have this \
+                 client's key (it was re-enrolled, or this config is stale) - re-enrol with `vallum \
+                 peer add`; the endpoint is wrong or filtered; or the server's daemon is not running"
+                .to_owned(),
+        },
     };
     (
         Status::Fail,
@@ -854,6 +902,7 @@ fn check_tunnel(
     carrier: Option<vallum_config::Carrier>,
     is_client: bool,
     reachable: Option<bool>,
+    account: Option<&vallum_config::Account>,
 ) -> Check {
     let reply = match control::request(path, "get=1\n") {
         Ok(reply) => reply,
@@ -898,7 +947,7 @@ fn check_tunnel(
         }
         _ => {
             let protocol = carrier.map_or("udp", vallum_config::Carrier::protocol);
-            let (status, detail) = handshake_verdict(is_client, reachable);
+            let (status, detail) = handshake_verdict(is_client, reachable, account);
             Check::new(
                 "tunnel",
                 status,
@@ -1863,7 +1912,7 @@ mod tests {
         // The bug this closes: `Warn` does not fail the run, so a client that
         // had never protected a single byte exited 0 - the report said
         // everything was fine while nothing was.
-        let (status, detail) = super::handshake_verdict(true, None);
+        let (status, detail) = super::handshake_verdict(true, None, None);
         assert_eq!(status, super::Status::Fail);
         assert!(detail.contains("NOT protected"), "{detail}");
         // The likeliest cause is named, because the operator has to act on it.
@@ -1874,7 +1923,7 @@ mod tests {
     fn a_server_with_silent_peers_is_only_a_warning() {
         // The asymmetry is deliberate: a server whose clients are offline is
         // ordinary. Failing it would train people to ignore the line.
-        let (status, detail) = super::handshake_verdict(false, None);
+        let (status, detail) = super::handshake_verdict(false, None, None);
         assert_eq!(status, super::Status::Warn);
         assert!(detail.contains("offline"), "{detail}");
     }
@@ -1884,11 +1933,11 @@ mod tests {
         // The probe answered, so the path is up: the silence is the server
         // refusing this client, not the server being absent. Those two have
         // different fixes, and the old message gave neither.
-        let (status, detail) = super::handshake_verdict(true, Some(true));
+        let (status, detail) = super::handshake_verdict(true, Some(true), None);
         assert_eq!(status, super::Status::Fail);
         assert!(detail.contains("refusing"), "{detail}");
 
-        let (status, detail) = super::handshake_verdict(true, Some(false));
+        let (status, detail) = super::handshake_verdict(true, Some(false), None);
         assert_eq!(status, super::Status::Fail);
         assert!(detail.contains("does not answer"), "{detail}");
     }
@@ -2292,5 +2341,78 @@ mod tests {
             crate::net::recommend_mtu_from_telemetry(1500, &[], dropped, reassembled, delivered);
         assert_eq!(rec.recommended_inner_mtu, 1380);
         assert_eq!(rec.profile, crate::net::MtuProfile::GamingLowFrag1380);
+    }
+
+    /// ADR-0046: an invite-code enrolment cannot run `vallum peer add` on
+    /// the server. When the config carries a desk account and the server
+    /// refuses the handshake, the next step is the desk, not re-enrolment.
+    #[test]
+    fn a_refused_client_with_a_desk_account_is_pointed_at_the_desk() {
+        let account = vallum_config::Account {
+            token: Some("0123456789abcdef0123456789abcdef".to_owned()),
+            endpoint: Some("https://desk.wingman.gold".to_owned()),
+        };
+        let (status, detail) = super::handshake_verdict(true, Some(true), Some(&account));
+        assert_eq!(status, super::Status::Fail);
+        assert!(detail.contains("refusing"), "{detail}");
+        assert!(detail.contains("desk account"), "{detail}");
+        assert!(detail.contains("expired"), "{detail}");
+        assert!(detail.contains("byte cap"), "{detail}");
+        assert!(detail.contains("vallum account"), "{detail}");
+        assert!(
+            detail.contains("https://desk.wingman.gold/account"),
+            "{detail}"
+        );
+        assert!(!detail.contains("peer add"), "{detail}");
+    }
+
+    /// Without an account token the existing advice is unchanged — the
+    /// file/SSH enrolment still re-enrols with `vallum peer add`.
+    #[test]
+    fn a_refused_client_without_an_account_keeps_the_existing_advice() {
+        let (status, detail) = super::handshake_verdict(true, Some(true), None);
+        assert_eq!(status, super::Status::Fail);
+        assert!(
+            detail.contains("Re-enrol with `vallum peer add`"),
+            "{detail}"
+        );
+        assert!(!detail.contains("desk account"), "{detail}");
+        // An empty [account] table (no token) is the same as none.
+        let empty = vallum_config::Account::default();
+        let (_, detail) = super::handshake_verdict(true, Some(true), Some(&empty));
+        assert!(
+            detail.contains("Re-enrol with `vallum peer add`"),
+            "{detail}"
+        );
+    }
+
+    /// A token recorded before the endpoint field existed still gets the
+    /// hint — without inventing a URL.
+    #[test]
+    fn an_account_without_an_endpoint_gets_the_hint_without_a_url() {
+        let account = vallum_config::Account {
+            token: Some("0123456789abcdef0123456789abcdef".to_owned()),
+            endpoint: None,
+        };
+        let (_, detail) = super::handshake_verdict(true, Some(true), Some(&account));
+        assert!(detail.contains("vallum account"), "{detail}");
+        assert!(!detail.contains("/account"), "{detail}");
+    }
+
+    /// The unprobed branch lists causes in order; with an account the desk
+    /// is the first cause, and `peer add` is not advised to an invite-code
+    /// user. A dead path (Some(false)) is never an account's fault.
+    #[test]
+    fn the_unprobed_and_dead_path_branches_stay_honest_about_the_account() {
+        let account = vallum_config::Account {
+            token: Some("0123456789abcdef0123456789abcdef".to_owned()),
+            endpoint: Some("https://desk.wingman.gold".to_owned()),
+        };
+        let (_, detail) = super::handshake_verdict(true, None, Some(&account));
+        assert!(detail.contains("desk account"), "{detail}");
+        assert!(!detail.contains("peer add"), "{detail}");
+        let (_, detail) = super::handshake_verdict(true, Some(false), Some(&account));
+        assert!(detail.contains("does not answer"), "{detail}");
+        assert!(!detail.contains("desk account"), "{detail}");
     }
 }

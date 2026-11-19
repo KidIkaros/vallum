@@ -272,6 +272,20 @@ fn control_socket(config_path: &Path, config: &Config, interface: &str) -> PathB
         .unwrap_or_else(|| vallum_config::socket_path(interface))
 }
 
+/// The account-cause hint for a handshake-failure verdict (ADR-0046).
+///
+/// `stale` (the daemon answers but the session is past the reject window)
+/// and `starting` (no handshake has completed) are the two verdicts where a
+/// desk account — expired or at its byte cap — is a plausible cause. The
+/// wording is the doctor's, so the two surfaces speak with one voice; a
+/// config without a token gets `None` and the existing advice stands.
+fn account_hint(config: &Config, verdict: Verdict) -> Option<String> {
+    if !matches!(verdict, Verdict::Stale | Verdict::Starting) {
+        return None;
+    }
+    crate::commands::doctor::desk_account_hint(&config.account)
+}
+
 /// Run the verb.
 ///
 /// # Errors
@@ -293,6 +307,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let verdict = verdict(live.as_deref(), guard, resolved, now);
+    let account_hint = account_hint(&config, verdict);
 
     if args.json {
         let report = serde_json::json!({
@@ -306,6 +321,7 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
                 GuardState::Unknown => "unknown",
             },
             "policy": resolved.as_str(),
+            "account_hint": account_hint,
         });
         println!(
             "{}",
@@ -325,6 +341,9 @@ pub fn status(args: &StatusArgs) -> Result<(), Error> {
             }
         );
         println!("{:<10} {}", "policy", resolved.as_str());
+        if let Some(hint) = &account_hint {
+            println!("{:<10} {}", "account", hint);
+        }
     }
 
     if verdict.is_failure() {
@@ -639,5 +658,84 @@ mod tests {
             verdict(Some(&both), GuardState::Absent, Mode::On, NOW),
             Verdict::Up
         );
+    }
+
+    /// ADR-0046: a dead session (`stale`) or a never-completed handshake
+    /// (`starting`) on a config that carries a desk account names the
+    /// account as a cause and points at the desk — the invite-code user
+    /// cannot re-enrol on the server.
+    #[test]
+    fn a_handshake_failure_with_a_desk_account_is_pointed_at_the_desk() {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-status-account-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nprivate_key = \"client.key\"\n\n[account]\n\
+             token = \"0123456789abcdef0123456789abcdef\"\n\
+             endpoint = \"https://desk.wingman.gold\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        for verdict in [Verdict::Stale, Verdict::Starting] {
+            let hint = super::account_hint(&config, verdict).expect("a desk hint");
+            assert!(hint.contains("desk account"), "{hint}");
+            assert!(hint.contains("expired"), "{hint}");
+            assert!(hint.contains("byte cap"), "{hint}");
+            assert!(hint.contains("vallum account"), "{hint}");
+            assert!(hint.contains("https://desk.wingman.gold/account"), "{hint}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a token the existing advice stands: the verdict's own
+    /// sentence, unchanged, and no account line.
+    #[test]
+    fn a_handshake_failure_without_an_account_keeps_the_existing_advice() {
+        let dir =
+            std::env::temp_dir().join(format!("vallum-status-noaccount-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client.toml");
+        std::fs::write(&path, "[interface]\nprivate_key = \"client.key\"\n").unwrap();
+        let config = Config::load(&path).unwrap();
+        assert!(super::account_hint(&config, Verdict::Stale).is_none());
+        assert!(super::account_hint(&config, Verdict::Starting).is_none());
+        assert!(Verdict::Stale.detail().contains("reject window"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hint is a handshake-failure hint: a carrying tunnel, a degraded
+    /// one (fresh handshakes), and the daemon-gone verdicts get none.
+    #[test]
+    fn only_handshake_failure_verdicts_get_the_account_hint() {
+        let dir = std::env::temp_dir().join(format!("vallum-status-scope-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client.toml");
+        std::fs::write(
+            &path,
+            "[interface]\nprivate_key = \"client.key\"\n\n[account]\n\
+             token = \"0123456789abcdef0123456789abcdef\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        for verdict in [
+            Verdict::Up,
+            Verdict::Degraded,
+            Verdict::Blocked,
+            Verdict::Leaking,
+            Verdict::Down,
+            Verdict::Unknown,
+        ] {
+            assert!(
+                super::account_hint(&config, verdict).is_none(),
+                "{verdict:?} must not carry an account hint"
+            );
+        }
+        // A token without an endpoint still gets the hint — without a URL.
+        let hint = super::account_hint(&config, Verdict::Stale).expect("a desk hint");
+        assert!(hint.contains("vallum account"), "{hint}");
+        assert!(!hint.contains("/account"), "{hint}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
