@@ -136,6 +136,20 @@ remaining gaps. Lead with findings in words, numbers as backup.
   signup live (old code+name shape refused with the new message), bogus code 403. DEPLOY-HOLD lifted for
   the desk. Cron's final tick reviewed WS4c and fixed real bugs (7981a40); live run cancelled after.
   Rollback: install vallum-desk.rollback-brand + restore desk-before-brand.sqlite + restart.
+- 2026-11-19 13:0x EST — DOGFOOD fixes (operator: "start" on fix 2). systematic-debugging 4-phase:
+  the "unattributed traffic" was NOT real — tui/mod.rs seeded showcase rates (1_420_800/3_891_200 B/s)
+  on EVERY --snapshot with a device; ADR-0039 advertises --snapshot as an agent read verb. FIXED
+  0a6cb0d: seed gated behind --demo, snapshot renders real data; generate_media.py opts in.
+  ad1afb1: metrics peer counters labelled {interface, peer} (fingerprint forks series on rotation);
+  fingerprint now vallum_peer_fingerprint_info metadata. 421b193: Starting status says "no peer is
+  connected yet" instead of the absolute "no handshake has completed" that contradicted
+  handshakes_established_total=1 in the same scrape. 455 lib tests; verify.sh PASS; workspace 48
+  suites clean; pushed b088cbe..421b193. VERIFIED LIVE on wingman-vps with the rebuilt binary:
+  plain snapshot honest (0.0 B/s flat), --demo showcase intact, metrics name-keyed + info metric.
+  NEW finding filed #34: laptop's config fingerprint (7db904af) ≠ daemon session fingerprint
+  (abc04277), no rotation window — a config↔daemon desync on the live server; doctor check proposed.
+  NOTE: the deployed VPS daemon binary is still 1.9.0 (pre-fix); deploying the new binary is a
+  separate live change, staged decision with the operator.
 - 2026-11-19 01:37 EST — WS3 DONE (5cae2fc): opt-in `[interface] client_isolation` + `--client-isolation`
   flag; drop chain in the wholesale-replaced `inet vallum` table (converges both ways; teardown already
   removes it); config is source of truth on re-init (flag/config conflict refused); `--no-nat`+isolation
