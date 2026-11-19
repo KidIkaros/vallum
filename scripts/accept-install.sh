@@ -27,6 +27,18 @@ TICKET_DIR=$(mktemp -d -t accept-install.XXXXXX)
 say() { echo "[accept] $*"; }
 die() { echo "[accept] FAIL: $*" >&2; exit 1; }
 
+# --from-release installs the PUBLISHED artifact (download + signature verify) —
+# the path a stranger actually takes. The default --local installs this checkout's
+# build. The premortem (2026-11-19, mode 2) found this gate only ever tested
+# --local, so the published download path was proven by nothing.
+FROM_RELEASE=0
+for arg in "$@"; do
+    case "$arg" in
+        --from-release) FROM_RELEASE=1 ;;
+        *) die "unknown argument: $arg (use --from-release)" ;;
+    esac
+done
+
 cleanup() {
     say "cleanup"
     ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config "${CONFIG:-/etc/vallum/vallum0.toml}"; sudo -n /usr/bin/vallum server enroll --disable --config "${CONFIG:-/etc/vallum/vallum0.toml}"" >/dev/null 2>&1
@@ -59,12 +71,16 @@ docker exec "$NAME" bash -c 'apt-get update -qq && apt-get install -y -qq iprout
 say "copying install media to /opt/vallum (the layout install.sh expects)"
 docker exec "$NAME" mkdir -p /opt/vallum/target/release
 for d in scripts packaging; do docker cp "$REPO/$d" "$NAME:/opt/vallum/$d" >/dev/null; done
-for b in vallum vallum-quick; do
-    docker cp "$REPO/target/release/$b" "$NAME:/opt/vallum/target/release/$b" >/dev/null
-done
-
-say "hand command one: install.sh --local --install-only"
-docker exec "$NAME" bash -c 'cd /opt/vallum && bash scripts/install.sh --local --install-only' >"$LOG" 2>&1
+if [ "$FROM_RELEASE" = 0 ]; then
+    for b in vallum vallum-quick; do
+        docker cp "$REPO/target/release/$b" "$NAME:/opt/vallum/target/release/$b" >/dev/null
+    done
+    say "hand command one: install.sh --local --install-only"
+    docker exec "$NAME" bash -c 'cd /opt/vallum && bash scripts/install.sh --local --install-only' >"$LOG" 2>&1
+else
+    say "hand command one: install.sh --from-release --install-only (the published artifact)"
+    docker exec "$NAME" bash -c 'cd /opt/vallum && bash scripts/install.sh --from-release --install-only' >"$LOG" 2>&1
+fi
 grep -qE 'installed|complete' "$LOG" || { tail -20 "$LOG"; die "install.sh did not report success"; }
 docker exec "$NAME" test -x /usr/bin/vallum || die "no binary after install"
 say "installed: $(docker exec "$NAME" /usr/bin/vallum --version 2>&1 | head -1)"

@@ -109,4 +109,21 @@ if ssh-keygen -Y verify -f "$sig_dir/allowed_signers" -n file \
     exit 1
 fi
 rm -rf "$sig_dir"
+
+echo "== release parity (HEAD vs the latest tag)"
+# A verdict on main is not a verdict on what a stranger downloads. Warn when the
+# tree is ahead of the latest release tag, so "verified" cannot quietly stand in
+# for an artifact that was never cut (premortem 2026-11-19, mode 2). A warning,
+# not a refusal: development legitimately runs ahead of the last release.
+latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+if [ -n "$latest_tag" ]; then
+    ahead=$(git rev-list --count "$latest_tag..HEAD" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ]; then
+        echo "   warn  HEAD is $ahead commit(s) ahead of $latest_tag — a stranger installing --from-release gets $latest_tag, not this tree; cut a release before the cohort installs"
+    else
+        echo "   ok    HEAD is at $latest_tag"
+    fi
+else
+    echo "   warn  no release tag found"
+fi
 echo "PASS"

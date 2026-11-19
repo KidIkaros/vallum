@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.10.0 — 2026-11-19
+
+- **The account is not the device (ADR-0047).** Signup creates an account alone
+  (code → shown-once number, no device name); devices enrol on demand, each minting
+  its own single-use join ticket pinned to the device's public key when it presents
+  one. Rotation replaces key material under the stable peer name so the slot, address
+  and plan survive; the device cap reconciles against the daemon's own peers, releasing
+  ghost reservations past a TTL longer than the ticket, and fails closed when the daemon
+  cannot be asked.
+- **A lost number is recoverable by the operator.** `vallum-desk-admin reset-token`
+  (and `/api/admin/reset-token`) issues a fresh account number and retires the old
+  immediately, leaving devices, plan, quota and expiry untouched (ADR-0047 Q3).
+- **Rotation no longer drifts silently — the #34 root cause.** The TUI and GUI
+  rotate/finalize saved the config then discarded the daemon apply outcome
+  (`let _ = syncconf_running`) and reported success regardless, so a rotation the daemon
+  never learned looked done and `finalize` dropped the previous key from the config while
+  the daemon kept it — the config↔session drift seen on the alpha server. All four sites
+  now propagate the apply error and report `applied: yes/no — reason`, like the CLI.
+  `vallum doctor` gained a `peer sync` check that warns when a config peer's fingerprint
+  differs from the running daemon's. (#34)
+- **The instrument tells the truth.** `vallum tui --snapshot` is a read verb and no longer
+  fabricates showcase traffic (the demo seed moved behind an explicit `--demo`); peer
+  metrics are labelled by `{interface, peer}` so rotation cannot fork a series (the
+  fingerprint became a `vallum_peer_fingerprint_info` metadata metric); the Starting status
+  speaks present state, not an absolute it cannot know.
+- **The monitoring watches itself.** The telemetry pusher emits a heartbeat
+  (`VallumMonitoringSilent` pages on staleness), probes Alertmanager and pages ntfy directly
+  when the router is down (`VallumPagerPathBroken`), and `contrib/ops/vallum-watchdog.sh` is
+  an independent second-host dead-man's switch. The funnel alert detects tickets minted and
+  never redeemed.
+- **A stranger's failed join is diagnosable.** The front (TLS) enrolment path now gives the
+  same three-cause no-answer diagnostic as UDP, with a stranger-vs-operator line so a client
+  that cannot sudo the server knows to forward the message.
+- **The desk wears the Vallum brand, and operators can wear their own.** The embedded pages
+  share one brandkit stylesheet; `--operator-name`, `--install-source`, `--repo-url` rebrand
+  everything the desk serves for a white-label deployment.
+- **Runbooks for the operator.** `docs/deployment/` gains incident-response (severity ladder,
+  pager drill, escalation, incident log), compromise (three secret classes, contain → verify
+  against daemon reality), and white-label (run your own branded paid desk, honest manual
+  billing). A premortem of the verification system (`docs/qa/premortem-alpha-verification.md`)
+  corrected the readiness claims and added a release-parity warning to `verify.sh` plus a
+  `--from-release` mode to `accept-install` so the published artifact a stranger downloads is
+  gated, not just the local build.
+
 ## 1.9.0 — 2026-11-19
 
 - **`vallum account` reads the desk, and join records where the account lives.**
