@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vallum — a post-quantum layer-3 tunnel for Linux</title>
-<meta name="description" content="Vallum is a Linux server and client VPN whose handshake combines X25519, sntrup761 and ML-KEM-768. You run the server; you hold the keys.">
+<title>Vallum — every boundary under watch</title>
+<meta name="description" content="Vallum is a post-quantum layer-3 tunnel for Linux with a self-hostable account desk. Open an account, enrol devices on demand, keep your keys on your own machines — for humans and agents.">
+<meta name="theme-color" content="#0d1117">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,74 +16,228 @@
   <nav aria-label="Primary">
     <a href="docs/">Documentation</a>
     <a href="https://github.com/KidIkaros/vallum">Source</a>
+    <a href="https://desk.wingman.gold/account">Account</a>
   </nav>
 </header>
 
 <main id="main">
-  <h1>A tunnel whose handshake is built for the day the quantum computer arrives.</h1>
-  <p class="lede">Vallum is a layer-3 VPN for Linux: a server and a client you deploy, not a reference
-    crate. Every handshake combines X25519, sntrup761 and ML-KEM-768, and every identity is signed with
-    Ed25519 and Falcon-1024 under a CA-issued validity window.</p>
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="tagline">every boundary under watch</p>
+      <h1>A tunnel built for the day the quantum computer arrives</h1>
+      <p class="lede">Vallum is a layer-3 VPN for Linux with a tri-hybrid post-quantum handshake.
+        Open an account at a desk, enrol devices on demand, and keep every private key on your own
+        machine — or run the desk yourself and offer the same tunnel to your own users, human or agent.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://desk.wingman.gold">Create an account</a>
+        <a class="btn btn-quiet" href="#install">Install the client</a>
+      </div>
+      <p class="cta-note">The hosted alpha desk is invite-gated —
+        <a href="#desk">run your own desk</a> for open signup.</p>
+    </div>
 
-  <h2>Install</h2>
-  <pre><code><span class="cmd">sudo ./scripts/install.sh --from-release</span>
+    <figure class="seal">
+      <svg viewBox="0 0 480 340" role="img" aria-labelledby="seal-title">
+        <title id="seal-title">The Vallum boundary seal: an initiator and a responder on a boundary line, meeting at a diamond rampart gate</title>
+        <defs>
+          <pattern id="seal-grid" width="32" height="32" patternUnits="userSpaceOnUse">
+            <path d="M32 0H0V32" fill="none" stroke="#161b22" stroke-width="1"/>
+          </pattern>
+          <clipPath id="seal-clip">
+            <rect x="1" y="1" width="478" height="338" rx="11"/>
+          </clipPath>
+        </defs>
+        <rect x="0.5" y="0.5" width="479" height="339" rx="12" fill="#090d12" stroke="#21262d"/>
+        <g clip-path="url(#seal-clip)">
+          <rect width="480" height="340" fill="url(#seal-grid)"/>
+        </g>
+        <line x1="240" y1="48" x2="240" y2="272" stroke="#21262d" stroke-width="1"/>
+        <line x1="48" y1="160" x2="432" y2="160" stroke="#30363d" stroke-width="2"/>
+        <line x1="130" y1="160" x2="350" y2="160" stroke="#39c5cf" stroke-width="2"/>
+        <circle cx="130" cy="160" r="11" fill="#0d1117" stroke="#39c5cf" stroke-width="3"/>
+        <circle cx="350" cy="160" r="11" fill="#0d1117" stroke="#39c5cf" stroke-width="3"/>
+        <polygon points="240,134 266,160 240,186 214,160" fill="#161b22" stroke="#39c5cf" stroke-width="2"/>
+        <polygon points="240,148 252,160 240,172 228,160" fill="#39c5cf"/>
+        <g text-anchor="middle">
+          <text x="130" y="205" fill="#8b949e">Initiator</text>
+          <text x="350" y="205" fill="#8b949e">Responder</text>
+          <text x="240" y="222" fill="#39c5cf">Rampart gate</text>
+        </g>
+      </svg>
+      <figcaption>The Vallum seal — initiator and responder meet at the rampart gate</figcaption>
+    </figure>
+
+    <ul class="hero-meta">
+      <li><span>suite</span> 0x0003 tri-hybrid</li>
+      <li><span>platform</span> linux + systemd</li>
+      <li><span>license</span> apache-2.0</li>
+      <li><span>status</span> alpha</li>
+    </ul>
+  </section>
+
+  <section aria-labelledby="ways-h">
+    <h2 id="ways-h"><span class="tick" aria-hidden="true">◆</span>Two ways in</h2>
+    <div class="ways">
+      <article class="way-human">
+        <h3>For humans</h3>
+        <ol class="steps">
+          <li>
+            <div>
+              <span class="step-title">Open an account</span>
+              <p>Sign up at a desk with an invite code, or anonymously where the operator allows it.
+                You get an account number and a single-use join ticket.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <span class="step-title">Keep the account number</span>
+              <p>32 hex characters, the only credential. No email, no password reset — the desk holds
+                no personal data and no private keys
+                (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0045-the-desk-is-the-account-layer-keys-only.md">ADR-0045</a>).</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <span class="step-title">Enrol a device</span>
+              <p>The desk mints a join ticket bound to your plan. The client generates its own key;
+                only the public line crosses to the server.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <span class="step-title">Join, then add more</span>
+              <p><code>vallum join 'vallum1-join:…'</code> brings the tunnel up. The account page mints
+                fresh tickets for further devices under the same plan.</p>
+            </div>
+          </li>
+        </ol>
+        <p class="way-note">A ticket lives 15 minutes; the account outlives it. An expired ticket is
+          not a lost account — add a device again, no new invite code.</p>
+      </article>
+
+      <article class="way-agent">
+        <h3>For agents</h3>
+        <pre class="api"><code><span class="ep">POST /api/signup</span>
+  {"code": "…", "name": "agent-01"}
+<span class="cmt">  → join ticket + account number</span>
+<span class="ep">POST /api/devices</span>
+  {"token": "…", "name": "agent-02"}
+<span class="cmt">  → a fresh ticket, same plan</span>
+<span class="ep">POST /api/account</span>
+  {"token": "…"}
+<span class="cmt">  → plan, byte pool, devices</span></code></pre>
+        <p class="note">The desk is a JSON API first: credentials ride in the body, never the URL.
+          A <a href="https://github.com/KidIkaros/vallum/blob/main/packaging/utcp/vallum-desk.utcp.json">UTCP manual</a>
+          ships in the repo, so an agent can discover the flow and enrol headlessly — no browser, no TTY.
+          On the tunnel itself, every read verb answers <code>--json</code> and
+          <code>vallum tui --snapshot</code> renders a TTY-free view
+          (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0039-alpha-distribution-surface.md">ADR-0039</a>).</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="desk" aria-labelledby="desk-h">
+    <h2 id="desk-h"><span class="tick" aria-hidden="true">◆</span>Run your own desk</h2>
+    <p class="prose">The desk is the account layer, not the tunnel. It is stdlib Python and one systemd
+      unit, and it never edits the daemon's config — it only calls <code>vallum peer invite/remove/show</code>
+      and reads the daemon's own counters. A desk bug cannot weaken the tunnel; worst case it mints or
+      removes a peer.</p>
+    <ul class="flat">
+      <li><strong>One server per desk.</strong> A desk enrols against a single Vallum server; capacity is
+        that machine's hardware, not a fleet. There are no regions, and multi-server is future work
+        (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0047-the-account-is-not-the-device.md">ADR-0047</a>).</li>
+      <li><strong>Plans are rows.</strong> A paid tier is data on the account row — plan, expiry, byte cap —
+        so a billing webhook only ever updates a row.</li>
+      <li><strong>Your brand.</strong> <code>--operator-name</code> sets the desk's page header; invite codes,
+        trial limits and device caps are operator flags.</li>
+      <li><strong>Backups ship enabled.</strong> A timer copies the account database through SQLite's
+        online-backup API and verifies the copy before keeping it.</li>
+    </ul>
+    <div class="link-row">
+      <a href="https://github.com/KidIkaros/vallum/blob/main/service/README.md">Service README</a>
+      <a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0045-the-desk-is-the-account-layer-keys-only.md">ADR-0045 — the account layer</a>
+    </div>
+  </section>
+
+  <section aria-labelledby="handshake-h">
+    <h2 id="handshake-h"><span class="tick" aria-hidden="true">◆</span>What the handshake does</h2>
+    <dl class="facts">
+      <div>
+        <dt>Suite 0x0003</dt>
+        <dd>X25519 + sntrup761 + ML-KEM-768, combined with HKDF-SHA3-256. Three messages, three hybrid
+          KEM operations, one round trip.</dd>
+      </div>
+      <div>
+        <dt>Signed identities</dt>
+        <dd>Ed25519 + Falcon-1024 over the transcript, with a signed validity window so a key can
+          expire without being revoked by hand.</dd>
+      </div>
+      <div>
+        <dt>Epoch discipline</dt>
+        <dd>Rekey is a fresh hybrid handshake, not a re-use of the old one; the superseded epoch is
+          erased after <code>REJECT_AFTER_TIME</code>.</dd>
+      </div>
+      <div>
+        <dt>Rotation without an outage</dt>
+        <dd><code>vallum peer rotate</code> accepts the old and the new key at once, and
+          <code>peer finalize</code> retires the old identity when the client has switched.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section aria-labelledby="cockpit-h">
+    <h2 id="cockpit-h"><span class="tick" aria-hidden="true">◆</span>The cockpit</h2>
+    <p class="prose">Humans get <code>vallum tui</code> — a real operations console over SSH. The alpha
+      ships the CLI, the TUI and the UTCP manual; the desktop console stays a development surface
+      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0039-alpha-distribution-surface.md">ADR-0039</a>).</p>
+    <figure>
+      <img src="assets/vallum-cockpit.png" width="1200" height="720"
+           alt="The Vallum terminal cockpit: an interface panel with service state and suite, a peers table with handshake age and rx/tx totals, and a peer detail pane.">
+      <figcaption><code>vallum tui</code> — a real frame rendered from the binary, not a mockup</figcaption>
+    </figure>
+  </section>
+
+  <section id="install" aria-labelledby="install-h">
+    <h2 id="install-h"><span class="tick" aria-hidden="true">◆</span>Install</h2>
+    <p class="prose">For your own server. Joining the hosted alpha needs only the client.</p>
+    <pre><code><span class="cmd">sudo ./scripts/install.sh --from-release</span>
 
 <span class="cmt"># server: key, config, IP forwarding, firewall, NAT, systemd units</span>
 sudo vallum setup --server
 
 <span class="cmt"># client with SSH access: it generates its own key, only the public line crosses</span>
 sudo vallum setup --remote you@vpn.example.com</code></pre>
-  <p class="note">A client without SSH takes one invite ticket instead
-    (<code>sudo vallum peer invite laptop</code>, then <code>sudo vallum join vallum1-join:…</code>) —
-    the private key never leaves the machine. See the
-    <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/client.md">client guide</a>.</p>
+    <p class="note">A client without SSH takes one join ticket instead
+      (<code>sudo vallum peer invite laptop</code>, then <code>sudo vallum join vallum1-join:…</code>) —
+      the private key never leaves the machine. See the
+      <a href="https://github.com/KidIkaros/vallum/blob/main/docs/deployment/client.md">client guide</a>.</p>
+  </section>
 
-  <h2>What the handshake does</h2>
-  <dl class="facts">
-    <div>
-      <dt>Suite 0x0003</dt>
-      <dd>X25519 + sntrup761 + ML-KEM-768, combined with HKDF-SHA3-256. Three messages, three hybrid
-        KEM operations, one round trip.</dd>
-    </div>
-    <div>
-      <dt>Signed identities</dt>
-      <dd>Ed25519 + Falcon-1024 over the transcript, with a signed validity window so a key can
-        expire without being revoked by hand.</dd>
-    </div>
-    <div>
-      <dt>Epoch discipline</dt>
-      <dd>Rekey is a fresh hybrid handshake, not a re-use of the old one; the superseded epoch is
-        erased after <code>REJECT_AFTER_TIME</code>.</dd>
-    </div>
-    <div>
-      <dt>Rotation without an outage</dt>
-      <dd><code>vallum peer rotate</code> accepts the old and the new key at once, and
-        <code>peer finalize</code> retires the old identity when the client has switched.</dd>
-    </div>
-  </dl>
-
-  <h2>The cockpit</h2>
-  <figure>
-    <img src="assets/vallum-cockpit.png" width="1200" height="720"
-         alt="The Vallum terminal cockpit: an interface panel with service state and suite, a peers table with handshake age and rx/tx totals, and a peer detail pane.">
-    <figcaption><code>vallum tui</code> — a real frame rendered from the binary, not a mockup.</figcaption>
-  </figure>
-
-  <h2>What it is not</h2>
-  <ul class="flat">
-    <li>Not cross-platform. Linux is the supported target
-      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0005-linux-only-platform-scope.md">ADR-0005</a>),
-      and macOS is out of scope
-      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0011-macos-out-of-scope.md">ADR-0011</a>).</li>
-    <li>Not a hosted service. You run the server, and you hold the keys; there is no account to create.</li>
-    <li>Not a relay. NAT traversal and relaying are bounded by a written list of what we will and will
-      not do
-      (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0016-nat-traversal.md">ADR-0016</a>).</li>
-  </ul>
+  <section aria-labelledby="boundaries-h">
+    <h2 id="boundaries-h"><span class="tick" aria-hidden="true">◆</span>What it is not</h2>
+    <ul class="flat">
+      <li>Not cross-platform. Linux is the supported target
+        (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0005-linux-only-platform-scope.md">ADR-0005</a>),
+        and macOS is out of scope
+        (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0011-macos-out-of-scope.md">ADR-0011</a>).</li>
+      <li>Not a fleet. One self-hosted server per deployment, sized by its hardware. No regions, no
+        anycast, no autoscaling claims
+        (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0047-the-account-is-not-the-device.md">ADR-0047</a>).</li>
+      <li>Not a relay. NAT traversal and relaying are bounded by a written list of what we will and will
+        not do
+        (<a href="https://github.com/KidIkaros/vallum/blob/main/docs/adr/0016-nat-traversal.md">ADR-0016</a>).</li>
+      <li>Not audited. The post-quantum legs ride an experimental SDK and no external audit has been
+        performed. Read the
+        <a href="https://github.com/KidIkaros/vallum/blob/main/docs/security-model.md">security model</a>
+        before you deploy.</li>
+    </ul>
+  </section>
 </main>
 
 <footer>
-  <p>Apache-2.0 · Ikaros Digital × Atomguard · <a href="https://github.com/KidIkaros/vallum">source</a></p>
+  <p>Apache-2.0 · Ikaros Digital × Atomguard ·
+    <a href="https://github.com/KidIkaros/vallum">source</a> ·
+    <a href="docs/">documentation</a></p>
 </footer>
 </body>
 </html>
