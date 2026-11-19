@@ -1060,6 +1060,18 @@ fn place_config_in(
         config_text = vallum_config::with_account_token(&config_text, &account);
     }
 
+    // The desk origin the URI carried (VALLUM_DESK_ENDPOINT, set by
+    // vallum-uri from `desk=`) lands beside the token, so `vallum account`
+    // knows which desk to ask — and shows it before the token leaves
+    // (ADR-0046). Absent for a desk-less enrolment; the config parses
+    // either way.
+    if let Some(desk) = std::env::var_os("VALLUM_DESK_ENDPOINT") {
+        let desk = desk.to_string_lossy();
+        crate::commands::account::parse_desk_endpoint(&desk)
+            .map_err(|error| Error::Usage(format!("VALLUM_DESK_ENDPOINT: {error}")))?;
+        config_text = vallum_config::with_account_endpoint(&config_text, &desk);
+    }
+
     // Probe path MTU to the server endpoint. If a reduced-MTU link (PPPoE, DS-Lite)
     // is measured, configure `interface.outer_mtu` so large payloads do not hang.
     if !endpoint.is_empty() && endpoint != "?" {
@@ -1564,6 +1576,54 @@ mod tests {
             dir.join("desk-client.key").exists(),
             "the key file must exist under the new name"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0046: the desk origin the URI carried (`VALLUM_DESK_ENDPOINT`,
+    /// set by vallum-uri) lands in `[account]` beside the token, so
+    /// `vallum account` knows which desk to ask. A desk-less enrolment
+    /// records no endpoint, and the config still parses.
+    #[test]
+    fn join_records_the_desk_endpoint_beside_the_token() {
+        let dir = std::env::temp_dir().join(format!("vallum-join-desk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let server_text = "[interface]\nname = \"vallum-u0009\"\nprivate_key = \"u0009.key\"\naddress = \"10.99.90.7/32\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:00:-\"\nallowed_ips = [\"10.99.90.0/24\"]\n";
+        let secret = crate::keys::new_secret(3, false, [7u8; 32]);
+        let token = "0123456789abcdef0123456789abcdef";
+
+        std::env::set_var("VALLUM_ACCOUNT", token);
+        std::env::set_var("VALLUM_DESK_ENDPOINT", "https://desk.example.com:8443");
+        place_config_in("desk-a", server_text, &secret, "10.99.90.7/32", "?", None, &dir)
+            .unwrap();
+        let written = std::fs::read_to_string(dir.join("desk-a.toml")).unwrap();
+        let parsed = vallum_config::Config::load(&dir.join("desk-a.toml")).unwrap();
+        assert_eq!(parsed.account.token.as_deref(), Some(token), "{written}");
+        assert_eq!(
+            parsed.account.endpoint.as_deref(),
+            Some("https://desk.example.com:8443"),
+            "{written}"
+        );
+
+        // A desk-less enrolment (file/SSH, or a URI without desk=) records
+        // the token alone; the config must still parse with no endpoint.
+        std::env::remove_var("VALLUM_DESK_ENDPOINT");
+        place_config_in("desk-b", server_text, &secret, "10.99.90.7/32", "?", None, &dir)
+            .unwrap();
+        let parsed = vallum_config::Config::load(&dir.join("desk-b.toml")).unwrap();
+        assert_eq!(parsed.account.token.as_deref(), Some(token));
+        assert!(parsed.account.endpoint.is_none());
+
+        // A malformed origin is refused at join, not recorded for later.
+        std::env::set_var("VALLUM_DESK_ENDPOINT", "ftp://not-a-desk.example");
+        let err = place_config_in(
+            "desk-c", server_text, &secret, "10.99.90.7/32", "?", None, &dir,
+        )
+        .expect_err("a non-https desk origin must be refused");
+        assert!(err.to_string().contains("VALLUM_DESK_ENDPOINT"), "{err}");
+
+        std::env::remove_var("VALLUM_ACCOUNT");
+        std::env::remove_var("VALLUM_DESK_ENDPOINT");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

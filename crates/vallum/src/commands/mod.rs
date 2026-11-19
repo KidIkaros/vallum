@@ -2,6 +2,7 @@
 
 //! The `vallum` command implementations. `main.rs` only parses and dispatches.
 
+pub mod account;
 pub mod bench;
 pub mod client;
 pub mod control;
