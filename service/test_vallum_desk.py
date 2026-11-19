@@ -2656,5 +2656,85 @@ class AccountOnlyTests(DeskTestCase):
         self.assertEqual(self.daemon.removed, [])
 
 
+class ReconciliationTests(DeskTestCase):
+    """WS4d (ADR-0047 §1): the daemon is the source of truth for devices.
+
+    The cap counts actual daemon peers plus live reservations, not desk rows
+    alone: a ticket nobody redeemed must not burn a device slot for ever, and
+    a daemon that cannot be asked must not cause a guess."""
+
+    def _backdate(self, peer, seconds):
+        old = (datetime.datetime.now(datetime.timezone.utc)
+               - datetime.timedelta(seconds=seconds)).isoformat(timespec="seconds")
+        with self.desk.lock:
+            self.desk.db.execute("UPDATE peers SET created=? WHERE peer=?", (old, peer))
+
+    def _status(self, peer):
+        with self.desk.lock:
+            return self.desk.db.execute(
+                "SELECT status FROM peers WHERE peer=?", (peer,)).fetchone()[0]
+
+    def test_ghost_reservation_is_released_and_frees_the_cap(self):
+        self.config.device_cap = 2
+        account, device = self.account_with_device(name="real")
+        code, ghost = self.desk.add_device({"token": account["token"], "name": "ghost"})
+        self.assertEqual(code, 200)
+        self._backdate(ghost["peer"], 3600)
+        self.daemon._liveness = {device["peer"]: 1700000000}  # only the real device exists
+        # rows now == cap (2); without reconciliation this would 429
+        code, payload = self.desk.add_device({"token": account["token"], "name": "new"})
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(self._status(ghost["peer"]), "removed")
+
+    def test_ghost_release_does_not_call_daemon_remove(self):
+        account, device = self.account_with_device(name="real")
+        code, ghost = self.desk.add_device({"token": account["token"], "name": "ghost"})
+        self._backdate(ghost["peer"], 3600)
+        self.daemon._liveness = {device["peer"]: 1700000000}
+        self.desk.add_device({"token": account["token"], "name": "new"})
+        # the peer is absent from the daemon: there is nothing to remove there
+        self.assertNotIn(ghost["peer"], self.daemon.removed)
+
+    def test_pending_reservation_within_ttl_is_kept(self):
+        self.config.device_cap = 2
+        account, device = self.account_with_device(name="real")
+        code, pending = self.desk.add_device({"token": account["token"], "name": "pending"})
+        self.assertEqual(code, 200)
+        self.daemon._liveness = {device["peer"]: 1700000000}  # pending not yet joined
+        code, payload = self.desk.add_device({"token": account["token"], "name": "new"})
+        self.assertEqual(code, 429)  # real + pending == cap; a fresh ticket is not a ghost
+        self.assertIn("device limit", payload["error"])
+        self.assertEqual(self._status(pending["peer"]), "active")
+
+    def test_redeemed_device_is_kept_regardless_of_age(self):
+        self.config.device_cap = 1
+        account, device = self.account_with_device(name="real")
+        self._backdate(device["peer"], 100000)  # old, but present on the daemon
+        self.daemon._liveness = {device["peer"]: 1700000000}
+        code, payload = self.desk.add_device({"token": account["token"], "name": "new"})
+        self.assertEqual(code, 429)  # the real device still counts
+        self.assertEqual(self._status(device["peer"]), "active")
+
+    def test_unreachable_daemon_releases_nothing(self):
+        self.config.device_cap = 2
+        account, device = self.account_with_device(name="real")
+        code, ghost = self.desk.add_device({"token": account["token"], "name": "ghost"})
+        self._backdate(ghost["peer"], 3600)
+        self.daemon._refuse_liveness = True  # the daemon cannot be asked
+        code, payload = self.desk.add_device({"token": account["token"], "name": "new"})
+        self.assertEqual(code, 429)  # fail-closed: rows counted, no guess, no release
+        self.assertEqual(self._status(ghost["peer"]), "active")
+
+    def test_sweep_releases_ghost_reservations_of_active_accounts(self):
+        account, device = self.account_with_device(name="real")
+        code, ghost = self.desk.add_device({"token": account["token"], "name": "ghost"})
+        self._backdate(ghost["peer"], 3600)
+        self.daemon._liveness = {device["peer"]: 1700000000}
+        actions = self.desk.sweep_once()
+        self.assertTrue(any(a.get("peer") == ghost["peer"] and a.get("reason") == "unredeemed"
+                            for a in actions), actions)
+        self.assertEqual(self._status(ghost["peer"]), "removed")
+
+
 if __name__ == "__main__":
     unittest.main()

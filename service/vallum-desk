@@ -449,6 +449,7 @@ class DeskConfig:
     max_active_accounts: int = 200                   # the /24 holds 253
     signup_ip_day_limit: int = 3                     # signups per IP per day
     device_cap: int = 5                              # devices per account
+    reservation_ttl: int = 1200                      # seconds a minted ticket reserves a slot (> the 15-min invite, so a slow join is not released mid-flight)
     operator_name: str = "vallum desk"               # the page header's brand
     install_source: str = DEFAULT_INSTALL_SOURCE     # the install.sh URL served to users
     repo_url: str = DEFAULT_REPO_URL                 # the source/docs link served to users
@@ -693,6 +694,67 @@ class Desk:
 
     # -- devices ----------------------------------------------------------
 
+    def _daemon_peers(self):
+        """The set of peer names the daemon actually has, or None when it
+        cannot be asked. The source of truth for which devices exist
+        (ADR-0047 §1): the desk's `peers` rows are reservations and records,
+        not reality — a row whose peer the daemon does not have is a ticket
+        nobody redeemed (or a peer removed out from under the desk)."""
+        live = self._daemon_liveness()
+        return None if live is None else set(live)
+
+    def _release_ghost_reservations(self, account, daemon_peers):
+        """Release the account's reservations whose peer the daemon does not
+        have AND whose ticket has expired (the row is older than
+        `reservation_ttl`). A reservation within the TTL is a live ticket the
+        client may still redeem — not a ghost. The peer is absent from the
+        daemon, so there is nothing to remove there; the row is aligned to
+        reality. Returns the released peer names. A daemon that cannot be
+        asked (daemon_peers None) releases nothing: no guess, fail-closed."""
+        if daemon_peers is None:
+            return []
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=self.config.reservation_ttl)
+                  ).isoformat(timespec="seconds")
+        released = []
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT peer, created FROM peers WHERE account_id=? AND status='active'",
+                (account["id"],)).fetchall()
+            for row in rows:
+                # ISO-8601 UTC timestamps compare lexicographically in order.
+                if row["peer"] not in daemon_peers and row["created"] <= cutoff:
+                    self.db.execute(
+                        "UPDATE peers SET status='removed' WHERE peer=?", (row["peer"],))
+                    released.append(row["peer"])
+        return released
+
+    def _live_device_count(self, account, daemon_peers):
+        """The cap count: ghost reservations released, then the remaining
+        active rows (the legacy first-device column is the fallback for a
+        pre-migration account). With the daemon unreachable this is just the
+        row count — conservative, no release."""
+        self._release_ghost_reservations(account, daemon_peers)
+        with self.lock:
+            live = self.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE account_id=? AND status='active'",
+                (account["id"],)).fetchone()[0]
+        if live == 0 and account["peer"]:
+            live = 1  # a pre-migration row: the legacy column IS the device
+        return live
+
+    def _sweep_ghost_reservations(self, active, daemon_peers):
+        """The sweep's share of reconciliation: release unredeemed reservations
+        on ACTIVE accounts too (the orphan sweep only visits inactive ones), so
+        a ghost does not hold a device slot until the account itself expires."""
+        actions = []
+        for account in active:
+            for peer in self._release_ghost_reservations(account, daemon_peers):
+                actions.append({"peer": peer, "reason": "unredeemed"})
+        if actions:
+            print(f"desk: released {len(actions)} unredeemed reservation(s)")
+        return actions
+
     _PUBLIC_LINE_MAX = 8192  # a tri-hybrid public line is a few KB; this is headroom
     _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
@@ -759,6 +821,10 @@ class Desk:
         # racing read on the shared connection never interleaves. The
         # daemon call stays outside the lock: a subprocess under a mutex
         # serializes the desk, and a failed mint deletes the reservation.
+        # The daemon's actual peers are the source of truth for the cap
+        # (ADR-0047 §1): fetched once here, then used inside the locked step
+        # to release ghost reservations and count live devices.
+        daemon_peers = self._daemon_peers()
         with self.lock:
             account = self.db.execute(
                 "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
@@ -767,11 +833,7 @@ class Desk:
             if account["status"] != "active":
                 return 403, {"error": f"account is {account['status']} — "
                                       "devices can only join an active account"}
-            live = self.db.execute(
-                "SELECT COUNT(*) FROM peers WHERE account_id=? AND status='active'",
-                (account["id"],)).fetchone()[0]
-            if live == 0 and account["peer"]:
-                live = 1  # a pre-migration row: the legacy column IS the device
+            live = self._live_device_count(account, daemon_peers)
             if live >= self.config.device_cap:
                 return 429, {"error": "device limit — an account carries at most "
                                       f"{self.config.device_cap} devices; remove one first"}
@@ -1177,6 +1239,7 @@ class Desk:
             if reason:
                 actions.append(self._revoke(row, reason, used))
         actions.extend(self._sweep_orphans())
+        actions.extend(self._sweep_ghost_reservations(active, self._daemon_peers()))
         return actions
 
     def _sweep_orphans(self):
