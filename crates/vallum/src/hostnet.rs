@@ -857,18 +857,22 @@ mod tests {
         assert!(plan_firewall(&host, 51820, "vallum0").is_empty());
     }
 
-    #[test]
-    fn the_nat_script_names_both_families_and_owns_its_table() {
-        let v4: Vec<IpNet> = vec!["10.7.0.0/24".parse().unwrap()];
-        let v6: Vec<IpNet> = vec!["fd00:7::/64".parse().unwrap()];
-        let steps = plan_nat(&v4, &v6, None);
-        let script = steps
+    fn nat_script(steps: &[HostStep]) -> String {
+        steps
             .iter()
             .find_map(|step| match step {
                 HostStep::Run { stdin, .. } => stdin.clone(),
                 HostStep::Write { .. } => None,
             })
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn the_nat_script_names_both_families_and_owns_its_table() {
+        let v4: Vec<IpNet> = vec!["10.7.0.0/24".parse().unwrap()];
+        let v6: Vec<IpNet> = vec!["fd00:7::/64".parse().unwrap()];
+        let steps = plan_nat(&v4, &v6, None);
+        let script = nat_script(&steps);
         assert!(script.contains("ip saddr 10.7.0.0/24 masquerade"));
         assert!(script.contains("ip6 saddr fd00:7::/64 masquerade"));
         assert!(script.contains("table inet vallum"));
@@ -884,13 +888,7 @@ mod tests {
         // without touching the operator's rules.
         let v4: Vec<IpNet> = vec!["10.7.0.0/24".parse().unwrap()];
         let steps = plan_nat(&v4, &[], Some("vallum0"));
-        let script = steps
-            .iter()
-            .find_map(|step| match step {
-                HostStep::Run { stdin, .. } => stdin.clone(),
-                HostStep::Write { .. } => None,
-            })
-            .unwrap();
+        let script = nat_script(&steps);
         assert!(script.contains("table inet vallum"));
         assert!(script.contains("chain forward"));
         assert!(script.contains("type filter hook forward priority filter; policy accept;"));
@@ -907,13 +905,7 @@ mod tests {
         // v6-only tunnel is isolated by the same rule.
         let v6: Vec<IpNet> = vec!["fd00:7::/64".parse().unwrap()];
         let steps = plan_nat(&[], &v6, Some("vallum9"));
-        let script = steps
-            .iter()
-            .find_map(|step| match step {
-                HostStep::Run { stdin, .. } => stdin.clone(),
-                HostStep::Write { .. } => None,
-            })
-            .unwrap();
+        let script = nat_script(&steps);
         assert!(script.contains("iifname \"vallum9\" oifname \"vallum9\" drop"));
     }
 

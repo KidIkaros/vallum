@@ -113,3 +113,11 @@ remaining gaps. Lead with findings in words, numbers as backup.
   reverted, gate re-passed. DEPLOY-HOLD — live alpha untouched. Follow-ups booked: doctor isolation check;
   shared NAT-planner dedup (hostnet/quick two writers); WS7 wires accept-isolation into verify.sh;
   kernel proof of quick-reconcile-preserves-chain awaits a NAT-only quick verb. Next: WS4 slice (a).
+- 2026-11-19 01:50 EST — WS3 two-axis review (Standards + Spec sub-agents, code-review skill) on
+  5cae2fc: no hard violations; spec axes clean (flat default, opt-in, Q1 left open, wan proof genuine).
+  Verified-then-fixed: test-helper duplication extracted (nat_script); --force and --no-host semantics
+  documented in comments (both consistent by design, not holes); CONTEXT.md gained the Tenancy entry;
+  gate script trailing newline. Waived with reason: --force recreates from flags (explicit, like every
+  field); --no-host claims no host change (flag applies on next host-applying re-run). Review-fix commit
+  follows; verify.sh re-run on the final tree. Skill lesson saved to vallum-operations
+  references/client-isolation.md (SKILL.md is over its 100k char limit — split booked as follow-up).

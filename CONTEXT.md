@@ -110,6 +110,7 @@ Two calls that followed, and their status:
 | **Voucher** | An invite code consumed by an *existing* account (`POST /api/voucher`, bearer-token auth) to extend expiry and bytes — the same code path as signup, a different consumption point | `service/vallum-desk`, **ADR-0045** |
 | **`vallum://` URI** | The webpage→client bridge: `vallum://join?ticket=<t>&account=<token>` emitted by the ticket page's Connect button. Baseline handler is a packaged `x-scheme-handler` desktop entry execing `vallum join`; `vallum-gui` takes over the scheme when installed | `service/vallum-desk`, **ADR-0045** |
 | **Privilege boundary** | The config file is a privilege boundary *because of hooks*: a hook string runs as root. Only hook execution escalates — routes and DNS from a user's own config are not a boundary. Hook-bearing configs must be root-owned, 0600 | `vallum-quick/hooks.rs` |
+| **Tenancy (personal / service)** | *Personal* = flat: every peer reaches every other peer through the server — a feature for one operator's devices. *Service* = isolated: strangers sharing a server must not reach each other. The mode is opt-in via `[interface] client_isolation` (absent = flat); the mechanism is an interface-wide tunnel→tunnel drop in `inet vallum`. Per-account refinement (same-account talks, cross-account blocked) is **open** — ADR-0047 Q1, operator ratification | **ADR-0047**, `crates/vallum/src/hostnet.rs`, `scripts/accept-isolation.sh` |
 
 ## Conventions worth not re-deriving
 

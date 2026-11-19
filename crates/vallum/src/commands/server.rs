@@ -529,7 +529,11 @@ pub(crate) fn init(args: &InitArgs) -> Result<(), Error> {
     let isolation = isolation_setting(args, config_created)?;
     if isolation && args.no_nat && !args.no_host {
         // The drop chain is installed with the NAT table; skipping the table
-        // would persist the flag and enforce nothing.
+        // would persist the flag and enforce nothing. `--no-host` is exempt
+        // on purpose: it claims NO host change at all (config and service
+        // only), and the persisted flag is applied by the next host-applying
+        // re-run. `--no-nat` is different — it applies the rest of the host
+        // plan while omitting the one piece isolation lives in.
         return Err(Error::Precondition(
             "client_isolation is installed with the NAT table, which --no-nat skips; \
              drop --no-nat, or turn client_isolation off"
@@ -776,7 +780,9 @@ fn key_path_for(config: &Path, directory: &Path) -> PathBuf {
 /// operator toggles `client_isolation` there and re-runs. Passing the flag
 /// against a preserved config that disagrees is refused: silently ignoring it
 /// would break the flag's promise, and silently applying it would leave the
-/// file and the host disagreeing.
+/// file and the host disagreeing. `--force` is the explicit exception: it
+/// recreates the config from the flags (as it does for every field), so the
+/// flag decides again and the host converges to the rewritten file.
 fn isolation_setting(args: &InitArgs, config_created: bool) -> Result<bool, Error> {
     if config_created {
         return Ok(args.client_isolation);
