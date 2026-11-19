@@ -441,20 +441,9 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             metric.0, metric.2, metric.0, metric.1
         ));
         for index in 0..peers {
-            let peer = response
-                .peer_field(index, uapi::field::VALLUM_NAME)
-                .filter(|name| !name.is_empty())
-                .or_else(|| response.peer_field(index, uapi::field::VALLUM_FINGERPRINT))
-                .unwrap_or("unnamed");
-            let fingerprint = response
-                .peer_field(index, uapi::field::VALLUM_FINGERPRINT)
-                .unwrap_or("-");
-            let labels = format!(
-                "interface=\"{}\",peer=\"{}\",fingerprint=\"{}\"",
-                escape(interface),
-                escape(peer),
-                escape(fingerprint)
-            );
+            let peer = peer_label(response, index);
+            let labels =
+                format!("interface=\"{}\",peer=\"{}\"", escape(interface), escape(&peer));
             let value = match metric.0 {
                 "peer_rx_bytes_total" => number(response, index, uapi::field::RX_BYTES).to_string(),
                 "peer_tx_bytes_total" => number(response, index, uapi::field::TX_BYTES).to_string(),
@@ -524,7 +513,44 @@ fn render(response: &Response, prefix: &str, now: u64) -> String {
             out.push_str(&format!("{prefix}_{}{{{labels}}} {value}\n", metric.0));
         }
     }
+    // The fingerprint is metadata, not identity: it changes on every rotation
+    // while the counter series above must not. It travels as an info metric
+    // joined by `peer` — a scraper that joins on fingerprint loses every peer
+    // at the first rotation (the desk's scrape already made that mistake once).
+    out.push_str(&format!(
+        "# HELP {prefix}_peer_fingerprint_info The peer's current key fingerprint; \
+         the value is always 1. Join by `peer`, never by `fingerprint` — rotation \
+         changes the fingerprint, not the peer.\n\
+         # TYPE {prefix}_peer_fingerprint_info gauge\n"
+    ));
+    for index in 0..peers {
+        let peer = peer_label(response, index);
+        let fingerprint = response
+            .peer_field(index, uapi::field::VALLUM_FINGERPRINT)
+            .unwrap_or("-");
+        out.push_str(&format!(
+            "{prefix}_peer_fingerprint_info{{interface=\"{}\",peer=\"{}\",fingerprint=\"{}\"}} 1\n",
+            escape(interface),
+            escape(&peer),
+            escape(fingerprint)
+        ));
+    }
     out
+}
+
+/// The stable peer label: the configured name, falling back to the
+/// fingerprint only when the daemon reports no name at all.
+fn peer_label(response: &Response, index: usize) -> String {
+    response
+        .peer_field(index, uapi::field::VALLUM_NAME)
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            response
+                .peer_field(index, uapi::field::VALLUM_FINGERPRINT)
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "unnamed".to_owned())
 }
 
 /// A peer's last-activity age in milliseconds, or `None` if the daemon did not
@@ -606,18 +632,36 @@ errno=0\n";
         assert!(text.contains("vallum_up 1"));
         assert!(text.contains("vallum_peers_total 2"));
         assert!(text.contains("vallum_peers_handshaked 1"));
+        assert!(
+            text.contains("vallum_peer_rx_bytes_total{interface=\"vallum0\",peer=\"laptop\"} 1234")
+        );
         assert!(text.contains(
-            "vallum_peer_rx_bytes_total{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 1234"
-        ));
-        assert!(text.contains(
-            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 42"
+            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"laptop\"} 42"
         ));
         // A peer that never handshook reports -1, not "now".
         assert!(text.contains(
-            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} -1"
+            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"phone\"} -1"
+        ));
+        assert!(text.contains("vallum_peer_handshaked{interface=\"vallum0\",peer=\"phone\"} 0"));
+    }
+
+    #[test]
+    fn peer_counters_are_labelled_by_name_and_fingerprint_is_metadata() {
+        // The fingerprint changes on every rotation while the peer does not:
+        // a rotation must not fork the counter series or orphan the history.
+        // (Live evidence: the alpha server's laptop peer answered metrics with
+        // one fingerprint and `peer show` with another — a scraper that joined
+        // on fingerprint matched nothing, the desk's old failure mode.) The
+        // fingerprint travels as an info metric instead, joined by `peer`.
+        let text = render(&response(), "vallum", 1792522042);
+        assert!(!text.contains(
+            "vallum_peer_rx_bytes_total{interface=\"vallum0\",peer=\"laptop\",fingerprint="
         ));
         assert!(text.contains(
-            "vallum_peer_handshaked{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} 0"
+            "vallum_peer_fingerprint_info{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 1"
+        ));
+        assert!(text.contains(
+            "vallum_peer_fingerprint_info{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} 1"
         ));
     }
 
@@ -628,12 +672,12 @@ errno=0\n";
         let text = render(&response(), "vallum", 1792522042);
         assert!(
             text.contains(
-                "vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 0.0120"
+                "vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"laptop\"} 0.0120"
             ),
             "the ratio must show a tunnel that is sending and not being answered"
         );
         assert!(text.contains(
-            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"laptop\",fingerprint=\"f1e20541fb69\"} 42"
+            "vallum_peer_handshake_age_seconds{interface=\"vallum0\",peer=\"laptop\"} 42"
         ));
     }
 
@@ -643,9 +687,7 @@ errno=0\n";
         // not a broken one, and reporting 0 here would make every quiet peer
         // look like an outage.
         let text = render(&response(), "vallum", 1792522042);
-        assert!(text.contains(
-            "vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"phone\",fingerprint=\"0ca326366885\"} 1"
-        ));
+        assert!(text.contains("vallum_peer_delivery_ratio{interface=\"vallum0\",peer=\"phone\"} 1"));
     }
 
     #[test]
