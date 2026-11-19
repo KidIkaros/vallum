@@ -1594,8 +1594,16 @@ mod tests {
 
         std::env::set_var("VALLUM_ACCOUNT", token);
         std::env::set_var("VALLUM_DESK_ENDPOINT", "https://desk.example.com:8443");
-        place_config_in("desk-a", server_text, &secret, "10.99.90.7/32", "?", None, &dir)
-            .unwrap();
+        place_config_in(
+            "desk-a",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "?",
+            None,
+            &dir,
+        )
+        .unwrap();
         let written = std::fs::read_to_string(dir.join("desk-a.toml")).unwrap();
         let parsed = vallum_config::Config::load(&dir.join("desk-a.toml")).unwrap();
         assert_eq!(parsed.account.token.as_deref(), Some(token), "{written}");
@@ -1608,8 +1616,16 @@ mod tests {
         // A desk-less enrolment (file/SSH, or a URI without desk=) records
         // the token alone; the config must still parse with no endpoint.
         std::env::remove_var("VALLUM_DESK_ENDPOINT");
-        place_config_in("desk-b", server_text, &secret, "10.99.90.7/32", "?", None, &dir)
-            .unwrap();
+        place_config_in(
+            "desk-b",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "?",
+            None,
+            &dir,
+        )
+        .unwrap();
         let parsed = vallum_config::Config::load(&dir.join("desk-b.toml")).unwrap();
         assert_eq!(parsed.account.token.as_deref(), Some(token));
         assert!(parsed.account.endpoint.is_none());
@@ -1617,7 +1633,13 @@ mod tests {
         // A malformed origin is refused at join, not recorded for later.
         std::env::set_var("VALLUM_DESK_ENDPOINT", "ftp://not-a-desk.example");
         let err = place_config_in(
-            "desk-c", server_text, &secret, "10.99.90.7/32", "?", None, &dir,
+            "desk-c",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "?",
+            None,
+            &dir,
         )
         .expect_err("a non-https desk origin must be refused");
         assert!(err.to_string().contains("VALLUM_DESK_ENDPOINT"), "{err}");
