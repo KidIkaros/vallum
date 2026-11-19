@@ -177,6 +177,7 @@ def capture_snapshot(sock_path, view="dashboard", width=120, height=32, at=None)
         "--control",
         sock_path,
         "--snapshot",
+        "--demo",
         "--ansi",
         "--width",
         str(width),

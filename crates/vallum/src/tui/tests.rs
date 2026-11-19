@@ -512,6 +512,54 @@ fn expanded_peer_table_fits_ipv6_endpoints_and_transfer_totals() {
 }
 
 #[test]
+fn snapshot_showcase_seed_is_gated_behind_demo() {
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut interface = super::app::Interface::new(
+        "vallum0".to_owned(),
+        None,
+        std::path::PathBuf::from("/tmp/vallum-control-socket-that-does-not-exist"),
+    );
+    interface.set_device(DeviceView {
+        interface: "vallum0".to_owned(),
+        ..DeviceView::default()
+    });
+    let mut app = App::new(vec![interface]);
+
+    // `--snapshot` alone is a read verb (ADR-0039): with a device present it
+    // must render what the control socket actually reports — zeros included —
+    // never synthetic traffic that reads as a live tunnel.
+    super::seed_showcase(&mut app, false);
+    {
+        let iface = app.current().expect("interface present");
+        assert_eq!(
+            iface.rx_rate, 0.0,
+            "a read-verb frame must not invent rates"
+        );
+        assert_eq!(iface.tx_rate, 0.0);
+        assert!(iface.rx_history.is_empty(), "no fabricated sparkline");
+        assert!(iface.service_state.is_none());
+    }
+
+    // The media renderer opts into the showcase explicitly.
+    super::seed_showcase(&mut app, true);
+    {
+        let iface = app.current().expect("interface present");
+        assert_eq!(iface.rx_rate, 1_420_800.0);
+        assert_eq!(iface.tx_rate, 3_891_200.0);
+        assert_eq!(iface.rx_history.len(), 26);
+        assert_eq!(iface.tx_history.len(), 26);
+        assert_eq!(iface.service_state, Some(super::app::ServiceState::Active));
+    }
+
+    // And the seeded frame renders (the media pipeline's contract).
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    terminal
+        .draw(|frame| super::ui::draw(frame, &app))
+        .expect("draw seeded dashboard");
+}
+
+#[test]
 fn disconnected_control_marks_the_retained_snapshot_as_stale() {
     use ratatui::{backend::TestBackend, Terminal};
 

@@ -212,12 +212,17 @@ fn color_to_ansi_bg(color: ratatui::style::Color) -> String {
     }
 }
 
-fn snapshot(args: &TuiArgs) -> Result<(), Error> {
-    let mut app = App::new(client::discover(args));
-    let (keymap, _warning) = keymap::KeyMap::load(args.keymap_file());
-    app.keymap = keymap;
-    actions::refresh(&mut app);
-
+/// Seed the dashboard with showcase traffic for the published media renders.
+///
+/// Gated behind `--demo`: `--snapshot` alone is a read verb — ADR-0039 hands
+/// agents `vallum tui --snapshot` — and a read must never fabricate rates. A
+/// frame that pairs real peers with synthetic 1.4 MB/s reads as a live tunnel
+/// carrying unattributed traffic, which is exactly the diagnosis it produced
+/// on the alpha server. Media renders opt in explicitly instead.
+fn seed_showcase(app: &mut App, demo: bool) {
+    if !demo {
+        return;
+    }
     if let Some(iface) = app.interfaces.first_mut() {
         if iface.device.is_some() && iface.service_state.is_none() {
             iface.service_state = Some(app::ServiceState::Active);
@@ -235,6 +240,15 @@ fn snapshot(args: &TuiArgs) -> Result<(), Error> {
             ];
         }
     }
+}
+
+fn snapshot(args: &TuiArgs) -> Result<(), Error> {
+    let mut app = App::new(client::discover(args));
+    let (keymap, _warning) = keymap::KeyMap::load(args.keymap_file());
+    app.keymap = keymap;
+    actions::refresh(&mut app);
+
+    seed_showcase(&mut app, args.demo);
 
     match args.snapshot_view.as_str() {
         "empty" => {

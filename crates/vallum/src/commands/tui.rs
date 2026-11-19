@@ -22,9 +22,15 @@ pub struct TuiArgs {
     #[arg(long, value_name = "DIR")]
     pub config_dir: Option<PathBuf>,
 
-    /// Render one frame headlessly and exit (for CI and the README).
+    /// Render one frame headlessly and exit (for CI and agent reads).
     #[arg(long)]
     pub snapshot: bool,
+
+    /// Seed the snapshot with showcase traffic for the published media
+    /// renders. Without it, `--snapshot` is a read verb: it renders what the
+    /// control socket actually reports, zeros included (ADR-0039).
+    #[arg(long, requires = "snapshot")]
+    pub demo: bool,
 
     /// Snapshot width.
     #[arg(long, default_value = "120")]
