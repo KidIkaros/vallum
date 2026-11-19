@@ -55,10 +55,10 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | # | Workstream | Acceptance (runnable) | Status |
 |---|---|---|---|
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
-| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up: service/README config table +2 flags |
+| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up DONE in 450c322: service/README config table +2 flags |
 | WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | DONE (5cae2fc) — accept-isolation 15 assertions; accept-pair 88; verify.sh PASS; DEPLOY-HOLD |
-| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | TODO (DEPLOY-HOLD for live signup flip) |
-| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up: WS4 re-check human-journey step1 after account-only flip |
+| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DOING — slice (a) DONE (450c322): account-only signup + v3 migration + device-less readers/admin + docs; 217 tests OK, verify.sh PASS. Slices b (pinned invite), c (rotation), d (reconciliation) TODO. DEPLOY-HOLD for live signup flip |
+| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up DONE in 450c322: journey step1 + agent API block re-worded for account-only signup (live journey re-proof rides WS6's headless gate) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
 
@@ -121,3 +121,19 @@ remaining gaps. Lead with findings in words, numbers as backup.
   field); --no-host claims no host change (flag applies on next host-applying re-run). Review-fix commit
   follows; verify.sh re-run on the final tree. Skill lesson saved to vallum-operations
   references/client-isolation.md (SKILL.md is over its 100k char limit — split booked as follow-up).
+- 2026-11-19 02:36 EST — WS4 slice (a) DONE (450c322): account-only signup per ADR-0047 §3. Signup =
+  code → account number (peer NULL, no peers row, NO daemon call — a down daemon cannot stop signup);
+  device name at signup refused with guidance (code not burned). Schema v3 rebuilds accounts.peer
+  nullable (idempotent, row-preserving; v0→v3 in one start); legacy accounts keep device/enforcement/
+  readers. Device-less accounts first-class: account/status/funnel/sweep truthful at zero devices,
+  expiry revokes them, admin set-plan/revoke-account accept token, listing carries the number, CLI
+  --token. Latent bug fixed: voucher burn wrote used_by=peer (NULL on device-less → code redeems
+  twice); one _account_name definition serves burn/revoke/sweep-log. Pages: index without device-name
+  field, account-created page (shown-once number, next step), ticket page stays on add-device. Docs in
+  the same edit: service README (+WS2's two booked config-table flags), site journey step 1 (WS5
+  follow-up), UTCP manual (signup shape, new add_device tool, status token out of the retired URL
+  shape). Seams: Desk.signup, open_database, device-less readers, HTTP wire, admin CLI (plan-agreed).
+  TDD: migration tests RED→GREEN first, then full contract rewrite (147 red) → implementation → green.
+  Gates: desk 217 OK (CI discover command), verify.sh PASS (incl. accept-desk-restore on v3).
+  Suite-alarm: NULL-burn mutant caught by 2 tests, reverted, green. DEPLOY-HOLD — live alpha untouched.
+  Next: WS4 slice (b) — add_device mints a PINNED invite via --public-key.
