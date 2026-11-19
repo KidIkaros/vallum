@@ -309,6 +309,16 @@ class DaemonCli(Daemon):
 
 # ---------------------------------------------------------------- config
 
+# The white-label defaults: the upstream project's own install source and
+# repo. An operator deploying their own service overrides both — the flags
+# ride VALLUM_DESK_EXTRA_ARGS in /etc/vallum/desk.env like every other knob —
+# and nothing the desk serves then points at the upstream repo. Unset, the
+# desk renders exactly what it always did.
+DEFAULT_INSTALL_SOURCE = ("https://raw.githubusercontent.com/KidIkaros/vallum/"
+                          "main/scripts/install.sh")
+DEFAULT_REPO_URL = "https://github.com/KidIkaros/vallum"
+
+
 @dataclass
 class DeskConfig:
     """Everything the desk needs to run, in one place."""
@@ -332,6 +342,8 @@ class DeskConfig:
     signup_ip_day_limit: int = 3                     # signups per IP per day
     device_cap: int = 5                              # devices per account
     operator_name: str = "vallum desk"               # the page header's brand
+    install_source: str = DEFAULT_INSTALL_SOURCE     # the install.sh URL served to users
+    repo_url: str = DEFAULT_REPO_URL                 # the source/docs link served to users
 
 
 # ---------------------------------------------------------------- the desk
@@ -469,7 +481,7 @@ class Desk:
                      "plan": plan, "bytes_cap": cap,
                      "connect": connect_uri(ticket, token, desk_origin),
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
-                               "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
+                               f"{self.config.install_source}"
                                " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
                      "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
 
@@ -1328,15 +1340,22 @@ def _esc(text):
     return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-INSTALL_BLURB = """<p><b>Don't have the client yet?</b>
+def install_blurb(install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
+    """The install instructions every enrolment page carries. The source and
+    the repo are the operator's: a white-label desk must not send its users
+    to the upstream project. The defaults are the upstream values, so an
+    unconfigured desk renders exactly what it always did. The link text is
+    the repo URL without its scheme — the place a reader recognizes."""
+    return f"""<p><b>Don't have the client yet?</b>
 <pre>curl -fsSL -o /tmp/vallum-install.sh \\
-  https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh
+  {_esc(install_source)}
 sudo bash /tmp/vallum-install.sh --from-release --install-only</pre>
 Linux + systemd; the release signature verifies itself before anything is
-installed. Source and docs: <a href="https://github.com/KidIkaros/vallum">github.com/KidIkaros/vallum</a>.</p>"""
+installed. Source and docs: <a href="{_esc(repo_url)}">{_esc(repo_url.split("://", 1)[-1])}</a>.</p>"""
 
 
-def index_page(open_signup, operator="vallum desk"):
+def index_page(open_signup, operator="vallum desk",
+               install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
     intro = ("A device name gets you a join ticket; your key never leaves "
@@ -1349,7 +1368,7 @@ input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}
 pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
 <h1>{_esc(operator)}</h1>
 <p>Self-service enrolment for this Vallum server. {intro}</p>
-{INSTALL_BLURB}
+{install_blurb(install_source, repo_url)}
 <form method="post" action="/signup">
 {code_field}
 <label>device name<br><input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
@@ -1371,7 +1390,8 @@ def connect_uri(ticket, token, desk=None):
     return uri
 
 
-def ticket_page(payload, operator="vallum desk"):
+def ticket_page(payload, operator="vallum desk",
+                install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
     """The one place the ticket is shown. No script, no storage: what the
     visitor copies is what they keep."""
     ticket = _esc(payload.get("ticket", ""))
@@ -1417,7 +1437,7 @@ is already spent and is not needed again.</p>
 <p>Your account number: <code>{token}</code> — the only credential this
 account ever has. Save it; the desk does not send it anywhere else.</p>
 <ol>
-<li>{INSTALL_BLURB}</li>
+<li>{install_blurb(install_source, repo_url)}</li>
 <li><p>Join:</p><pre>sudo vallum join '&lt;ticket&gt;'</pre>
 <p>Paste the ticket between the quotes. To keep it out of shell history:
 <code>sudo vallum join -</code> reads it from stdin.</p></li>
@@ -1601,7 +1621,8 @@ def make_handler(desk):
                 self._send(code, payload)
                 return
             if self.path == "/":
-                self._send_html(index_page(desk.config.open_signup, desk.config.operator_name))
+                self._send_html(index_page(desk.config.open_signup, desk.config.operator_name,
+                                           desk.config.install_source, desk.config.repo_url))
                 return
             if self.path == "/account":
                 self._send_html(account_shell_page(desk.config.operator_name))
@@ -1625,7 +1646,8 @@ def make_handler(desk):
                     # page. Agents keep /api/signup and its JSON.
                     code, payload = desk.signup(body, self._client_ip(), self._desk_origin())
                     if code == 200:
-                        self._send_html(ticket_page(payload, desk.config.operator_name))
+                        self._send_html(ticket_page(payload, desk.config.operator_name,
+                                                    desk.config.install_source, desk.config.repo_url))
                     else:
                         self._send_html(error_page(payload.get("error", "")), status=code)
                     return
@@ -1655,7 +1677,9 @@ def make_handler(desk):
                         # The page needs the token for its manage-account
                         # form; the caller sent it, so this is no new echo.
                         payload["token"] = body.get("token")
-                        self._send_html(ticket_page(payload, desk.config.operator_name), private=True)
+                        self._send_html(ticket_page(payload, desk.config.operator_name,
+                                                    desk.config.install_source, desk.config.repo_url),
+                                        private=True)
                     else:
                         self._send_html(error_page(payload.get("error", "")),
                                         status=code, private=True)
@@ -1729,6 +1753,10 @@ def parse_args(argv=None):
                         help="devices per account (default 5)")
     parser.add_argument("--operator-name", default="vallum desk",
                         help="the service name shown in page headers")
+    parser.add_argument("--install-source", default=DEFAULT_INSTALL_SOURCE,
+                        help="the install.sh URL the enrolment pages point at")
+    parser.add_argument("--repo-url", default=DEFAULT_REPO_URL,
+                        help="the source/docs link shown on enrolment pages")
     parser.add_argument("--cli", default="vallum")
     parser.add_argument("--metrics", action="store_true",
                         help="print the funnel as Prometheus text and exit")
@@ -1768,6 +1796,8 @@ def main(argv=None):
         signup_ip_day_limit=args.signup_ip_day_limit,
         device_cap=args.device_cap,
         operator_name=args.operator_name,
+        install_source=args.install_source,
+        repo_url=args.repo_url,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
     if args.metrics:

@@ -564,6 +564,20 @@ class ClosedModeHttpTests(WireTestCase):
         self.assertIn("Add a device", page)
         self.assertIn("not needed again", page)
 
+    def test_the_unconfigured_pages_keep_the_upstream_install_and_repo(self):
+        # Backward compatibility: an operator who sets nothing gets exactly
+        # the install source and repo link the desk always served.
+        status, page = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
+        self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
+        self.assertIn("github.com/KidIkaros/vallum</a>", page)
+        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
+        self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
+
     def test_the_ticket_page_renders_the_codes_plan_label(self):
         # A code carrying plan "plus" lands a plus account; the page said
         # "trial until" regardless — a false sentence about the plan row.
@@ -1665,6 +1679,114 @@ class AdminTests(DeskTestCase):
     def test_an_unknown_admin_endpoint_is_not_found(self):
         code, _ = self.desk.admin("/api/admin/nope", {"admin_token": "admin-secret"})
         self.assertEqual(code, 404)
+
+
+class WhiteLabelConfigTests(DeskTestCase):
+    """The install source and the repo link are the operator's, not the
+    upstream project's: a desk someone else deploys must not send its users
+    to KidIkaros. The defaults stay the upstream values, so an unconfigured
+    desk renders exactly what it always did."""
+
+    UPSTREAM_INSTALL = ("curl -fsSL -o /tmp/vallum-install.sh "
+                        "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
+                        " && sudo bash /tmp/vallum-install.sh --from-release --install-only")
+
+    def test_the_default_install_command_is_unchanged(self):
+        code, payload = self.signup()
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["install"], self.UPSTREAM_INSTALL)
+
+    def test_a_configured_install_source_replaces_the_upstream_url(self):
+        self.config.install_source = "https://vpn.example.com/install.sh"
+        code, payload = self.signup()
+        self.assertEqual(code, 200)
+        self.assertIn("https://vpn.example.com/install.sh", payload["install"])
+        self.assertNotIn("KidIkaros", payload["install"])
+        self.assertNotIn("raw.githubusercontent", payload["install"])
+
+    def test_the_cli_defaults_match_the_upstream_values(self):
+        args = desk_module.parse_args(["--config", "/etc/vallum/server.toml"])
+        self.assertEqual(
+            args.install_source,
+            "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh")
+        self.assertEqual(args.repo_url, "https://github.com/KidIkaros/vallum")
+
+    def test_the_cli_flags_override_the_sources(self):
+        # The flags ride VALLUM_DESK_EXTRA_ARGS in /etc/vallum/desk.env —
+        # the unit's existing env path, so env and CLI are one knob.
+        args = desk_module.parse_args([
+            "--config", "/etc/vallum/server.toml",
+            "--install-source", "https://vpn.example.com/install.sh",
+            "--repo-url", "https://git.example.com/vallum"])
+        self.assertEqual(args.install_source, "https://vpn.example.com/install.sh")
+        self.assertEqual(args.repo_url, "https://git.example.com/vallum")
+
+
+class WhiteLabelHttpTests(WireTestCase):
+    """The served pages, not just the logic: when the operator configures
+    their own install source and repo, zero hardcoded upstream references
+    may remain in anything the desk serves."""
+
+    def setUp(self):
+        super().setUp()
+        self.config.operator_name = "example tunnel"
+        self.config.install_source = "https://vpn.example.com/install.sh"
+        self.config.repo_url = "https://git.example.com/vallum"
+
+    def get(self, path):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as r:
+            return r.status, r.read().decode()
+
+    def test_the_index_serves_the_operators_install_source_and_repo(self):
+        status, page = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("https://vpn.example.com/install.sh", page)
+        self.assertIn('href="https://git.example.com/vallum"', page)
+        self.assertIn("git.example.com/vallum</a>", page)
+        self.assertNotIn("KidIkaros", page)
+
+    def test_the_ticket_page_serves_the_operators_install_source_and_repo(self):
+        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("https://vpn.example.com/install.sh", page)
+        self.assertIn('href="https://git.example.com/vallum"', page)
+        self.assertNotIn("KidIkaros", page)
+
+    def test_the_signup_json_install_command_is_the_operators(self):
+        status, body = self.post("/api/signup", '{"code":"friend-code-1","name":"json-user"}',
+                                 "application/json")
+        self.assertEqual(status, 200)
+        install = json.loads(body)["install"]
+        self.assertIn("https://vpn.example.com/install.sh", install)
+        self.assertNotIn("KidIkaros", install)
+
+    def test_no_served_page_mentions_the_upstream_repo(self):
+        # Every page a visitor can reach: the index, the account shell, the
+        # ticket page (signup and add-device), the account page, and the
+        # error page. One upstream reference in any of them is a leak.
+        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1","name":"friend"}',
+                                   "application/json")
+        token = json.loads(signup_body)["token"]
+        pages = [self.get("/")[1], self.get("/account")[1]]
+        pages.append(self.post("/signup", "code=friend-code-2&name=second",
+                               "application/x-www-form-urlencoded")[1])
+        pages.append(self.post("/account", f"token={token}",
+                               "application/x-www-form-urlencoded")[1])
+        pages.append(self.post("/account/device", f"token={token}&name=extra",
+                               "application/x-www-form-urlencoded")[1])
+        pages.append(self.post("/signup", "code=not-a-code&name=walk-in",
+                               "application/x-www-form-urlencoded")[1])
+        for page in pages:
+            self.assertNotIn("KidIkaros", page)
+            self.assertNotIn("raw.githubusercontent", page)
+
+    def test_the_repo_link_is_html_escaped(self):
+        # The URL is operator input now: an ampersand in a query string must
+        # not break out of the href attribute's HTML.
+        self.config.repo_url = "https://git.example.com/vallum?a=1&b=2"
+        _, page = self.get("/")
+        self.assertIn('href="https://git.example.com/vallum?a=1&amp;b=2"', page)
 
 
 if __name__ == "__main__":
