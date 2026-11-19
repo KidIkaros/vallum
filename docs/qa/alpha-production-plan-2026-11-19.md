@@ -150,6 +150,18 @@ remaining gaps. Lead with findings in words, numbers as backup.
   (abc04277), no rotation window — a config↔daemon desync on the live server; doctor check proposed.
   NOTE: the deployed VPS daemon binary is still 1.9.0 (pre-fix); deploying the new binary is a
   separate live change, staged decision with the operator.
+- 2026-11-19 14:2x EST — OPERATOR "do the remaining steps". #34 FIXED+CLOSED (ada4b20): doctor's new
+  'peer sync' check VERIFIED LIVE — it WARNs on both peers (laptop AND lab8 are config↔session
+  desynced; lab8 was a second desync the investigation missed: config 777caef vs session 7252c337).
+  Remediation (re-apply config) is an operator decision — NOT done unilaterally. VALLUM BINARY
+  DEPLOYED to wingman-vps: /usr/bin/{vallum,vallum-quick} upgraded 1.8.0→1.9.0+main (rotation,
+  join --key, honest snapshots, name-keyed metrics, doctor peer-sync); backups
+  vallum*.rollback-20261119T142105 staged; daemon+quick restarted, both active; verified live: show
+  answers, /20 address intact, name-keyed metrics + fingerprint_info live, doctor WARNs both desyncs,
+  desk healthz ok. GUI findings ticketed: #35 (privilege read path, ready-for-human — design call),
+  #36 (status/legend/contrast, ready-for-agent). Gate PASS twice + pushed (7d5e852..ada4b20, then
+  docs). PENDING: ADR-0047 ratification (recommendations recorded in-ADR, awaiting operator words);
+  the peer-key desync remediation; GUI fixes (#35/#36) are beta scope.
 - 2026-11-19 01:37 EST — WS3 DONE (5cae2fc): opt-in `[interface] client_isolation` + `--client-isolation`
   flag; drop chain in the wholesale-replaced `inet vallum` table (converges both ways; teardown already
   removes it); config is source of truth on re-init (flag/config conflict refused); `--no-nat`+isolation
