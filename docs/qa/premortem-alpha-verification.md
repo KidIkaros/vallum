@@ -125,9 +125,10 @@ system trusts its own records over performed, verified reality for the real user
    a free check and drops the URL) and the alertmanager example carries a commented **email
    second channel** (fill SMTP to enable). The cooldown is now written *after* a successful page,
    so a failed page retries instead of being suppressed. Watchdog paging proven: a bogus-host run
-   fired a direct "host unreachable" page. Remaining operator steps: create the healthchecks check
-   + drop the URL; fill SMTP for email; a human secondary responder if one exists (else bus factor
-   is honestly 1, named).
+   fired a direct "host unreachable" page. The healthchecks.io check is now **wired and pinging**
+   (URL on the VPS, pusher confirmed `OK`); the operator should tighten its period to ~1 min / grace
+   ~5 min (it was created at 1 day / 1 hour, far too slow). Remaining operator steps: fill SMTP for
+   the email channel; a human secondary responder if one exists (else bus factor is honestly 1, named).
 5. **[DONE]** Instrument the journey, not just the outcome (mode 5): the desk funnel now
    persists per-step counters (`funnel_events`, schema v4) — `vallum_alpha_signup_total`,
    `vallum_alpha_add_device_total`, and `*_refused_total{reason}` (bad_request / forbidden /
