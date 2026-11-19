@@ -5,6 +5,7 @@
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use vallum::commands::account::AccountArgs;
 use vallum::commands::bench::BenchArgs;
 use vallum::commands::client::ClientArgs;
 use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs, StopArgs};
@@ -25,8 +26,8 @@ use vallum::commands::support_bundle::SupportBundleArgs;
 use vallum::commands::tui::TuiArgs;
 use vallum::commands::uninstall::UninstallArgs;
 use vallum::commands::{
-    bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run, sandbox,
-    server, setup, status, support_bundle, uninstall,
+    account, bench, client, control, doctor, identity, import, keys, metrics, peer, policy, run,
+    sandbox, server, setup, status, support_bundle, uninstall,
 };
 use vallum::Error;
 
@@ -91,6 +92,8 @@ enum Command {
     Policy(PolicyArgs),
     /// Report whether traffic is in the tunnel, blocked, or leaking.
     Status(StatusArgs),
+    /// Read this config's desk account: plan, status, expiry, and usage.
+    Account(AccountArgs),
     /// Prepare this host to be a tunnel server.
     Server(ServerArgs),
     /// Disconnect and remove a client tunnel installed by `vallum setup`.
@@ -195,6 +198,7 @@ fn main() -> ExitCode {
         Command::Doctor(args) => doctor::doctor(&args, cli.allow_insecure_key_permissions),
         Command::Policy(args) => policy::policy(&args),
         Command::Status(args) => status::status(&args),
+        Command::Account(args) => account::account(&args),
         Command::Server(args) => server::server(&args),
         Command::Client(args) => client::client(&args),
         Command::Join(args) => setup::setup(&SetupArgs {
