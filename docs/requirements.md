@@ -135,6 +135,14 @@ end-to-end pps or bitrate figure. **Do not quote a throughput number until one
 exists**: the crypto figure is not one, because it excludes syscalls, the
 interface and the loop.
 
+**Concurrent enrolment (measured on the released build).** `accept-many 12`
+against v1.10.0: 12/12 clients enrolled and carried, 12 distinct addresses, the
+server's peer table tracked all 12 (signed verdict). The RSS delta at this small
+N (≈30 kB/peer) is dominated by page granularity and neither confirms nor refutes
+the 8.9 kB/peer figure measured at 0/1000/2000. This validates the enrolment path
+at concurrency on the shipped artifact; it is **not** a throughput or
+sustained-rekey-herd measurement.
+
 ---
 
 ## Latency

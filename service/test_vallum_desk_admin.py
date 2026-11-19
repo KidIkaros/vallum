@@ -205,6 +205,15 @@ class AdminCliTests(unittest.TestCase):
         new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
         self.assertNotEqual(new, payload["token"])
 
+    def test_reset_token_by_recovery_code_proves_ownership(self):
+        payload = self.signup()
+        old = payload["token"]
+        out = self.cli("reset-token", "--recovery-code", payload["recovery_code"])
+        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertNotEqual(new, old)
+        self.assertIn(new, out)
+        self.assertEqual(self.desk.status(old)[0], 404)
+
     def test_per_device_revoke_needs_a_peer(self):
         payload = self.signup()
         with self.assertRaises(SystemExit) as raised:

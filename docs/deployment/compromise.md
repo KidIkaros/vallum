@@ -100,16 +100,17 @@ while its peer still answers is a live peer no longer enforced. After the
 revoke, the leaked token is refused (`403 account is revoked`) on every
 device/status call.
 
-**Lost the number, not the account?** If the account still has a device,
-`sudo vallum-desk-admin reset-token --peer u0007-laptop` issues a fresh number
-and retires the old immediately; the devices, plan, quota and expiry survive
-([ADR-0047](../adr/0047-the-account-is-not-the-device.md) Q3). Reset does not
-un-revoke a revoked account — revocation is permanent, and a revoked account
-recovers as a new account (§4). A device-less account whose number is lost cannot be
-addressed by `reset-token` (no peer, no token), but the operator can still read its number
-from `vallum-desk-admin accounts --json` by label — there is no PII to verify the requester
-owns it, so recovery is operator-mediated and impersonation-risky; rebuild from a minted
-code when ownership cannot be established.
+**Lost the number, not the account?** Signup shows a **recovery code** once
+(stored hashed). The customer quotes it and `sudo vallum-desk-admin reset-token
+--recovery-code-file <file>` verifies ownership, then issues a fresh number and
+retires the old; the devices, plan, quota and expiry survive
+([ADR-0047](../adr/0047-the-account-is-not-the-device.md) Q3). Without the
+recovery code, `reset-token --peer u0007-laptop` works for an account that still
+has a device — but a peer name is not proof of ownership, so confirm out-of-band
+before handing over a number. Reset does not un-revoke a revoked account —
+revocation is permanent, and a revoked account recovers as a new account (§4). A
+device-less account with neither number nor recovery code has no provable handle;
+rebuild it from a minted code.
 
 One device's key leaked, not the token? That is class (b): revoke just the
 device (`vallum-desk-admin revoke --peer <name>`, no `--account`). The account

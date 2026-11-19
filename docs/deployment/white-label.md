@@ -457,16 +457,16 @@ and `bytes_cap`), so treat it as bookkeeping until you wire it.
 The constraints a paid service must say out loud to its customers:
 
 - **The account number is the only credential.** No email, no password
-  reset. A customer who loses it has operator recovery paths:
-  `vallum-desk-admin reset-token --peer <device>` re-issues a fresh number for
-  an account that still has a device (the old number stops working; plan and
-  quota survive); `adopt` re-registers their live peers into a fresh account;
-  and for a device-less account the operator can read the number from
-  `vallum-desk-admin accounts --json` by its label. **None of these verifies the
-  requester owns the account** — there is no PII — so recovery is a social-engineering
-  surface: confirm ownership out-of-band before handing over a number, or rebuild
-  from a minted code when you cannot
-  ([ADR-0047](../adr/0047-the-account-is-not-the-device.md) Q3).
+  reset. Signup also shows a **recovery code** once, stored hashed: a customer
+  who loses their number quotes it, and `vallum-desk-admin reset-token
+  --recovery-code-file <file>` verifies ownership and re-issues a fresh number
+  (the old stops working; plan and quota survive). Without the recovery code,
+  fallbacks are `reset-token --peer <device>` (an account that still has a
+  device) or `adopt` (re-register live peers into a fresh account) — but these
+  prove only that the requester knows a peer name, not that they own the
+  account, so confirm ownership out-of-band before handing over a number; a
+  device-less account with neither number nor recovery code is rebuilt from a
+  minted code ([ADR-0047](../adr/0047-the-account-is-not-the-device.md) Q3).
 - **One host, one interface.** No high availability, no horizontal scaling
   story yet; capacity is the box (the /24 peer table, the address pool,
   handshake CPU). Sell what one server can carry.

@@ -1284,6 +1284,63 @@ class FunnelTests(DeskTestCase):
             float(value)
 
 
+class RecoveryCodeTests(DeskTestCase):
+    """Ownership proof on recovery (premortem 2026-11-19, mode 7): the account
+    number is the only credential and there is no PII, so handing a number to
+    whoever claims a label is a social-engineering surface. A recovery code shown
+    once at signup, stored hashed, lets the operator verify ownership before
+    re-issuing a number — without needing the (lost) number itself."""
+
+    def test_signup_returns_a_recovery_code_distinct_from_the_token(self):
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        rc = account.get("recovery_code")
+        self.assertIsNotNone(rc)
+        self.assertEqual(len(rc), 16)
+        self.assertNotEqual(rc, account["token"])
+
+    def test_recovery_code_is_stored_hashed_not_plaintext(self):
+        import hashlib
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        row = self.desk.db.execute("SELECT recovery_code_hash FROM accounts").fetchone()
+        self.assertEqual(row["recovery_code_hash"],
+                         hashlib.sha256(account["recovery_code"].encode()).hexdigest())
+        self.assertNotEqual(row["recovery_code_hash"], account["recovery_code"])
+
+    def test_reset_token_by_recovery_code_proves_ownership(self):
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        old = account["token"]
+        code, payload = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "recovery_code": account["recovery_code"]})
+        self.assertEqual(code, 200)
+        self.assertNotEqual(payload["token"], old)
+        self.assertEqual(self.desk.status(old)[0], 404)
+        self.assertEqual(self.desk.status(payload["token"])[0], 200)
+
+    def test_reset_token_by_wrong_recovery_code_is_refused(self):
+        self.desk.signup({"code": "friend-code-1"})
+        code, _ = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "recovery_code": "0" * 16})
+        self.assertEqual(code, 404)
+
+    def test_recovery_code_survives_a_restart(self):
+        _, account = self.desk.signup({"code": "friend-code-1"})
+        reopened = desk_module.Desk(self.desk.config, FakeDaemon())
+        code, _ = reopened.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "recovery_code": account["recovery_code"]})
+        self.assertEqual(code, 200)
+
+    def test_a_legacy_account_without_a_recovery_code_still_resets_by_peer(self):
+        _, device = self.account_with_device()
+        self.desk.db.execute("UPDATE accounts SET recovery_code_hash=NULL")
+        code, _ = self.desk.admin(
+            "/api/admin/reset-token",
+            {"admin_token": "admin-secret", "peer": device["peer"]})
+        self.assertEqual(code, 200)
+
+
 class FunnelStepTests(DeskTestCase):
     """Per-step journey counters (premortem 2026-11-19, mode 5): the funnel must
     show WHERE conversion drops, not just the terminal state. A stranger who dies

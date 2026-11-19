@@ -132,6 +132,10 @@ def main(argv=None):
     reset.add_argument("--token", help="address the account by its current account number. "
                                        "Visible in ps and shell history — prefer --token-file")
     reset.add_argument("--token-file", help="read the current account number from a file")
+    reset.add_argument("--recovery-code", help="prove ownership with the recovery code shown at "
+                                               "signup (for a lost number). Visible in ps — prefer "
+                                               "--recovery-code-file")
+    reset.add_argument("--recovery-code-file", help="read the recovery code from a file")
 
     adopt = sub.add_parser("adopt", help="register an existing daemon peer")
     adopt.add_argument("--peer", required=True)
@@ -190,7 +194,12 @@ def main(argv=None):
                                  "(use --account to revoke a whole account)")
             show(call(args.desk, "/api/admin/revoke", token, {"peer": args.peer}), args.json)
     elif args.command == "reset-token":
-        result = call(args.desk, "/api/admin/reset-token", token, account_key(args))
+        if args.recovery_code or args.recovery_code_file:
+            rc = args.recovery_code if args.recovery_code else read_token(args.recovery_code_file)
+            body = {"recovery_code": rc}
+        else:
+            body = account_key(args)
+        result = call(args.desk, "/api/admin/reset-token", token, body)
         if args.json:
             print(json.dumps(result, indent=2))
         else:

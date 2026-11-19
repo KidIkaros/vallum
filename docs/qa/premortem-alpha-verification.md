@@ -84,6 +84,9 @@ system trusts its own records over performed, verified reality for the real user
    admin list is a handle) — the real gap is **no PII to verify the requester owns the account**,
    so recovery is churn-or-impersonation. *Assumption:* no-PII purity is free. *Watch for:*
    recovery requests the operator cannot attribute; tokens handed over on a claimed label alone.
+   **FIXED:** signup shows a recovery code once (sha256-hashed, schema v5); `reset-token
+   --recovery-code[-file]` verifies ownership before re-issuing a number. Residual: a peer name is
+   not proof; a device-less account with neither number nor code is rebuilt from a minted code.
 8. **Config↔daemon drift: a live write-without-apply bug** — **FOUND AND FIXED (`32f181d`).**
    TUI `tui/actions.rs:267,282` and GUI `vallum-gui/src/actions.rs:564,584` did
    `let _ = syncconf_running(...)` then reported unconditional success; `control.rs:692-705`
@@ -96,7 +99,10 @@ system trusts its own records over performed, verified reality for the real user
    (`:59`) but throughput/concurrency never; `accept-isolation.sh:176` creates **two** clients
    (`devb devc`); benches are micro-benchmarks. *Assumption:* "server-size bound" is known without
    a load test. *Watch for:* conntrack/NAT table growth, handshake CPU, or fd limits at the first
-   real cohort — none exercised by a gate.
+   real cohort — none exercised by a gate. **PARTIAL:** `accept-many 12` on v1.10.0 enrolled and
+   carried 12/12 with the server tracking all 12 (signed verdict); memory/restart/address ceilings
+   already measured. End-to-end throughput and a sustained hundreds-of-peers rekey-herd run remain
+   unmeasured — do not quote a throughput number until one exists.
 
 ## Revised plan (each maps to a mode; doable this week)
 
@@ -141,10 +147,14 @@ system trusts its own records over performed, verified reality for the real user
    them as a daemon metric is the remaining sub-item.
 6. **Provision a real secondary** (mode 6): fill the contact, add a second SSH key, wire a second
    alertmanager receiver with escalation; until then the bus factor is 1, named.
-7. **Add ownership proof to recovery** (mode 7): a shared secret set at signup the user can quote,
-   or a documented out-of-band confirmation step; the docs now name the social-engineering surface.
-8. **Load-test before the cohort** (mode 9): a sustained concurrent-peer test (hundreds of peers,
-   conntrack/NAT scale, handshake CPU); record the measured ceiling in `requirements.md`.
+7. **Add ownership proof to recovery** (mode 7) — **DONE.** Signup shows a recovery code once
+   (sha256-hashed, schema v5); `reset-token --recovery-code[-file]` verifies ownership before
+   re-issuing a lost number. 7 new tests green; deployed live (v4→v5 migration faithful, 17 dead
+   dogfood accounts cleared to one). Docs name the residual: a peer name is not proof.
+8. **Load-test before the cohort** (mode 9) — **PARTIAL.** `accept-many 12` on v1.10.0: 12/12
+   enrolled and carried, distinct addresses, server tracked all 12 (signed). Memory at 0/1000/2000
+   and restart latency already measured in `requirements.md`. Still unmeasured: end-to-end
+   pps/throughput and a sustained hundreds-of-peers rekey-herd run.
 
 ## Before you commit (pre-launch checklist)
 
@@ -159,6 +169,10 @@ system trusts its own records over performed, verified reality for the real user
       **Done: signup/add_device counters + VallumSignupNoDevice, deployed live, expr vmalert-validated.**
 - [ ] A secondary responder is provisioned (contact + SSH key + receiver), not a placeholder
       (mode 6).
+- [x] Recovery proves ownership (mode 7). **Done: recovery code shown once at signup, hashed;
+      `reset-token --recovery-code` verifies it; deployed live, migration faithful.**
+- [x] Concurrent enrolment validated on the released build (mode 9, partial). **Done: accept-many 12
+      PASS on v1.10.0; throughput + sustained rekey-herd load remain unmeasured and named.**
 
 ## Verification note
 
