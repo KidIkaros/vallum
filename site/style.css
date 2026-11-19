@@ -1,41 +1,39 @@
-/* Vallum site — tokens mirror crates/vallum/src/tui/theme.rs.
-   Accent = the TUI cyan, ok = emerald, warn = amber, danger = crimson,
-   selection = the Rgb(24, 42, 58) row highlight. No gradients, no shadows. */
+/* Vallum site — brandkit tokens (assets/vallum-brandkit.png, rendered by
+   scripts/generate_media.py §05; the console's rendition lives in
+   crates/vallum-gui/ui/src/index.css).
+
+   Obsidian canvas, one signal cyan, hairline boundaries. Dark surface only —
+   the brandkit has no light theme. No gradients, no shadows, no glow.
+   Text roles: --text / --subtext / --muted. The brandkit's muted #6e7681
+   fails AA at small sizes on obsidian (4.12:1), so the muted role uses the
+   console's #7d8590 (5.07:1 on canvas, 4.64:1 on panel). */
 
 :root {
-  --bg: #0b1117;
-  --panel: #121b24;
-  --rule: #22313f;
+  --bg: #0d1117;          /* obsidian — canvas */
+  --panel: #161b22;       /* raised surface */
+  --panel-deep: #090d12;  /* cockpit surface (brandkit §03) */
+  --rule: #30363d;        /* hairline, strong */
+  --rule-soft: #21262d;   /* hairline, quiet */
   --text: #e6edf3;
-  --subtext: #a3b3c2;
-  --muted: #74869a;
-  --accent: #22d3ee;
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --danger: #f87171;
-  --selection: #182a3a;
+  --subtext: #8b949e;
+  --muted: #7d8590;
+  --signal: #39c5cf;      /* signal cyan — focus / nav / the one accent */
+  --signal-step: #4ecbd4; /* hover tone step, same hue */
+  --live: #3fb950;        /* healthy — semantic only */
+  --stale: #d29922;       /* aging / warn — semantic only */
+  --fault: #ff7b72;       /* unavailable — semantic only */
+  --tx: #bc8cff;          /* outbound — semantic only */
+  --selection: #1b2330;
 
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Brandkit §06: JetBrains Mono, with the console's fallback chain.
+     No webfont fetch — the site stays build-free and offline-safe. */
+  --mono: "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, "SF Mono",
+    Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
 
+  --page-max: 72rem;
   --measure: 70ch;
-  --step: 1.5rem;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f8fafc;
-    --panel: #ffffff;
-    --rule: #d5dee7;
-    --text: #0f1e2b;
-    --subtext: #40566a;
-    --muted: #5c7082;
-    --accent: #0e7490;
-    --ok: #047857;
-    --warn: #9a6700;
-    --danger: #b91c1c;
-    --selection: #e7f1f7;
-  }
 }
 
 * {
@@ -43,7 +41,7 @@
 }
 
 html {
-  color-scheme: dark light;
+  color-scheme: dark;
 }
 
 body {
@@ -54,15 +52,24 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+::selection {
+  background: var(--selection);
+  color: var(--text);
+}
+
 a {
-  color: var(--accent);
+  color: var(--signal);
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
 }
 
+a:hover {
+  color: var(--signal-step);
+}
+
 a:focus-visible,
 button:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
 
@@ -74,16 +81,20 @@ button:focus-visible {
 .skip:focus {
   left: 1rem;
   top: 1rem;
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  z-index: 10;
 }
 
 .masthead,
 main,
 footer {
-  max-width: var(--measure);
+  max-width: var(--page-max);
   margin: 0 auto;
-  padding: 0 1.25rem;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
 }
 
 .masthead {
@@ -91,9 +102,9 @@ footer {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding-top: 1.5rem;
-  padding-bottom: 1.5rem;
-  border-bottom: 1px solid var(--rule);
+  padding-top: 1.25rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--rule-soft);
 }
 
 .brand {
@@ -101,14 +112,16 @@ footer {
   align-items: center;
   gap: 0.5rem;
   font: 600 1rem/1 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   color: var(--text);
   text-decoration: none;
 }
 
+.brand:hover {
+  color: var(--text);
+}
+
 .mark {
-  color: var(--accent);
+  color: var(--signal);
 }
 
 nav {
@@ -123,63 +136,288 @@ nav a {
 }
 
 nav a:hover {
-  color: var(--accent);
+  color: var(--text);
 }
 
 main {
-  padding-top: 3rem;
   padding-bottom: 4rem;
 }
 
-h1 {
+/* ---- Hero: asymmetric split, text left, the boundary seal right ---- */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 3rem;
+  align-items: center;
+  padding: 4rem 0 3rem;
+}
+
+.tagline {
   margin: 0 0 1rem;
-  font: 600 clamp(1.75rem, 4vw, 2.5rem) / 1.15 var(--mono);
-  letter-spacing: -0.01em;
-  max-width: 30ch;
+  font: 400 0.875rem/1.4 var(--mono);
+  color: var(--signal);
+}
+
+h1 {
+  margin: 0 0 1.25rem;
+  font: 600 clamp(1.875rem, 4vw, 2.75rem) / 1.18 var(--mono);
+  letter-spacing: -0.015em;
+  max-width: 24ch;
 }
 
 .lede {
-  margin: 0 0 3rem;
-  max-width: 64ch;
+  margin: 0 0 2rem;
+  max-width: 60ch;
   font-size: 1.0625rem;
+  line-height: 1.7;
   color: var(--subtext);
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.75rem 1.25rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font: 500 0.9375rem/1 var(--mono);
+  text-decoration: none;
+  transition: background-color 120ms ease-out, color 120ms ease-out,
+    border-color 120ms ease-out;
+}
+
+.btn-primary {
+  background: var(--signal);
+  border-color: var(--signal);
+  color: var(--bg);
+}
+
+.btn-primary:hover {
+  background: var(--signal-step);
+  border-color: var(--signal-step);
+  color: var(--bg);
+}
+
+.btn-quiet {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--text);
+}
+
+.btn-quiet:hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.cta-note {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.hero-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 2.5rem;
+  margin: 0.5rem 0 0;
+  padding: 1.25rem 0 0;
+  border-top: 1px solid var(--rule-soft);
+  list-style: none;
+  font: 400 0.8125rem/1.6 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--subtext);
+}
+
+.hero-meta span {
+  color: var(--muted);
+}
+
+/* The seal: brandkit §02 boundary geometry, drawn inline. */
+.seal {
+  margin: 0;
+}
+
+.seal svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.seal figcaption {
+  margin-top: 0.75rem;
+}
+
+/* ---- Sections: ◆ label ────── (the TUI rule with the brand mark) ---- */
+
+main > section {
+  margin-top: 4rem;
 }
 
 h2 {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin: 3rem 0 1.25rem;
-  font: 600 0.8125rem/1 var(--mono);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--accent);
+  margin: 0 0 1.5rem;
+  font: 500 1.0625rem/1.4 var(--mono);
+  color: var(--text);
 }
 
-/* The `── label ──` rule from the TUI, as a hairline that takes the slack. */
+h2 .tick {
+  color: var(--signal);
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
 h2::after {
   content: "";
   flex: 1;
   height: 1px;
-  background: var(--rule);
+  background: var(--rule-soft);
 }
+
+h3 {
+  margin: 0 0 1rem;
+  font: 500 1rem/1.4 var(--mono);
+  color: var(--text);
+}
+
+p {
+  margin: 0 0 1rem;
+}
+
+p:last-child {
+  margin-bottom: 0;
+}
+
+.prose {
+  max-width: 70ch;
+  color: var(--subtext);
+}
+
+.prose strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ---- Two ways in: a journey card and an API column, not twin cards ---- */
+
+.ways {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.way-human {
+  padding: 1.5rem;
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  border-radius: 12px;
+}
+
+.way-agent {
+  padding-top: 1.5rem;
+}
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.steps li {
+  counter-increment: step;
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.steps li::before {
+  content: counter(step, decimal-leading-zero);
+  font: 500 0.8125rem/1.9 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.steps .step-title {
+  display: block;
+  font-weight: 500;
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+
+.steps p {
+  margin: 0.25rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--subtext);
+}
+
+.way-note {
+  margin: 1.25rem 0 0;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule-soft);
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.api {
+  margin: 0 0 1rem;
+  padding: 1rem 1.125rem;
+  overflow-x: auto;
+  background: var(--panel-deep);
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  font: 0.8125rem/1.9 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.api .ep {
+  color: var(--signal);
+}
+
+.api .cmt {
+  color: var(--muted);
+}
+
+/* ---- Code surfaces ---- */
 
 pre {
   margin: 0 0 1rem;
   padding: 1rem 1.125rem;
   overflow-x: auto;
   background: var(--panel);
-  border: 1px solid var(--rule);
-  border-left: 2px solid var(--accent);
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid var(--signal);
+  border-radius: 8px;
   font: 0.875rem/1.7 var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 
 code {
-  font: 0.9em/1.5 var(--mono);
+  font: 0.875em/1.5 var(--mono);
+  background: var(--panel);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  color: var(--text);
 }
 
 pre code {
   font-size: inherit;
+  background: none;
+  border-radius: 0;
+  padding: 0;
 }
 
 .cmd {
@@ -195,38 +433,39 @@ pre code {
   font-size: 0.9375rem;
 }
 
+/* ---- Handshake facts: a hairline table, not stat cards ---- */
+
 .facts {
   margin: 0;
   display: grid;
   gap: 1px;
-  background: var(--rule);
-  border: 1px solid var(--rule);
+  background: var(--rule-soft);
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .facts > div {
-  background: var(--bg);
-  padding: 0.875rem 1rem;
+  background: var(--panel);
+  padding: 1rem 1.25rem;
   display: grid;
-  gap: 0.25rem;
-  grid-template-columns: 15rem 1fr;
-}
-
-@media (max-width: 40rem) {
-  .facts > div {
-    grid-template-columns: 1fr;
-  }
+  gap: 0.25rem 1.5rem;
+  grid-template-columns: 15rem minmax(0, 1fr);
 }
 
 .facts dt {
-  font: 600 0.875rem/1.5 var(--mono);
-  color: var(--ok);
+  font: 500 0.875rem/1.6 var(--mono);
+  color: var(--text);
 }
 
 .facts dd {
   margin: 0;
   color: var(--subtext);
   font-size: 0.9375rem;
+  line-height: 1.6;
 }
+
+/* ---- The cockpit: the one raster image, a real rendered frame ---- */
 
 figure {
   margin: 0;
@@ -236,15 +475,18 @@ figure img {
   display: block;
   width: 100%;
   height: auto;
-  border: 1px solid var(--rule);
-  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  background: var(--panel-deep);
 }
 
 figcaption {
-  margin-top: 0.625rem;
+  margin-top: 0.75rem;
   font: 0.8125rem/1.6 var(--mono);
   color: var(--muted);
 }
+
+/* ---- Boundary lists ---- */
 
 .flat {
   margin: 0;
@@ -252,6 +494,7 @@ figcaption {
   list-style: none;
   display: grid;
   gap: 0.75rem;
+  max-width: 70ch;
 }
 
 .flat li {
@@ -268,6 +511,24 @@ figcaption {
   color: var(--muted);
 }
 
+.link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin-top: 1.25rem;
+  font: 400 0.875rem/1.6 var(--mono);
+}
+
+/* ---- Documentation hub ---- */
+
+body.doc-hub {
+  --page-max: var(--measure);
+}
+
+.doc-hub main {
+  padding-top: 3rem;
+}
+
 .groups {
   display: grid;
   gap: 2.5rem;
@@ -281,11 +542,11 @@ figcaption {
   margin: 0;
   padding: 0;
   list-style: none;
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--rule-soft);
 }
 
 .doc-list li {
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule-soft);
   padding: 0.75rem 0;
   display: grid;
   gap: 0.15rem;
@@ -308,11 +569,70 @@ figcaption {
 footer {
   padding-top: 1.5rem;
   padding-bottom: 3rem;
-  border-top: 1px solid var(--rule);
-  font: 0.8125rem/1.6 var(--mono);
+  border-top: 1px solid var(--rule-soft);
+  font: 0.8125rem/1.8 var(--mono);
   color: var(--muted);
 }
 
 footer p {
   margin: 0;
+}
+
+/* ---- Small screens ---- */
+
+@media (max-width: 880px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2.5rem;
+    padding: 3rem 0 2rem;
+  }
+
+  .seal {
+    max-width: 26rem;
+  }
+
+  .ways {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .way-agent {
+    padding-top: 0;
+  }
+
+  main > section {
+    margin-top: 3rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .masthead,
+  main,
+  footer {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .masthead {
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+
+  nav {
+    gap: 1rem;
+    font-size: 0.8125rem;
+  }
+
+  .facts > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hero-meta {
+    gap: 0.5rem 1.25rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none;
+  }
 }
