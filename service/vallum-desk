@@ -325,6 +325,8 @@ class DaemonCli(Daemon):
             invite = json.loads(out)
         except json.JSONDecodeError as error:
             raise RuntimeError(f"invite's JSON did not parse: {error}") from error
+        if not isinstance(invite, dict):
+            raise RuntimeError("invite's JSON is not a report object — refusing to guess")
         ticket = invite.get("ticket")
         if not ticket:
             raise RuntimeError("invite produced no join ticket — refusing to hand out a placeholder")
@@ -404,7 +406,12 @@ class DaemonCli(Daemon):
             report = json.loads(out)
         except json.JSONDecodeError as error:
             raise RuntimeError(f"rotate's JSON did not parse: {error}") from error
-        result = {"fingerprint": report.get("fingerprint"),
+        if not isinstance(report, dict):
+            raise RuntimeError("rotate's JSON is not a report object — refusing to guess")
+        fingerprint = report.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise RuntimeError("rotate's JSON carries no fingerprint — refusing to guess")
+        result = {"fingerprint": fingerprint,
                   "applied": bool(report.get("applied")),
                   "finalized": True}
         try:
@@ -1074,26 +1081,45 @@ class Desk:
             "conversion": account_conversion(devices),
             "devices": devices}
 
-    def remove_device(self, body):
-        """The account owner's per-device revoke: the bearer token must own
-        the peer. Same removal-first order as the admin path."""
-        token = body.get("token") or ""
+    def _device_target(self, body, verb, require_active=False):
+        """The (account, peer) a per-device verb addresses, or an error
+        answer as the third element. Intake typing lives here once: a JSON
+        number/list/dict where a name belongs is a 400 naming the field —
+        not a sqlite bind error behind a 500, and not a 404 blaming the
+        device for the caller's typing. A falsy peer must not reach the
+        ownership comparison: the legacy column is NULL on new-contract
+        accounts, and `None != None` is False — the comparison would pass
+        and act on nothing.
+        """
+        token = body.get("token")
+        if token is not None and not isinstance(token, str):
+            return None, None, (400, {"error": "token must be a string — the account number"})
         peer = body.get("peer")
+        if peer is not None and not isinstance(peer, str):
+            return None, None, (400, {"error": f"peer must be a string — name the device to {verb}"})
         if not peer:
-            # A missing peer must not reach the ownership check: the legacy
-            # column is NULL on new-contract accounts, and `None != None`
-            # is False — the comparison would pass and remove nothing.
-            return 400, {"error": "peer is required — name the device to remove"}
+            return None, None, (400, {"error": f"peer is required — name the device to {verb}"})
         with self.lock:
             account = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+                "SELECT * FROM accounts WHERE token=?", (token or "",)).fetchone()
             if not account:
-                return 404, {"error": "unknown account token"}
+                return None, None, (404, {"error": "unknown account token"})
+            if require_active and account["status"] != "active":
+                return None, None, (403, {"error": f"account is {account['status']} — "
+                                                   f"devices can only {verb} on an active account"})
             owned = self.db.execute(
                 "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
                 (account["id"], peer)).fetchone()
         if not owned and peer != account["peer"]:
-            return 404, {"error": "unknown device"}
+            return None, None, (404, {"error": "unknown device"})
+        return account, peer, None
+
+    def remove_device(self, body):
+        """The account owner's per-device revoke: the bearer token must own
+        the peer. Same removal-first order as the admin path."""
+        account, peer, error = self._device_target(body, "remove")
+        if error:
+            return error
         try:
             self.daemon.remove(peer)
         except RuntimeError as error:
@@ -1108,16 +1134,11 @@ class Desk:
 
         Rotation is never add_device: no reservation, no cap check, no
         ticket — the slot, the address and the plan are untouched, so the
-        device count is preserved even at the cap. The bearer token must
-        own the peer, exactly as for removal.
+        device count is preserved even at the cap.
         """
-        token = body.get("token") or ""
-        peer = body.get("peer")
-        if not peer:
-            # A missing peer must not reach the ownership check: the legacy
-            # column is NULL on new-contract accounts, and `None != None`
-            # is False — the comparison would pass and rotate nothing.
-            return 400, {"error": "peer is required — name the device to rotate"}
+        account, peer, error = self._device_target(body, "rotate", require_active=True)
+        if error:
+            return error
         # The device's OWN new public line is required: there is no unpinned
         # rotation (custody, ADR-0013 — server-generation is the operator's
         # explicit `--ship-key` opt-in, not this path). Validate before any
@@ -1136,19 +1157,6 @@ class Desk:
             return 400, {"error": "public_key must be the device's public line — "
                                   "vallum1:<suite>:<kem>:<signing|->, from "
                                   "`vallum pubkey --key <file>`"}
-        with self.lock:
-            account = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
-            if not account:
-                return 404, {"error": "unknown account token"}
-            if account["status"] != "active":
-                return 403, {"error": f"account is {account['status']} — "
-                                      "devices can only rotate on an active account"}
-            owned = self.db.execute(
-                "SELECT 1 FROM peers WHERE account_id=? AND peer=? AND status='active'",
-                (account["id"], peer)).fetchone()
-        if not owned and peer != account["peer"]:
-            return 404, {"error": "unknown device"}
         try:
             report = self.daemon.rotate(peer, public_key)
         except RuntimeError as error:
@@ -1157,8 +1165,8 @@ class Desk:
                    "applied": report["applied"], "finalized": report["finalized"]}
         if not report["finalized"]:
             # The rotation happened; the old key is still accepted. Name both
-            # facts and the recovery — a retry of this same call retires the
-            # previous key (re-rotating moves it out of `previous_*`).
+            # facts; the recovery is a retry of this same call (the rationale
+            # lives in DaemonCli.rotate, the decision in ADR-0047 §4).
             payload["warning"] = ("the old key is still accepted: "
                                   f"{report.get('finalize_error', 'finalize failed')} "
                                   "— retry the rotation to retire it")

@@ -80,6 +80,8 @@ class FakeDaemon(desk_module.Daemon):
     def rotate(self, peer, public_key):
         if getattr(self, "_refuse_rotate", False):
             raise RuntimeError("the daemon said no")
+        if peer in getattr(self, "missing_peers", ()):
+            raise RuntimeError(f"vallum: no peer named `{peer}`")
         self.rotated.append((peer, public_key))
         report = {"fingerprint": f"fp-{peer}", "applied": True, "finalized": True}
         if getattr(self, "_refuse_finalize", False):
@@ -370,6 +372,29 @@ class DaemonCliTests(unittest.TestCase):
             daemon, _ = self._cli_recording_calls(tempdir, rotate_body="not json")
             with self.assertRaises(RuntimeError):
                 daemon.rotate("laptop", "vallum1:0003:" + "ab" * 32 + ":-")
+
+    def test_rotate_json_of_wrong_shape_fails_loudly(self):
+        # Valid JSON of the wrong shape is the same failure as unparseable
+        # JSON: a loud RuntimeError, not an AttributeError behind a 500.
+        # The real `Rotated` report always carries a fingerprint string.
+        line = "vallum1:0003:" + "ab" * 32 + ":-"
+        for body in ("null", "[]", '"ok"', "{}", '{"fingerprint": null}'):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tempdir:
+                daemon, _ = self._cli_recording_calls(tempdir, rotate_body=body)
+                with self.assertRaises(RuntimeError):
+                    daemon.rotate("laptop", line)
+
+    def test_mint_ticket_json_of_wrong_shape_fails_loudly(self):
+        # Same shape guard on the invite path (the gap pre-dated rotate).
+        for body in ("null", "[]", '"ok"'):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tempdir:
+                cli = os.path.join(tempdir, "vallum")
+                with open(cli, "w") as f:
+                    f.write("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(body) + "\n")
+                os.chmod(cli, 0o755)
+                daemon = desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli)
+                with self.assertRaises(RuntimeError):
+                    daemon.mint_ticket("laptop")
 
 
 class StatusTests(DeskTestCase):
@@ -684,6 +709,20 @@ class HttpTests(WireTestCase):
             "application/json")
         self.assertEqual(status, 400)
         self.assertIn("public_key", json.loads(body)["error"])
+
+    def test_the_rotate_wire_answers_a_non_string_peer(self):
+        # A list where a peer name belongs must be a 400 JSON answer on the
+        # wire — not a sqlite bind error dropping a 500 (or the connection).
+        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1"}',
+                                   "application/json")
+        token = json.loads(signup_body)["token"]
+        status, body = self.post(
+            "/api/devices/rotate",
+            json.dumps({"token": token, "peer": ["u0001-x"],
+                        "public_key": "vallum1:0003:" + "cd" * 32 + ":-"}),
+            "application/json")
+        self.assertEqual(status, 400)
+        self.assertIn("peer", json.loads(body)["error"])
 
     def test_the_form_path_answers_with_an_account_page(self):
         status, page = self.post("/signup", "", "application/x-www-form-urlencoded")
@@ -2085,13 +2124,29 @@ class DevicesTests(DeskTestCase):
         self.assertEqual(code, 400)
         self.assertEqual(self.daemon.removed, [])
 
+    def test_remove_device_refuses_non_string_peer_and_token(self):
+        # Same intake rule as rotate: a non-string name is a 400 naming the
+        # field, not a bind error behind a 500 (the gap pre-dated rotate).
+        token = self._token()
+        _, device = self.desk.add_device({"token": token, "name": "laptop"})
+        for bad in (["x"], {"p": 1}, 123, True):
+            with self.subTest(peer=bad):
+                code, payload = self.desk.remove_device({"token": token, "peer": bad})
+                self.assertEqual(code, 400)
+                self.assertIn("peer", payload["error"])
+        for bad in (["tok"], {"t": 1}, 123):
+            with self.subTest(token=bad):
+                code, payload = self.desk.remove_device(
+                    {"token": bad, "peer": device["peer"]})
+                self.assertEqual(code, 400)
+                self.assertIn("token", payload["error"])
+        self.assertEqual(self.daemon.removed, [])
+
 
 class RotationTests(DeskTestCase):
-    """ADR-0047 §4: rotation replaces a device's key under its stable name.
-    The slot is preserved — no reservation, no cap check, no ticket — and the
-    old key is retired (finalize) in the same operation, because the caller
-    generated and holds the new key: the grace window would protect nothing
-    and only extend a compromised old key's life."""
+    """ADR-0047 §4: rotation replaces a device's key under its stable name;
+    the slot is preserved. The finalize-in-same-call decision and its
+    rationale live in DaemonCli.rotate and the CONTEXT.md glossary."""
 
     LINE = "vallum1:0003:" + "cd" * 32 + ":-"
 
@@ -2256,8 +2311,8 @@ class RotationTests(DeskTestCase):
 
     def test_a_failed_finalize_is_reported_not_hidden(self):
         # The rotation happened; the old key is still accepted. Saying 502
-        # would misname what did — the answer carries both facts and the
-        # recovery (retry the rotation: re-rotating retires the previous).
+        # would misname what did — the answer carries both facts (recovery:
+        # see DaemonCli.rotate).
         account, device = self.account_with_device()
         self.daemon._refuse_finalize = True
         code, payload = self.desk.rotate_device(
@@ -2267,6 +2322,38 @@ class RotationTests(DeskTestCase):
         self.assertIn("old key", payload["warning"])
         self.assertIn("retry", payload["warning"])
         self.assertEqual(self.daemon.rotated, [(device["peer"], self.LINE)])
+
+    def test_rotation_refuses_non_string_peer_and_token(self):
+        # A JSON number/list/dict where a name belongs is a 400 naming the
+        # field — not a sqlite bind error behind a 500, and not a 404 that
+        # blames the device for the caller's typing (house rule, 6eb03da).
+        account, device = self.account_with_device()
+        for bad in (["u0001-x"], {"p": 1}, 123, True):
+            with self.subTest(peer=bad):
+                code, payload = self.desk.rotate_device(
+                    {"token": account["token"], "peer": bad, "public_key": self.LINE})
+                self.assertEqual(code, 400)
+                self.assertIn("peer", payload["error"])
+        for bad in (["tok"], {"t": 1}, 123):
+            with self.subTest(token=bad):
+                code, payload = self.desk.rotate_device(
+                    {"token": bad, "peer": device["peer"], "public_key": self.LINE})
+                self.assertEqual(code, 400)
+                self.assertIn("token", payload["error"])
+        self.assertEqual(self.daemon.rotated, [])
+
+    def test_rotation_of_a_peer_the_daemon_does_not_have_is_a_502(self):
+        # The desk's row is a record, not reality (ADR-0047 §1): a legacy
+        # device already removed from the daemon cannot rotate — the CLI
+        # refuses "no peer named", and the desk reports the refusal.
+        _, account = self.signup()
+        self.desk.db.execute("UPDATE accounts SET peer='u0001-old' WHERE token=?",
+                             (account["token"],))
+        self.daemon.missing_peers = ["u0001-old"]
+        code, payload = self.desk.rotate_device(
+            {"token": account["token"], "peer": "u0001-old", "public_key": self.LINE})
+        self.assertEqual(code, 502)
+        self.assertIn("daemon refused", payload["error"])
 
 
 class VoucherTests(DeskTestCase):

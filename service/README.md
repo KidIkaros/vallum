@@ -267,7 +267,7 @@ vallum pubkey --key agent-new.key
 curl -X POST https://desk.example.com/api/devices/rotate \
      -H 'content-type: application/json' \
      -d '{"token":"<account number>","peer":"<peer>","public_key":"<new public line>"}'
-#   → {"rotated": …, "fingerprint": …, "finalized": true}
+#   → {"rotated": …, "fingerprint": …, "applied": true, "finalized": true}
 #   No ticket, no new device, no cap check: the key changes under the stable
 #   name and the old key is retired in the same call. The device then uses
 #   the new key file (its config is untouched). If `finalized` is false the
