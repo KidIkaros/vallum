@@ -12,3 +12,4 @@ than its changelog claims.
 
 | date | commit | gate | reason |
 |---|---|---|---|
+| 2026-11-19 | aff6a37 | desktop-bundle | the console does not ship in the alpha (ADR-0039); desktop bundle + GUI version bump deferred to beta |

@@ -36,8 +36,8 @@ criterion.
 - [x] Off-host backup: host timer + laptop pull (valid SQLite copies proven).
 - [x] Host health: 0 failed units; tunnel carrying; NAT masquerade widened to /20.
 - [x] Gate of record: `scripts/verify.sh` PASS on main.
-- [ ] Two-host stamp fresh at the release commit (`verify-remote`).
-- [ ] Signed restore-drill verdict at the release commit.
+- [x] Two-host stamp fresh at the release commit (`verify-remote` at aff6a37, 42 assertions, signed).
+- [x] Signed restore-drill verdict at the release commit (`accept-desk-restore`, 8 assertions).
 
 ## Out of scope for the alpha (beta or later)
 
