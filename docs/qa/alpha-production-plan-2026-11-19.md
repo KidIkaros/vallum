@@ -128,6 +128,14 @@ remaining gaps. Lead with findings in words, numbers as backup.
   First run failed: unshare -Urn has no mount ns, so tmpfs over /etc/vallum + /run was denied;
   fixed with -m (unshare -Urnm). PASS 25 assertions. Merged 533fc44; wired into verify.sh E2E
   (7cc3158). WS6 + WS7 DONE. ALL workstreams WS1-WS7 complete. Morning report written; cron paused.
+- 2026-11-19 12:2x EST — OPERATOR "go": DEPLOYED + PUSHED + desk UI re-skinned. Re-skinned the desk
+  embedded pages to the brandkit (b14fdb7, 271 tests OK, verify.sh PASS); pushed origin 5d85727..b14fdb7;
+  deployed to wingman-vps (backup tarball + binary rollback + DB copy staged). LIVE verified:
+  https://desk.wingman.gold branded (obsidian+cyan+◆), healthz ok (db+daemon), closed mode preserved,
+  migration faithful (17 accounts identical to pre-deploy backup: 2 expired + 15 revoked), account-only
+  signup live (old code+name shape refused with the new message), bogus code 403. DEPLOY-HOLD lifted for
+  the desk. Cron's final tick reviewed WS4c and fixed real bugs (7981a40); live run cancelled after.
+  Rollback: install vallum-desk.rollback-brand + restore desk-before-brand.sqlite + restart.
 - 2026-11-19 01:37 EST — WS3 DONE (5cae2fc): opt-in `[interface] client_isolation` + `--client-isolation`
   flag; drop chain in the wholesale-replaced `inet vallum` table (converges both ways; teardown already
   removes it); config is source of truth on re-init (flag/config conflict refused); `--no-nat`+isolation
