@@ -783,6 +783,11 @@ impl ShapingSpec {
 pub struct Account {
     /// The account number — the desk's 32-hex bearer token.
     pub token: Option<String>,
+    /// The desk origin (`https://host[:port]`) the account lives on,
+    /// recorded at join from the URI's `desk=` param (ADR-0046). `vallum
+    /// account` shows it before calling, so the user can see where the
+    /// token goes. Absent in configs written before the field existed.
+    pub endpoint: Option<String>,
 }
 
 /// The `[log]` table.
@@ -1237,6 +1242,45 @@ pub fn with_account_token(config_text: &str, token: &str) -> String {
     out
 }
 
+/// Record the desk origin in `config_text` as `[account] endpoint`
+/// (ADR-0046).
+///
+/// The endpoint is the transparency half of the account read: `vallum
+/// account` shows which desk it is calling before the token leaves the
+/// machine. Idempotent with the same semantics as [`with_account_token`]:
+/// a config already carrying an endpoint keeps it on re-join, and text
+/// that does not parse is returned untouched for the caller's own parse
+/// to report. Creates the `[account]` table when absent.
+#[must_use]
+pub fn with_account_endpoint(config_text: &str, endpoint: &str) -> String {
+    let Ok(config) = toml::from_str::<Config>(config_text) else {
+        return config_text.to_owned();
+    };
+    if config.account.endpoint.is_some() {
+        return config_text.to_owned();
+    }
+    let line = format!("endpoint = \"{endpoint}\"\n");
+    let mut out = String::with_capacity(config_text.len() + line.len() + 16);
+    let mut placed = false;
+    for text_line in config_text.lines() {
+        out.push_str(text_line);
+        out.push('\n');
+        if !placed && text_line.trim() == "[account]" {
+            out.push_str(&line);
+            placed = true;
+        }
+    }
+    if placed {
+        return out;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n[account]\n");
+    out.push_str(&line);
+    out
+}
+
 /// Insert `outer_mtu` into `[interface]` of `config_text` if not already present.
 ///
 /// Preserves surrounding comments and fields. If the text does not parse or
@@ -1571,6 +1615,73 @@ size = 1400
         let once = with_account_token(text, "0123456789abcdef0123456789abcdef");
         let twice = with_account_token(&once, "ffffffffffffffffffffffffffffffff");
         assert_eq!(once, twice);
+    }
+
+    /// ADR-0046: the desk origin rides beside the token so `vallum account`
+    /// knows which desk to ask. Both halves must survive the text round-trip.
+    #[test]
+    fn account_token_and_endpoint_round_trip_together() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let with = with_account_token(text, "0123456789abcdef0123456789abcdef");
+        let with = with_account_endpoint(&with, "https://desk.example.com:8443");
+        let parsed: Config = toml::from_str(&with).unwrap();
+        assert_eq!(
+            parsed.account.token.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            parsed.account.endpoint.as_deref(),
+            Some("https://desk.example.com:8443")
+        );
+    }
+
+    /// Configs written before the endpoint field existed must still parse:
+    /// the field defaults to absent, never to a guess.
+    #[test]
+    fn a_config_without_an_account_endpoint_still_parses() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n\
+                    [account]\ntoken = \"0123456789abcdef0123456789abcdef\"\n\n\
+                    [[peer]]\nname = \"p\"\n";
+        let parsed: Config = toml::from_str(text).unwrap();
+        assert_eq!(
+            parsed.account.token.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert!(parsed.account.endpoint.is_none());
+        // And a config with no [account] at all defaults both halves absent.
+        let bare = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let parsed: Config = toml::from_str(bare).unwrap();
+        assert!(parsed.account.token.is_none());
+        assert!(parsed.account.endpoint.is_none());
+    }
+
+    /// Re-join semantics match the token's: the recorded desk is kept, not
+    /// overwritten by whatever the next URI happens to carry.
+    #[test]
+    fn with_account_endpoint_is_idempotent() {
+        let text = "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n\n[[peer]]\nname = \"p\"\n";
+        let once = with_account_endpoint(text, "https://desk.example.com");
+        let twice = with_account_endpoint(&once, "https://other.example.com");
+        assert_eq!(once, twice);
+        let parsed: Config = toml::from_str(&twice).unwrap();
+        assert_eq!(
+            parsed.account.endpoint.as_deref(),
+            Some("https://desk.example.com")
+        );
+    }
+
+    /// The endpoint is not a secret — it is the transparency half of
+    /// ADR-0046 — so redaction keeps it while still hiding the token.
+    #[test]
+    fn the_endpoint_survives_redaction_but_the_token_does_not() {
+        let text = "[account]\ntoken = \"0123456789abcdef0123456789abcdef\"\n\
+                    endpoint = \"https://desk.example.com\"\n";
+        let redacted = redact_secrets(text);
+        assert!(!redacted.contains("0123456789abcdef"), "{redacted}");
+        assert!(
+            redacted.contains("endpoint = \"https://desk.example.com\""),
+            "{redacted}"
+        );
     }
 
     #[test]
