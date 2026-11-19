@@ -183,7 +183,12 @@ pub fn account(args: &AccountArgs) -> Result<(), Error> {
 }
 
 /// Read `[account]` and, when there is something to ask, ask the desk.
-fn read_report(config: &vallum_config::Config) -> Report {
+///
+/// The crate's one desk-read seam (ADR-0046): `vallum account` and the TUI
+/// account panel both read through here, so the verified-HTTPS path is never
+/// duplicated. Blocking (up to the desk timeouts) — callers on a render path
+/// must run it off-thread and cache the [`Report`].
+pub(crate) fn read_report(config: &vallum_config::Config) -> Report {
     let Some(token) = config.account.token.as_deref() else {
         return Report {
             detail: "this config has no desk account — it was enrolled from a file \

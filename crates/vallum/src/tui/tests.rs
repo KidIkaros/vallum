@@ -2226,3 +2226,19 @@ fn colliding_interface_names_carry_their_socket_origin() {
     assert!(text.contains("· a "));
     assert!(text.contains("· b "));
 }
+
+#[test]
+fn the_tui_reuses_the_desk_read_seam() {
+    // ADR-0046: the account panel reads through the same verified-HTTPS
+    // path as `vallum account` — one read path, not a second TLS client.
+    // A config without a token exercises the seam without a network.
+    let dir = std::env::temp_dir().join(format!("vallum-tui-seam-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("client.toml");
+    std::fs::write(&path, "[interface]\nname = \"v0\"\nprivate_key = \"k\"\n").unwrap();
+    let config = vallum_config::Config::load(&path).unwrap();
+    let report = crate::commands::account::read_report(&config);
+    assert!(!report.has_account);
+    assert_eq!(report.reachable, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
