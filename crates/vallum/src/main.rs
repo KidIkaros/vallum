@@ -136,6 +136,14 @@ struct JoinArgs {
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 
+    /// Enrol with a key this device already generated (`vallum keygen`),
+    /// instead of generating a fresh one. Required to redeem a **pinned**
+    /// invite (`peer invite --public-key`, ADR-0047): the responder accepts
+    /// only the key the invite was bound to. The private half never leaves
+    /// this machine.
+    #[arg(long, value_name = "FILE")]
+    key: Option<std::path::PathBuf>,
+
     /// Print every step and change nothing.
     #[arg(long)]
     dry_run: bool,
@@ -166,7 +174,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let outcome = match command {
-        Command::Setup(args) => setup::setup(&args),
+        Command::Setup(mut args) => {
+            args.allow_insecure_key_permissions = cli.allow_insecure_key_permissions;
+            setup::setup(&args)
+        }
         Command::EnrollServe(args) => vallum::enroll::serve(&args.config),
         Command::Run(args) => run::run(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keys::keygen(&args),
@@ -216,6 +227,8 @@ fn main() -> ExitCode {
             remote: None,
             remote_config: None,
             join: Some(args.ticket.clone()),
+            key: args.key.clone(),
+            allow_insecure_key_permissions: cli.allow_insecure_key_permissions,
             token: None,
             invite_id: None,
             front_url: None,
@@ -261,6 +274,47 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("vallum: {error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+
+    /// ADR-0047 §3: a pinned invite is redeemed with the key the device
+    /// generated *before* enrolment, so `join` must accept that key file
+    /// instead of always generating a fresh one.
+    #[test]
+    fn join_accepts_a_key_file_for_pinned_enrolment() {
+        let cli = Cli::try_parse_from([
+            "vallum",
+            "join",
+            "vallum1-join:203.0.113.9:51922/u0001-agent/id/token/fp",
+            "--key",
+            "/tmp/device.key",
+        ])
+        .expect("join --key must parse");
+        match cli.command {
+            Some(Command::Join(args)) => {
+                assert_eq!(
+                    args.key.as_deref(),
+                    Some(std::path::Path::new("/tmp/device.key"))
+                );
+            }
+            _ => panic!("expected a join command"),
+        }
+    }
+
+    #[test]
+    fn join_without_a_key_still_parses() {
+        let cli = Cli::try_parse_from(["vallum", "join", "vallum1-join:h:1/n/i/t/f"])
+            .expect("the unpinned path must keep working");
+        match cli.command {
+            Some(Command::Join(args)) => assert!(args.key.is_none()),
+            _ => panic!("expected a join command"),
         }
     }
 }

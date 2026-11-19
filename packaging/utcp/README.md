@@ -67,7 +67,7 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_fox_status` | `vallum-fox status` | Device, units, separation, budget spent. |
 | `vallum_fox_budget_set` / `vallum_fox_budget_list` | `vallum-fox budget …` | Per-domain request caps (the volume governor). |
 | `vallum_desk_signup` | `POST <desk>/api/signup` | Invite code → account number (self-service; no device at signup). |
-| `vallum_desk_add_device` | `POST <desk>/api/devices` | Enrol a device on the account → single-use join ticket. |
+| `vallum_desk_add_device` | `POST <desk>/api/devices` | Enrol a device on the account → single-use join ticket; pinned to the device's key when `public_key` is presented. |
 | `vallum_desk_status` | `POST <desk>/api/status` | Plan, expiry, bytes used. |
 | `vallum_desk_mint_code` | `POST <desk>/api/admin/code` | Mint a single-use invite code. |
 | `vallum_desk_set_plan` | `POST <desk>/api/admin/plan` | Set a cap or expiry — a paid tier is a row. |
@@ -90,7 +90,8 @@ starts a root daemon and changes the host:
 | Tool | CLI Command | Purpose |
 |---|---|---|
 | `vallum_join_plan` | `vallum join <ticket> --dry-run` | Print what a ticket would write and start. Contacts nothing. |
-| `vallum_join` | `vallum join <ticket>` | Enrol this machine with the one-time `vallum1-join:…` ticket. |
+| `vallum_join` | `vallum join <ticket>` | Enrol this machine with the one-time `vallum1-join:…` ticket (generates a fresh key). |
+| `vallum_join_pinned` | `vallum join <ticket> --key <file>` | Redeem a PINNED ticket with the key the device generated before enrolment (ADR-0047). |
 | `vallum_import_bundle` | `vallum import-bundle <file> --install` | Install a client from a `.vallum-bundle`: `/etc/vallum`, key, units, started. |
 | `vallum_stop` | `vallum stop --config <file>` | Ask the daemon to stop and wait for its acknowledgement. |
 

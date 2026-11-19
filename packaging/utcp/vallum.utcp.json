@@ -1323,7 +1323,7 @@
     },
     {
       "name": "vallum_join",
-      "description": "Enrol this machine as a client with the one-time `vallum1-join:…` ticket `vallum peer invite` printed on the server. The ticket carries the responder address, invite id, token and the server fingerprint in one string, so there are no other flags to get right. On a root host this writes /etc/vallum and starts the tunnel; `vallum_join_plan` prints the same steps without changing anything. Fails if the invite expired, was minted for another name, or the server is unreachable.",
+      "description": "Enrol this machine as a client with the one-time `vallum1-join:…` ticket `vallum peer invite` printed on the server. The ticket carries the responder address, invite id, token and the server fingerprint in one string, so there are no other flags to get right. On a root host this writes /etc/vallum and starts the tunnel; `vallum_join_plan` prints the same steps without changing anything. Fails if the invite expired, was minted for another name, or the server is unreachable. A ticket minted with `--public-key` (a PINNED invite, e.g. from the desk's add_device with a public line) must be redeemed with vallum_join_pinned and the matching key file — this tool generates a fresh key, which the pin refuses.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -1349,6 +1349,44 @@
         "commands": [
           {
             "command": "vallum join UTCP_ARG_ticket_UTCP_END",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_join_pinned",
+      "description": "Enrol this machine with a PINNED `vallum1-join:…` ticket — one minted with `peer invite --public-key` (or the desk's add_device given a public line, ADR-0047). Presents the key the device generated BEFORE enrolment (`vallum keygen --key <file>`), so the responder accepts only the holder of the matching private key. The private half never leaves this machine; it is copied beside the new config. Fails if the key does not match the pin, the invite expired, or the server is unreachable.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string",
+            "description": "The pinned `vallum1-join:…` ticket."
+          },
+          "key_file": {
+            "type": "string",
+            "description": "The private key file whose public line the invite was pinned to (from `vallum keygen --key <file>`)."
+          }
+        },
+        "required": [
+          "ticket",
+          "key_file"
+        ]
+      },
+      "outputs": {
+        "type": "string",
+        "description": "The config written, the key, and the unit started."
+      },
+      "tags": [
+        "activation",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "vallum join UTCP_ARG_ticket_UTCP_END --key UTCP_ARG_key_file_UTCP_END",
             "append_to_final_output": true
           }
         ]

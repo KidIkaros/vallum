@@ -43,7 +43,7 @@
     },
     {
       "name": "vallum_desk_add_device",
-      "description": "Enrol a device on an existing Vallum desk account: the desk counts against the account's device cap and mints a single-use join ticket bound to the account's plan. Join it on the device with `vallum join '<ticket>'` within 15 minutes; an expired ticket is re-minted by calling this again — no new invite code. The ticket is a secret — hand it to the device, never log it.",
+      "description": "Enrol a device on an existing Vallum desk account: the desk counts against the account's device cap and mints a single-use join ticket bound to the account's plan. For a PINNED ticket (recommended for agents, ADR-0047): generate the key on the device first (`vallum keygen --key device.key`), read its public line (`vallum pubkey --key device.key`), and pass it as public_key — the responder then enrols only the holder of the matching private key, so a stolen account number enrols nothing. Redeem a pinned ticket with `vallum join '<ticket>' --key device.key`; an unpinned ticket (public_key empty) with `vallum join '<ticket>'` (the client generates its key at join time). Join within 15 minutes; an expired ticket is re-minted by calling this again — no new invite code. The ticket is a secret — hand it to the device, never log it.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -58,12 +58,17 @@
           "name": {
             "type": "string",
             "description": "Device name to enrol under (lowercase letters, digits, hyphens)."
+          },
+          "public_key": {
+            "type": "string",
+            "description": "The device's own public line from `vallum pubkey --key <file>` (vallum1:<suite>:<kem>:<signing|->). When present the ticket is pinned to that key and must be joined with `vallum join '<ticket>' --key <file>`. Empty = unpinned (the client generates its key at join time). Required field; pass an empty string for the unpinned path."
           }
         },
         "required": [
           "url",
           "token",
-          "name"
+          "name",
+          "public_key"
         ]
       },
       "outputs": {
@@ -78,7 +83,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"token\":\"UTCP_ARG_token_UTCP_END\",\"name\":\"UTCP_ARG_name_UTCP_END\"}'",
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"token\":\"UTCP_ARG_token_UTCP_END\",\"name\":\"UTCP_ARG_name_UTCP_END\",\"public_key\":\"UTCP_ARG_public_key_UTCP_END\"}'",
             "append_to_final_output": true
           }
         ]
@@ -123,7 +128,7 @@
     },
     {
       "name": "vallum_desk_mint_code",
-      "description": "Mint a single-use invite code on the desk \u2014 the operator's closed-alpha handout.",
+      "description": "Mint a single-use invite code on the desk — the operator's closed-alpha handout.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -257,7 +262,7 @@
     },
     {
       "name": "vallum_desk_adopt",
-      "description": "Adopt a peer that already exists on the server into the desk \u2014 an operator migrating a live deployment onto the service, or a device enrolled before the desk was running. The peer is not re-created; it becomes an account the desk can enforce.",
+      "description": "Adopt a peer that already exists on the server into the desk — an operator migrating a live deployment onto the service, or a device enrolled before the desk was running. The peer is not re-created; it becomes an account the desk can enforce.",
       "inputs": {
         "type": "object",
         "properties": {

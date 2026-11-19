@@ -107,6 +107,20 @@ pub struct SetupArgs {
     #[arg(long, value_name = "TICKET|HOST:PORT|-", conflicts_with_all = ["server", "client", "remote"])]
     pub join: Option<String>,
 
+    /// Enrol with a key this device already generated (`vallum keygen`),
+    /// instead of generating a fresh one at join time. Required to redeem a
+    /// **pinned** invite (`peer invite --public-key`, ADR-0047): the
+    /// responder accepts only the key the invite was bound to. The private
+    /// half never leaves this machine; it is copied beside the new config.
+    #[arg(long, value_name = "FILE", requires = "join")]
+    pub key: Option<PathBuf>,
+
+    /// Set from the global `--allow-insecure-key-permissions` flag by the
+    /// dispatcher; not a flag of its own. Governs the `--key` file's mode
+    /// check, exactly as `pubkey` and `run` govern theirs.
+    #[arg(skip)]
+    pub allow_insecure_key_permissions: bool,
+
     /// The single-use token from `vallum peer invite`, or `-` to read it from
     /// stdin so it stays out of shell history and `ps`.
     #[arg(long, value_name = "TOKEN", requires = "join")]
@@ -228,6 +242,8 @@ fn as_interactive_client(args: &SetupArgs) -> Result<(), Error> {
                     remote: None,
                     remote_config: None,
                     join: Some(ticket.clone()),
+                    key: args.key.clone(),
+                    allow_insecure_key_permissions: args.allow_insecure_key_permissions,
                     token: None,
                     invite_id: None,
                     front_url: None,
@@ -1040,7 +1056,15 @@ fn place_config_in(
     })?;
     let key_path = directory.join(format!("{name}.key"));
     let config_path = directory.join(format!("{name}.toml"));
-    crate::keys::save_secret(&key_path, secret)?;
+    // A `join --key` may name a key already at its destination (the operator
+    // keygen'd straight into the config dir). The server enrolled the peer
+    // and spent the single-use invite before this point, so an overwrite
+    // refusal here would strand a successful enrolment. Placing the identical
+    // key again is a no-op; a *different* existing key still refuses.
+    let existing = std::fs::read_to_string(&key_path).ok();
+    if existing.as_deref() != Some(crate::keys::render_secret(secret).as_str()) {
+        crate::keys::save_secret(&key_path, secret)?;
+    }
     // `fwmark` is this machine's routing detail: a server released before the
     // field existed hands back a config that would refuse to attach.
     let mut config_text = vallum_config::with_local_fwmark(config_text);
@@ -1237,6 +1261,34 @@ fn read_token_arg(arg: Option<&str>, mut stdin: impl std::io::BufRead) -> Result
     }
 }
 
+/// The identity a join presents to the responder: the device's own key when
+/// `--key` names one (a pinned invite, ADR-0047 — the responder accepts only
+/// the key the invite was bound to), else a fresh key generated here. Either
+/// way the private half stays on this machine; the returned secret is what
+/// `place_config` writes beside the new config.
+fn join_identity(
+    key: Option<&Path>,
+    allow_insecure: bool,
+) -> Result<(crate::keys::SecretFile, String), Error> {
+    let secret = match key {
+        Some(path) => {
+            // Reading the key at all is the exposure, so the mode is checked
+            // before the file is read — the same rule `pubkey` and `run` keep.
+            if let Some(warning) = crate::keys::check_permissions(path, allow_insecure)? {
+                eprintln!(
+                    "vallum: warning: {warning} (allowed by --allow-insecure-key-permissions)"
+                );
+            }
+            crate::keys::load_secret(path)?
+        }
+        None => crate::keys::new_secret(3, false, crate::entropy::seed()),
+    };
+    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
+    let identity = crate::keys::identity(&suite, &secret)?;
+    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
+    Ok((secret, public_line))
+}
+
 /// Enrol with a single-use token — transport B, for machines that cannot SSH.
 ///
 /// `server` is either the `vallum1-join:…` ticket `peer invite` prints, or a
@@ -1294,17 +1346,26 @@ fn as_join(server: &str, args: &SetupArgs) -> Result<(), Error> {
         say!("         sure you reached the server you meant.");
     }
     if args.dry_run {
-        say!("would generate a key here and ask {server} to enrol `{name}`");
+        match &args.key {
+            Some(path) => say!(
+                "would enrol `{name}` at {server} with the key {}",
+                path.display()
+            ),
+            None => say!("would generate a key here and ask {server} to enrol `{name}`"),
+        }
         say!("   the token proves the server invited this machine; no secrets travel");
         return Ok(());
     }
 
-    let seed = crate::entropy::seed();
-    let secret = crate::keys::new_secret(3, false, seed);
-    let suite = SdkSuite::from_id(secret.suite).map_err(|error| Error::Suite(error.to_string()))?;
-    let identity = crate::keys::identity(&suite, &secret)?;
-    let public_line = crate::keys::encode_public(secret.suite, &identity.to_peer());
-    say!("generated a key here; the private half does not leave this machine");
+    let (secret, public_line) =
+        join_identity(args.key.as_deref(), args.allow_insecure_key_permissions)?;
+    match &args.key {
+        Some(path) => say!(
+            "using the key at {}; the private half does not leave this machine",
+            path.display()
+        ),
+        None => say!("generated a key here; the private half does not leave this machine"),
+    }
     say!("asking {server} to enrol `{name}`…");
 
     let answer = if let Some(front_url) = args.front_url.as_deref() {
@@ -1907,5 +1968,117 @@ mod tests {
     fn guidance_names_both_roles_without_running_anything() {
         // The non-interactive path must not prompt or mutate; it only explains.
         guidance().unwrap();
+    }
+
+    /// ADR-0047 §3: a pinned invite is redeemed with the key the device
+    /// generated before enrolment. `join_identity` must present THAT key —
+    /// a fresh draw would carry a different seed and the responder would
+    /// refuse the pin.
+    #[test]
+    fn join_identity_presents_the_named_key_not_a_fresh_one() {
+        let dir = std::env::temp_dir().join(format!("vallum-join-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = crate::keys::new_secret(3, false, [42u8; 32]);
+        let key_path = dir.join("device.key");
+        crate::keys::save_secret(&key_path, &secret).unwrap();
+
+        let (loaded, line) = join_identity(Some(&key_path), false).unwrap();
+        assert_eq!(
+            loaded.seed, secret.seed,
+            "the named key's seed, not a fresh draw"
+        );
+        assert!(
+            line.starts_with("vallum1:0003:"),
+            "canonical suite-3 line: {line}"
+        );
+        let (suite, _identity) = crate::keys::decode_public(&line).unwrap();
+        assert_eq!(suite, 3);
+        let (_, again) = join_identity(Some(&key_path), false).unwrap();
+        assert_eq!(line, again, "the same file always presents the same line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_identity_without_a_key_generates_a_usable_one() {
+        let (secret, line) = join_identity(None, false).unwrap();
+        assert_eq!(secret.suite, 3);
+        crate::keys::decode_public(&line).unwrap();
+    }
+
+    #[test]
+    fn join_identity_refuses_a_world_readable_key_unless_allowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vallum-join-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = crate::keys::new_secret(3, false, [7u8; 32]);
+        let key_path = dir.join("device.key");
+        crate::keys::save_secret(&key_path, &secret).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(join_identity(Some(&key_path), false).is_err());
+        assert!(join_identity(Some(&key_path), true).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_identity_names_a_missing_key_file() {
+        let missing = std::env::temp_dir().join("vallum-join-absent-xyz.key");
+        let _ = std::fs::remove_file(&missing);
+        assert!(join_identity(Some(&missing), false).is_err());
+    }
+
+    /// `join --key` may name a key the operator keygen'd straight into the
+    /// config dir. The server has already enrolled the peer and spent the
+    /// single-use invite before `place_config` runs, so an overwrite refusal
+    /// here would strand a successful enrolment. Placing the identical key
+    /// again is a no-op; a *different* existing key still refuses.
+    #[test]
+    fn placing_a_key_already_at_its_destination_is_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("vallum-place-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let server_text = "[interface]\nname = \"vallum-u0009\"\nprivate_key = \"u0009-redeem-t.key\"\naddress = \"10.99.90.7/32\"\n\n[[peer]]\nname = \"server\"\npublic_key = \"vallum1:0003:00:-\"\nallowed_ips = [\"10.99.90.0/24\"]\n";
+        let secret = crate::keys::new_secret(3, false, [9u8; 32]);
+        place_config_in(
+            "desk-client",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "198.51.100.10:51921",
+            None,
+            &dir,
+        )
+        .unwrap();
+        let key_before = std::fs::read(dir.join("desk-client.key")).unwrap();
+        place_config_in(
+            "desk-client",
+            server_text,
+            &secret,
+            "10.99.90.7/32",
+            "198.51.100.10:51921",
+            None,
+            &dir,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("desk-client.key")).unwrap(),
+            key_before
+        );
+        let other = crate::keys::new_secret(3, false, [10u8; 32]);
+        assert!(
+            place_config_in(
+                "desk-client",
+                server_text,
+                &other,
+                "10.99.90.7/32",
+                "198.51.100.10:51921",
+                None,
+                &dir,
+            )
+            .is_err(),
+            "a different key at the destination must still be refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

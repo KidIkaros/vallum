@@ -31,9 +31,9 @@ user's machine                     server
 ──────────────                     ──────
 POST /api/signup {code}       ──►  vallum-desk          (account only — no daemon call)
         ◄── account number ┘
-POST /api/devices {token,name} ──► vallum-desk ──► `vallum peer invite` ──► daemon
+POST /api/devices {token,name[,public_key]} ──► vallum-desk ──► `vallum peer invite [--public-key]` ──► daemon
         ◄── join ticket ┘
-vallum join '<ticket>'             (peer is live; counters tracked per peer)
+vallum join '<ticket>' [--key <file>]  (peer is live; counters tracked per peer)
 POST /account {token}              (plan, shared pool, devices, voucher box)
                                    sweep thread: expiry + byte caps ──► peer remove
 ```
@@ -72,6 +72,15 @@ The cap (`--device-cap`, default 5) is enforced under the desk's lock; the
 count and the reservation are one step, so a race cannot oversell. The
 first device enrols the same way as the fifth — there is no special
 "signup device".
+
+A device may present its own **public line** (`public_key`, from
+`vallum pubkey --key <file>` after `vallum keygen --key <file>` on the
+device). The ticket is then **pinned** to that key (ADR-0047 §3): the
+responder enrols only the holder of the matching private key, so a stolen
+account number enrols nothing. Redeem it with `vallum join '<ticket>'
+--key <file>`. Without a public line the ticket is single-use but
+unpinned — the web account page's path, where the client generates its
+key at join time. The response's `pinned` field says which was minted.
 
 A **plan** is data on the account row: `plan` label, `expires`,
 `bytes_cap`, `status`. A **code** may carry a plan payload — minted with
@@ -243,6 +252,15 @@ curl -X POST https://desk.example.com/api/devices \
      -d '{"token":"<account number>","name":"phone"}'
 #   → a second join ticket bound to the same plan
 
+# 4b. an agent enrols with its OWN key (pinned — a stolen token enrols nothing)
+vallum keygen --key agent.key            # on the device; the private half stays here
+vallum pubkey --key agent.key            # the public line to present
+curl -X POST https://desk.example.com/api/devices \
+     -H 'content-type: application/json' \
+     -d '{"token":"<account number>","name":"agent","public_key":"<public line>"}'
+#   → {"ticket": …, "pinned": true, …}
+vallum join '<ticket>' --key agent.key   # redeems the pin with the matching key
+
 # 5. they top up
 vallum-desk-admin mint-code --gib 100
 curl -X POST https://desk.example.com/api/voucher \
@@ -334,7 +352,7 @@ Tauri bundle's file-association config when those ports ship.
 | `POST /api/signup {code}` | invite code (or none, open mode) | create an account; return its number (no device, no ticket) |
 | `POST /api/status {token}` | account number | plan, expiry, bytes used |
 | `POST /api/account {token}` | account number | the full account view: plan, pool, devices |
-| `POST /api/devices {token,name}` | account number | mint a device ticket bound to the account |
+| `POST /api/devices {token,name[,public_key]}` | account number | mint a device ticket bound to the account; pinned to the key when a public line is presented |
 | `POST /api/devices/revoke {token,peer}` | account number | remove one of the account's devices |
 | `POST /api/voucher {token,code}` | account number | apply an unused code's payload to the account |
 | `POST /api/admin/code {admin_token,…}` | admin | mint a code (`days`/`bytes`/`plan` optional) |

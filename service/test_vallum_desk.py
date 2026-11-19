@@ -14,6 +14,7 @@ import datetime
 import importlib.util
 import json
 import os
+import shlex
 import sqlite3
 import tempfile
 import threading
@@ -49,11 +50,13 @@ class FakeDaemon(desk_module.Daemon):
         self._refuse_counters = refuse_counters
         self.removed = []
         self.minted = []
+        self.pins = {}
 
-    def mint_ticket(self, peer):
+    def mint_ticket(self, peer, public_key=None):
         if self._refuse:
             raise RuntimeError("the daemon said no")
         self.minted.append(peer)
+        self.pins[peer] = public_key
         return f"vallum1-join:203.0.113.9:51922/{peer}/deadbeef/token/fingerprint"
 
     def counters(self):
@@ -220,6 +223,46 @@ class DaemonCliTests(unittest.TestCase):
                 daemon.mint_ticket("laptop"),
                 "vallum1-join:203.0.113.9:51922/laptop/id/token/fp",
             )
+
+    def test_a_pinned_mint_passes_the_public_key_to_peer_invite(self):
+        # The pin turns the ticket from a bearer credential into a
+        # registration for a key the client already holds (ADR-0047 §3):
+        # `peer invite --public-key LINE`. The line is one argv element —
+        # never shell input — and the ticket still comes from the JSON field.
+        line = "vallum1:0003:" + "ab" * 32 + ":-"
+        with tempfile.TemporaryDirectory() as tempdir:
+            cli = os.path.join(tempdir, "vallum")
+            args_file = os.path.join(tempdir, "args")
+            with open(cli, "w") as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shlex.quote(args_file) + "\n"
+                        "printf '%s\\n' "
+                        "'{\"ticket\":\"vallum1-join:203.0.113.9:51922/laptop/id/token/fp\"}'\n")
+            os.chmod(cli, 0o755)
+            daemon = desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli)
+            ticket = daemon.mint_ticket("laptop", public_key=line)
+            self.assertEqual(ticket, "vallum1-join:203.0.113.9:51922/laptop/id/token/fp")
+            with open(args_file) as f:
+                argv = f.read().splitlines()
+            self.assertEqual(argv[:4], ["peer", "invite", "laptop", "--json"])
+            self.assertEqual(argv[argv.index("--public-key") + 1], line)
+
+    def test_an_unpinned_mint_sends_no_public_key_flag(self):
+        # The web account page enrols without a pre-shared public line: the
+        # client generates its key at join time. That path must stay exactly
+        # `peer invite <name> --json` — no empty pin, which the daemon would
+        # read as a line to validate.
+        with tempfile.TemporaryDirectory() as tempdir:
+            cli = os.path.join(tempdir, "vallum")
+            args_file = os.path.join(tempdir, "args")
+            with open(cli, "w") as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shlex.quote(args_file) + "\n"
+                        "printf '%s\\n' '{\"ticket\":\"vallum1-join:h:1/n/i/t/f\"}'\n")
+            os.chmod(cli, 0o755)
+            daemon = desk_module.DaemonCli("/etc/vallum/server.toml", cli=cli)
+            daemon.mint_ticket("laptop")
+            with open(args_file) as f:
+                argv = f.read().splitlines()
+            self.assertNotIn("--public-key", argv)
 
     def _daemon_emitting(self, body):
         """A DaemonCli whose `vallum show --json` prints `body`."""
@@ -520,6 +563,31 @@ class HttpTests(WireTestCase):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
             page = r.read().decode()
         self.assertNotIn('name="name"', page)
+
+    def test_the_devices_wire_carries_the_pin(self):
+        # The API seam an agent uses (ADR-0047 §3): signup → devices with a
+        # public line → a pinned ticket. The wire answers with the same
+        # `pinned` verdict the logic does, and a bad line is a 400 on the
+        # wire too — not a dropped connection.
+        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1"}',
+                                   "application/json")
+        token = json.loads(signup_body)["token"]
+        line = "vallum1:0003:" + "cd" * 32 + ":-"
+        status, body = self.post(
+            "/api/devices",
+            json.dumps({"token": token, "name": "agent", "public_key": line}),
+            "application/json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertIs(payload["pinned"], True)
+        self.assertTrue(payload["ticket"].startswith("vallum1-join:"))
+        self.assertEqual(self.daemon.pins[payload["peer"]], line)
+        status, body = self.post(
+            "/api/devices",
+            json.dumps({"token": token, "name": "bad", "public_key": "nope"}),
+            "application/json")
+        self.assertEqual(status, 400)
+        self.assertIn("public_key", json.loads(body)["error"])
 
     def test_the_form_path_answers_with_an_account_page(self):
         status, page = self.post("/signup", "", "application/x-www-form-urlencoded")
@@ -1691,6 +1759,95 @@ class DevicesTests(DeskTestCase):
         rows = self.desk.db.execute(
             "SELECT peer FROM peers WHERE status='active' ORDER BY peer").fetchall()
         self.assertEqual([r["peer"] for r in rows], ["u0001-laptop"])
+
+    def test_a_device_with_a_public_key_gets_a_pinned_invite(self):
+        # ADR-0047 §3: the client keygens locally and presents its public
+        # line; the desk mints an invite bound to that key, so a stolen
+        # account token enrols nothing without the matching private key.
+        token = self._token()
+        line = "vallum1:0003:" + "ab" * 32 + ":-"
+        code, payload = self.desk.add_device(
+            {"token": token, "name": "laptop", "public_key": line})
+        self.assertEqual(code, 200)
+        self.assertIs(payload["pinned"], True)
+        self.assertEqual(self.daemon.pins[payload["peer"]], line)
+
+    def test_a_device_without_a_public_key_stays_unpinned(self):
+        # The web account page's path: no pre-shared line, the client
+        # generates its key at join time. Single-use, not pinned — and the
+        # response says so, so a caller can tell the two apart.
+        token = self._token()
+        code, payload = self.desk.add_device({"token": token, "name": "laptop"})
+        self.assertEqual(code, 200)
+        self.assertIs(payload["pinned"], False)
+        self.assertIsNone(self.daemon.pins[payload["peer"]])
+
+    def test_a_malformed_public_key_is_refused_before_any_reservation(self):
+        # A bad line is the caller's mistake, not the daemon's: it is a 400
+        # that burns no device slot and makes no daemon call. The shapes
+        # mirror `keys::decode_public` — the daemon would refuse them too,
+        # but only after the reservation existed.
+        token = self._token()
+        bad_lines = [
+            "not-a-line",
+            "vallum2:0003:abcd:-",          # wrong tag
+            "vallum1:0003:abcd",            # three fields
+            "vallum1:0003:abcd:-:extra",    # five fields
+            "vallum1:zzzz:abcd:-",          # suite not hex
+            "vallum1:0003::-",              # empty KEM
+            "vallum1:0003:abcd:",           # empty signing (only `-` means none)
+            "vallum1:0003:nothex:-",        # KEM not hex
+            "vallum1:0003:abcd:nothex",     # signing not hex
+            "vallum1:0003:abc:-",           # odd-length hex
+            "vallum1:0003:" + "ab" * 5000 + ":-",  # absurdly long
+        ]
+        for line in bad_lines:
+            with self.subTest(line=line[:40]):
+                code, payload = self.desk.add_device(
+                    {"token": token, "name": "laptop", "public_key": line})
+                self.assertEqual(code, 400)
+                self.assertIn("public_key", payload["error"])
+        self.assertEqual(self.daemon.minted, [])
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
+
+    def test_a_wrapped_public_key_is_canonicalized_before_pinning(self):
+        # The pin is a byte comparison of the whole line at the responder
+        # (`decide_invite`), while the client presents the canonical line
+        # `vallum pubkey` prints: lowercase hex, four-digit suite, no
+        # whitespace. A paste that wrapped in an editor, or uppercase hex,
+        # or a short suite field must be normalized to exactly that form —
+        # otherwise the invite is minted and then refused at join time.
+        token = self._token()
+        wrapped = "vallum1:3:ABCD\n  EF01:-"
+        code, payload = self.desk.add_device(
+            {"token": token, "name": "laptop", "public_key": wrapped})
+        self.assertEqual(code, 200)
+        self.assertIs(payload["pinned"], True)
+        self.assertEqual(self.daemon.pins[payload["peer"]], "vallum1:0003:abcdef01:-")
+
+    def test_a_failed_pinned_mint_leaves_no_orphan_row(self):
+        # The cleanup path is the same whether the invite was pinned or not:
+        # a daemon refusal deletes the reservation, so the slot is free again.
+        token = self._token()
+        self.daemon._refuse = True
+        code, payload = self.desk.add_device(
+            {"token": token, "name": "laptop",
+             "public_key": "vallum1:0003:" + "ab" * 32 + ":-"})
+        self.assertEqual(code, 502)
+        self.assertIn("daemon refused", payload["error"])
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
+
+    def test_an_empty_public_key_is_the_unpinned_path(self):
+        # A form or UTCP template that always sends the field sends it empty
+        # when the caller has no line: that is absence, not a malformed pin.
+        token = self._token()
+        for empty in ("", "   "):
+            code, payload = self.desk.add_device(
+                {"token": token, "name": "laptop", "public_key": empty})
+            self.assertEqual(code, 200)
+            self.assertIs(payload["pinned"], False)
 
     def test_peer_names_differ_in_their_first_eight_characters(self):
         # The kernel's interface-name ceiling truncates at fifteen characters,

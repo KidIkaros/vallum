@@ -241,8 +241,15 @@ class Daemon:
     tests pass a fake, and the production wiring passes `DaemonCli`.
     """
 
-    def mint_ticket(self, peer):
-        """Return a join ticket for `peer`."""
+    def mint_ticket(self, peer, public_key=None):
+        """Return a join ticket for `peer`.
+
+        With `public_key` (the device's own public line) the ticket is
+        **pinned**: the responder enrols only the holder of the matching
+        private key, so a stolen account token enrols nothing (ADR-0047 §3).
+        Without it the ticket is single-use but unpinned — the client
+        generates its key at join time, the web account page's path.
+        """
         raise NotImplementedError
 
     def counters(self):
@@ -291,14 +298,19 @@ class DaemonCli(Daemon):
             raise RuntimeError(f"vallum {' '.join(args[:2])}: {out.stderr.strip()[:200]}")
         return out.stdout
 
-    def mint_ticket(self, peer):
+    def mint_ticket(self, peer, public_key=None):
         """The ticket as a field, not a line to scrape.
 
         `peer invite --json` is the machine interface (ADR-0013/ADR-0044); a
         regex over the human report once matched the usage string and handed a
-        client a 27-byte "ticket". The JSON shape is the contract.
+        client a 27-byte "ticket". The JSON shape is the contract. A public
+        line rides as one argv element (`--public-key`), never shell input;
+        it is public by definition, so argv exposure is not a secret leak.
         """
-        out = self._run("peer", "invite", peer, "--json")
+        args = ["peer", "invite", peer, "--json"]
+        if public_key:
+            args += ["--public-key", public_key]
+        out = self._run(*args)
         try:
             invite = json.loads(out)
         except json.JSONDecodeError as error:
@@ -641,6 +653,40 @@ class Desk:
 
     # -- devices ----------------------------------------------------------
 
+    _PUBLIC_LINE_MAX = 8192  # a tri-hybrid public line is a few KB; this is headroom
+    _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+    @classmethod
+    def _canonical_public_line(cls, text):
+        """The device's public line in the exact form `vallum pubkey` prints,
+        or None when it is not a public line at all.
+
+        The responder pins by comparing the whole line byte-for-byte
+        (`decide_invite`), and the client presents the canonical encoding:
+        lowercase hex, four-digit suite, no whitespace. So a wrapped paste,
+        uppercase hex or a short suite field is normalized here — mirroring
+        `keys::decode_public` (which ignores whitespace) plus `encode_public`
+        (which is canonical) — or the invite would be minted and then refused
+        at join time. Suite *match* and KEM *size* are the server's own
+        checks (`validate_public_line`); the desk does not know the suite.
+        """
+        compact = "".join(text.split())
+        if len(compact) > cls._PUBLIC_LINE_MAX:
+            return None
+        fields = compact.split(":")
+        if len(fields) != 4 or fields[0] != "vallum1":
+            return None
+        suite, kem, signing = fields[1:]
+        if not 1 <= len(suite) <= 4 or not set(suite) <= cls._HEX_DIGITS:
+            return None
+
+        def is_hex(value):
+            return bool(value) and len(value) % 2 == 0 and set(value) <= cls._HEX_DIGITS
+
+        if not is_hex(kem) or (signing != "-" and not is_hex(signing)):
+            return None
+        return f"vallum1:{int(suite, 16):04x}:{kem.lower()}:{signing.lower()}"
+
     def add_device(self, body, desk_origin=None):
         """A second (third…) device on an existing account: the bearer token
         authenticates, and the new peer's ticket binds the account's plan —
@@ -650,6 +696,19 @@ class Desk:
         label = (body.get("name") or "").strip()[:40]
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
             return 400, {"error": "name must be lowercase letters/digits/hyphens"}
+        # The device's own public line, when it presents one (ADR-0047 §3):
+        # the invite is then pinned to that key. Absent — the web account
+        # page's path — the client generates its key at join time. A bad
+        # line is refused before the reservation: it burns no device slot
+        # and makes no daemon call.
+        public_key = (body.get("public_key") or "").strip() or None
+        if public_key:
+            public_key = self._canonical_public_line(public_key)
+            if public_key is None:
+                return 400, {"error": "public_key must be the device's public line — "
+                                      "vallum1:<suite>:<kem>:<signing|->, from "
+                                      "`vallum pubkey --key <file>` (generate the key on "
+                                      "the device with `vallum keygen --key <file>`)"}
         # The lookup, cap check, and the peers row are one locked step —
         # the row IS the reservation, so a racing request counts it, and a
         # racing read on the shared connection never interleaves. The
@@ -674,7 +733,7 @@ class Desk:
             peer = self._next_peer_name(label)
             self._insert_peer(account["id"], peer, label)
         try:
-            ticket = self.daemon.mint_ticket(peer)
+            ticket = self.daemon.mint_ticket(peer, public_key=public_key)
         except RuntimeError as error:
             with self.lock:
                 self.db.execute("DELETE FROM peers WHERE peer=?", (peer,))
@@ -686,6 +745,7 @@ class Desk:
             return 409, {"error": "the account was revoked while the ticket was minting"}
         return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
                      "expires": account["expires"], "bytes_cap": account["bytes_cap"],
+                     "pinned": public_key is not None,
                      "connect": connect_uri(ticket, token, desk_origin)}
 
     def voucher(self, body):
