@@ -37,10 +37,22 @@ make the value legible. The polish went into making it *work*, not into learning
 1. **Stranger first-run friction** *(acute symptom FIXED)* — the documented first command
    `install.sh -- --from-release --install-only` hard-failed: `--` is the server-passthrough
    separator (`scripts/install.sh:146`), so MODE stayed `local` → "no local build found", exit 1
-   (reproduced). Fixed in `873a984` across quickstart/server/backup/upgrades. Residual friction:
-   hidden prerequisites (`openssh-client`, UDP 51820 **and** 51821), the invite wall
-   (`service/vallum-desk:624-629`). *Watch for:* a stranger's first command failing where the gate
-   passes — the gate invokes the installer correctly, the docs did not.
+   (reproduced). Fixed in `873a984` across quickstart/server/backup/upgrades. Residual friction
+   (verified): (a) hidden prerequisites — signed install hard-refuses without `openssh-client`/
+   `iproute2`, which the gate pre-installs so PASS never surfaces it (`scripts/install.sh:216-220`,
+   `accept-install.sh:69`); (b) the **Connect button burns the single-use ticket without bringing the
+   tunnel up** — `vallum-uri.desktop` Exec has no sudo/pkexec, so `join` runs as the desktop user,
+   writes config to cwd and skips service install + `prove_tunnel` (`setup.rs:1119-1128`); the invite
+   is spent, zero packets, retry needs a fresh ticket; the scheme binding registers only for
+   `SUDO_USER` (`install.sh:527-531`), so a root-shell install leaves Connect dead; (c) the enrolment
+   responder is opt-in (`--enroll` defaults off, `server.rs:367-370`) and never boot-armed, while the
+   desk mints tickets without checking it and `/healthz` checks only DB+daemon — a filtered/stopped
+   51821 yields a join timeout whose fixes are operator-only; (d) the invite wall
+   (`service/vallum-desk:624-629`). The gates prove components, not the stranger path: `accept-install`
+   uses an operator-SSH-minted ticket (no desk/invite/account); `accept-agent-enrol` is a veth netns lab
+   (loopback-HTTP desk, pre-placed code, no install.sh/browser/HTTPS front/upstream firewall).
+   *Watch for:* a stranger's command failing where the gate passes, or "enrolled" with zero packets
+   and a burned ticket.
 2. **Measures operations, not desire** *(most likely, with 6)* — the exit bar is M1 conversion +
    M2-M4 capacity/restore/replay (`docs/qa/alpha-exit-bar-2026-11-19.md:16-31`); its purpose is
    "the alpha proves the protocol and harness work" (:7-8). The funnel records only signup /
@@ -93,11 +105,18 @@ make the value legible. The polish went into making it *work*, not into learning
 5. **Compensating evidence + a crypto feedback loop** (5): surface the self-conducted pentest summary
    and a plain-language hybrid rationale on the trust path; route SDK findings back to the operator
    (not only upstream) so the validation learns about crypto trust.
+6. **Make Connect actually connect** (1): the deep-link `join` must bring the tunnel up (pkexec
+   escalation, or a guided `sudo vallum run` step) without burning the ticket on a no-op; arm the
+   enrolment responder by default — or have the desk refuse to mint a ticket when the responder is
+   down, and check it in `/healthz`; register the scheme binding for the desktop user, not only
+   `SUDO_USER`.
 
 ## Before you commit (pre-launch checklist)
 
 - [x] A stranger's documented first command works (the `--` bug fixed, `873a984`; dry-run verified).
 - [ ] A real stranger (not the operator) completes install→enrol→tunnel using ONLY the docs.
+- [ ] The Connect deep-link brings the tunnel up (not "enrolled" + burned ticket + zero packets);
+      the responder is armed when a ticket is minted.
 - [ ] An invite-request channel exists and ≥N real strangers are recruited.
 - [ ] A feedback/return-usage signal exists; the exit bar includes a desire criterion.
 - [ ] README/quickstart state the value in one plain sentence and link `site/`.
