@@ -3,8 +3,9 @@
 
 One process on the server, next to the daemon. Anyone running a Vallum
 server can point would-be users at it: a visitor signs up with an invite
-code (closed alpha) or opens a paid plan later, receives a join ticket
-minted by the daemon itself, and manages their lane from there. The
+code (closed alpha) or opens a paid plan later, receives an account number,
+and enrols devices on demand — each device gets its own join ticket minted
+by the daemon itself (ADR-0047: the account is not the device). The
 operator never runs an SSH command per user.
 
     vallum-desk --config /etc/vallum/vallumrc.toml \
@@ -44,7 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -63,8 +64,10 @@ TICKET_TTL_MINUTES = 15
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
     id         INTEGER PRIMARY KEY,
-    peer       TEXT UNIQUE NOT NULL,      -- first/legacy device name (expand step; the relation is `peers`)
-    label      TEXT NOT NULL,             -- the name the user chose
+    peer       TEXT UNIQUE,             -- legacy first-device name; NULL for an account-only
+                                        -- signup (ADR-0047). The relation is `peers`; this column
+                                        -- stays populated only for pre-migration and adopted rows.
+    label      TEXT NOT NULL,             -- the account's display name
     token      TEXT UNIQUE NOT NULL,      -- account token: status/auth
     code       TEXT NOT NULL,             -- invite code consumed
     plan       TEXT NOT NULL DEFAULT 'trial',
@@ -101,7 +104,7 @@ CREATE TABLE IF NOT EXISTS signups (
 CREATE TABLE IF NOT EXISTS codes (
     code     TEXT PRIMARY KEY,
     created  TEXT NOT NULL,
-    used_by  TEXT,                        -- peer name once consumed
+    used_by  TEXT,                        -- peer name or account label once consumed
     days     INTEGER,                     -- plan payload: days granted (NULL = trial defaults)
     bytes    INTEGER,                     -- plan payload: byte cap granted
     plan     TEXT                         -- plan payload: plan label granted
@@ -142,6 +145,44 @@ def _migrate_v1(conn):
         conn.execute("ALTER TABLE accounts ADD COLUMN signup_ip TEXT")
 
 
+def _migrate_v2(conn):
+    """v2 → v3: accounts.peer becomes nullable — the account is not the device
+    (ADR-0047). An account-only signup writes peer=NULL; the old NOT NULL
+    column refuses it.
+
+    SQLite cannot drop a NOT NULL constraint in place, so the table is rebuilt:
+    copy every row into the new shape, drop the old, rename. Idempotent — a
+    database already created at v3 has a nullable peer and skips the rebuild.
+    The legacy rows keep their peer values: migration changes the shape, never
+    the facts, and `peers` (the relation) is untouched.
+    """
+    peer_column = [row for row in conn.execute("PRAGMA table_info(accounts)")
+                   if row[1] == "peer"]
+    if not peer_column or peer_column[0][3] == 0:
+        return  # already nullable (a fresh v3 database)
+    conn.executescript("""
+        CREATE TABLE accounts_v3 (
+            id         INTEGER PRIMARY KEY,
+            peer       TEXT UNIQUE,
+            label      TEXT NOT NULL,
+            token      TEXT UNIQUE NOT NULL,
+            code       TEXT NOT NULL,
+            plan       TEXT NOT NULL DEFAULT 'trial',
+            created    TEXT NOT NULL,
+            expires    TEXT NOT NULL,
+            bytes_cap  INTEGER NOT NULL,
+            status     TEXT NOT NULL DEFAULT 'active',
+            paid_until TEXT,
+            signup_ip  TEXT
+        );
+        INSERT INTO accounts_v3 SELECT id, peer, label, token, code, plan,
+            created, expires, bytes_cap, status, paid_until, signup_ip
+            FROM accounts;
+        DROP TABLE accounts;
+        ALTER TABLE accounts_v3 RENAME TO accounts;
+    """)
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -165,13 +206,15 @@ def open_database(path):
             "— refusing to run a schema it does not know")
     conn.executescript(SCHEMA)
     # Migrations run in order from whatever version the file is at, so a v0
-    # database passes through v1 and lands on v2 in one start. Each step is
+    # database passes through v1, v2 and lands on v3 in one start. Each step is
     # idempotent because `executescript(SCHEMA)` above has already created any
     # table the step expects.
     if version < 1:
         _migrate_v0(conn)
     if version < 2:
         _migrate_v1(conn)
+    if version < 3:
+        _migrate_v2(conn)
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
@@ -405,6 +448,28 @@ class Desk:
             return self.db.execute(
                 "SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
 
+    def _account_for_body(self, body):
+        """The account an admin request addresses: by a device peer name, or
+        by the account token. A device-less account (ADR-0047) has no peer to
+        name, so the token is the operator's handle on it; peer addressing
+        keeps working for every account that has devices."""
+        peer = body.get("peer")
+        if peer:
+            return self._account_for_peer(peer)
+        token = body.get("token")
+        if token:
+            with self.lock:
+                return self.db.execute(
+                    "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        return None
+
+    @staticmethod
+    def _account_name(account):
+        """How a report names an account: its legacy first-device peer when
+        it has one, else its label. One definition for the burn record, the
+        revoke answer and the sweep log, so the three cannot drift."""
+        return account["peer"] or account["label"]
+
     def _insert_peer(self, account_id, peer, label):
         with self.lock:
             self.db.execute(
@@ -413,13 +478,24 @@ class Desk:
 
     # -- signup ---------------------------------------------------------
 
-    def signup(self, body, client_ip="unknown", desk_origin=None):
-        """An invite code — or, in open mode, nothing — becomes a join ticket
-        and an account. Anonymous signup is bounded per IP and by capacity.
-        `desk_origin` is this desk's public origin (https + Host), carried in
-        the connect URI so the client knows where its account lives."""
+    def signup(self, body, client_ip="unknown"):
+        """An invite code — or, in open mode, nothing — becomes an ACCOUNT,
+        never a device (ADR-0047). Devices enrol later, client-driven, through
+        `add_device`; centring the flow on the durable account is what defines
+        the expired-ticket race out of existence — the client is installed
+        before it enrols, and the account re-derives tickets freely.
+
+        No daemon call happens here: account creation is desk-only, so a down
+        daemon cannot stop signup. Anonymous signup is bounded per IP and by
+        capacity."""
         code = (body.get("code") or "").strip()
-        label = (body.get("name") or "").strip()[:40]
+        if body.get("name"):
+            # The old shape (code + device name) is refused, not silently
+            # reinterpreted: the caller is told where the device name lives
+            # now. The code is not burned by a refused shape.
+            return 400, {"error": "signup creates an account only — a device name "
+                                  "belongs to enrolment: create the account, then add "
+                                  "a device from your account page (POST /api/devices)"}
         if not code and not self.config.open_signup:
             # An empty field is a missing input, not a bad credential. Saying
             # "unknown invite code" here sent users hunting for a code they
@@ -431,8 +507,6 @@ class Desk:
             if limit is not None and limit <= 0:
                 return 429, {"error": "too many signups from this address today — "
                                       "come back tomorrow or ask the operator"}
-        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", label or "-") is None:
-            return 400, {"error": "name must be lowercase letters/digits/hyphens"}
         with self.lock:
             known = (self.db.execute(
                 "SELECT used_by, days, bytes, plan FROM codes WHERE code=?", (code,)).fetchone()
@@ -446,11 +520,6 @@ class Desk:
                 "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0]
             if active >= self.config.max_active_accounts:
                 return 503, {"error": "this desk is at capacity — ask the operator"}
-            peer = self._next_peer_name(label)
-            try:
-                ticket = self.daemon.mint_ticket(peer)
-            except RuntimeError as error:
-                return 502, {"error": f"the daemon refused the enrolment: {error}"}
             # A code may carry a plan payload (days/bytes/plan); a payload-less
             # code — minted bare, or from the operator's file — means the trial.
             if known and (known["days"] or known["bytes"] or known["plan"]):
@@ -463,27 +532,32 @@ class Desk:
                 plan = "trial"
             token = secrets.token_hex(16)
             origin = code if code else "open"
+            # peer stays NULL and no peers row is written: the account is not
+            # a device. The label carries the id so the operator's listing can
+            # tell accounts apart without using the credential as a name.
             cursor = self.db.execute(
                 "INSERT INTO accounts "
                 "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (peer, label, token, origin, plan, self._now(), expires, cap, "active",
+                "VALUES (NULL,?,?,?,?,?,?,?,?,?)",
+                ("account", token, origin, plan, self._now(), expires, cap, "active",
                  client_ip if client_ip and client_ip != "unknown" else None))
-            self._insert_peer(cursor.lastrowid, peer, label)
+            label = f"account-{cursor.lastrowid}"
+            self.db.execute("UPDATE accounts SET label=? WHERE id=?",
+                            (label, cursor.lastrowid))
             if not code:
                 self._count_signup(client_ip)
             elif known:
-                self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (peer, code))
+                self.db.execute("UPDATE codes SET used_by=? WHERE code=?", (label, code))
             else:
                 self.db.execute("INSERT INTO codes (code, created, used_by) VALUES (?,?,?)",
-                                (code, self._now(), peer))
-        return 200, {"ticket": ticket, "peer": peer, "token": token, "expires": expires,
+                                (code, self._now(), label))
+        return 200, {"token": token, "expires": expires,
                      "plan": plan, "bytes_cap": cap,
-                     "connect": connect_uri(ticket, token, desk_origin),
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
                                f"{self.config.install_source}"
                                " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
-                     "how": "vallum join '<ticket>'  then  vallum-fox adopt"}
+                     "how": "open /account with your account number and add a device — "
+                            "each device gets its own join ticket when it enrols"}
 
     def _signup_limit_left(self, client_ip):
         """How many anonymous signups this address has left today (None = no limit).
@@ -638,8 +712,11 @@ class Desk:
             values.append(account["id"])
             self.db.execute(f"UPDATE accounts SET {', '.join(updates)} WHERE id=?",
                             tuple(values))
+            # The burn records who consumed the code. A device-less account
+            # (ADR-0047) has no peer, so its label stands in — a NULL used_by
+            # reads as "unused" and the same code would redeem twice.
             self.db.execute("UPDATE codes SET used_by=? WHERE code=?",
-                            (account["peer"], code))
+                            (self._account_name(account), code))
             row = self.db.execute(
                 "SELECT expires, bytes_cap, plan FROM accounts WHERE id=?",
                 (account["id"],)).fetchone()
@@ -966,7 +1043,8 @@ class Desk:
         longer enforced and never retried.
         """
         peers = self._peers_of(account)
-        action = {"peer": account["peer"], "peers": peers, "reason": reason, "bytes": used}
+        action = {"peer": self._account_name(account), "peers": peers,
+                  "reason": reason, "bytes": used}
         failed = []
         for peer in peers:
             try:
@@ -986,7 +1064,7 @@ class Desk:
             return action
         with self.lock:
             self.db.execute("UPDATE accounts SET status=? WHERE id=?", (reason, account["id"]))
-        print(f"desk: removed {', '.join(peers) or account['peer']} "
+        print(f"desk: removed {', '.join(peers) or self._account_name(account)} "
               f"({reason}, {used if used is not None else 'usage unknown'} bytes)")
         return action
 
@@ -1069,11 +1147,12 @@ class Desk:
 
     def _set_plan(self, body):
         """A plan is a row: cap, expiry, plan name, or status. A paid tier is
-        data, and reinstating a mis-quota'd account is the same change."""
+        data, and reinstating a mis-quota'd account is the same change.
+        Addressed by peer or by account token (device-less accounts)."""
         peer = body.get("peer")
-        account = self._account_for_peer(peer)
+        account = self._account_for_body(body)
         if not account:
-            return 404, {"error": "unknown peer"}
+            return 404, {"error": "unknown peer or account token"}
         columns, values = [], []
         for column, key in (("bytes_cap", "bytes_cap"), ("expires", "expires"),
                             ("paid_until", "paid_until"), ("plan", "plan")):
@@ -1112,23 +1191,24 @@ class Desk:
 
     def _revoke_account(self, body):
         """Per-account: every device goes first, then the account is marked —
-        the same removal-first order and retry semantics as the sweep."""
-        peer = body.get("peer")
-        account = self._account_for_peer(peer)
+        the same removal-first order and retry semantics as the sweep.
+        Addressed by peer or by account token (device-less accounts)."""
+        account = self._account_for_body(body)
         if not account:
-            return 404, {"error": "unknown peer"}
+            return 404, {"error": "unknown peer or account token"}
         counters = self._daemon_counters()
         used = (None if counters is None
                 else sum(counters.get(p, 0) for p in self._peers_of(account)))
         action = self._revoke(account, "revoked", used)
         if "error" in action:
             return 502, action
-        return 200, {"revoked": account["peer"], "peers": action["peers"]}
+        return 200, {"revoked": self._account_name(account),
+                     "peers": action["peers"]}
 
     def _list_peers(self, body):
         with self.lock:
             rows = self.db.execute(
-                "SELECT peer,label,plan,status,expires,bytes_cap FROM accounts").fetchall()
+                "SELECT peer,label,token,plan,status,expires,bytes_cap FROM accounts").fetchall()
         return 200, {"peers": [dict(row) for row in rows]}
 
     def _list_devices(self, body):
@@ -1358,10 +1438,10 @@ def index_page(open_signup, operator="vallum desk",
                install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
-    intro = ("A device name gets you a join ticket; your key never leaves "
-             "your machine." if open_signup else
-             "An invite code gets you a join ticket; your key never leaves "
-             "your machine.")
+    intro = ("Create an account, then add your devices from your account page; "
+             "your key never leaves your machine." if open_signup else
+             "An invite code gets you an account; add devices from your account "
+             "page — your key never leaves your machine.")
     return f"""<!doctype html><title>{_esc(operator)}</title>
 <style>body{{font:16px/1.6 system-ui;max-width:36em;margin:10vh auto;padding:0 1em}}
 input,button{{font:inherit;padding:.4em .6em}}button{{cursor:pointer}}
@@ -1371,9 +1451,44 @@ pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888
 {install_blurb(install_source, repo_url)}
 <form method="post" action="/signup">
 {code_field}
-<label>device name<br><input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label><br><br>
-<button>Get my join ticket</button>
+<button>Create my account</button>
 </form>"""
+
+
+def account_created_page(payload, operator="vallum desk",
+                         install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
+    """The account-only signup answer (ADR-0047): the account number, shown
+    once, and the next step — add a device. No ticket exists yet: each device
+    gets its own when it enrols, so nothing on this page expires in fifteen
+    minutes. No script, no storage — what the visitor copies is what they keep."""
+    token = _esc(payload.get("token", ""))
+    expires = _esc(payload.get("expires", ""))
+    plan = _esc(payload.get("plan") or "trial")
+    gib = payload.get("bytes_cap", 0) // (1024 ** 3)
+    manage = (f"""<form method="post" action="/account">
+<input type="hidden" name="token" value="{token}">
+<button>Manage this account</button></form>"""
+              if token else "")
+    return f"""<!doctype html><title>your account — {_esc(operator)}</title>
+<style>body{{font:16px/1.6 system-ui;max-width:40em;margin:10vh auto;padding:0 1em}}
+pre{{white-space:pre-wrap;word-break:break-all;padding:1em;border:1px solid #888}}</style>
+<h1>Your account</h1>
+<p><small>{_esc(operator)}</small></p>
+<p>Shown once. Copy your account number now — the desk does not send it
+anywhere else. It is the only credential this account ever has; treat it
+like a password.</p>
+<p>Plan {plan} until {expires} or {gib} GiB (shared across your devices).</p>
+<pre>{token}</pre>
+<h2>Next: add a device</h2>
+<p>Open your account and use <b>Add a device</b> — each device gets its own
+join ticket, minted when the device enrols. Installing the client can come
+first; your account outlives any ticket.</p>
+<ol>
+<li>{install_blurb(install_source, repo_url)}</li>
+<li><p>Open your account — <b>Manage this account</b> below, or
+<code>/account</code> with your account number — and add your first device.</p></li>
+</ol>
+{manage}"""
 
 
 def connect_uri(ticket, token, desk=None):
@@ -1465,8 +1580,8 @@ def account_shell_page(operator="vallum desk"):
     return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
 <p><small>{_esc(operator)}</small></p>
 <h1>Your account</h1>
-<p>Your account number came with your join ticket. It is the only
-credential — treat it like a password.</p>
+<p>Your account number was shown once, when you created your account. It is
+the only credential — treat it like a password.</p>
 <form method="post" action="/account">
 <label>account number<br><input name="token" required></label><br><br>
 <button>Open my account</button>
@@ -1641,14 +1756,14 @@ def make_handler(desk):
             try:
                 body = self._body()
                 if self.path == "/api/signup":
-                    code, payload = desk.signup(body, self._client_ip(), self._desk_origin())
+                    code, payload = desk.signup(body, self._client_ip())
                 elif self.path == "/signup":
                     # The no-script path: a plain form post, answered with a
                     # page. Agents keep /api/signup and its JSON.
-                    code, payload = desk.signup(body, self._client_ip(), self._desk_origin())
+                    code, payload = desk.signup(body, self._client_ip())
                     if code == 200:
-                        self._send_html(ticket_page(payload, desk.config.operator_name,
-                                                    desk.config.install_source, desk.config.repo_url))
+                        self._send_html(account_created_page(payload, desk.config.operator_name,
+                                                             desk.config.install_source, desk.config.repo_url))
                     else:
                         self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
                                         status=code)

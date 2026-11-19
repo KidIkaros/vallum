@@ -20,16 +20,19 @@ port; `DaemonCli` is the one implementation that talks to the `vallum` CLI.
 The port is what lets the tests fake the daemon.
 
 Turn a Vallum server into a self-service product: a user signs up with an
-invite code (or anonymously, in open mode), receives a daemon-minted join
-ticket, and joins. Their **account number** — the desk's bearer token — is
-the only credential; it carries up to `--device-cap` devices and redeems
-codes against the account.
+invite code (or anonymously, in open mode) and receives an **account
+number** — the desk's bearer token, the only credential. The account is
+created alone (ADR-0047: the account is not the device); devices enrol on
+demand, each with its own daemon-minted join ticket, up to `--device-cap`.
+The account redeems codes against its plan.
 
 ```
 user's machine                     server
 ──────────────                     ──────
-POST /api/signup {code,name}  ──►  vallum-desk ──► `vallum peer invite` ──► daemon
-        ◄── join ticket + account number ┘
+POST /api/signup {code}       ──►  vallum-desk          (account only — no daemon call)
+        ◄── account number ┘
+POST /api/devices {token,name} ──► vallum-desk ──► `vallum peer invite` ──► daemon
+        ◄── join ticket ┘
 vallum join '<ticket>'             (peer is live; counters tracked per peer)
 POST /account {token}              (plan, shared pool, devices, voucher box)
                                    sweep thread: expiry + byte caps ──► peer remove
@@ -60,12 +63,15 @@ An **account number** is the user's only credential: 32 hex chars, issued at
 signup, treated like a password. It authenticates `/api/status`,
 `/api/account`, `/api/devices`, `/api/voucher` and the `/account` page.
 There is no email, no password reset flow — lose the number, lose the
-account (an operator can adopt the peers into a fresh account).
+account (an operator can adopt the peers into a fresh account). Signup
+creates the account alone: no device name on the web, ever (ADR-0047).
 
 A **device** is a daemon peer bound to an account: `POST /api/devices`
 with the account number mints a ticket against the account's own plan.
 The cap (`--device-cap`, default 5) is enforced under the desk's lock; the
-count and the reservation are one step, so a race cannot oversell.
+count and the reservation are one step, so a race cannot oversell. The
+first device enrols the same way as the fifth — there is no special
+"signup device".
 
 A **plan** is data on the account row: `plan` label, `expires`,
 `bytes_cap`, `status`. A **code** may carry a plan payload — minted with
@@ -78,13 +84,15 @@ hardcoded "trial".
 
 A **join ticket** lives **15 minutes** (`INVITE_TTL_SECS = 15 * 60` in
 `crates/vallum/src/enroll.rs`) — one sitting, enough to walk to the other
-machine. The ticket page says the window out loud, and that installing the
-client can come after signup: the account number outlives the ticket. An
-expired ticket is not a lost account and not a reason to ask for another
-invite code — the account page's **Add a device** mints a fresh ticket under
-the same account (bearer token, no code), bound to the same plan and expiry.
-That is the recovery path the 2026-11-16 open experiment lacked: 14 tickets,
-0 handshakes, every code burned before its user installed.
+machine. The ticket page says the window out loud. The ticket is minted
+when a device enrols, not at signup, so installing the client can come
+first: the account number outlives every ticket. An expired ticket is not
+a lost account and not a reason to ask for another invite code — the
+account page's **Add a device** mints a fresh ticket under the same
+account (bearer token, no code), bound to the same plan and expiry. That
+is the recovery path the 2026-11-16 open experiment lacked: 14 tickets,
+0 handshakes, every code burned before its user installed — the old flow
+minted the ticket at signup, before the client existed to join with it.
 
 ## Deploy it
 
@@ -148,6 +156,8 @@ restore path both work; it runs in `verify.sh`, `ci-local.sh` and CI.
 | `--device-cap` | 5 | devices per account |
 | `--sweep-secs` | 300 | enforcement pass cadence |
 | `--operator-name` | `vallum desk` | the page header's brand |
+| `--install-source` | upstream `install.sh` URL | the install command the enrolment pages serve |
+| `--repo-url` | upstream repo URL | the source/docs link the enrolment pages serve |
 | `--cli` | `vallum` | the binary the desk shells to |
 
 Flags ride `VALLUM_DESK_EXTRA_ARGS` in `/etc/vallum/desk.env`, read by the
@@ -181,8 +191,10 @@ vallum-desk-admin accounts             # the account list
 vallum-desk-admin devices              # every peer, its account, its status
 vallum-desk-admin codes                # codes, payloads, burn state
 vallum-desk-admin set-plan --peer u0007-laptop --plan plus --expires 2026-12-31
+vallum-desk-admin set-plan --token <account-number> --plan plus  # device-less account
 vallum-desk-admin revoke --peer u0007-laptop            # one device
 vallum-desk-admin revoke --peer u0007-laptop --account  # the whole account
+vallum-desk-admin revoke --token <account-number> --account  # device-less account
 vallum-desk-admin adopt --peer u0003-alice   # a live daemon peer becomes an account
 vallum-desk-admin sweep                # enforce expiry + quotas now
 vallum-desk-admin --desk http://127.0.0.1:8400 --json accounts   # for scripts
@@ -211,17 +223,21 @@ no account, peer or count, so it is safe to expose through the same front.
 vallum-desk-admin mint-code --days 30 --gib 200 --plan plus
 #   → prints the code
 
-# 2. a user signs up with it
+# 2. a user signs up with it — an account, no device yet
 curl -X POST https://desk.example.com/api/signup \
-     -H 'content-type: application/json' -d '{"code":"<code>","name":"laptop"}'
-#   → {"ticket": "vallum1-join:…", "token": "<account number>", …}
+     -H 'content-type: application/json' -d '{"code":"<code>"}'
+#   → {"token": "<account number>", "plan": "plus", …}
 
 # 3. their account
 curl -X POST https://desk.example.com/api/account \
      -H 'content-type: application/json' -d '{"token":"<account number>"}'
-#   → plan plus, 200 GiB cap, one device
+#   → plan plus, 200 GiB cap, no devices yet
 
-# 4. they add a phone
+# 4. they enrol their laptop, then a phone
+curl -X POST https://desk.example.com/api/devices \
+     -H 'content-type: application/json' \
+     -d '{"token":"<account number>","name":"laptop"}'
+#   → a join ticket bound to the plan; `vallum join '<ticket>'`
 curl -X POST https://desk.example.com/api/devices \
      -H 'content-type: application/json' \
      -d '{"token":"<account number>","name":"phone"}'
@@ -237,8 +253,9 @@ curl -X POST https://desk.example.com/api/voucher \
 
 ## The Connect button — vallum:// deep links
 
-Every ticket-bearing response (`signup`, `devices`) carries a `connect` URI,
-and the ticket page renders it as a Connect button:
+Every ticket-bearing response (`devices` — signup carries no ticket,
+ADR-0047) carries a `connect` URI, and the ticket page renders it as a
+Connect button:
 
 ```
 vallum://join?ticket=<url-encoded ticket>&account=<account number>&desk=<origin>
@@ -309,12 +326,12 @@ Tauri bundle's file-association config when those ports ship.
 | `GET /healthz` | none | `200` when the database reads and the daemon answers; `503` naming the dependency that did not |
 | `GET /` | none | signup page |
 | `GET /account` | none | the account-number shell page |
-| `POST /signup {code,name}` | invite code (or none, open mode) | no-script signup → ticket page |
+| `POST /signup {code}` | invite code (or none, open mode) | no-script signup → account page |
 | `POST /account {token}` | account number | no-script account page |
 | `POST /account/device {token,name}` | account number | no-script add-device → ticket page |
 | `POST /account/revoke {token,peer}` | account number | no-script per-device remove |
 | `POST /account/voucher {token,code}` | account number | no-script code redemption |
-| `POST /api/signup {code,name}` | invite code (or none, open mode) | mint + return a join ticket |
+| `POST /api/signup {code}` | invite code (or none, open mode) | create an account; return its number (no device, no ticket) |
 | `POST /api/status {token}` | account number | plan, expiry, bytes used |
 | `POST /api/account {token}` | account number | the full account view: plan, pool, devices |
 | `POST /api/devices {token,name}` | account number | mint a device ticket bound to the account |
@@ -322,9 +339,9 @@ Tauri bundle's file-association config when those ports ship.
 | `POST /api/voucher {token,code}` | account number | apply an unused code's payload to the account |
 | `POST /api/admin/code {admin_token,…}` | admin | mint a code (`days`/`bytes`/`plan` optional) |
 | `POST /api/admin/adopt {admin_token,peer}` | admin | adopt a live daemon peer as an account |
-| `POST /api/admin/plan {admin_token,peer,…}` | admin | set cap, expiry, plan, status |
+| `POST /api/admin/plan {admin_token,peer\|token,…}` | admin | set cap, expiry, plan, status |
 | `POST /api/admin/revoke {admin_token,peer}` | admin | remove one device |
-| `POST /api/admin/revoke-account {admin_token,peer}` | admin | remove every device, then the account |
+| `POST /api/admin/revoke-account {admin_token,peer\|token}` | admin | remove every device, then the account |
 | `POST /api/admin/peers` / `devices` / `codes` | admin | listings |
 | `POST /api/admin/sweep` | admin | enforce expiry and quotas now |
 

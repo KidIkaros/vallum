@@ -97,8 +97,16 @@ class DeskTestCase(unittest.TestCase):
         self.daemon = FakeDaemon()
         self.desk = Desk(self.config, self.daemon)
 
-    def signup(self, code="friend-code-1", name="friend"):
-        return self.desk.signup({"code": code, "name": name})
+    def signup(self, code="friend-code-1"):
+        return self.desk.signup({"code": code})
+
+    def account_with_device(self, code="friend-code-1", name="friend"):
+        """An account plus its first device — the shape most tests need now
+        that signup creates the account alone (ADR-0047). Returns both
+        payloads; the device peer is `u0001-<name>`."""
+        _, account = self.signup(code=code)
+        _, device = self.desk.add_device({"token": account["token"], "name": name})
+        return account, device
 
 
 class StateFileModeTests(DeskTestCase):
@@ -113,15 +121,39 @@ class StateFileModeTests(DeskTestCase):
 
 
 class SignupTests(DeskTestCase):
+    """ADR-0047: signup creates an account, never a device. The device name
+    belongs to the client-driven enrolment (`add_device`), not the web form —
+    the durable account, not the ephemeral ticket, is the centre of the flow."""
 
-    def test_a_valid_code_returns_a_ticket_and_creates_an_account(self):
+    def test_signup_creates_an_account_without_a_device(self):
         code, payload = self.signup()
         self.assertEqual(code, 200)
-        self.assertTrue(payload["ticket"].startswith("vallum1-join:"))
-        self.assertEqual(payload["peer"], "u0001-friend")
+        self.assertTrue(payload["token"])
+        for gone in ("ticket", "peer", "connect"):
+            self.assertNotIn(gone, payload)
         row = self.desk.db.execute("SELECT * FROM accounts").fetchone()
-        self.assertEqual(row["peer"], "u0001-friend")
+        self.assertIsNone(row["peer"])
         self.assertEqual(row["status"], "active")
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
+        self.assertEqual(self.daemon.minted, [])
+
+    def test_signup_needs_no_daemon(self):
+        # Creating the account is desk-only: the daemon is asked when a device
+        # enrols. A down daemon must not stop signup — that is the whole point
+        # of centring the flow on the durable account.
+        self.daemon._refuse = True
+        self.assertEqual(self.signup()[0], 200)
+
+    def test_a_device_name_at_signup_is_refused_with_guidance(self):
+        # The old shape (code + device name) is refused, not silently
+        # reinterpreted: the caller is told where the device name lives now.
+        code, payload = self.desk.signup({"code": "friend-code-1", "name": "laptop"})
+        self.assertEqual(code, 400)
+        self.assertIn("device", payload["error"])
+        self.assertEqual(self.daemon.minted, [])
+        # The refusal does not burn the code.
+        self.assertEqual(self.signup()[0], 200)
 
     def test_an_unknown_code_is_refused(self):
         code, payload = self.signup(code="not-a-code")
@@ -131,21 +163,29 @@ class SignupTests(DeskTestCase):
 
     def test_a_code_is_single_use(self):
         self.assertEqual(self.signup()[0], 200)
-        code, payload = self.signup(name="second")
+        code, payload = self.signup()
         self.assertEqual(code, 403)
         self.assertIn("already used", payload["error"])
 
-    def test_a_daemon_refusal_is_reported_not_swallowed(self):
-        self.daemon._refuse = True
-        code, payload = self.signup()
-        self.assertEqual(code, 502)
-        self.assertIn("refused the enrolment", payload["error"])
+    def test_accounts_are_labelled_distinctly(self):
+        # Fourteen rows labelled "account" are fourteen unreadable rows; the
+        # label carries the account id so the operator's listing can tell
+        # them apart without exposing the token as a name.
+        self.signup()
+        self.signup(code="friend-code-2")
+        labels = [r["label"] for r in self.desk.db.execute(
+            "SELECT label FROM accounts ORDER BY id")]
+        self.assertEqual(len(set(labels)), 2)
+        self.assertTrue(all(label for label in labels))
 
-    def test_peer_names_differ_in_their_first_eight_characters(self):
-        # The kernel's interface-name ceiling truncates at fifteen characters,
-        # so two peers sharing a prefix would collide on one machine.
-        self.assertEqual(self.signup(name="alpha")[1]["peer"], "u0001-alpha")
-        self.assertEqual(self.signup(code="friend-code-2", name="beta")[1]["peer"], "u0002-beta")
+    def test_signup_does_not_consume_a_peer_number(self):
+        # Peer numbers count devices, not accounts: two accounts and then one
+        # device enrols as u0001, not u0003. The old flow burned a peer slot
+        # (and a daemon invite) on every signup, even one that never joined.
+        _, first = self.signup()
+        self.signup(code="friend-code-2")
+        _, device = self.desk.add_device({"token": first["token"], "name": "laptop"})
+        self.assertEqual(device["peer"], "u0001-laptop")
 
 
 class DaemonCliTests(unittest.TestCase):
@@ -211,13 +251,14 @@ class DaemonCliTests(unittest.TestCase):
 class StatusTests(DeskTestCase):
 
     def test_status_reports_the_bytes_used_for_the_account_peer(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
+        _, device = self.account_with_device()
+        peer = device["peer"]
         # The daemon keys its counters by peer NAME. A reader that looked them
         # up by fingerprint would report zero here — which is how a quota
         # stops firing while the expiry path keeps working.
         self.daemon._counters = {peer: 23838}
-        code, payload = self.desk.status(signup_payload["token"])
+        code, payload = self.desk.status(
+            self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"])
         self.assertEqual(code, 200)
         self.assertEqual(payload["bytes_used"], 23838)
 
@@ -235,15 +276,15 @@ class OrphanSweepTests(DeskTestCase):
     active accounts.
     """
 
-    def _revoke_account_directly(self, peer):
+    def _revoke_account_directly(self, token):
         """Revoke the account row without the peer cleanup — the historical state
         the sweep has to recover from."""
         self.desk.db.execute(
-            "UPDATE accounts SET status='revoked' WHERE peer=?", (peer,))
+            "UPDATE accounts SET status='revoked' WHERE token=?", (token,))
 
     def test_a_peer_under_a_revoked_account_is_marked_removed(self):
-        self.signup()
-        self._revoke_account_directly("u0001-friend")
+        account, _ = self.account_with_device()
+        self._revoke_account_directly(account["token"])
         actions = self.desk.sweep_once()
         self.assertEqual(
             [a for a in actions if a.get("reason") == "orphaned"],
@@ -256,16 +297,16 @@ class OrphanSweepTests(DeskTestCase):
         # An orphaned row can be a peer still live on the server and no longer
         # enforced, which is worse than a stale row. Marking the row alone would
         # leave that peer carrying traffic.
-        self.signup()
-        self._revoke_account_directly("u0001-friend")
+        account, _ = self.account_with_device()
+        self._revoke_account_directly(account["token"])
         self.desk.sweep_once()
         self.assertIn("u0001-friend", self.daemon.removed)
 
     def test_a_peer_the_daemon_never_had_is_already_in_the_goal_state(self):
         # The normal case: a ticket nobody redeemed has no peer on the server.
-        self.signup()
+        account, _ = self.account_with_device()
         self.daemon.missing_peers = ("u0001-friend",)
-        self._revoke_account_directly("u0001-friend")
+        self._revoke_account_directly(account["token"])
         actions = self.desk.sweep_once()
         self.assertEqual(
             [a for a in actions if a.get("reason") == "orphaned"],
@@ -275,8 +316,8 @@ class OrphanSweepTests(DeskTestCase):
         # If the daemon refuses for a reason other than "no such peer", the row
         # must stay active: marking it removed would make an enforced-nowhere
         # peer look handled, and nothing would ever retry it.
-        self.signup()
-        self._revoke_account_directly("u0001-friend")
+        account, _ = self.account_with_device()
+        self._revoke_account_directly(account["token"])
         self.desk.daemon = FakeDaemon(refuse_remove=True)
         actions = self.desk.sweep_once()
         self.assertEqual([a for a in actions if a.get("reason") == "orphaned"], [])
@@ -285,7 +326,7 @@ class OrphanSweepTests(DeskTestCase):
         self.assertEqual(row["status"], "active")
 
     def test_a_peer_under_an_active_account_is_left_alone(self):
-        self.signup()
+        self.account_with_device()
         self.desk.sweep_once()
         row = self.desk.db.execute(
             "SELECT status FROM peers WHERE peer='u0001-friend'").fetchone()
@@ -294,70 +335,70 @@ class OrphanSweepTests(DeskTestCase):
 
 class EnforcementTests(DeskTestCase):
 
-    def account_row(self, peer):
-        return self.desk.db.execute("SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
+    def account_row(self, token):
+        return self.desk.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
 
     def test_an_expired_account_loses_its_peer(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+        account, device = self.account_with_device()
+        peer = device["peer"]
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
+                             (account["token"],))
         actions = self.desk.sweep_once()
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0]["reason"], "expired")
         self.assertEqual(self.daemon.removed, [peer])
-        self.assertEqual(self.account_row(peer)["status"], "expired")
+        self.assertEqual(self.account_row(account["token"])["status"], "expired")
 
     def test_an_account_over_its_byte_cap_loses_its_peer(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.daemon._counters = {peer: 5000}  # cap is 1000
+        account, device = self.account_with_device()
+        self.daemon._counters = {device["peer"]: 5000}  # cap is 1000
         actions = self.desk.sweep_once()
         self.assertEqual(actions[0]["reason"], "overquota")
-        self.assertEqual(self.daemon.removed, [peer])
+        self.assertEqual(self.daemon.removed, [device["peer"]])
 
     def test_a_healthy_account_is_left_alone(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.daemon._counters = {peer: 10}
+        _, device = self.account_with_device()
+        self.daemon._counters = {device["peer"]: 10}
         self.assertEqual(self.desk.sweep_once(), [])
         self.assertEqual(self.daemon.removed, [])
 
     def test_an_account_expiring_today_is_expired(self):
         # Inclusive: "expires 2026-11-16" means it is already spent on the
         # 16th, not at the end of it.
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
+        account, _ = self.account_with_device()
         today = desk_module.datetime.date.today().isoformat()
-        self.desk.db.execute("UPDATE accounts SET expires=? WHERE peer=?", (today, peer))
+        self.desk.db.execute("UPDATE accounts SET expires=? WHERE token=?",
+                             (today, account["token"]))
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
 
     def test_a_failed_removal_is_retried_instead_of_marked_revoked(self):
         # The row is what the next sweep reads, so marking it before the peer
         # is actually gone hides a live peer from every future pass.
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+        account, device = self.account_with_device()
+        peer = device["peer"]
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
+                             (account["token"],))
         self.daemon._refuse_remove = True
         action = self.desk.sweep_once()[0]
         self.assertIn("error", action)
-        self.assertEqual(self.account_row(peer)["status"], "active")
+        self.assertEqual(self.account_row(account["token"])["status"], "active")
         self.daemon._refuse_remove = False
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
-        self.assertEqual(self.account_row(peer)["status"], "expired")
+        self.assertEqual(self.account_row(account["token"])["status"], "expired")
         self.assertEqual(self.daemon.removed, [peer])
 
     def test_a_peer_that_was_never_created_marks_the_account_without_retrying(self):
         # A ticket minted but never redeemed leaves no peer to remove: "no
         # peer named" is the goal state already holding, not a failure, and a
         # row that retries it forever would never finish sweeping.
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
-        self.daemon.missing_peers = {peer}
+        account, device = self.account_with_device()
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
+                             (account["token"],))
+        self.daemon.missing_peers = {device["peer"]}
         action = self.desk.sweep_once()[0]
         self.assertNotIn("error", action)
         self.assertEqual(action["reason"], "expired")
-        self.assertEqual(self.account_row(peer)["status"], "expired")
+        self.assertEqual(self.account_row(account["token"])["status"], "expired")
 
 
 class OnDemandTests(DeskTestCase):
@@ -371,7 +412,7 @@ class OnDemandTests(DeskTestCase):
 
     def test_open_mode_signs_up_without_a_code(self):
         self.open_desk()
-        code, payload = self.desk.signup({"name": "walk-in"}, client_ip="198.51.100.9")
+        code, payload = self.desk.signup({}, client_ip="198.51.100.9")
         self.assertEqual(code, 200)
         self.assertEqual(payload["bytes_cap"], 500)  # the smaller anonymous trial
 
@@ -384,27 +425,27 @@ class OnDemandTests(DeskTestCase):
     def test_anonymous_signups_are_limited_per_ip_per_day(self):
         self.open_desk()
         self.config.max_active_accounts = 10  # capacity is a separate test
-        first = self.desk.signup({"name": "a"}, client_ip="198.51.100.9")
-        second = self.desk.signup({"name": "b"}, client_ip="198.51.100.9")
-        third = self.desk.signup({"name": "c"}, client_ip="198.51.100.9")
+        first = self.desk.signup({}, client_ip="198.51.100.9")
+        second = self.desk.signup({}, client_ip="198.51.100.9")
+        third = self.desk.signup({}, client_ip="198.51.100.9")
         self.assertEqual(first[0], 200)
         self.assertEqual(second[0], 200)
         self.assertEqual(third[0], 429)
         # a different address is not affected by this one's history
-        other = self.desk.signup({"name": "d"}, client_ip="198.51.100.10")
+        other = self.desk.signup({}, client_ip="198.51.100.10")
         self.assertEqual(other[0], 200)
 
     def test_capacity_is_a_ceiling_not_a_formality(self):
         self.open_desk()
         for n in range(2):
             self.assertEqual(
-                self.desk.signup({"name": f"filler{n}"}, client_ip=f"198.51.100.{n}")[0], 200)
-        code, payload = self.desk.signup({"name": "one-too-many"}, client_ip="198.51.100.9")
+                self.desk.signup({}, client_ip=f"198.51.100.{n}")[0], 200)
+        code, payload = self.desk.signup({}, client_ip="198.51.100.9")
         self.assertEqual(code, 503)
         self.assertIn("capacity", payload["error"])
 
     def test_closed_mode_still_refuses_without_a_code(self):
-        code, payload = self.desk.signup({"name": "walk-in"}, client_ip="198.51.100.9")
+        code, payload = self.desk.signup({}, client_ip="198.51.100.9")
         self.assertEqual(code, 403)
 
 
@@ -458,11 +499,18 @@ class HttpTests(WireTestCase):
         self.assertNotIn("<script", page)
         self.assertNotIn('name="code"', page)  # open mode: no invite field
 
-    def test_the_form_path_answers_with_a_ticket_page(self):
-        status, page = self.post("/signup", "name=form-user", "application/x-www-form-urlencoded")
+    def test_the_index_asks_for_no_device_name(self):
+        # ADR-0047: no device name on the web, ever. The form creates the
+        # account; devices enrol from the account page, client-driven.
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
+            page = r.read().decode()
+        self.assertNotIn('name="name"', page)
+
+    def test_the_form_path_answers_with_an_account_page(self):
+        status, page = self.post("/signup", "", "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
-        self.assertIn("Your join ticket", page)
-        self.assertIn("vallum1-join:", page)
+        self.assertIn("account number", page)
+        self.assertNotIn("vallum1-join:", page)  # no ticket exists at signup
 
     def test_a_json_body_sent_as_a_form_is_named_as_the_mistake(self):
         # curl -d sends form-encoding by default; the desk must say so rather
@@ -473,16 +521,24 @@ class HttpTests(WireTestCase):
         self.assertIn("application/json", page)
 
     def test_the_json_api_still_works(self):
-        status, body = self.post("/api/signup", '{"name":"json-user"}', "application/json")
+        status, body = self.post("/api/signup", "{}", "application/json")
         self.assertEqual(status, 200)
-        self.assertIn("vallum1-join:", body)
+        payload = json.loads(body)
+        self.assertTrue(payload["token"])
+        self.assertNotIn("ticket", payload)
 
     def test_the_connect_uri_carries_the_desk_origin(self):
         # ADR-0046: the client records where its account lives from desk=<origin>
         # in the connect URI. The origin is https + the Host header the front
         # (Caddy) forwards — here, the loopback authority the request used.
+        # The URI now rides the device ticket (signup has none).
         from urllib.parse import quote
-        status, body = self.post("/api/signup", '{"name":"json-user"}', "application/json")
+        status, body = self.post("/api/signup", "{}", "application/json")
+        self.assertEqual(status, 200)
+        token = json.loads(body)["token"]
+        status, body = self.post("/api/devices",
+                                 json.dumps({"token": token, "name": "laptop"}),
+                                 "application/json")
         self.assertEqual(status, 200)
         connect = json.loads(body)["connect"]
         origin = f"https://127.0.0.1:{self.port}"
@@ -492,7 +548,9 @@ class HttpTests(WireTestCase):
         # The button fires the payload's connect URI — the same string the
         # JSON API returns, desk origin included, not a second derivation.
         from urllib.parse import quote
-        status, page = self.post("/signup", "name=form-user",
+        status, body = self.post("/api/signup", "{}", "application/json")
+        token = json.loads(body)["token"]
+        status, page = self.post("/account/device", f"token={token}&name=laptop",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         origin = f"https://127.0.0.1:{self.port}"
@@ -505,12 +563,12 @@ class HttpTests(WireTestCase):
         self.config.signup_ip_day_limit = 1
         same = {"X-Forwarded-For": "198.51.100.9"}
         self.assertEqual(
-            self.post("/api/signup", '{"name":"one"}', "application/json", same)[0], 200)
+            self.post("/api/signup", "{}", "application/json", same)[0], 200)
         self.assertEqual(
-            self.post("/api/signup", '{"name":"two"}', "application/json", same)[0], 429)
+            self.post("/api/signup", "{}", "application/json", same)[0], 429)
         other = {"X-Forwarded-For": "198.51.100.10"}
         self.assertEqual(
-            self.post("/api/signup", '{"name":"three"}', "application/json", other)[0], 200)
+            self.post("/api/signup", "{}", "application/json", other)[0], 200)
 
 
 class ClosedModeHttpTests(WireTestCase):
@@ -531,25 +589,35 @@ class ClosedModeHttpTests(WireTestCase):
     def test_an_empty_code_asks_for_the_code_not_an_unknown_one(self):
         # An empty field is a missing input, not a bad credential: "unknown
         # invite code" sent alpha users hunting for a code they never typed.
-        status, page = self.post("/signup", "name=walk-in",
+        status, page = self.post("/signup", "",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 403)
         self.assertIn("enter your invite code", page)
         self.assertNotIn("unknown invite code", page)
 
     def test_an_unknown_code_still_says_unknown(self):
-        status, page = self.post("/signup", "code=not-a-code&name=walk-in",
+        status, page = self.post("/signup", "code=not-a-code",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 403)
         self.assertIn("unknown invite code", page)
         self.assertNotIn("enter your invite code", page)
 
+    def _signup_and_add_device(self, code="friend-code-1", name="friend"):
+        """The closed-mode journey: code → account, then a device ticket."""
+        status, body = self.post("/api/signup", json.dumps({"code": code}),
+                                 "application/json")
+        self.assertEqual(status, 200)
+        token = json.loads(body)["token"]
+        return self.post("/account/device", f"token={token}&name={name}",
+                         "application/x-www-form-urlencoded")
+
     def test_the_ticket_page_states_the_fifteen_minute_window(self):
         # INVITE_TTL_SECS = 15 * 60 (crates/vallum/src/enroll.rs): the alpha's
         # 14 tickets / 0 handshakes were users who installed first and joined
         # after the ticket expired. The page must say the window out loud.
-        status, page = self.post("/signup", "code=friend-code-1&name=friend",
-                                 "application/x-www-form-urlencoded")
+        # The ticket now comes from add-device, not signup — the window is a
+        # property of the ticket, wherever it is minted.
+        status, page = self._signup_and_add_device()
         self.assertEqual(status, 200)
         self.assertIn("15 minutes", page)
 
@@ -557,8 +625,7 @@ class ClosedModeHttpTests(WireTestCase):
         # The recovery path: the account page's Add a device mints a FRESH
         # ticket under the existing account (bearer token, no code) — the
         # burned invite code is not needed again.
-        status, page = self.post("/signup", "code=friend-code-1&name=friend",
-                                 "application/x-www-form-urlencoded")
+        status, page = self._signup_and_add_device()
         self.assertEqual(status, 200)
         self.assertIn("expires before you join", page)
         self.assertIn("Add a device", page)
@@ -572,19 +639,31 @@ class ClosedModeHttpTests(WireTestCase):
         self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
         self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
         self.assertIn("github.com/KidIkaros/vallum</a>", page)
-        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+        status, page = self.post("/signup", "code=friend-code-1",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
         self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
 
     def test_the_error_page_carries_the_default_brand(self):
-        status, page = self.post("/signup", "name=walk-in",
+        status, page = self.post("/signup", "",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 403)
         self.assertIn("vallum desk", page)
 
-    def test_the_ticket_page_renders_the_codes_plan_label(self):
+    def test_the_account_page_shows_the_number_once(self):
+        # The account number is the only credential; the page says it is
+        # shown once and must be saved — the same contract the ticket page
+        # always had, now centred on the durable account.
+        status, page = self.post("/signup", "code=friend-code-1",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        self.assertIn("Shown once", page)
+        self.assertIn(token, page)
+        self.assertIn("Add a device", page)  # the next step is named
+
+    def test_the_account_page_renders_the_codes_plan_label(self):
         # A code carrying plan "plus" lands a plus account; the page said
         # "trial until" regardless — a false sentence about the plan row.
         status, body = self.post(
@@ -593,7 +672,7 @@ class ClosedModeHttpTests(WireTestCase):
             "application/json")
         self.assertEqual(status, 200)
         code = json.loads(body)["code"]
-        status, page = self.post("/signup", f"code={code}&name=member",
+        status, page = self.post("/signup", f"code={code}",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         self.assertIn("plus until", page)
@@ -607,8 +686,8 @@ class LivenessTests(DeskTestCase):
     user is looking for."""
 
     def _token(self):
-        _, payload = self.signup()
-        return payload["token"]
+        account, _ = self.account_with_device()
+        return account["token"]
 
     def _account(self, liveness_mapping):
         self.desk.daemon = FakeDaemon(liveness=liveness_mapping)
@@ -706,8 +785,8 @@ class DaemonOutageTests(DeskTestCase):
     """
 
     def _token(self):
-        _, payload = self.signup()
-        return payload["token"]
+        account, _ = self.account_with_device()
+        return account["token"]
 
     def test_the_account_view_keeps_the_page_and_says_usage_unknown(self):
         token = self._token()
@@ -746,7 +825,7 @@ class DaemonOutageTests(DeskTestCase):
     def test_an_unreachable_daemon_does_not_revoke_a_healthy_account(self):
         # No counters is not "used 0 bytes" and not "over quota": no judgement
         # is the only safe answer, because a wrong one removes a working peer.
-        self.signup()
+        self.account_with_device()
         self.desk.daemon = FakeDaemon(refuse_counters=True)
         self.assertEqual(self.desk.sweep_once(), [])
 
@@ -762,8 +841,8 @@ class AccountConversionTests(DeskTestCase):
     """
 
     def _page(self, liveness=None, refuse_liveness=False, extra_devices=()):
-        self.signup()
-        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        account, _ = self.account_with_device()
+        token = account["token"]
         for name in extra_devices:
             self.assertEqual(self.desk.add_device({"token": token, "name": name})[0], 200)
         self.desk.daemon = FakeDaemon(liveness=liveness or {},
@@ -863,9 +942,9 @@ class FunnelTests(DeskTestCase):
     """
 
     def _funnel(self, liveness_mapping):
-        # Sign up first: an empty desk reports zeros, which would pass several of
-        # these assertions for the wrong reason.
-        self.signup()
+        # Sign up and enrol a device first: an empty desk reports zeros, which
+        # would pass several of these assertions for the wrong reason.
+        self.account_with_device()
         self.desk.daemon = FakeDaemon(liveness=liveness_mapping)
         return self.desk.funnel()
 
@@ -889,13 +968,13 @@ class FunnelTests(DeskTestCase):
         self.assertEqual(funnel["handshaked"], 1)
 
     def test_a_revoked_device_is_not_counted_at_all(self):
-        self.signup()
+        self.account_with_device()
         self.desk.db.execute("UPDATE peers SET status='removed' WHERE peer='u0001-friend'")
         self.desk.daemon = FakeDaemon(liveness={})
         self.assertEqual(self.desk.funnel()["devices_total"], 0)
 
     def test_a_daemon_that_cannot_answer_is_visible_as_such(self):
-        self.signup()
+        self.account_with_device()
         self.desk.daemon = FakeDaemon(refuse_liveness=True)
         funnel = self.desk.funnel()
         self.assertFalse(funnel["daemon_answered"])
@@ -941,10 +1020,10 @@ class SignupAttributionTests(DeskTestCase):
     def test_a_signup_records_its_address(self):
         desk = self.open_desk()
         self.addCleanup(desk.db.close)
-        code, payload = desk.signup({"name": "friend"}, client_ip="203.0.113.7")
+        code, payload = desk.signup({}, client_ip="203.0.113.7")
         self.assertEqual(code, 200)
         row = desk.db.execute(
-            "SELECT signup_ip FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+            "SELECT signup_ip FROM accounts WHERE token=?", (payload["token"],)).fetchone()
         self.assertEqual(row["signup_ip"], "203.0.113.7")
 
     def test_an_unknown_address_is_recorded_as_absent_not_as_the_string(self):
@@ -953,9 +1032,9 @@ class SignupAttributionTests(DeskTestCase):
         # `shared_ip_accounts` fire on them.
         desk = self.open_desk()
         self.addCleanup(desk.db.close)
-        _, payload = desk.signup({"name": "friend"})
+        _, payload = desk.signup({})
         row = desk.db.execute(
-            "SELECT signup_ip FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+            "SELECT signup_ip FROM accounts WHERE token=?", (payload["token"],)).fetchone()
         self.assertIsNone(row["signup_ip"])
 
     def test_the_limit_survives_a_restart(self):
@@ -965,22 +1044,22 @@ class SignupAttributionTests(DeskTestCase):
         first = self.open_desk()
         first.config = dataclasses.replace(first.config, signup_ip_day_limit=2)
         for _ in range(2):
-            self.assertEqual(first.signup({"name": "friend"}, client_ip="198.51.100.4")[0], 200)
+            self.assertEqual(first.signup({}, client_ip="198.51.100.4")[0], 200)
         first.db.close()
 
         second = self.open_desk()
         self.addCleanup(second.db.close)
         second.config = dataclasses.replace(second.config, signup_ip_day_limit=2)
-        code, payload = second.signup({"name": "again"}, client_ip="198.51.100.4")
+        code, payload = second.signup({}, client_ip="198.51.100.4")
         self.assertEqual(code, 429, payload)
 
     def test_a_different_address_gets_its_own_limit(self):
         desk = self.open_desk()
         self.addCleanup(desk.db.close)
         desk.config = dataclasses.replace(desk.config, signup_ip_day_limit=1)
-        self.assertEqual(desk.signup({"name": "a"}, client_ip="198.51.100.1")[0], 200)
-        self.assertEqual(desk.signup({"name": "b"}, client_ip="198.51.100.1")[0], 429)
-        self.assertEqual(desk.signup({"name": "c"}, client_ip="198.51.100.2")[0], 200)
+        self.assertEqual(desk.signup({}, client_ip="198.51.100.1")[0], 200)
+        self.assertEqual(desk.signup({}, client_ip="198.51.100.1")[0], 429)
+        self.assertEqual(desk.signup({}, client_ip="198.51.100.2")[0], 200)
 
     def test_the_throttle_day_is_utc(self):
         # A desk whose local clock is not UTC would reset the limit early or
@@ -996,8 +1075,8 @@ class SignupAttributionTests(DeskTestCase):
         # The signal that would have shown "fourteen accounts, one laptop".
         desk = self.open_desk()
         self.addCleanup(desk.db.close)
-        for name in ("a", "b", "c"):
-            desk.signup({"name": name}, client_ip="203.0.113.50")
+        for _ in range(3):
+            desk.signup({}, client_ip="203.0.113.50")
         attribution = desk.funnel()["attribution"]
         self.assertEqual(attribution["distinct_ips"], 1)
         self.assertEqual(attribution["shared_ip_accounts"], 3)
@@ -1006,8 +1085,8 @@ class SignupAttributionTests(DeskTestCase):
     def test_accounts_with_no_address_are_counted_not_hidden(self):
         desk = self.open_desk()
         self.addCleanup(desk.db.close)
-        desk.signup({"name": "no-ip"})
-        desk.signup({"name": "has-ip"}, client_ip="203.0.113.60")
+        desk.signup({})
+        desk.signup({}, client_ip="203.0.113.60")
         attribution = desk.funnel()["attribution"]
         self.assertEqual(attribution["unattributed"], 1)
         self.assertEqual(attribution["distinct_ips"], 1)
@@ -1094,7 +1173,7 @@ class AccountPageTests(HttpTests):
     never the request line — and every rendered page is private."""
 
     def _token(self):
-        status, body = self.post("/api/signup", '{"name":"friend"}', "application/json")
+        status, body = self.post("/api/signup", "{}", "application/json")
         self.assertEqual(status, 200)
         return json.loads(body)["token"]
 
@@ -1118,6 +1197,7 @@ class AccountPageTests(HttpTests):
 
     def test_the_account_endpoint_returns_the_full_view(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         self.desk.add_device({"token": token, "name": "laptop"})
         status, body = self.post("/api/account", json.dumps({"token": token}),
                                  "application/json")
@@ -1137,6 +1217,7 @@ class AccountPageTests(HttpTests):
 
     def test_status_by_post_still_works(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         status, body = self.post("/api/status", json.dumps({"token": token}),
                                  "application/json")
         self.assertEqual(status, 200)
@@ -1144,6 +1225,7 @@ class AccountPageTests(HttpTests):
 
     def test_the_account_page_is_private_and_noindexed(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         status, headers, page = self.post_headers(
             "/account", f"token={token}", "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
@@ -1168,6 +1250,7 @@ class AccountPageTests(HttpTests):
 
     def test_the_page_revokes_only_the_accounts_own_device(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         self.desk.add_device({"token": token, "name": "laptop"})
         status, _, _ = self.post_headers(
             "/account/revoke", f"token={token}&peer=u0002-laptop",
@@ -1175,8 +1258,9 @@ class AccountPageTests(HttpTests):
         self.assertEqual(status, 200)
         self.assertEqual(self.daemon.removed, ["u0002-laptop"])
         # Another account's peer is not ours to remove.
-        other = self.desk.signup({"name": "other"})
-        other_peer = other[1]["peer"]
+        other_token = self._token()
+        _, other_device = self.desk.add_device({"token": other_token, "name": "other"})
+        other_peer = other_device["peer"]
         status, _, _ = self.post_headers(
             "/account/revoke", f"token={token}&peer={other_peer}",
             "application/x-www-form-urlencoded")
@@ -1184,11 +1268,10 @@ class AccountPageTests(HttpTests):
         self.assertNotIn(other_peer, self.daemon.removed)
 
     def test_the_ticket_page_emits_the_deep_link_and_the_number(self):
-        status, page = self.post("/signup", "name=form-user",
+        token = self._token()
+        status, page = self.post("/account/device", f"token={token}&name=form-user",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
-        payload = self.desk.db.execute("SELECT token FROM accounts").fetchone()
-        token = payload["token"]
         from urllib.parse import quote
         expected = (f"vallum://join?ticket={quote('vallum1-join:203.0.113.9:51922/u0001-form-use/deadbeef/token/fingerprint', safe='')}"
                     f"&account={token}")
@@ -1200,20 +1283,33 @@ class AccountPageTests(HttpTests):
             self.assertNotIn(token, href)
 
     def test_the_ticket_page_names_the_account_number(self):
-        status, page = self.post("/signup", "name=form-user",
+        token = self._token()
+        status, page = self.post("/account/device", f"token={token}&name=form-user",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
-        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
         self.assertIn("account number", page)
         self.assertIn(token, page)
 
-    def test_the_signup_json_carries_the_deep_link(self):
-        status, body = self.post("/api/signup", '{"name":"json-user"}',
+    def test_the_signup_json_carries_no_ticket(self):
+        # ADR-0047: the account is created alone; the ticket belongs to the
+        # device enrolment. A signup answer carrying a ticket would mean the
+        # old conflation had crept back in.
+        status, body = self.post("/api/signup", "{}", "application/json")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertNotIn("ticket", payload)
+        self.assertNotIn("connect", payload)
+        self.assertTrue(payload["token"])
+
+    def test_the_devices_json_carries_the_deep_link(self):
+        token = self._token()
+        status, body = self.post("/api/devices",
+                                 json.dumps({"token": token, "name": "json-user"}),
                                  "application/json")
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertTrue(payload["connect"].startswith("vallum://join?ticket="))
-        self.assertIn(f"&account={payload['token']}", payload["connect"])
+        self.assertIn(f"&account={token}", payload["connect"])
 
     def test_the_add_device_form_mints_a_bound_ticket(self):
         token = self._token()
@@ -1326,26 +1422,143 @@ class MigrationTests(DeskTestCase):
         with self.assertRaises(RuntimeError):
             Desk(config, self.daemon)
 
+    def v2_db(self):
+        """A v2 database the way the desk wrote it before ADR-0047: every
+        account carried its first device in a NOT NULL `peer` column. The
+        DDL is hardcoded here on purpose — it is the *old* shape, and must
+        not drift when `desk_module.SCHEMA` moves on."""
+        path = os.path.join(self.tempdir.name, "v2.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript("""
+            CREATE TABLE accounts (
+                id INTEGER PRIMARY KEY, peer TEXT UNIQUE NOT NULL,
+                label TEXT NOT NULL, token TEXT UNIQUE NOT NULL,
+                code TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'trial',
+                created TEXT NOT NULL, expires TEXT NOT NULL,
+                bytes_cap INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active', paid_until TEXT,
+                signup_ip TEXT);
+            CREATE TABLE peers (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL REFERENCES accounts(id),
+                peer TEXT UNIQUE NOT NULL, label TEXT NOT NULL,
+                created TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active');
+            CREATE TABLE signups (ip TEXT NOT NULL, day TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ip, day));
+            CREATE TABLE codes (code TEXT PRIMARY KEY, created TEXT NOT NULL,
+                used_by TEXT, days INTEGER, bytes INTEGER, plan TEXT);
+            INSERT INTO accounts (peer,label,token,code,created,expires,bytes_cap,status)
+                VALUES ('u0001-old','old-friend','tok-v2','legacy','2026-11-01',
+                        '2027-01-01',1000,'active');
+            INSERT INTO peers (account_id,peer,label,created,status)
+                VALUES (1,'u0001-old','old-friend','2026-11-01','active');
+        """)
+        conn.execute("PRAGMA user_version=2")
+        conn.close()
+        return path
+
+    def test_a_v2_database_migrates_to_a_nullable_peer(self):
+        # ADR-0047: the account is not the device. An account-only signup
+        # writes peer=NULL, which the old NOT NULL column refuses — so the
+        # table is rebuilt, keeping every row. SQLite cannot drop NOT NULL
+        # in place; the migration must copy, not ALTER.
+        config = dataclasses.replace(self.config, state=self.v2_db())
+        desk = Desk(config, self.daemon)
+        self.addCleanup(desk.db.close)
+        self.assertEqual(
+            desk.db.execute("PRAGMA user_version").fetchone()[0],
+            desk_module.SCHEMA_VERSION)
+        peer_column = [r for r in desk.db.execute("PRAGMA table_info(accounts)")
+                       if r[1] == "peer"][0]
+        self.assertEqual(peer_column[3], 0, "accounts.peer must accept NULL")
+        row = desk.db.execute("SELECT * FROM accounts WHERE token='tok-v2'").fetchone()
+        self.assertEqual(row["peer"], "u0001-old")
+        self.assertEqual(row["label"], "old-friend")
+        self.assertEqual(
+            desk.db.execute("SELECT peer FROM peers").fetchone()["peer"], "u0001-old")
+        # The rebuilt column accepts the new shape: an account with no device.
+        desk.db.execute(
+            "INSERT INTO accounts (peer,label,token,code,created,expires,bytes_cap,status) "
+            "VALUES (NULL,'account-2','tok-new','open','2026-11-19','2027-01-01',1000,'active')")
+        self.assertIsNone(desk.db.execute(
+            "SELECT peer FROM accounts WHERE token='tok-new'").fetchone()["peer"])
+
+    def test_a_legacy_account_keeps_its_device_after_migration(self):
+        # The cohort's existing accounts must keep working: the device the
+        # legacy column names is still reported, still enforced, still
+        # revocable — migration changes the shape, never the facts.
+        config = dataclasses.replace(self.config, state=self.legacy_db())
+        desk = Desk(config, self.daemon)
+        self.addCleanup(desk.db.close)
+        code, view = desk.account("tok-1")
+        self.assertEqual(code, 200)
+        self.assertEqual([d["peer"] for d in view["devices"]], ["u0001-old"])
+        code, status = desk.status("tok-1")
+        self.assertEqual(code, 200)
+        self.assertEqual(status["peers"], ["u0001-old"])
+        desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token='tok-1'")
+        actions = desk.sweep_once()
+        # tok-2 is already expired in the fixture, so its peer is swept as an
+        # orphan on the same pass — assert our account's fact, not the total.
+        self.assertIn("expired", [a["reason"] for a in actions])
+        self.assertIn("u0001-old", self.daemon.removed)
+
+    def test_migration_is_idempotent(self):
+        # A desk restarts often (peer invite restarts the daemon beside it);
+        # opening an already-migrated file must not rebuild or duplicate.
+        config = dataclasses.replace(self.config, state=self.v2_db())
+        first = Desk(config, self.daemon)
+        first.db.close()
+        second = Desk(config, self.daemon)
+        self.addCleanup(second.db.close)
+        self.assertEqual(
+            second.db.execute("PRAGMA user_version").fetchone()[0],
+            desk_module.SCHEMA_VERSION)
+        self.assertEqual(
+            second.db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0], 1)
+        self.assertEqual(
+            second.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 1)
+
 
 class PeersRelationTests(DeskTestCase):
     """Every reader consults the peers relation, not the legacy column."""
 
-    def test_signup_writes_the_peer_row_and_keeps_the_legacy_column(self):
-        _, payload = self.signup()
+    def test_signup_writes_no_peer_row(self):
+        # ADR-0047: the account is created alone. No peers row, no legacy
+        # column value — the device arrives later, through add_device.
+        self.signup()
         account = self.desk.db.execute("SELECT * FROM accounts").fetchone()
-        peer = self.desk.db.execute(
-            "SELECT * FROM peers WHERE account_id=?", (account["id"],)).fetchone()
-        self.assertIsNotNone(peer)
-        self.assertEqual(peer["peer"], payload["peer"])
-        self.assertEqual(peer["status"], "active")
-        self.assertEqual(account["peer"], payload["peer"])
+        self.assertIsNone(account["peer"])
+        self.assertIsNone(self.desk.db.execute(
+            "SELECT * FROM peers WHERE account_id=?", (account["id"],)).fetchone())
+
+    def test_add_device_writes_the_peer_row(self):
+        account, device = self.account_with_device()
+        account_id = self.desk.db.execute(
+            "SELECT id FROM accounts WHERE token=?", (account["token"],)).fetchone()["id"]
+        row = self.desk.db.execute(
+            "SELECT * FROM peers WHERE account_id=?", (account_id,)).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["peer"], device["peer"])
+        self.assertEqual(row["status"], "active")
+        # The legacy column stays NULL for new accounts: the relation is the
+        # truth, and the column is kept only for pre-migration/adopted rows.
+        self.assertIsNone(self.desk.db.execute(
+            "SELECT peer FROM accounts WHERE id=?", (account_id,)).fetchone()["peer"])
 
     def test_the_relation_falls_back_to_the_legacy_column(self):
-        _, payload = self.signup()
+        # A pre-migration row: the device lives in the account's own column
+        # with no peers row. Readers must still find it.
+        account, device = self.account_with_device()
+        account_id = self.desk.db.execute(
+            "SELECT id FROM accounts WHERE token=?", (account["token"],)).fetchone()["id"]
         self.desk.db.execute("DELETE FROM peers")
-        code, status = self.desk.status(payload["token"])
+        self.desk.db.execute("UPDATE accounts SET peer=? WHERE id=?",
+                             (device["peer"], account_id))
+        code, status = self.desk.status(account["token"])
         self.assertEqual(code, 200)
-        self.assertEqual(status["peer"], payload["peer"])
+        self.assertEqual(status["peer"], device["peer"])
 
     def test_adopting_writes_the_peers_row(self):
         self.desk.admin("/api/admin/adopt",
@@ -1356,12 +1569,12 @@ class PeersRelationTests(DeskTestCase):
         self.assertEqual(row["status"], "active")
 
     def test_revoking_marks_the_peers_row_removed(self):
-        _, payload = self.signup()
-        peer = payload["peer"]
+        account, device = self.account_with_device()
         self.desk.db.execute(
-            "UPDATE accounts SET expires='2020-01-01' WHERE peer=?", (peer,))
+            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (account["token"],))
         self.desk.sweep_once()
-        row = self.desk.db.execute("SELECT status FROM peers WHERE peer=?", (peer,)).fetchone()
+        row = self.desk.db.execute(
+            "SELECT status FROM peers WHERE peer=?", (device["peer"],)).fetchone()
         self.assertEqual(row["status"], "removed")
 
 
@@ -1378,10 +1591,10 @@ class CodePlanTests(DeskTestCase):
 
     def test_a_payload_code_signup_lands_the_codes_plan(self):
         _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
-        status, payload = self.signup(code=minted["code"], name="member")
+        status, payload = self.signup(code=minted["code"])
         self.assertEqual(status, 200)
         row = self.desk.db.execute(
-            "SELECT * FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+            "SELECT * FROM accounts WHERE token=?", (payload["token"],)).fetchone()
         self.assertEqual(row["plan"], "plus")
         self.assertEqual(row["bytes_cap"], 5000)
         expected = (datetime.datetime.now(datetime.timezone.utc)
@@ -1390,10 +1603,10 @@ class CodePlanTests(DeskTestCase):
 
     def test_a_payload_less_code_still_lands_the_trial(self):
         _, minted = self.desk._mint_code({})
-        status, payload = self.signup(code=minted["code"], name="trial-friend")
+        status, payload = self.signup(code=minted["code"])
         self.assertEqual(status, 200)
         row = self.desk.db.execute(
-            "SELECT * FROM accounts WHERE peer=?", (payload["peer"],)).fetchone()
+            "SELECT * FROM accounts WHERE token=?", (payload["token"],)).fetchone()
         self.assertEqual(row["plan"], "trial")
         self.assertEqual(row["bytes_cap"], 1000)
 
@@ -1401,9 +1614,9 @@ class CodePlanTests(DeskTestCase):
         _, minted = self.desk._mint_code({})
         results = []
         threads = [threading.Thread(
-            target=lambda n: results.append(
-                self.desk.signup({"code": minted["code"], "name": n})[0]),
-            args=(f"racer-{i}",)) for i in range(2)]
+            target=lambda: results.append(
+                self.desk.signup({"code": minted["code"]})[0]))
+            for _ in range(2)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -1416,7 +1629,8 @@ class CodePlanTests(DeskTestCase):
 class DevicesTests(DeskTestCase):
     """One account token carries several devices: a ticket minted through
     /api/devices binds the account's plan, the cap is enforced under race,
-    and revocation splits into per-device and per-account."""
+    and revocation splits into per-device and per-account. The account is
+    created alone (ADR-0047); every device here arrives through add_device."""
 
     def _token(self):
         _, payload = self.signup()
@@ -1427,14 +1641,24 @@ class DevicesTests(DeskTestCase):
         code, payload = self.desk.add_device({"token": token, "name": "laptop"})
         self.assertEqual(code, 200)
         self.assertTrue(payload["ticket"].startswith("vallum1-join:"))
-        self.assertEqual(payload["peer"], "u0002-laptop")
+        self.assertEqual(payload["peer"], "u0001-laptop")
         rows = self.desk.db.execute(
             "SELECT peer FROM peers WHERE status='active' ORDER BY peer").fetchall()
-        self.assertEqual([r["peer"] for r in rows], ["u0001-friend", "u0002-laptop"])
+        self.assertEqual([r["peer"] for r in rows], ["u0001-laptop"])
+
+    def test_peer_names_differ_in_their_first_eight_characters(self):
+        # The kernel's interface-name ceiling truncates at fifteen characters,
+        # so two peers sharing a prefix would collide on one machine.
+        first = self._token()
+        _, alpha = self.desk.add_device({"token": first, "name": "alpha"})
+        second = self.desk.signup({"code": "friend-code-2"})[1]["token"]
+        _, beta = self.desk.add_device({"token": second, "name": "beta"})
+        self.assertEqual(alpha["peer"], "u0001-alpha")
+        self.assertEqual(beta["peer"], "u0002-beta")
 
     def test_the_device_ticket_binds_the_accounts_plan(self):
         _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
-        _, signup_payload = self.signup(code=minted["code"], name="member")
+        _, signup_payload = self.signup(code=minted["code"])
         code, payload = self.desk.add_device(
             {"token": signup_payload["token"], "name": "laptop"})
         self.assertEqual(code, 200)
@@ -1448,25 +1672,24 @@ class DevicesTests(DeskTestCase):
 
     def test_a_device_against_a_revoked_account_is_refused(self):
         token = self._token()
-        peer = self.daemon.minted[0]
         self.desk.admin("/api/admin/revoke-account",
-                        {"admin_token": "admin-secret", "peer": peer})
+                        {"admin_token": "admin-secret", "token": token})
         code, payload = self.desk.add_device({"token": token, "name": "laptop"})
         self.assertEqual(code, 403)
 
     def test_the_device_cap_is_a_ceiling(self):
         self.desk.config.device_cap = 2
         token = self._token()
-        code, _ = self.desk.add_device({"token": token, "name": "laptop"})
-        self.assertEqual(code, 200)
-        code, payload = self.desk.add_device({"token": token, "name": "phone"})
+        self.assertEqual(self.desk.add_device({"token": token, "name": "laptop"})[0], 200)
+        self.assertEqual(self.desk.add_device({"token": token, "name": "phone"})[0], 200)
+        code, payload = self.desk.add_device({"token": token, "name": "tablet"})
         self.assertEqual(code, 429)
         self.assertIn("device limit", payload["error"])
         self.assertEqual(
             self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 2)
 
     def test_the_cap_holds_under_a_race(self):
-        self.desk.config.device_cap = 2
+        self.desk.config.device_cap = 1
         token = self._token()
         results = []
         threads = [threading.Thread(
@@ -1480,10 +1703,11 @@ class DevicesTests(DeskTestCase):
         self.assertEqual(sorted(results), [200, 429])
         self.assertEqual(
             self.desk.db.execute(
-                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 2)
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
 
     def test_devices_share_the_account_byte_pool(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         self.desk.add_device({"token": token, "name": "laptop"})
         self.daemon._counters = {"u0001-friend": 600, "u0002-laptop": 600}
         actions = self.desk.sweep_once()
@@ -1494,6 +1718,7 @@ class DevicesTests(DeskTestCase):
 
     def test_per_device_revoke_keeps_the_account(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         _, device = self.desk.add_device({"token": token, "name": "laptop"})
         code, _ = self.desk.admin("/api/admin/revoke",
                                   {"admin_token": "admin-secret", "peer": device["peer"]})
@@ -1506,6 +1731,7 @@ class DevicesTests(DeskTestCase):
 
     def test_account_revoke_removes_every_device(self):
         token = self._token()
+        self.desk.add_device({"token": token, "name": "friend"})
         self.desk.add_device({"token": token, "name": "laptop"})
         code, _ = self.desk.admin("/api/admin/revoke-account",
                                   {"admin_token": "admin-secret", "peer": "u0001-friend"})
@@ -1519,7 +1745,7 @@ class DevicesTests(DeskTestCase):
     def test_a_never_redeemed_device_ticket_is_swept_clean(self):
         token = self._token()
         self.desk.add_device({"token": token, "name": "laptop"})
-        self.daemon.missing_peers = ["u0002-laptop"]
+        self.daemon.missing_peers = ["u0001-laptop"]
         self.desk.db.execute("UPDATE accounts SET expires='2000-01-01'")
         actions = self.desk.sweep_once()
         self.assertEqual(actions[0]["reason"], "expired")
@@ -1534,7 +1760,7 @@ class DevicesTests(DeskTestCase):
         self.assertEqual(code, 502)
         self.assertEqual(
             self.desk.db.execute(
-                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 1)
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0], 0)
 
 
 class VoucherTests(DeskTestCase):
@@ -1558,7 +1784,9 @@ class VoucherTests(DeskTestCase):
         self.assertEqual(expected, datetime.date.fromisoformat(self.desk._trial_expiry()))
         code_row = self.desk.db.execute(
             "SELECT used_by FROM codes WHERE code=?", (minted["code"],)).fetchone()
-        self.assertEqual(code_row["used_by"], "u0001-friend")
+        # The burn records who consumed the code. A device-less account has
+        # no peer, so its label stands in — NULL here would read as "unused".
+        self.assertEqual(code_row["used_by"], row["label"])
 
     def test_a_voucher_only_applies_the_parts_a_code_carries(self):
         token = self._token()
@@ -1578,7 +1806,7 @@ class VoucherTests(DeskTestCase):
 
     def test_a_used_code_cannot_voucher_twice(self):
         _, minted = self.desk._mint_code({"days": 30})
-        self.signup(code=minted["code"], name="first")
+        self.signup(code=minted["code"])
         token = self._token()
         code, payload = self.desk.voucher({"token": token, "code": minted["code"]})
         self.assertEqual(code, 403)
@@ -1587,7 +1815,7 @@ class VoucherTests(DeskTestCase):
     def test_a_voucher_needs_an_active_account(self):
         token = self._token()
         self.desk.admin("/api/admin/revoke-account",
-                        {"admin_token": "admin-secret", "peer": "u0001-friend"})
+                        {"admin_token": "admin-secret", "token": token})
         _, minted = self.desk._mint_code({"days": 30})
         code, payload = self.desk.voucher({"token": token, "code": minted["code"]})
         self.assertEqual(code, 403)
@@ -1636,30 +1864,61 @@ class AdminTests(DeskTestCase):
             "SELECT 1 FROM codes WHERE code=?", (payload["code"],)).fetchone())
 
     def test_setting_a_plan_changes_the_row(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
+        account, device = self.account_with_device()
         code, _ = self.desk.admin("/api/admin/plan", {
-            "admin_token": "admin-secret", "peer": peer, "bytes_cap": 42})
+            "admin_token": "admin-secret", "peer": device["peer"], "bytes_cap": 42})
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
-            "SELECT bytes_cap FROM accounts WHERE peer=?", (peer,)).fetchone()[0], 42)
+            "SELECT bytes_cap FROM accounts WHERE token=?",
+            (account["token"],)).fetchone()[0], 42)
 
     def test_an_account_can_be_reinstated(self):
         # The way back after a quota fired on a mis-set cap.
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
-        self.desk.db.execute("UPDATE accounts SET status='overquota' WHERE peer=?", (peer,))
+        account, device = self.account_with_device()
+        self.desk.db.execute("UPDATE accounts SET status='overquota' WHERE token=?",
+                             (account["token"],))
         code, _ = self.desk.admin("/api/admin/plan", {
-            "admin_token": "admin-secret", "peer": peer, "status": "active"})
+            "admin_token": "admin-secret", "peer": device["peer"], "status": "active"})
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
-            "SELECT status FROM accounts WHERE peer=?", (peer,)).fetchone()[0], "active")
+            "SELECT status FROM accounts WHERE token=?",
+            (account["token"],)).fetchone()[0], "active")
 
     def test_an_unknown_status_is_refused(self):
-        _, signup_payload = self.signup()
+        _, device = self.account_with_device()
         code, payload = self.desk.admin("/api/admin/plan", {
-            "admin_token": "admin-secret", "peer": signup_payload["peer"], "status": "banished"})
+            "admin_token": "admin-secret", "peer": device["peer"], "status": "banished"})
         self.assertEqual(code, 400)
+
+    def test_a_deviceless_account_can_be_planned_by_token(self):
+        # An account-only signup has no peer to address — the operator must
+        # still be able to reach it, by its account number.
+        _, account = self.signup()
+        code, _ = self.desk.admin("/api/admin/plan", {
+            "admin_token": "admin-secret", "token": account["token"], "bytes_cap": 42})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.desk.db.execute(
+            "SELECT bytes_cap FROM accounts WHERE token=?",
+            (account["token"],)).fetchone()[0], 42)
+
+    def test_a_deviceless_account_can_be_revoked_by_token(self):
+        _, account = self.signup()
+        code, _ = self.desk.admin("/api/admin/revoke-account", {
+            "admin_token": "admin-secret", "token": account["token"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.desk.db.execute(
+            "SELECT status FROM accounts WHERE token=?",
+            (account["token"],)).fetchone()["status"], "revoked")
+        self.assertEqual(self.daemon.removed, [])  # nothing to remove
+
+    def test_the_accounts_listing_carries_the_account_number(self):
+        # The operator needs the number to address a device-less account;
+        # the admin API is the operator's own trust domain.
+        _, account = self.signup()
+        code, payload = self.desk.admin("/api/admin/peers",
+                                        {"admin_token": "admin-secret"})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["peers"][0]["token"], account["token"])
 
     def test_adopting_an_existing_peer_registers_it(self):
         code, payload = self.desk.admin("/api/admin/adopt", {
@@ -1675,8 +1934,8 @@ class AdminTests(DeskTestCase):
         self.assertEqual(code, 409)
 
     def test_revoking_removes_the_peer(self):
-        _, signup_payload = self.signup()
-        peer = signup_payload["peer"]
+        _, device = self.account_with_device()
+        peer = device["peer"]
         code, _ = self.desk.admin("/api/admin/revoke", {
             "admin_token": "admin-secret", "peer": peer})
         self.assertEqual(code, 200)
@@ -1751,8 +2010,8 @@ class WhiteLabelHttpTests(WireTestCase):
         self.assertIn("git.example.com/vallum</a>", page)
         self.assertNotIn("KidIkaros", page)
 
-    def test_the_ticket_page_serves_the_operators_install_source_and_repo(self):
-        status, page = self.post("/signup", "code=friend-code-1&name=friend",
+    def test_the_account_page_serves_the_operators_install_source_and_repo(self):
+        status, page = self.post("/signup", "code=friend-code-1",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         self.assertIn("https://vpn.example.com/install.sh", page)
@@ -1760,7 +2019,7 @@ class WhiteLabelHttpTests(WireTestCase):
         self.assertNotIn("KidIkaros", page)
 
     def test_the_signup_json_install_command_is_the_operators(self):
-        status, body = self.post("/api/signup", '{"code":"friend-code-1","name":"json-user"}',
+        status, body = self.post("/api/signup", '{"code":"friend-code-1"}',
                                  "application/json")
         self.assertEqual(status, 200)
         install = json.loads(body)["install"]
@@ -1769,19 +2028,20 @@ class WhiteLabelHttpTests(WireTestCase):
 
     def test_no_served_page_mentions_the_upstream_repo(self):
         # Every page a visitor can reach: the index, the account shell, the
-        # ticket page (signup and add-device), the account page, and the
-        # error page. One upstream reference in any of them is a leak.
-        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1","name":"friend"}',
+        # account-created page, the ticket page (add-device), the account
+        # page, and the error page. One upstream reference in any of them is
+        # a leak.
+        _, signup_body = self.post("/api/signup", '{"code":"friend-code-1"}',
                                    "application/json")
         token = json.loads(signup_body)["token"]
         pages = [self.get("/")[1], self.get("/account")[1]]
-        pages.append(self.post("/signup", "code=friend-code-2&name=second",
+        pages.append(self.post("/signup", "code=friend-code-2",
                                "application/x-www-form-urlencoded")[1])
         pages.append(self.post("/account", f"token={token}",
                                "application/x-www-form-urlencoded")[1])
         pages.append(self.post("/account/device", f"token={token}&name=extra",
                                "application/x-www-form-urlencoded")[1])
-        pages.append(self.post("/signup", "code=not-a-code&name=walk-in",
+        pages.append(self.post("/signup", "code=not-a-code",
                                "application/x-www-form-urlencoded")[1])
         for page in pages:
             self.assertNotIn("KidIkaros", page)
@@ -1790,7 +2050,7 @@ class WhiteLabelHttpTests(WireTestCase):
     def test_the_error_page_carries_the_operator_name(self):
         # The one page that had no brand: a refusal is still the operator's
         # service speaking, not an anonymous upstream desk.
-        status, page = self.post("/signup", "code=not-a-code&name=walk-in",
+        status, page = self.post("/signup", "code=not-a-code",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 403)
         self.assertIn("example tunnel", page)
@@ -1801,6 +2061,83 @@ class WhiteLabelHttpTests(WireTestCase):
         self.config.repo_url = "https://git.example.com/vallum?a=1&b=2"
         _, page = self.get("/")
         self.assertIn('href="https://git.example.com/vallum?a=1&amp;b=2"', page)
+
+
+class AccountOnlyTests(DeskTestCase):
+    """An account with no devices yet is a first-class row (ADR-0047): every
+    reader answers truthfully about it, every operator path can reach it, and
+    the first device enrols onto it without special-casing."""
+
+    def test_the_account_view_reports_no_devices(self):
+        _, account = self.signup()
+        code, view = self.desk.account(account["token"])
+        self.assertEqual(code, 200)
+        self.assertEqual(view["devices"], [])
+        self.assertEqual(view["conversion"],
+                         {"devices_total": 0, "devices_connected": 0})
+        self.assertEqual(view["bytes_used"], 0)  # no devices, no bytes — true
+
+    def test_the_account_view_survives_a_down_daemon(self):
+        _, account = self.signup()
+        self.desk.daemon = FakeDaemon(refuse_counters=True, refuse_liveness=True)
+        code, view = self.desk.account(account["token"])
+        self.assertEqual(code, 200)
+        self.assertIsNone(view["bytes_used"])
+        self.assertEqual(view["devices"], [])
+
+    def test_status_reports_no_peers(self):
+        _, account = self.signup()
+        code, payload = self.desk.status(account["token"])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["peers"], [])
+        self.assertIsNone(payload["peer"])
+
+    def test_the_funnel_counts_the_account_but_no_device(self):
+        self.signup()
+        funnel = self.desk.funnel()
+        self.assertEqual(funnel["accounts"], {"active": 1})
+        self.assertEqual(funnel["devices_total"], 0)
+
+    def test_expiry_revokes_a_deviceless_account(self):
+        # No peers to remove is not an error: the account row itself is what
+        # expiry marks, and the sweep must finish the job.
+        _, account = self.signup()
+        self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
+                             (account["token"],))
+        actions = self.desk.sweep_once()
+        self.assertEqual([a["reason"] for a in actions], ["expired"])
+        self.assertNotIn("error", actions[0])
+        self.assertEqual(self.daemon.removed, [])
+        self.assertEqual(self.desk.db.execute(
+            "SELECT status FROM accounts").fetchone()["status"], "expired")
+
+    def test_the_first_device_enrols_on_a_deviceless_account(self):
+        _, account = self.signup()
+        code, device = self.desk.add_device({"token": account["token"], "name": "phone"})
+        self.assertEqual(code, 200)
+        self.assertEqual(device["peer"], "u0001-phone")
+        _, view = self.desk.account(account["token"])
+        self.assertEqual([d["peer"] for d in view["devices"]], ["u0001-phone"])
+
+    def test_a_voucher_burns_its_code_on_a_deviceless_account(self):
+        # The burn writes `used_by`; with no peer it must fall back to the
+        # account label. A NULL burn reads as "unused" and the same code
+        # redeems twice — the single-use invariant silently broken.
+        _, account = self.signup()
+        _, minted = self.desk._mint_code({"days": 30})
+        code, _ = self.desk.voucher({"token": account["token"], "code": minted["code"]})
+        self.assertEqual(code, 200)
+        used_by = self.desk.db.execute(
+            "SELECT used_by FROM codes WHERE code=?", (minted["code"],)).fetchone()["used_by"]
+        self.assertIsNotNone(used_by)
+        code, payload = self.desk.voucher({"token": account["token"], "code": minted["code"]})
+        self.assertEqual(code, 403)
+        self.assertIn("already used", payload["error"])
+
+    def test_a_device_cannot_be_removed_from_a_deviceless_account(self):
+        _, account = self.signup()
+        code, payload = self.desk.remove_device({"token": account["token"], "peer": "u0001-x"})
+        self.assertEqual(code, 404)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "vallum_desk_signup",
-      "description": "Self-service enrolment against a Vallum desk: an invite code becomes a join ticket and a peer on the server. Pass an empty code when the desk runs in open-signup mode. The ticket is a secret \u2014 hand it to the device, never log it.",
+      "description": "Create an account on a Vallum desk: an invite code becomes an account number (the bearer token). No device is created at signup (ADR-0047) — enrol devices afterwards with vallum_desk_add_device. Pass an empty code when the desk runs in open-signup mode. The account number is a secret — never log it.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -16,6 +16,44 @@
           "code": {
             "type": "string",
             "description": "A single-use invite code from the operator; empty when the desk allows open signup."
+          }
+        },
+        "required": [
+          "url",
+          "code"
+        ]
+      },
+      "outputs": {
+        "type": "object",
+        "properties": {}
+      },
+      "tags": [
+        "service",
+        "enrolment"
+      ],
+      "tool_call_template": {
+        "call_template_type": "cli",
+        "commands": [
+          {
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"code\":\"UTCP_ARG_code_UTCP_END\"}'",
+            "append_to_final_output": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "vallum_desk_add_device",
+      "description": "Enrol a device on an existing Vallum desk account: the desk counts against the account's device cap and mints a single-use join ticket bound to the account's plan. Join it on the device with `vallum join '<ticket>'` within 15 minutes; an expired ticket is re-minted by calling this again — no new invite code. The ticket is a secret — hand it to the device, never log it.",
+      "inputs": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The desk's devices endpoint, e.g. http://127.0.0.1:8400/api/devices."
+          },
+          "token": {
+            "type": "string",
+            "description": "The account number returned at signup (a secret)."
           },
           "name": {
             "type": "string",
@@ -24,7 +62,7 @@
         },
         "required": [
           "url",
-          "code",
+          "token",
           "name"
         ]
       },
@@ -40,7 +78,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"code\":\"UTCP_ARG_code_UTCP_END\",\"name\":\"UTCP_ARG_name_UTCP_END\"}'",
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"token\":\"UTCP_ARG_token_UTCP_END\",\"name\":\"UTCP_ARG_name_UTCP_END\"}'",
             "append_to_final_output": true
           }
         ]
@@ -77,7 +115,7 @@
         "call_template_type": "cli",
         "commands": [
           {
-            "command": "curl -sS 'UTCP_ARG_url_UTCP_END?token=UTCP_ARG_token_UTCP_END'",
+            "command": "curl -sS -X POST UTCP_ARG_url_UTCP_END -H 'Content-Type: application/json' -d '{\"token\":\"UTCP_ARG_token_UTCP_END\"}'",
             "append_to_final_output": true
           }
         ]

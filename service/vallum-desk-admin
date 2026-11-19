@@ -9,6 +9,7 @@ token on a command line is a token in ps and shell history.
     vallum-desk-admin accounts --json
     vallum-desk-admin revoke --peer u0007-laptop          # one device
     vallum-desk-admin revoke --peer u0007-laptop --account # the whole account
+    vallum-desk-admin revoke --token <account-number> --account  # device-less account
     vallum-desk-admin sweep
 """
 
@@ -90,7 +91,9 @@ def main(argv=None):
     sub.add_parser("codes", help="list invite codes and their payloads")
 
     plan = sub.add_parser("set-plan", help="change an account's plan row")
-    plan.add_argument("--peer", required=True)
+    plan.add_argument("--peer", help="address the account by one of its device peers")
+    plan.add_argument("--token", help="address the account by its account number "
+                                      "(the only handle on a device-less account)")
     plan.add_argument("--bytes-cap", type=int)
     plan.add_argument("--expires")
     plan.add_argument("--paid-until")
@@ -100,7 +103,8 @@ def main(argv=None):
 
     revoke = sub.add_parser("revoke",
                             help="remove a device; --account removes them all")
-    revoke.add_argument("--peer", required=True)
+    revoke.add_argument("--peer", help="the device peer (or, with --account, any of them)")
+    revoke.add_argument("--token", help="with --account: the account number")
     revoke.add_argument("--account", action="store_true",
                         help="revoke the whole account, every device")
 
@@ -129,7 +133,7 @@ def main(argv=None):
             print(f"  {result['note']}")
     elif args.command == "accounts":
         show(call(args.desk, "/api/admin/peers", token), args.json,
-             ("peers", ["peer", "label", "plan", "status", "expires", "bytes_cap"]))
+             ("peers", ["label", "token", "plan", "status", "expires", "bytes_cap"]))
     elif args.command == "devices":
         show(call(args.desk, "/api/admin/devices", token), args.json,
              ("devices", ["peer", "device", "status", "account", "account_plan"]))
@@ -137,7 +141,9 @@ def main(argv=None):
         show(call(args.desk, "/api/admin/codes", token), args.json,
              ("codes", ["code", "used_by", "days", "bytes", "plan"]))
     elif args.command == "set-plan":
-        body = {"peer": args.peer}
+        if bool(args.peer) == bool(args.token):
+            raise SystemExit("vallum-desk-admin: set-plan needs exactly one of --peer / --token")
+        body = {"peer": args.peer} if args.peer else {"token": args.token}
         for key, arg in (("bytes_cap", args.bytes_cap), ("expires", args.expires),
                          ("paid_until", args.paid_until), ("plan", args.plan),
                          ("status", args.status)):
@@ -145,8 +151,17 @@ def main(argv=None):
                 body[key] = arg
         show(call(args.desk, "/api/admin/plan", token, body), args.json)
     elif args.command == "revoke":
-        path = "/api/admin/revoke-account" if args.account else "/api/admin/revoke"
-        show(call(args.desk, path, token, {"peer": args.peer}), args.json)
+        if args.account:
+            if bool(args.peer) == bool(args.token):
+                raise SystemExit("vallum-desk-admin: revoke --account needs exactly one "
+                                 "of --peer / --token")
+            body = {"peer": args.peer} if args.peer else {"token": args.token}
+            show(call(args.desk, "/api/admin/revoke-account", token, body), args.json)
+        else:
+            if not args.peer:
+                raise SystemExit("vallum-desk-admin: per-device revoke needs --peer "
+                                 "(use --account to revoke a whole account)")
+            show(call(args.desk, "/api/admin/revoke", token, {"peer": args.peer}), args.json)
     elif args.command == "adopt":
         body = {"peer": args.peer, "label": args.label, "bytes_cap": args.bytes_cap}
         show(call(args.desk, "/api/admin/adopt", token,

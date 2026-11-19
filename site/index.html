@@ -85,7 +85,7 @@
             <div>
               <span class="step-title">Open an account</span>
               <p>Sign up at a desk with an invite code, or anonymously where the operator allows it.
-                You get an account number and a single-use join ticket.</p>
+                You get an account number — the account is created on its own; devices come next.</p>
             </div>
           </li>
           <li>
@@ -99,8 +99,8 @@
           <li>
             <div>
               <span class="step-title">Enrol a device</span>
-              <p>The desk mints a join ticket bound to your plan. The client generates its own key;
-                only the public line crosses to the server.</p>
+              <p>From your account page, add a device: the desk mints a single-use join ticket bound
+                to your plan. The client generates its own key; only the public line crosses to the server.</p>
             </div>
           </li>
           <li>
@@ -118,11 +118,11 @@
       <article class="way-agent">
         <h3>For agents</h3>
         <pre class="api"><code><span class="ep">POST /api/signup</span>
-  {"code": "…", "name": "agent-01"}
-<span class="cmt">  → join ticket + account number</span>
+  {"code": "…"}
+<span class="cmt">  → account number (no device yet)</span>
 <span class="ep">POST /api/devices</span>
-  {"token": "…", "name": "agent-02"}
-<span class="cmt">  → a fresh ticket, same plan</span>
+  {"token": "…", "name": "agent-01"}
+<span class="cmt">  → a single-use join ticket, bound to the plan</span>
 <span class="ep">POST /api/account</span>
   {"token": "…"}
 <span class="cmt">  → plan, byte pool, devices</span></code></pre>

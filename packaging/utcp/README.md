@@ -66,8 +66,9 @@ UTCP provides a standardized, zero-overhead bridge:
 | `vallum_fox_egress` | `vallum-fox egress` | Agent IP vs host IP — the separation check. |
 | `vallum_fox_status` | `vallum-fox status` | Device, units, separation, budget spent. |
 | `vallum_fox_budget_set` / `vallum_fox_budget_list` | `vallum-fox budget …` | Per-domain request caps (the volume governor). |
-| `vallum_desk_signup` | `POST <desk>/api/signup` | Invite code → join ticket + peer (self-service). |
-| `vallum_desk_status` | `GET <desk>/api/status?token=` | Plan, expiry, bytes used. |
+| `vallum_desk_signup` | `POST <desk>/api/signup` | Invite code → account number (self-service; no device at signup). |
+| `vallum_desk_add_device` | `POST <desk>/api/devices` | Enrol a device on the account → single-use join ticket. |
+| `vallum_desk_status` | `POST <desk>/api/status` | Plan, expiry, bytes used. |
 | `vallum_desk_mint_code` | `POST <desk>/api/admin/code` | Mint a single-use invite code. |
 | `vallum_desk_set_plan` | `POST <desk>/api/admin/plan` | Set a cap or expiry — a paid tier is a row. |
 | `vallum_desk_sweep` | `POST <desk>/api/admin/sweep` | Enforce expiry and quotas now. |
