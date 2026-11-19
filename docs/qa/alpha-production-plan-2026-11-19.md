@@ -57,7 +57,7 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
 | WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up DONE in 450c322: service/README config table +2 flags |
 | WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | DONE (5cae2fc) — accept-isolation 15 assertions; accept-pair 88; verify.sh PASS; DEPLOY-HOLD |
-| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DOING — slice (a) DONE (450c322): account-only signup + v3 migration + device-less readers/admin + docs; 217 tests OK, verify.sh PASS. Slices b (pinned invite), c (rotation), d (reconciliation) TODO. DEPLOY-HOLD for live signup flip |
+| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DOING — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; 224 tests OK, verify.sh PASS. Slices b (pinned invite), c (rotation), d (reconciliation) TODO. DEPLOY-HOLD for live signup flip |
 | WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up DONE in 450c322: journey step1 + agent API block re-worded for account-only signup (live journey re-proof rides WS6's headless gate) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
@@ -137,3 +137,17 @@ remaining gaps. Lead with findings in words, numbers as backup.
   Gates: desk 217 OK (CI discover command), verify.sh PASS (incl. accept-desk-restore on v3).
   Suite-alarm: NULL-burn mutant caught by 2 tests, reverted, green. DEPLOY-HOLD — live alpha untouched.
   Next: WS4 slice (b) — add_device mints a PINNED invite via --public-key.
+- 2026-11-19 03:2x EST — WS4 slice (a) two-axis review on 450c322 (Standards sub-agent + Spec checked
+  against ADR-0047 §3). Spec clean (account-only, no device name on web, migration row-preserving, open
+  questions untouched, pinned invites stay slice b). Standards: 3 HARD findings, each REPRODUCED live
+  before fixing, each regression-tested RED-first: (1) remove_device missing-peer ownership bypass
+  (None != None is False on the now-NULL legacy column → daemon.remove(None)); (2) _migrate_v2 rebuild
+  non-atomic under autocommit — crash between DROP and RENAME silently loses every account, orphaned
+  scratch table wedges reopen → now one BEGIN IMMEDIATE/COMMIT + DROP IF EXISTS, both recovery paths
+  proven by probe; (3) account_created_page served the credential without no-store/noindex →
+  private=True, headers pinned on the wire. Judgement calls landed: signup writes one transaction
+  (failure-injection test), _account_name unified across voucher/set-plan responses, stale comments
+  corrected, CLI --token-file + masked human accounts listing (full under --json), UTCP set_plan/
+  set_status token addressing (both directions verified live). Review-fix commit 9d70fd3; gates re-run
+  on the final tree: desk 224 OK, verify.sh PASS. Lessons saved to vallum-operations
+  references/service-layer.md. DEPLOY-HOLD unchanged. Next: WS4 slice (b).
