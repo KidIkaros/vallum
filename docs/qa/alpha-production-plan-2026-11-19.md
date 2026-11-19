@@ -55,10 +55,10 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | # | Workstream | Acceptance (runnable) | Status |
 |---|---|---|---|
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
-| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DOING (child sa-0, worktree vallum-ws2, branch ws2-white-label) |
-| WS3 | Multi-tenant isolation (opt-in service mode): nft drops tunnel→tunnel across accounts; personal flat default | new gate: 2 peers different accounts cannot ping; same account can; default off = flat (accept-pair still green) | TODO |
+| WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up: service/README config table +2 flags |
+| WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | TODO |
 | WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | TODO (DEPLOY-HOLD for live signup flip) |
-| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DOING (child sa-1, worktree vallum-ws5, branch ws5-brand-site; site/* only) |
+| WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up: WS4 re-check human-journey step1 after account-only flip |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | TODO |
 
@@ -95,3 +95,9 @@ remaining gaps. Lead with findings in words, numbers as backup.
 - 2026-11-19 00:1x EST — Foundation complete: plan + ADR-0047 committed (13e8a78 + plan commit);
   WS2/WS5 children running; cron loop 45dc5f86ee11 scheduled (first tick 00:57). Parent turn ends;
   the loop carries WS3/WS4/WS6/WS7 and merges verified worktrees through the night.
+- 2026-11-19 00:4x EST — WS2 + WS5 VERIFIED by parent (re-ran gates: desk 165 OK + siblings 25 OK;
+  site brand tokens present, old theme 0 hits, Nu-valid, write-sets respected) and MERGED into
+  main e0d6711 (--no-ff). Worktrees removed, branches deleted. WS3 refined to implementable opt-in
+  client_isolation (per-account refinement deferred to ADR-0047 Q1). Next: WS3 then WS4 (sliced).
+  Follow-ups booked: service/README config table +2 flags (WS2); landing human-journey step1 re-check
+  after account-only signup flip (WS4/WS5).
