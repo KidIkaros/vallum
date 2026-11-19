@@ -2028,11 +2028,9 @@ mod tests {
         assert!(join_identity(Some(&missing), false).is_err());
     }
 
-    /// `join --key` may name a key the operator keygen'd straight into the
-    /// config dir. The server has already enrolled the peer and spent the
-    /// single-use invite before `place_config` runs, so an overwrite refusal
-    /// here would strand a successful enrolment. Placing the identical key
-    /// again is a no-op; a *different* existing key still refuses.
+    /// `join --key` may name a key already at its destination: placing the
+    /// identical key again must be a no-op, a different one must refuse.
+    /// The rationale lives at `place_config_in`'s key-placement comment.
     #[test]
     fn placing_a_key_already_at_its_destination_is_a_no_op() {
         let dir = std::env::temp_dir().join(format!("vallum-place-idem-{}", std::process::id()));

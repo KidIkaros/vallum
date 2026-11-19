@@ -700,8 +700,13 @@ class Desk:
         # the invite is then pinned to that key. Absent — the web account
         # page's path — the client generates its key at join time. A bad
         # line is refused before the reservation: it burns no device slot
-        # and makes no daemon call.
-        public_key = (body.get("public_key") or "").strip() or None
+        # and makes no daemon call. A non-string is the same mistake as a
+        # malformed line — a 400 naming the field, not a crash behind a 500.
+        raw_key = body.get("public_key")
+        if raw_key is not None and not isinstance(raw_key, str):
+            return 400, {"error": "public_key must be a string — the device's public "
+                                  "line from `vallum pubkey --key <file>`"}
+        public_key = (raw_key or "").strip() or None
         if public_key:
             public_key = self._canonical_public_line(public_key)
             if public_key is None:

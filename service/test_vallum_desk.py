@@ -1826,6 +1826,21 @@ class DevicesTests(DeskTestCase):
         self.assertIs(payload["pinned"], True)
         self.assertEqual(self.daemon.pins[payload["peer"]], "vallum1:0003:abcdef01:-")
 
+    def test_a_non_string_public_key_is_a_400_not_a_crash(self):
+        # A JSON number or list where a line belongs is the caller's mistake:
+        # it must be a 400 naming the field, not an AttributeError behind a
+        # 500 — and it burns no slot.
+        token = self._token()
+        for bad in (123, ["vallum1:0003:abcd:-"], {"line": "x"}, True):
+            with self.subTest(bad=bad):
+                code, payload = self.desk.add_device(
+                    {"token": token, "name": "laptop", "public_key": bad})
+                self.assertEqual(code, 400)
+                self.assertIn("public_key", payload["error"])
+        self.assertEqual(self.daemon.minted, [])
+        self.assertEqual(
+            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
+
     def test_a_failed_pinned_mint_leaves_no_orphan_row(self):
         # The cleanup path is the same whether the invite was pinned or not:
         # a daemon refusal deletes the reservation, so the slot is free again.
