@@ -30,7 +30,7 @@ cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/accept-isolation.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh scripts/check-doc-addresses.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/accept-isolation.sh scripts/accept-agent-enrol.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh scripts/check-doc-addresses.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== durable state coverage"
@@ -87,6 +87,8 @@ if [ "${E2E:-0}" = "1" ]; then
     bash scripts/e2e-netns.sh
     echo "== client isolation (netns, ADR-0047 service tenancy)"
     bash scripts/accept-isolation.sh
+    echo "== headless agent enrolment (netns, ADR-0047 account/device)"
+    bash scripts/accept-agent-enrol.sh
     echo "== syscall allow-list (ADR-0028)"
     bash scripts/seccomp-trace.sh
 fi
