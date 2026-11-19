@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/KidIkaros/vallum/releases"><img src="https://img.shields.io/badge/version-1.6.5-39c5cf.svg?style=flat-square" alt="Version 1.6.5"></a>
+  <a href="https://github.com/KidIkaros/vallum/releases"><img src="https://img.shields.io/badge/version-1.10.0-39c5cf.svg?style=flat-square" alt="Version 1.10.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3fb950.svg?style=flat-square" alt="License: Apache-2.0"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-1.95%2B-orange.svg?style=flat-square" alt="Rust 1.95+"></a>
   <a href="https://github.com/KidIkaros/vallum"><img src="https://img.shields.io/badge/suite-0x0003%20Tri--Hybrid-bc8cff.svg?style=flat-square" alt="Tri-Hybrid Suite"></a>
@@ -17,7 +17,7 @@
   <img src="https://img.shields.io/badge/platform-Linux-24292f.svg?style=flat-square&logo=linux&logoColor=white" alt="Linux">
   <img src="https://img.shields.io/badge/unsafe-forbidden-3fb950.svg?style=flat-square" alt="forbid(unsafe_code)">
   <img src="https://img.shields.io/badge/post--quantum-ML--KEM%20%2B%20sntrup761-bc8cff.svg?style=flat-square" alt="Post-quantum">
-  <img src="https://img.shields.io/badge/status-experimental--pq-f0883e.svg?style=flat-square" alt="Status">
+  <img src="https://img.shields.io/badge/status-alpha--experimental--pq-f0883e.svg?style=flat-square" alt="Status: alpha, experimental PQ">
 </p>
 
 <p align="center">
@@ -32,10 +32,16 @@
 <p align="center">
   <b>A deployable, hybrid post-quantum layer-3 tunnel for Linux</b>
   <br>
-  <em>Production client and gateway VPN with real-time operations telemetry, live cyberpunk cockpits (TUI & Desktop GUI), and zero private-key exposure.</em>
+  <em>An alpha hybrid post-quantum client and gateway VPN with real-time operations telemetry, live cockpits (TUI & Desktop GUI), and zero private-key exposure.</em>
   <br>
   <sub>Developed in joint engineering partnership between <b>Ikaros Digital</b> and <b>Atomguard</b>.</sub>
 </p>
+
+> **Status — alpha, built to validate the idea, not a hosted service.** The CLI, TUI and UTCP
+> enrolment path is alpha-verified end-to-end (signed release, two-host gate, clean-container
+> install). The desktop GUI is **beta** ([ADR-0039](docs/adr/0039-alpha-distribution-surface.md)).
+> The post-quantum primitives come from `origin-crypto-sdk`, which is **experimental and unaudited** —
+> read [SECURITY.md](SECURITY.md) before trusting this with anything that matters.
 
 ---
 
@@ -111,7 +117,7 @@ High-density, low-overhead TUI designed for remote servers, headless gateways, a
 
 ## Why Vallum?
 
-PQ-WireGuard (Hülsing–Ning–Weber–Schwabe–Zimmermann, 2023) proved a KEM-only handshake can replace WireGuard's non-interactive DH. Vallum takes that foundation into production reality:
+PQ-WireGuard (Hülsing–Ning–Weber–Schwabe–Zimmermann, 2023) proved a KEM-only handshake can replace WireGuard's non-interactive DH. Vallum takes that foundation into a deployable alpha:
 
 | Vector | WireGuard / PQ-WireGuard | Vallum |
 |---|---|---|

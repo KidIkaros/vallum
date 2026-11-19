@@ -51,20 +51,21 @@ host*, not the published-release stranger path.
    session keys. The premortem found the **root cause** — TUI/GUI rotate/finalize discarded
    the daemon apply outcome (`let _ = syncconf_running`) and reported success regardless;
    fixed in `32f181d` (the apply outcome is now surfaced). `vallum doctor` warns on both
-   (detection, deployed). The two stale peers still need an operator re-apply or
-   delete-and-re-enrol; new rotations no longer drift silently.
+   (detection, deployed). The 17 dead dogfood accounts were cleared to one test account that now
+   owns `laptop`/`lab8`; the stale session keys still need an operator re-apply (`syncconf`) or
+   delete-and-re-enrol. New rotations no longer drift silently.
 2. **GUI is beta** (ADR-0039 excludes it from the alpha): #35 (privilege read path —
    the console can't see a root-owned daemon as a normal user) and #36 (status/legend/
    contrast) are tracked. The alpha ships CLI/TUI/UTCP, all verified above.
 3. **Dependabot**: `glib` (medium, unsoundness in a GTK iterator) is a **GUI-only**
    dependency, not in the daemon path; `atty` (low) is a legacy transitive dep. The
    gate's `cargo audit` passes. Both are beta/dev-scope, tracked upstream.
-4. **Main is 49 commits ahead of the published release** (`v1.9.0`): tonight's fixes
-   (honest snapshots, name-keyed metrics, doctor peer-sync, account/device desk, reset-token,
-   the drift fix) are **deployed and verified on the server**, but a stranger installing
-   `--from-release` still gets `v1.9.0` — pre-fix, including the fabricated TUI traffic.
-   No gate forces release parity, and the published install path is **untested** (corrected
-   by the premortem). Cut a release before the cohort installs.
+4. **Release parity — RESOLVED.** `v1.10.0` is cut and signed (8 assets); `verify.sh` now warns
+   when HEAD is ahead of the latest tag, and `accept-install --from-release` installs the published
+   artifact in a clean container and PASSes (it caught the `openssh-client` prerequisite the
+   `--local` path never could). A stranger installing `--from-release` gets the fixes. Desk-side
+   changes since the tag (recovery code, monitoring) deploy directly to the server and need no
+   client re-release.
 5. **ADR-0047 ratification pending** — architecture direction for beta (isolation
    refinement, agent devices, token lifecycle); does not block alpha operation.
 
