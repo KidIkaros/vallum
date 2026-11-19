@@ -122,6 +122,36 @@ make the value legible. The polish went into making it *work*, not into learning
 - [ ] README/quickstart state the value in one plain sentence and link `site/`.
 - [ ] Shown-once secrets have copy/download + a lost-number recovery path on the login page.
 
+## Progress (2026-11-19 polish pass — "do all")
+
+Done and verified (gate PASS, desk suite 303, deployed to the alpha server):
+- **Rev 3 (value legible):** README + quickstart carry the plain-language
+  harvest-now-decrypt-later pitch and link `site/` (`f772257`).
+- **Rev 4 (account first-run, partial):** shown-once secrets get a no-script
+  download + local copy buttons; login/error pages offer a lost-number recovery
+  path (`f772257`). **Residual:** the decided `vallum://account` number-handoff
+  deep link (ADR-0047) is still unimplemented.
+- **Rev 1/2 (channel + desire, partial):** a configurable operator `contact`
+  drives an invite-request link + feedback link; `connection_days` (schema v6)
+  records distinct return days, surfaced as `days_connected`; the exit bar gains
+  **M5** (desire/learning) + a recruitment prerequisite (`f772257`, `67809e5`).
+  **Residual:** `contact` is unset on the live desk (operator must set it), and
+  recruiting real strangers is an operator action, not code.
+- **Rev 6 (Connect connects):** `vallum-uri` routes through the audited
+  privileged dispatcher so the ticket buys a working tunnel (root → service +
+  proof), with a guided fallback; a trailing-newline bug fixed; responder state
+  surfaced in `/healthz` (informational, ADR-0034 started-not-armed); scheme
+  binding guidance for root-shell installs (`9b714ad`). 16 URI tests green.
+
+Still open:
+- **Rev 5 (crypto trust):** compensating evidence on the trust path + routing SDK
+  findings back to the operator — not started.
+- **Release parity:** HEAD is 16 commits ahead of v1.10.0; the client-side fixes
+  (Connect flow, doctor false-positive, install guidance) reach strangers only
+  via a new release. Desk-side changes deploy directly.
+- **Live dogfood:** a real stranger completing install→enrol→tunnel end-to-end
+  (the gates prove components; the stranger path needs a real cohort).
+
 ## Provenance
 
 Six investigators (deleg_fd72fe2d, deleg_dd8a1d1b), all completed; citations spot-checked by the
