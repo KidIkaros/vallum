@@ -2494,17 +2494,15 @@ fn the_join_form_carries_the_account_token_into_the_privileged_join() {
     );
     let request = super::actions::join_request(&form).expect("a valid join request");
     assert_eq!(request.ops_args, vec!["join".to_owned()]);
-    // The ticket rides stdin line 1, the token line 2 — the dispatcher
-    // re-exports line 2 as VALLUM_ACCOUNT for `vallum join` to seal into
-    // [account]. The desk origin rides the environment, as in vallum-uri.
+    // The ticket rides stdin line 1, the token line 2, the desk origin line 3
+    // — the dispatcher re-exports line 2 as VALLUM_ACCOUNT and line 3 as
+    // VALLUM_DESK_ENDPOINT for `vallum join` to seal into [account]. All ride
+    // stdin because the sudo path strips the environment (#32).
     assert_eq!(
         request.stdin.as_deref(),
-        Some(format!("{JOIN_TICKET}\n{JOIN_TOKEN}").as_str())
+        Some(format!("{JOIN_TICKET}\n{JOIN_TOKEN}\nhttps://desk.wingman.gold").as_str())
     );
-    assert!(request.env.contains(&(
-        "VALLUM_DESK_ENDPOINT",
-        "https://desk.wingman.gold".to_owned()
-    )));
+    assert!(request.env.is_empty());
     // Nothing secret ever sits in argv — ps is world-readable.
     assert!(!request.ops_args.iter().any(|arg| arg.contains(JOIN_TOKEN)));
 }

@@ -1657,12 +1657,12 @@ fn show_invite(app: &mut App, name: &str, ticket: &str, responder_label: &str) -
 /// What the privileged join invocation carries (ADR-0046).
 ///
 /// The ticket rides stdin line 1; an optional desk account token rides
-/// line 2, which `vallum-ops join` re-exports as `VALLUM_ACCOUNT` for
-/// `vallum join` to seal into `[account]`. The desk origin rides the
-/// environment as `VALLUM_DESK_ENDPOINT` — the same channels
-/// `service/vallum-uri` uses. Nothing secret sits in argv: `ps` is
-/// world-readable. (The sudo path strips the environment; recording the
-/// endpoint there needs a dispatcher stdin line — a packaging change.)
+/// line 2, which `vallum-ops join` re-exports as `VALLUM_ACCOUNT`; an
+/// optional desk origin rides line 3, re-exported as `VALLUM_DESK_ENDPOINT`,
+/// for `vallum join` to seal into `[account]`. All ride stdin because the
+/// sudo path strips the environment (sudoers grants the dispatcher only, no
+/// SETENV) — an env-only endpoint never crossed sudo (#32). Nothing secret
+/// sits in argv: `ps` is world-readable.
 #[derive(Debug)]
 pub(crate) struct JoinRequest {
     pub ops_args: Vec<String>,
@@ -1714,20 +1714,25 @@ pub(crate) fn join_request(form: &super::app::Form) -> Result<JoinRequest, FormE
             crate::commands::account::parse_desk_endpoint(desk)
                 .map_err(|e| field_error("desk endpoint (optional)", e.to_string()))?;
         }
-        let stdin = if account.is_empty() {
-            ticket.to_owned()
-        } else {
-            format!("{ticket}\n{account}")
-        };
-        let env = if desk.is_empty() {
-            Vec::new()
-        } else {
-            vec![("VALLUM_DESK_ENDPOINT", desk.to_owned())]
-        };
+        // The ticket rides stdin line 1, the token line 2, the desk origin
+        // line 3. All three ride stdin because the sudo path strips the
+        // environment (sudoers grants the dispatcher only, no SETENV): an
+        // env-only endpoint never reached `vallum join`. The dispatcher
+        // re-exports line 2 as VALLUM_ACCOUNT and line 3 as
+        // VALLUM_DESK_ENDPOINT (ADR-0046, #32).
+        let mut stdin = ticket.to_owned();
+        if !account.is_empty() {
+            stdin.push('\n');
+            stdin.push_str(account);
+            if !desk.is_empty() {
+                stdin.push('\n');
+                stdin.push_str(desk);
+            }
+        }
         Ok(JoinRequest {
             ops_args: vec!["join".to_owned()],
             stdin: Some(stdin),
-            env,
+            env: Vec::new(),
         })
     } else {
         if !account.is_empty() {

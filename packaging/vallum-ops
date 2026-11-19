@@ -23,6 +23,7 @@ set -uo pipefail
 # every host but the one it was built on, and it was a password-less root
 # escalation for whoever owned that checkout (review, 2026-11-11).
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
+VALLUM_BIN=${VALLUM_BIN:-/usr/bin/vallum}
 # The source tree, if this host has one. `sudo` resets the environment, so the
 # path cannot come from VALLUM_REPO alone: it comes from a root-owned pointer
 # file that an operator writes once. Nothing is compiled into this file.
@@ -121,15 +122,25 @@ full-tunnel)
 join)
     # Redeem a vallum1-join:... ticket passed on stdin. Line 1 is the
     # ticket; an optional line 2 is the desk account token, re-exported as
-    # VALLUM_ACCOUNT for `vallum join` to seal into the config. The token
-    # rides stdin because the caller's env dies at sudo/pkexec, and argv
-    # would put the credential in ps.
+    # VALLUM_ACCOUNT; an optional line 3 is the desk origin, re-exported as
+    # VALLUM_DESK_ENDPOINT. Both ride stdin because the caller's env dies at
+    # sudo/pkexec (sudoers grants the dispatcher only, no SETENV), and argv
+    # would put the credential in ps. `vallum join` seals them into [account]
+    # (ADR-0046, #32) — an env-only endpoint never crossed sudo.
     IFS= read -r join_ticket
     IFS= read -r join_account || join_account=""
-    if [ -n "$join_account" ]; then
-        printf '%s\n' "$join_ticket" | VALLUM_ACCOUNT="$join_account" /usr/bin/vallum join -
+    IFS= read -r join_desk || join_desk=""
+    if [ -n "$join_desk" ]; then
+        case "$join_desk" in
+            *[!A-Za-z0-9.:/\[\]_-]*|-*) echo "vallum-ops: invalid desk endpoint '$join_desk'" >&2; exit 2 ;;
+        esac
+    fi
+    if [ -n "$join_account" ] && [ -n "$join_desk" ]; then
+        printf '%s\n' "$join_ticket" | VALLUM_ACCOUNT="$join_account" VALLUM_DESK_ENDPOINT="$join_desk" "$VALLUM_BIN" join -
+    elif [ -n "$join_account" ]; then
+        printf '%s\n' "$join_ticket" | VALLUM_ACCOUNT="$join_account" "$VALLUM_BIN" join -
     else
-        printf '%s\n' "$join_ticket" | /usr/bin/vallum join -
+        printf '%s\n' "$join_ticket" | "$VALLUM_BIN" join -
     fi
     ;;
 setup-remote)

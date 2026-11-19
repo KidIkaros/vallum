@@ -29,8 +29,14 @@ echo "== tests"
 cargo test --workspace
 echo "== lean daemon tests"
 cargo test -p vallum --no-default-features
+echo "== desk service tests (account/device, URI handler, join dispatcher)"
+# The desk is a core alpha component; its Python suite runs against a fake
+# Daemon port (no daemon needed). The join-dispatcher shell test pins the
+# sudo-safe stdin channels (#32): ticket/token/desk-origin on lines 1/2/3.
+python3 -m unittest discover -s service -p 'test_*.py'
+sh service/test_vallum_ops_join.sh
 echo "== shell syntax"
-bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/accept-isolation.sh scripts/accept-agent-enrol.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh scripts/check-doc-addresses.sh
+bash -n scripts/install.sh scripts/release.sh scripts/e2e-netns.sh scripts/seccomp-trace.sh scripts/seccomp-enforce.sh scripts/seccomp-log.sh scripts/verify-remote.sh scripts/check-zstd-ignores.sh scripts/check-state-coverage.sh scripts/accept-desk-restore.sh scripts/accept-deployment-backup.sh scripts/accept-isolation.sh scripts/accept-agent-enrol.sh scripts/backup-deployment.sh scripts/check-trust-anchor.sh scripts/check-doc-addresses.sh service/test_vallum_ops_join.sh
 echo "== zstd ignore guard"
 scripts/check-zstd-ignores.sh
 echo "== durable state coverage"
