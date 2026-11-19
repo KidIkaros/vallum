@@ -5,9 +5,9 @@ bundler, no package manager, no generated output to keep in sync.
 
 ```
 site/
-  index.html        landing page: what the handshake does, install, the cockpit
+  index.html        landing page: account-first journey, the handshake, the cockpit
   docs/index.html   documentation hub: every guide in the repo, grouped by job
-  style.css         shared tokens and layout
+  style.css         shared brandkit tokens and layout
 ```
 
 ## Preview
@@ -42,24 +42,44 @@ and a toolchain in CI. Nothing here depends on that happening.
 
 ## Design tokens
 
-`style.css` mirrors `crates/vallum/src/tui/theme.rs` so the site and the cockpit
-read as one product:
+`style.css` carries the Vallum brandkit (`assets/vallum-brandkit.png`, rendered
+by `scripts/generate_media.py` §05; the console's rendition lives in
+`crates/vallum-gui/ui/src/index.css`). Dark surface only — the brandkit has no
+light theme:
 
-| token | role | dark | light |
-|---|---|---|---|
-| `--accent` | signal, links, headings | `#22d3ee` | `#0e7490` |
-| `--ok` | healthy / active | `#34d399` | `#047857` |
-| `--warn` | aging / transitional | `#fbbf24` | `#9a6700` |
-| `--danger` | failed / expired | `#f87171` | `#b91c1c` |
-| `--selection` | selected row (`Rgb(24, 42, 58)` in the TUI) | `#182a3a` | `#e7f1f7` |
+| token | role | value |
+|---|---|---|
+| `--bg` | obsidian canvas | `#0d1117` |
+| `--panel` | raised surface | `#161b22` |
+| `--panel-deep` | cockpit surface (brandkit §03) | `#090d12` |
+| `--rule` / `--rule-soft` | hairlines | `#30363d` / `#21262d` |
+| `--text` / `--subtext` / `--muted` | the three text roles | `#e6edf3` / `#8b949e` / `#7d8590` |
+| `--signal` | signal cyan — the one accent | `#39c5cf` |
+| `--live` / `--stale` / `--fault` / `--tx` | semantic telemetry only | `#3fb950` / `#d29922` / `#ff7b72` / `#bc8cff` |
 
-The TUI emits ANSI colours, so these hex values are the site's rendition of the
-same roles, checked against both schemes. The `── label ──` rule under each
-heading is the TUI's section rule, drawn as a hairline that takes the slack.
+One deliberate deviation: the brandkit's muted `#6e7681` fails AA at small
+sizes on obsidian (4.12:1), so the muted role uses the console's `#7d8590`
+(5.07:1 on canvas, 4.64:1 on panel). Every text/accent pair on the page was
+computed, not asserted.
 
-Deliberately absent: hero imagery, gradients, shadows, stock illustrations, and
-animations. The only image on the site is a real frame rendered by
-`vallum tui --snapshot`.
+Type is the brandkit's JetBrains Mono (§06) first in the stack, with the
+console's fallbacks and no webfont fetch; body prose is the system sans.
+The signature detail is the ◆ set on a hairline that takes the slack — every
+section rule is `◆ label ──────`, the TUI's section rule with the brand mark.
+The hero seal is the brandkit's boundary geometry (§02) drawn as inline SVG:
+initiator ──◆── responder, the rampart gate at the crossing.
+
+Deliberately absent: hero photography, gradients, shadows, glows, stock
+illustrations, and animations. The only raster image on the site is a real
+frame rendered by `vallum tui --snapshot`.
+
+## Landing page claims
+
+The landing page is account-first: the primary CTA points at the hosted alpha
+desk (`https://desk.wingman.gold`, invite-gated), and every claim maps to the
+repository — `service/README.md` for the desk, the README and ADRs 0005, 0011,
+0016, 0039, 0045, 0047 for the tunnel and its boundaries. One server per desk,
+no fleet, no regions, no external audit: the page says so out loud.
 
 ## Deployment
 
