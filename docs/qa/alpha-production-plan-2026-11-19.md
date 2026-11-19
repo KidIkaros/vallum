@@ -57,7 +57,7 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
 | WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up DONE in 450c322: service/README config table +2 flags |
 | WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | DONE (5cae2fc) — accept-isolation 15 assertions; accept-pair 88; verify.sh PASS; DEPLOY-HOLD |
-| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DONE — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; slice (b) DONE (821087b + review 6eb03da): add_device mints PINNED invite via --public-key (canonicalized, validated pre-reservation) + `vallum join --key` redemption + place_config idempotent key + UTCP/README/glossary; desk 236 OK, verify.sh PASS, real-binary two-netns probe 22 checks FAIL=0 (handshake + ping 3/3 + wrong-key refusal). Slices c (rotation) DONE (c1dc595), d (reconciliation) DONE (a12f425, full CI 261 OK, verify.sh PASS). DEPLOY-HOLD for live signup flip |
+| WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | DONE — slice (a) DONE (450c322 + review 9d70fd3): account-only signup + v3 migration + device-less readers/admin + docs; slice (b) DONE (821087b + review 6eb03da): add_device mints PINNED invite via --public-key (canonicalized, validated pre-reservation) + `vallum join --key` redemption + place_config idempotent key + UTCP/README/glossary; desk 236 OK, verify.sh PASS, real-binary two-netns probe 22 checks FAIL=0 (handshake + ping 3/3 + wrong-key refusal). Slices c (rotation) DONE (c1dc595 + review 7981a40; real-desk two-netns rotation probe 22 checks FAIL=0 — rotate at cap, key swap re-handshake, retired key refused+counted), d (reconciliation) DONE (a12f425, full CI 261 OK, verify.sh PASS). DEPLOY-HOLD for live signup flip |
 | WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up DONE in 450c322: journey step1 + agent API block re-worded for account-only signup (live journey re-proof rides WS6's headless gate) |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | DONE — accept-agent-enrol (533fc44, parent-built, 25 assertions PASS: account-only signup→pinned devices→join --key→handshake+ping, wrong-key refused). Fox-lane egress part HELD: no fox peer enrolled on the VPS; setup needs operator polkit + is a live change |
 | WS7 | Numeric acceptance + gates wired into verify.sh; requirements.md capacity number stated | new gates run in verify.sh; capacity ceiling stated with source | DONE — accept-isolation (e47dc8a) + accept-agent-enrol (7cc3158) wired into E2E; both PASS standalone (15 + 25 assertions); capacity ALREADY stated+sourced in requirements.md |
@@ -204,3 +204,32 @@ remaining gaps. Lead with findings in words, numbers as backup.
   own address — the product's self-tunnel refusal is correct, the probe needed two namespaces.
   Lessons saved to vallum-operations references/service-layer.md. DEPLOY-HOLD — live alpha untouched.
   Next: WS4 slice (c) — rotation endpoint calling `peer rotate --public-key`, preserving the device count.
+- 2026-11-19 07:09 EST — WS4 slice (c) EVIDENCE + REVIEW complete (the 06:06 tick, in flight while the
+  parent session finished d/WS6/WS7 and paused cron 45dc5f86ee11). Rotation endpoint POST /api/devices/rotate
+  {token,peer,public_key}: Desk.rotate_device -> DaemonCli.rotate = `peer rotate --public-key --json` +
+  `peer finalize` (finalize in the same call: client-driven rotation means the caller holds the new key,
+  so the grace window protects nothing; a failed finalize is reported finalized:false + warning, retry
+  converges). No reservation/cap/ticket — slot preserved. Real-binary proof (REAL desk + REAL binaries,
+  two netns, --device-cap 1 so the account is AT its cap): signup→pinned add_device→join --key→handshake+ping
+  (key A)→rotate over the wire (200, finalized+applied, no ticket; config holds key B only, 1 peer; desk DB
+  slot preserved)→device swaps its key file, config untouched→re-handshake+ping (key B)→retired key A
+  refused and counted (unknown_peer 0→1), no data plane. 22 checks FAIL=0. Suite-alarm: skip-finalize +
+  skip-canonicalization mutants each caught, reverted, green. Gates: desk 255 OK on c1dc595 in an isolated
+  worktree; UTCP manual tests 9 OK; Rust tree byte-identical to e6873d0 (verify.sh PASS 05:19), so the
+  Python-only slice did not re-run the full Rust gate. Two-axis review: Spec faithful to ADR-0047 §4
+  (stable name, custody, slot at cap, old key retired, single-use untouched, open questions untouched);
+  Standards (sub-agent, every finding reproduced in an isolated checkout): 1 HARD — non-string peer/token
+  crashed behind a 500 (sqlite bind) or read 404; 2 SOFT — rotate/mint JSON of wrong shape -> AttributeError
+  behind a 500, FakeDaemon.rotate more permissive than the real CLI (ignored missing_peers); 2 JUDGEMENT —
+  duplicated decision comments, README example omitted `applied`. ALL fixed RED-first in 7981a40: shared
+  _device_target intake helper (typing + lookup + ownership; NULL-guard comment once; also closes the
+  pre-existing remove_device gap), loud shape guards on rotate/mint JSON, faithful fake + missing-peer
+  negative test, comment dedup, README. Desk 269 OK after fixes; intake-guard mutant caught, reverted.
+  Probe-rig lessons (rig, not product): join's 35s proof is fed by the RUNNING client's 25s keepalive —
+  start the client before waiting for join; a retired key fails the peer-HINT lookup -> unknown_peer,
+  not unidentifiable. FOLLOW-UP finding (recorded, not in the plan gap list, not fixed): CLI `show --json`
+  (uapi::response_json) omits the handshake_dropped_* counters — they ride `vallum metrics` and the raw
+  get=1 response; a diagnostic reading show --json cannot see refusal reasons. Concurrency: the parent
+  committed this tick's green WIP mid-flight (c1dc595, believing it a prior tick's leftover); the tick
+  verified its committed slice in an isolated worktree and applied review fixes on main after the tree
+  went clean — never touching the concurrent slice-d WIP. DEPLOY-HOLD unchanged; live alpha untouched.
