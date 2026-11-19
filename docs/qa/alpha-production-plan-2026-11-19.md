@@ -56,7 +56,7 @@ Acceptance criteria are numbers with runnable checks (software-delivery-process 
 |---|---|---|---|
 | WS1 | ADR-0047 spine + open questions | ADR exists, cited, open questions marked | DONE (13e8a78) |
 | WS2 | White-label operator-config: install source + repo links + brand from config/env, no hardcoded KidIkaros | desk tests: operator install_source renders; default unchanged; 0 hardcoded KidIkaros in served pages when configured | DONE — merged e0d6711 (f282050,f816eab); 165 tests OK; follow-up: service/README config table +2 flags |
-| WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | TODO |
+| WS3 | Multi-tenant isolation (opt-in service mode): `[interface] client_isolation` drops tunnel→tunnel forward; personal flat default | new gate: with isolation on, two peers cannot ping each other but both reach internet; default off = flat (accept-pair stays green). Per-account refinement (same-account talks, cross-account blocked) is ADR-0047 open Q1 — DEFER, do not decide unilaterally | DONE (5cae2fc) — accept-isolation 15 assertions; accept-pair 88; verify.sh PASS; DEPLOY-HOLD |
 | WS4 | Account/device enrolment redesign (account-only signup + client-driven pinned enrolment + rotation endpoint + cap reconciliation + migration) | desk tests: signup creates account w/o device; add_device mints PINNED invite; rotation preserves count; cap race-free; legacy accounts migrate; count reconciles vs daemon | TODO (DEPLOY-HOLD for live signup flip) |
 | WS5 | Web re-skin: Vallum brandkit (obsidian + signal cyan + ◆, "every boundary under watch"); account-first journey | site/index.html uses brand tokens; no wingman-gold; renders; links valid (desk embedded pages re-skinned in WS4) | DONE — merged e0d6711 (bcaf3fd,037ff1c,f9032bb); signal cyan #39c5cf, Nu-valid; follow-up: WS4 re-check human-journey step1 after account-only flip |
 | WS6 | Agent dogfood + headless enrolment gate: enrol a device headless via API (signup→devices→join), exercise vallum-fox lane | new gate: headless agent enrols + handshakes in ≤3 API calls + join; fox egress separated:yes | TODO |
@@ -101,3 +101,15 @@ remaining gaps. Lead with findings in words, numbers as backup.
   client_isolation (per-account refinement deferred to ADR-0047 Q1). Next: WS3 then WS4 (sliced).
   Follow-ups booked: service/README config table +2 flags (WS2); landing human-journey step1 re-check
   after account-only signup flip (WS4/WS5).
+- 2026-11-19 01:37 EST — WS3 DONE (5cae2fc): opt-in `[interface] client_isolation` + `--client-isolation`
+  flag; drop chain in the wholesale-replaced `inet vallum` table (converges both ways; teardown already
+  removes it); config is source of truth on re-init (flag/config conflict refused); `--no-nat`+isolation
+  refused; quick's NAT reconcile made chain-scoped so an attach cannot wipe the isolation chain (found
+  during design: quick deleted the whole table). New gate scripts/accept-isolation.sh (server + 2 clients
+  + wan netns, no docker): 15 assertions PASS — flat control, refusal path, peers blocked both directions
+  (sustained window), wan + server-input preserved, toggle-off convergence, creation flag persist/report.
+  Gates: verify.sh PASS (final tree), workspace 1006 tests 0 fail, desk 165 OK, accept-pair 88 assertions
+  PASS (flat default intact). Suite-alarm proof: mutant (drop chain disabled) caught by the gate rc=1,
+  reverted, gate re-passed. DEPLOY-HOLD — live alpha untouched. Follow-ups booked: doctor isolation check;
+  shared NAT-planner dedup (hostnet/quick two writers); WS7 wires accept-isolation into verify.sh;
+  kernel proof of quick-reconcile-preserves-chain awaits a NAT-only quick verb. Next: WS4 slice (a).
