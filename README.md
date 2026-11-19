@@ -43,6 +43,12 @@
 > The post-quantum primitives come from `origin-crypto-sdk`, which is **experimental and unaudited** —
 > read [SECURITY.md](SECURITY.md) before trusting this with anything that matters.
 
+**Why post-quantum?** Encrypted traffic can be recorded today and decrypted later, once a large
+quantum computer exists — "harvest now, decrypt later." Vallum's tri-hybrid handshake mixes a
+classical key with two post-quantum keys, so a future quantum break alone does not expose the
+session. That is the reason to prefer it over a classical-only tunnel for anything you want to
+stay private for years. A plain-language overview lives on [the project site](site/index.html).
+
 ---
 
 ## At a Glance

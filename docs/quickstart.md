@@ -4,6 +4,11 @@ One page from nothing to a working tunnel: what to have ready, the three shapes
 a deployment takes, and how to tell it worked. Every section links the guide
 that owns the detail.
 
+Why post-quantum: traffic encrypted today can be recorded and decrypted later by
+a quantum computer ("harvest now, decrypt later"); Vallum's handshake mixes
+classical and post-quantum keys so a future quantum break alone does not expose
+the session.
+
 ## Before you start
 
 | Requirement | Why | Detail |

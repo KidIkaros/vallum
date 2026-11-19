@@ -1341,6 +1341,44 @@ class RecoveryCodeTests(DeskTestCase):
         self.assertEqual(code, 200)
 
 
+class ContactChannelTests(unittest.TestCase):
+    """The operator-contact channel (validation premortem B1/B2/C3): invite
+    requests, feedback and lost-number recovery need a reachable path, not a
+    dead-end 'Try again' loop; the shown-once secrets need a durable download."""
+
+    def test_invite_only_index_offers_a_request_channel(self):
+        html = desk_module.index_page(False, contact="ops@example.com")
+        self.assertIn("Request an invite", html)
+        self.assertIn("mailto:ops@example.com", html)
+
+    def test_open_signup_index_needs_no_invite_request(self):
+        html = desk_module.index_page(True, contact="ops@example.com")
+        self.assertNotIn("Request an invite", html)
+
+    def test_login_page_offers_lost_number_recovery(self):
+        html = desk_module.account_shell_page(contact="ops@example.com")
+        self.assertIn("Lost your number?", html)
+        self.assertIn("recovery code", html)
+
+    def test_error_page_offers_recovery_not_just_retry(self):
+        html = desk_module.error_page("unknown account token", contact="ops@example.com")
+        self.assertIn("Lost your number?", html)
+        self.assertIn("mailto:ops@example.com", html)
+
+    def test_no_contact_falls_back_to_guidance_not_a_dead_link(self):
+        html = desk_module.index_page(False)
+        self.assertIn("the operator who issued your invite code", html)
+        self.assertNotIn("mailto:", html)
+
+    def test_signup_page_offers_a_durable_download_and_copy(self):
+        html = desk_module.account_created_page(
+            {"token": "a" * 32, "recovery_code": "b" * 16,
+             "expires": "2026-12-03", "plan": "trial", "bytes_cap": 50 * 1024**3})
+        self.assertIn("vallum-account.txt", html)
+        self.assertIn("data:text/plain", html)
+        self.assertEqual(html.count("data-copy="), 2)
+
+
 class FunnelStepTests(DeskTestCase):
     """Per-step journey counters (premortem 2026-11-19, mode 5): the funnel must
     show WHERE conversion drops, not just the terminal state. A stranger who dies

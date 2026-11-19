@@ -505,6 +505,7 @@ class DeskConfig:
     operator_name: str = "vallum desk"               # the page header's brand
     install_source: str = DEFAULT_INSTALL_SOURCE     # the install.sh URL served to users
     repo_url: str = DEFAULT_REPO_URL                 # the source/docs link served to users
+    contact: str = ""                                # operator email/URL for invite requests, recovery, feedback
 
 
 # ---------------------------------------------------------------- the desk
@@ -1840,10 +1841,25 @@ Linux + systemd; the release signature verifies itself before anything is
 installed. Source and docs: <a href="{_esc(repo_url)}">{_esc(repo_url.split("://", 1)[-1])}</a>.</p>"""
 
 
+def contact_link(contact, label):
+    """A reachable operator channel (invite requests, recovery, feedback).
+    An empty contact falls back to guidance rather than a dead link."""
+    if not contact:
+        return "the operator who issued your invite code"
+    if "@" in contact and "://" not in contact:
+        return f'<a href="mailto:{_esc(contact)}">{_esc(label)}</a>'
+    return f'<a href="{_esc(contact)}">{_esc(label)}</a>'
+
+
 def index_page(open_signup, operator="vallum desk",
-               install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
+               install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL,
+               contact=""):
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
+    invite_request = ("" if open_signup else
+                      f'<p>No invite code? {contact_link(contact, "Request an invite")}.</p>')
+    feedback = (f'<p><small>Feedback? {contact_link(contact, "Tell the operator")}.</small></p>'
+                if contact else "")
     intro = ("Create an account, then add your devices from your account page; "
              "your key never leaves your machine." if open_signup else
              "An invite code gets you an account; add devices from your account "
@@ -1857,6 +1873,8 @@ def index_page(open_signup, operator="vallum desk",
 {code_field}
 <button>Create my account</button>
 </form>
+{invite_request}
+{feedback}
 {DESK_FOOTER}"""
 
 
@@ -1871,6 +1889,24 @@ def account_created_page(payload, operator="vallum desk",
     expires = _esc(payload.get("expires", ""))
     plan = _esc(payload.get("plan") or "trial")
     gib = payload.get("bytes_cap", 0) // (1024 ** 3)
+    # A no-script download (data URI) so closing the tab cannot lose the
+    # shown-once secrets, plus local-only copy buttons (clipboard, no network,
+    # no storage — the page still works with scripting off).
+    from urllib.parse import quote
+    cred_file = "\n".join([
+        f"Vallum account — {operator}",
+        f"Account number: {payload.get('token', '')}",
+        f"Recovery code: {payload.get('recovery_code', '')}",
+        f"Plan: {plan} until {expires}",
+        "",
+        "Keep this file private. The account number is the only credential this",
+        "account has; the recovery code proves ownership if you lose the number.",
+    ]) + "\n"
+    download = (
+        '<p><a download="vallum-account.txt" '
+        f'href="data:text/plain;charset=utf-8,{quote(cred_file)}">'
+        'Download both as a text file</a> — so closing this tab cannot lose them.</p>'
+    )
     manage = (f"""<form method="post" action="/account">
 <input type="hidden" name="token" value="{token}">
 <button>Manage this account</button></form>"""
@@ -1883,12 +1919,15 @@ def account_created_page(payload, operator="vallum desk",
 anywhere else. It is the only credential this account ever has; treat it
 like a password.</p>
 <p>Plan {plan} until {expires} or {gib} GiB (shared across your devices).</p>
-<pre>{token}</pre>
+<pre id="acct-token">{token}</pre>
+<button type="button" data-copy="acct-token">Copy account number</button>
 <p>Also copy your <b>recovery code</b> and store it <i>separately</i>. If you
 lose your account number, the operator asks for this code to prove the account
 is yours before issuing a new number — without it, recovery cannot verify
 ownership.</p>
-<pre>{recovery_code}</pre>
+<pre id="acct-recovery">{recovery_code}</pre>
+<button type="button" data-copy="acct-recovery">Copy recovery code</button>
+{download}
 <h2>Next: add a device</h2>
 <p>Open your account and use <b>Add a device</b> — each device gets its own
 join ticket, minted when the device enrols. Installing the client can come
@@ -1899,6 +1938,18 @@ first; your account outlives any ticket.</p>
 <code>/account</code> with your account number — and add your first device.</p></li>
 </ol>
 {manage}
+<script>
+// Local-only convenience: copy to clipboard, no network, no storage. The
+// numbers above stay selectable, so the page works with scripting off.
+document.querySelectorAll('[data-copy]').forEach(function (b) {{
+  b.addEventListener('click', function () {{
+    var t = document.getElementById(b.getAttribute('data-copy')).textContent;
+    var done = function (ok) {{ b.textContent = ok ? 'Copied' : 'Select the text above and copy'; }};
+    if (navigator.clipboard) {{ navigator.clipboard.writeText(t).then(function () {{ done(true); }}, function () {{ done(false); }}); }}
+    else {{ done(false); }}
+  }});
+}});
+</script>
 {DESK_FOOTER}"""
 
 
@@ -1971,11 +2022,14 @@ account ever has. Save it; the desk does not send it anywhere else.</p>
 {DESK_FOOTER}"""
 
 
-def error_page(message, operator="vallum desk"):
+def error_page(message, operator="vallum desk", contact=""):
     return f"""<!doctype html><title>signup failed — {_esc(operator)}</title>
 {DESK_STYLE}
 <p><small>{_esc(operator)}</small></p>
-<h1>Signup failed</h1><p>{_esc(message)}</p><p><a href="/">Try again</a></p>
+<h1>Signup failed</h1><p>{_esc(message)}</p>
+<p>Lost your number? Your recovery code lets the operator verify ownership
+and issue a new one — {contact_link(contact, "contact the operator")}.</p>
+<p><a href="/">Try again</a></p>
 {DESK_FOOTER}"""
 
 
@@ -2018,7 +2072,7 @@ ACCOUNT_STYLE = DESK_STYLE
 DESK_FOOTER = "<footer>every boundary under watch</footer>"
 
 
-def account_shell_page(operator="vallum desk"):
+def account_shell_page(operator="vallum desk", contact=""):
     """Where the account number goes. The token is a credential: it enters
     by POST body or not at all — never the URL."""
     return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
@@ -2030,6 +2084,13 @@ the only credential — treat it like a password.</p>
 <label>account number<br><input name="token" required></label><br><br>
 <button>Open my account</button>
 </form>
+<details><summary>Lost your number?</summary>
+<p>If you saved your <b>recovery code</b>, the operator can verify it and
+issue a new number — your devices and plan survive.
+{contact_link(contact, "Contact the operator")} with your recovery code.
+Without the number or the recovery code the account cannot be recovered;
+create a new one with a fresh invite.</p>
+</details>
 {DESK_FOOTER}"""
 
 
@@ -2184,10 +2245,11 @@ def make_handler(desk):
                 return
             if self.path == "/":
                 self._send_html(index_page(desk.config.open_signup, desk.config.operator_name,
-                                           desk.config.install_source, desk.config.repo_url))
+                                           desk.config.install_source, desk.config.repo_url,
+                                           desk.config.contact))
                 return
             if self.path == "/account":
-                self._send_html(account_shell_page(desk.config.operator_name))
+                self._send_html(account_shell_page(desk.config.operator_name, desk.config.contact))
                 return
             if self.path.startswith("/api/status"):
                 # The token used to ride this URL — into proxy access logs.
@@ -2212,7 +2274,7 @@ def make_handler(desk):
                                                              desk.config.install_source, desk.config.repo_url),
                                         private=True)
                     else:
-                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
+                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name, desk.config.contact),
                                         status=code)
                     return
                 elif self.path == "/api/devices":
@@ -2234,7 +2296,7 @@ def make_handler(desk):
                     if code == 200:
                         self._send_html(account_page(view, body["token"], operator=desk.config.operator_name), private=True)
                     else:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/device":
@@ -2247,7 +2309,7 @@ def make_handler(desk):
                                                     desk.config.install_source, desk.config.repo_url),
                                         private=True)
                     else:
-                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name),
+                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name, desk.config.contact),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/revoke":
@@ -2256,7 +2318,7 @@ def make_handler(desk):
                               else payload.get("error", "remove failed"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
@@ -2269,7 +2331,7 @@ def make_handler(desk):
                               else payload.get("error", "code refused"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
