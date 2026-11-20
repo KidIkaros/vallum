@@ -70,9 +70,11 @@ operator must guarantee. The proofs behind the claims live in
   completed one. Weight your deployment accordingly.
 - **Experimental post-quantum primitives** — the underlying
   `origin-crypto-sdk` dependency states `EXPERIMENTAL — NOT FOR PRODUCTION USE`.
-  Vallum mitigates implementation risks by composing classical X25519 alongside
-  sntrup761 and ML-KEM-768 in a tri-hybrid design (breaking session confidentiality
-  requires compromising all three algorithms simultaneously), but the post-quantum
+  Vallum composes classical X25519 alongside sntrup761 and ML-KEM-768 in a tri-hybrid
+  design, so breaking session confidentiality requires compromising all three
+  *algorithms*. That diversifies algorithm risk, not implementation risk: X25519, the
+  combiner KDF, the AEAD and the RNG all come from the same unaudited SDK, so a single
+  implementation bug can defeat all three legs at once. The post-quantum
   implementations have not undergone independent third-party audit. Weight your
   deployment accordingly.
 - **Compromised-key revocation at scale** — removing a peer revokes it;
@@ -82,4 +84,5 @@ operator must guarantee. The proofs behind the claims live in
 ## Reporting
 
 See [SECURITY.md](../SECURITY.md) — private GitHub vulnerability reporting;
-`origin-crypto-sdk` issues go to that repository.
+`origin-crypto-sdk` issues go to that repository **and** to the Vallum operator, so
+the alpha's core crypto claim is tracked even when the fix lands upstream.
