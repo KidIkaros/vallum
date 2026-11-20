@@ -1,7 +1,7 @@
 # ADR-0047: The account is not the device; the daemon owns the physical truth
 
 **Date**: 2026-11-19
-**Status**: proposed (spine decided in discussion; open questions await operator ratification)
+**Status**: accepted (operator-ratified 2026-11-19; spine + Q1–Q5 implemented, agent-device quota deferred)
 **Deciders**: operator (Ikaaros) + Hermes agent, from the 2026-11-18/19 architecture audit
 
 ## Context
@@ -103,11 +103,14 @@ model. Three forces push a redesign:
 - **Vertical-only scaling** (single-thread data plane); horizontal scaling un-designed. State
   the single-server capacity model honestly; name multi-server as future.
 
-## Proposed resolutions (2026-11-19, post-dogfood — pending operator ratification)
+## Resolutions (2026-11-19, operator-ratified)
 
 The overnight dogfood (TUI/GUI/UTCP against the live server) and issue #34 turned
-each open question from abstract to concrete. The recommendations below are the
-agent's; the ADR stays `proposed` until the operator ratifies.
+each open question from abstract to concrete. Ratified by the operator 2026-11-19
+("follow your recommendation"); Q1–Q5 are implemented except the deferred
+agent-device quota (Q2). Implementation status: isolation shipped
+(`accept-isolation`), reset-token + recovery code shipped, `vallum://account`
+handoff shipped (v1.11.0); per-account subnets and ephemeral agent devices are beta.
 
 1. **Isolation mechanism** → Ship the built **full client isolation** for the alpha
    (colleagues need no inter-peer traffic); design **per-account subnets** as the beta

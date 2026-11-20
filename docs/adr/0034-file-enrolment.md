@@ -229,3 +229,31 @@ it used.
    replace the script's exit status, and the "this commit passed" stamp was
    written *before* the cleanup ran. A failed restore is now loud, fails the
    run, and revokes the stamp. See `scripts/verify-remote.sh`.
+
+## Amendment (2026-11-19): the enrolment front TLS posture (#31, ratified)
+
+The enrolment front (`enroll::front_round_trip` + `tls_quic::build_tls_configs`)
+deliberately does **not** verify the outer TLS certificate
+(`EphemeralServerVerifier`, `tls_quic.rs:52-64`): outer TLS is DPI mimicry, not the
+authentication boundary. The server is authenticated **inside** the sealed PQ
+handshake, and the client pins it:
+
+1. The join ticket carries the server's public-line fingerprint
+   (`enroll.rs:176-177`, `keys::fingerprint` of the server public line).
+2. The ticket+fingerprint arrive over the desk's **verified** HTTPS (the account
+   read path verifies the desk cert, ADR-0046/#28, because the bearer token has no
+   inner auth), so the fingerprint the client pins is itself authentic.
+3. Before writing anything, the client checks the server's presented public line
+   against that fingerprint and refuses a mismatch — "this is not the server the
+   invite named … treat this as an attack" (`setup.rs:1406-1428`; the same
+   `check_server_fingerprint` invariant is tested at `setup.rs:1856`). A MITM cannot
+   impersonate the server without its private key, regardless of the outer cert.
+
+**Decision (operator-ratified 2026-11-19):** keep the no-outer-verify posture for
+enrolment; the inner-handshake authentication + ticket pin is the boundary. This is
+consistent with, not contradictory to, the account-read path verifying outer TLS:
+there the bearer token has no inner authentication, so outer TLS *is* the boundary;
+here the inner handshake is. The load-bearing invariant to guard is the client-side
+pin (step 3) — if it is ever absent or bypassed the posture collapses; the outer cert
+is not the thing to protect. Adding outer cert verification would be defense-in-depth
+at the cost of a real cert on the enrolment front, and would still not replace the pin.
