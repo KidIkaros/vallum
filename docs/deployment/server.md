@@ -337,6 +337,32 @@ sudo -S -p '' ufw delete allow 51821/udp
 If it does, the responder is still running or the rule was left behind — both are
 worth checking, because a listener on 51821 is a second service to harden.
 
+### The always-on desk: keep the responder armed, and verify after any restart
+
+The open-only-while-enrolling posture above is for a manually-operated server. The
+**desk** (the account/signup front) is different: strangers join by ticket at any
+time, so its responder must stay armed — `[enroll] enabled = true` in the config and
+`vallum-enroll@vallum0` active. A daemon restart, a redeploy, or a gate run can leave
+it down, and a down responder means every new signup silently times out.
+
+After any restart/deploy/gate, check it:
+
+```bash
+curl -s http://127.0.0.1:8400/healthz   # want "enrolment": "active"
+```
+
+If it reads `inactive` or `failed`, re-arm:
+
+```bash
+sudo vallum server enroll --enable --config /etc/vallum/vallum0.toml
+sudo systemctl reset-failed vallum-enroll@vallum0   # clear a rate-limited failed state
+sudo systemctl start vallum-enroll@vallum0
+```
+
+`scripts/verify-remote.sh` now captures the responder's prior state and restores it in
+cleanup, so a gate run no longer leaves it down; the check above is still the habit
+after a manual restart or redeploy.
+
 The alternative, and the primary path as of ADR-0034, needs no second port at
 all: the device generates its keypair, sends its **public line** to the server
 operator however you already talk, and the server records it and generates the

@@ -188,6 +188,12 @@ NAT_DELETED=0
 # Set when the host had a live deployment at start-up; the run then asserts, at
 # the end, that it still does. That assertion is the point of the whole change.
 LIVE_DEPLOYMENT=0
+# Prior state of the host's enrolment responder, captured before the run touches
+# anything and restored in cleanup. The daemon restart in cleanup does not touch
+# this separate unit, so without this a gate run could leave the live desk unable
+# to accept joins (found 2026-11-20: responder down, [enroll] enabled=false).
+ENROLL_WAS_ACTIVE=0
+ENROLL_WAS_ENABLED=""
 # Set when enrol_ssh moved a host's own /usr/bin/vallum aside; cleanup puts it
 # back. Without this a gate run replaces production binaries with the tree's.
 BINARY_RESTORE=0
@@ -526,6 +532,23 @@ cleanup() {
                 note "left /usr/bin/vallum{,-quick} alone — this run installed neither"
             fi
         fi
+        # The enrolment responder is a separate unit the daemon restart above does
+        # not touch. Restore it to its captured prior state so a gate run never
+        # leaves the live desk unable to accept joins.
+        if [ "$LIVE_DEPLOYMENT" = 1 ]; then
+            enroll_now=$(rsh "sudo sed -n '/^\[enroll\]/,/^\[/p' /etc/vallum/vallum0.toml | sed -n 's/^enabled *= *//p' | head -1" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$ENROLL_WAS_ENABLED" ] && [ "$ENROLL_WAS_ENABLED" != "$enroll_now" ]; then
+                rsh "sudo sed -i '/^\[enroll\]/,/^\[/s/^enabled *= *.*/enabled = $ENROLL_WAS_ENABLED/' /etc/vallum/vallum0.toml" >/dev/null 2>&1
+                note "restored [enroll] enabled=$ENROLL_WAS_ENABLED in the host's config"
+            fi
+            if [ "$ENROLL_WAS_ACTIVE" = 1 ]; then
+                if rsh "sudo systemctl reset-failed vallum-enroll@vallum0 2>/dev/null; sudo systemctl start vallum-enroll@vallum0 && sleep 1 && systemctl is-active vallum-enroll@vallum0 >/dev/null 2>&1"; then
+                    ok "the host's enrolment responder is active again (prior state restored)"
+                else
+                    fail "the host's enrolment responder did not come back — re-arm: sudo vallum server enroll --enable --config /etc/vallum/vallum0.toml && sudo systemctl start vallum-enroll@vallum0"
+                fi
+            fi
+        fi
         if [ -n "$FORWARD_WAS" ]; then
             rsh "sudo sysctl -q -w net.ipv4.ip_forward=$FORWARD_WAS" >/dev/null 2>&1
         fi
@@ -604,6 +627,11 @@ else
 fi
 if rsh "test -e /etc/vallum" 2>/dev/null; then
     LIVE_DEPLOYMENT=1
+    # Capture the production responder's prior state so cleanup can restore it.
+    if rsh "systemctl is-active vallum-enroll@vallum0 >/dev/null 2>&1"; then
+        ENROLL_WAS_ACTIVE=1
+    fi
+    ENROLL_WAS_ENABLED=$(rsh "sudo sed -n '/^\[enroll\]/,/^\[/p' /etc/vallum/vallum0.toml | sed -n 's/^enabled *= *//p' | head -1" 2>/dev/null | tr -d '[:space:]')
     if [ "$CLEAN" != 1 ] && [ "$PRODUCT" = 1 ]; then
         # --product installs the real thing over /etc/vallum and the real units,
         # so on a host that already has a deployment it would overwrite one.
