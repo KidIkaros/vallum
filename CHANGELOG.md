@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.11.0 — 2026-11-19
+
+- **Connect buys a working tunnel.** The `vallum://join` deep-link now enrols through the
+  audited privileged dispatcher (`sudo -n vallum-ops join`, ticket/token/desk on stdin), so
+  `vallum join` runs as root, installs the service and proves the tunnel — the single-use
+  ticket no longer buys a user config, a burned invite and zero packets. A guided same-uid
+  fallback covers machines without the dispatcher. The desk endpoint survives sudo (stdin
+  line 3, #32) for both the deep-link and TUI joins.
+- **The account number hands itself to the client (ADR-0047 Q4).** The signup page fires a
+  script-built `vallum://account?token=…&desk=…` link (out of browser history/prefetchers);
+  `vallum-uri` records it at `~/.config/vallum/account.toml` (0600) so `vallum account` manages
+  it without re-pasting the shown-once number.
+- **A lost number is recoverable with proof.** Signup shows a recovery code once (hashed,
+  schema v5); `reset-token --recovery-code[-file]` verifies ownership before re-issuing a
+  number. The login/error pages offer a lost-number path; the shown-once secrets get a
+  no-script download + copy buttons.
+- **The doctor tells the truth about peer sync.** The #34 peer-sync check compared a 6-byte
+  config line-hash to an 8-byte daemon device fingerprint (different algorithms/lengths) and
+  always warned false drift; it now fingerprints the daemon's public line like-for-like. The
+  apply-outcome hardening from 1.10.0 stands.
+- **The alpha measures desire, not just operations.** `connection_days` records distinct
+  return days (`days_connected`); the exit bar gains M5 (real strangers, return usage, why
+  they want it); a configurable operator `contact` drives invite-request + feedback links.
+- **The stranger's first command works.** The documented `install.sh -- --from-release`
+  hard-failed (`--` is the passthrough separator); fixed across the docs. Root-shell installs
+  print how to bind the Connect scheme.
+- **Crypto trust ends in evidence.** SECURITY.md routes SDK findings to the operator as well
+  as upstream and states the assurance posture; the tri-hybrid claim names the shared-
+  implementation risk (one SDK under all three legs).
+- **GUI version tracks the workspace (#33).** `package-desktop.sh` syncs `tauri.conf.json`
+  from the workspace version; the gate fails on divergence. The desktop bundle still ships
+  at beta (ADR-0039).
+
 ## 1.10.0 — 2026-11-19
 
 - **The account is not the device (ADR-0047).** Signup creates an account alone
