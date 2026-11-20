@@ -178,7 +178,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="Type REVERT"
               disabled={busy}
-              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground/70"
+              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground"
               spellCheck={false}
             />
             <Button
@@ -232,7 +232,7 @@ export function PlanPanel({ onChanged }: { onChanged?: () => void }) {
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="Type APPLY to arm"
               disabled={busy}
-              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground/70"
+              className="border-border/60 bg-background/40 h-8 w-40 rounded-md border px-2.5 font-mono text-xs placeholder:text-muted-foreground"
               spellCheck={false}
             />
             <Button

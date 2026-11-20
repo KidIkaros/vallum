@@ -1475,6 +1475,13 @@ export default function App() {
               ? "border-[#3fb950]/50 bg-[#3fb950]/12 text-[#3fb950] inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold tracking-wider uppercase"
               : "border-border bg-secondary/50 text-muted-foreground inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[11px] font-semibold tracking-wider uppercase"
           }
+          title={
+            payload?.ok
+              ? "The vallum daemon answered on its control socket — the tunnel is up."
+              : booting
+                ? "Waiting for the daemon's first answer."
+                : "No answer from the daemon. It may be stopped, or this console may lack permission to see a root-owned daemon (#35)."
+          }
         >
           <span
             aria-hidden
@@ -1486,7 +1493,7 @@ export default function App() {
                   : "bg-muted-foreground size-1.5 rounded-full"
             }
           />
-          {payload?.ok ? "Running" : booting ? "Connecting" : "Offline"}
+          {payload?.ok ? "Tunnel: connected" : booting ? "Tunnel: connecting" : "Tunnel: disconnected"}
         </span>
         <button
           type="button"

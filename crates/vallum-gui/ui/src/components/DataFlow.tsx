@@ -278,6 +278,17 @@ export function TunnelFlowMap({
               <FlowLane key={lane.label} {...lane} live={live} fast={totalRate >= 4096} />
             ))}
           </div>
+          {/* The lane colors carry meaning, so key them in text too — never color
+              alone (#36). "blocked" is the guard doing its job (safe, no egress). */}
+          <div
+            className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]"
+            aria-label="Egress lane legend"
+          >
+            <span className="inline-flex items-center gap-1"><span aria-hidden className="bg-signal inline-block size-1.5 rounded-full" />via tunnel</span>
+            <span className="inline-flex items-center gap-1"><span aria-hidden className="bg-live/70 inline-block size-1.5 rounded-full" />blocked by guard</span>
+            <span className="inline-flex items-center gap-1"><span aria-hidden className="bg-violet/65 inline-block size-1.5 rounded-full" />split · some direct</span>
+            <span className="inline-flex items-center gap-1"><span aria-hidden className="bg-fault inline-block size-1.5 rounded-full" />leak · outside tunnel</span>
+          </div>
           <div className="border-border/50 flex flex-col gap-1 border-t pt-2 text-[11px]">
             <div className="flex items-center justify-between gap-2 font-mono">
               <span className="text-signal">▼ {live ? rateLabel(rxRate) : "—"}</span>

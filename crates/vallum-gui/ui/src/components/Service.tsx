@@ -436,7 +436,7 @@ export function LogsPanel({
             onChange={(event) => setLogFilter(event.target.value)}
             placeholder="Filter logs"
             aria-label="Filter log lines"
-            className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground/70 min-w-[160px] flex-1 rounded-md border px-2.5 py-1 text-xs"
+            className="border-border/60 bg-background/40 text-foreground placeholder:text-muted-foreground min-w-[160px] flex-1 rounded-md border px-2.5 py-1 text-xs"
           />
 
           <select

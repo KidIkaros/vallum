@@ -631,7 +631,7 @@ export function DiagnosticsModal({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search VAL-E* error code, symptom (0600, 31/SYS, DNS, IPv6, suite)…"
               aria-label="Search error catalog"
-              className="border-border/70 bg-background/50 text-foreground placeholder:text-muted-foreground/70 w-full rounded-md border px-2.5 py-1.5 font-mono text-xs"
+              className="border-border/70 bg-background/50 text-foreground placeholder:text-muted-foreground w-full rounded-md border px-2.5 py-1.5 font-mono text-xs"
             />
 
             <ul className="flex max-h-[340px] flex-col gap-2 overflow-y-auto pr-1">
