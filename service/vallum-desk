@@ -1953,7 +1953,8 @@ def index_page(open_signup, operator="vallum desk",
 
 
 def account_created_page(payload, operator="vallum desk",
-                         install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL):
+                         install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL,
+                         desk_origin=None):
     """The account-only signup answer (ADR-0047): the account number, shown
     once, and the next step — add a device. No ticket exists yet: each device
     gets its own when it enrols, so nothing on this page expires in fifteen
@@ -1981,6 +1982,20 @@ def account_created_page(payload, operator="vallum desk",
         f'href="data:text/plain;charset=utf-8,{quote(cred_file)}">'
         'Download both as a text file</a> — so closing this tab cannot lose them.</p>'
     )
+    # ADR-0047 Q4: a script-fired vallum://account handoff keeps the number
+    # out of browser history/prefetchers (the ticket Connect pattern). It
+    # records the account client-side; it enrols no device.
+    account_uri = f"vallum://account?token={token}"
+    if desk_origin:
+        account_uri += f"&desk={quote(desk_origin, safe='')}"
+    open_client = (f"""
+<p><button id="open-client">Open in Vallum client</button>
+<script>document.getElementById("open-client").onclick = function() {{
+  window.location = {json.dumps(account_uri)};
+}};</script>
+<small>Hands the account number to your client without re-typing it. Enrols
+no device — add one from your account page.</small></p>"""
+                   if token else "")
     manage = (f"""<form method="post" action="/account">
 <input type="hidden" name="token" value="{token}">
 <button>Manage this account</button></form>"""
@@ -2002,6 +2017,7 @@ ownership.</p>
 <pre id="acct-recovery">{recovery_code}</pre>
 <button type="button" data-copy="acct-recovery">Copy recovery code</button>
 {download}
+{open_client}
 <h2>Next: add a device</h2>
 <p>Open your account and use <b>Add a device</b> — each device gets its own
 join ticket, minted when the device enrols. Installing the client can come
@@ -2345,7 +2361,8 @@ def make_handler(desk):
                     code, payload = desk.signup(body, self._client_ip())
                     if code == 200:
                         self._send_html(account_created_page(payload, desk.config.operator_name,
-                                                             desk.config.install_source, desk.config.repo_url),
+                                                             desk.config.install_source, desk.config.repo_url,
+                                                             desk_origin=self._desk_origin()),
                                         private=True)
                     else:
                         self._send_html(error_page(payload.get("error", ""), desk.config.operator_name, desk.config.contact),

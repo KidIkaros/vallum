@@ -19,6 +19,12 @@ is parsed, not executed. A browser-triggered URI only ever reaches root
 through the named, audited `vallum-ops join` verb, never a wildcard.
 
 Usage: vallum-uri 'vallum://join?ticket=<urlencoded>&account=<hex>[&desk=<origin>]'
+       vallum-uri 'vallum://account?token=<hex>[&desk=<origin>]'
+
+vallum://account (ADR-0047 Q4) records the account number client-side so
+`vallum account` can manage it without re-pasting the shown-once number; it
+enrols no device. The token rides the URI fired by script, keeping it out of
+browser history and prefetchers, the same pattern as the join Connect link.
 """
 
 import os
@@ -65,6 +71,51 @@ def parse_uri(uri):
     return ticket, account, desk or None
 
 
+def parse_account_uri(uri):
+    """vallum://account?token=<32hex>[&desk=<origin>] — the account-number
+    handoff (ADR-0047 Q4). No ticket: this records the account client-side;
+    enrolment is a separate join. Strict shape, same boundary as join."""
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "vallum":
+        raise ValueError("not a vallum:// URI")
+    fields = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    token = fields.get("token", [""])[0]
+    desk = fields.get("desk", [""])[0]
+    if not ACCOUNT.fullmatch(token):
+        raise ValueError("the account number is 32 hex characters")
+    if desk and not DESK.fullmatch(desk):
+        raise ValueError("the desk origin is not an https://host[:port] origin")
+    return token, desk or None
+
+
+def _account_config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(base, "vallum", "account.toml")
+
+
+def _record_account(token, desk):
+    """Write the account number client-side (ADR-0047 Q4) so `vallum account`
+    can manage it without re-pasting the shown-once number. A minimal config:
+    [account] is what the read uses; the [interface] stub satisfies the parser
+    and is never run — this handoff enrols no device. 0600: bearer credential."""
+    path = _account_config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = ["# Vallum account, recorded from the desk's open-in-client link.",
+             "# Account-only: no device is enrolled here; add one from the desk.",
+             "[interface]",
+             'private_key = "account.key"',
+             "",
+             "[account]",
+             f'token = "{token}"']
+    if desk:
+        lines.append(f'endpoint = "{desk}"')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return path
+
+
 def _privileged_join_available():
     """True when passwordless sudo grants the audited dispatcher — the same
     trust boundary the TUI/GUI join uses. Probing `sudo -n -l` avoids running
@@ -82,9 +133,21 @@ def _privileged_join_available():
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 1:
-        print("usage: vallum-uri 'vallum://join?ticket=<t>&account=<token>'",
+        print("usage: vallum-uri 'vallum://join?...' | 'vallum://account?token=...'",
               file=sys.stderr)
         return 2
+    action = urllib.parse.urlparse(argv[0]).netloc or \
+        urllib.parse.urlparse(argv[0]).path.lstrip("/")
+    if action == "account":
+        try:
+            token, desk = parse_account_uri(argv[0])
+        except ValueError as error:
+            print(f"vallum-uri: refused — {error}", file=sys.stderr)
+            return 2
+        path = _record_account(token, desk)
+        print(f"vallum-uri: recorded your account at {path}")
+        print(f"Manage it with: vallum account --config {path}")
+        return 0
     try:
         ticket, account, desk = parse_uri(argv[0])
     except ValueError as error:

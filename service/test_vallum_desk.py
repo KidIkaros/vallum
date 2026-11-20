@@ -1382,6 +1382,14 @@ class ContactChannelTests(unittest.TestCase):
         self.assertIn("data:text/plain", html)
         self.assertEqual(html.count("data-copy="), 2)
 
+    def test_signup_page_offers_the_account_handoff_link(self):
+        html = desk_module.account_created_page(
+            {"token": "a" * 32, "recovery_code": "b" * 16,
+             "expires": "2026-12-03", "plan": "trial", "bytes_cap": 50 * 1024**3},
+            desk_origin="https://desk.wingman.gold")
+        self.assertIn("open-client", html)
+        self.assertIn("vallum://account?token=", html)
+
 
 class ReturnUsageTests(DeskTestCase):
     """Return-usage (validation premortem B2 / exit bar M5): 'wanted' is measured

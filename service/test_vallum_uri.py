@@ -211,5 +211,50 @@ class PrivilegedJoinTests(unittest.TestCase):
         self.assertIn("desk:\n", out)
 
 
+class AccountHandoffTests(unittest.TestCase):
+    """vallum://account (ADR-0047 Q4) records the account client-side; no device
+    is enrolled, and the token never sits in argv."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.old_xdg = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = self.tempdir.name
+        self.addCleanup(self._restore_xdg)
+
+    def _restore_xdg(self):
+        if self.old_xdg is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self.old_xdg
+
+    def _config(self):
+        return os.path.join(self.tempdir.name, "vallum", "account.toml")
+
+    def test_records_the_account_config_0600(self):
+        code = uri_module.main(
+            [f"vallum://account?token={TOKEN32}&desk=https://desk.wingman.gold"])
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(self._config()))
+        self.assertEqual(os.stat(self._config()).st_mode & 0o777, 0o600)
+        with open(self._config()) as f:
+            text = f.read()
+        self.assertIn(f'token = "{TOKEN32}"', text)
+        self.assertIn('endpoint = "https://desk.wingman.gold"', text)
+
+    def test_desk_less_account_records_no_endpoint(self):
+        code = uri_module.main([f"vallum://account?token={TOKEN32}"])
+        self.assertEqual(code, 0)
+        with open(self._config()) as f:
+            self.assertNotIn("endpoint", f.read())
+
+    def test_garbage_account_token_is_refused(self):
+        self.assertEqual(uri_module.main(["vallum://account?token=nothex"]), 2)
+
+    def test_garbage_desk_is_refused(self):
+        self.assertEqual(uri_module.main(
+            [f"vallum://account?token={TOKEN32}&desk=http://desk.example.com"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
