@@ -15,3 +15,5 @@ than its changelog claims.
 | 2026-11-19 | aff6a37 | desktop-bundle | the console does not ship in the alpha (ADR-0039); desktop bundle + GUI version bump deferred to beta |
 | 2026-11-19 | 54a2da4 | accept-verdicts | accept-desktop + desktop-bundle verdicts are beta-desktop scope (#33); all alpha-surface gates re-run at HEAD |
 | 2026-11-19 | 54a2da4 | desktop-bundle | beta desktop bundle, #33 tauri version mismatch; GUI excluded from alpha by ADR-0039 |
+| 2026-11-20 | ab92136 | accept-verdicts | accept-desktop/desktop-bundle/accept-verdicts are beta-desktop scope (ADR-0039, #33); all alpha-surface gates fresh at HEAD (pair 88, isolation 15, agent-enrol 25, install 4, ops 10, desk-restore 8, deployment-backup 12, many 2, verify-remote 42) |
+| 2026-11-20 | ab92136 | desktop-bundle | GUI console ships at beta (ADR-0039); version tracking fixed in #33 |
