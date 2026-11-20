@@ -46,6 +46,11 @@ command -v cargo-tauri >/dev/null 2>&1 || {
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [ -n "$version" ] || { echo "package-desktop: cannot read workspace version" >&2; exit 1; }
 
+# Single source of truth (#33): the workspace version drives the bundle name the
+# stager looks for, so sync it into tauri.conf.json before building. A stale
+# config version once produced a bundle the stager could not find (1.9.0 release).
+sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$version\"/" crates/vallum-gui/tauri.conf.json
+
 ( cd crates/vallum-gui && cargo tauri build --bundles "$BUNDLES" )
 
 mkdir -p "$OUT_DIR"

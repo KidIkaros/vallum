@@ -116,6 +116,17 @@ if ssh-keygen -Y verify -f "$sig_dir/allowed_signers" -n file \
 fi
 rm -rf "$sig_dir"
 
+echo "== GUI version tracks the workspace (#33)"
+# The desktop bundle name is built from the workspace version, but tauri.conf.json
+# carries its own; a stale one produced a bundle the stager could not find (1.9.0).
+ws_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+gui_version=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' crates/vallum-gui/tauri.conf.json | head -1)
+if [ "$ws_version" != "$gui_version" ]; then
+    echo "   fail  tauri.conf.json version $gui_version != workspace $ws_version (package-desktop.sh syncs it; bump together)" >&2
+    exit 1
+fi
+echo "   ok    GUI version $gui_version matches the workspace"
+
 echo "== release parity (HEAD vs the latest tag)"
 # A verdict on main is not a verdict on what a stranger downloads. Warn when the
 # tree is ahead of the latest release tag, so "verified" cannot quietly stand in
