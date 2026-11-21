@@ -180,7 +180,8 @@ def main(argv=None):
             result = {"peers": [{**row, "token": (row.get("token") or "")[:8] + "…"}
                                 for row in result["peers"]]}
         show(result, args.json,
-             ("peers", ["label", "token", "plan", "status", "expires", "bytes_cap"]))
+             ("peers", ["label", "token", "plan", "status", "expires",
+                        "paid_until", "bytes_cap"]))
     elif args.command == "devices":
         show(call(args.desk, "/api/admin/devices", token), args.json,
              ("devices", ["peer", "device", "status", "account", "account_plan"]))

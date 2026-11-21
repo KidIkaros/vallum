@@ -778,8 +778,12 @@ class Desk:
                 cap = known["bytes"] or self.config.trial_bytes
                 plan = known["plan"] or "trial"
                 device_slots = known["devices"]
+                # The code simulates a payment: a days payload marks the
+                # account paid through the same date it expires.
+                paid_through = expires if known["days"] else None
             else:
                 device_slots = None
+                paid_through = None
                 expires = self._trial_expiry()
                 cap = (0 if pending else
                        self.config.trial_bytes if code else self.config.open_trial_bytes)
@@ -803,12 +807,12 @@ class Desk:
                 cursor = self.db.execute(
                     "INSERT INTO accounts "
                     "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip,"
-                    "recovery_code_hash,device_cap) "
-                    "VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?)",
+                    "recovery_code_hash,device_cap,paid_until) "
+                    "VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?)",
                     ("account", token_digest(token), origin, plan, self._now(), expires, cap,
                      "pending" if pending else "active",
                      client_ip if client_ip and client_ip != "unknown" else None,
-                     recovery_code_hash, device_slots))
+                     recovery_code_hash, device_slots, paid_through))
                 label = f"account-{cursor.lastrowid}"
                 self.db.execute("UPDATE accounts SET label=? WHERE id=?",
                                 (label, cursor.lastrowid))
@@ -1140,9 +1144,15 @@ class Desk:
             if known["days"]:
                 # ISO dates compare lexicographically: the later of the two.
                 base = max(account["expires"], datetime.date.today().isoformat())
+                new_expires = (datetime.date.fromisoformat(base)
+                               + datetime.timedelta(days=known["days"])).isoformat()
                 updates.append("expires=?")
-                values.append((datetime.date.fromisoformat(base)
-                               + datetime.timedelta(days=known["days"])).isoformat())
+                values.append(new_expires)
+                # The code simulates a payment, so it writes what billing
+                # would: paid_until marks this a paid account, not a trial
+                # that merely got longer.
+                updates.append("paid_until=?")
+                values.append(new_expires)
             if known["bytes"]:
                 updates.append("bytes_cap=bytes_cap+?")
                 values.append(known["bytes"])
@@ -1173,10 +1183,11 @@ class Desk:
                 self.db.execute("ROLLBACK")
                 raise
             row = self.db.execute(
-                "SELECT expires, bytes_cap, plan, device_cap FROM accounts WHERE id=?",
-                (account["id"],)).fetchone()
+                "SELECT expires, paid_until, bytes_cap, plan, device_cap "
+                "FROM accounts WHERE id=?", (account["id"],)).fetchone()
         return 200, {"peer": self._account_name(account), "applied": code,
-                     "expires": row["expires"], "bytes_cap": row["bytes_cap"],
+                     "expires": row["expires"], "paid_until": row["paid_until"],
+                     "bytes_cap": row["bytes_cap"],
                      "plan": row["plan"], "device_cap": row["device_cap"]}
 
     def seat_state(self):
@@ -1901,7 +1912,8 @@ class Desk:
     def _list_peers(self, body):
         with self.lock:
             rows = self.db.execute(
-                "SELECT peer,label,token,plan,status,expires,bytes_cap FROM accounts").fetchall()
+                "SELECT peer,label,token,plan,status,expires,paid_until,bytes_cap "
+                "FROM accounts").fetchall()
         return 200, {"peers": [dict(row) for row in rows]}
 
     def _list_devices(self, body):
@@ -2581,6 +2593,8 @@ def account_page(view, token, notice="", operator="vallum desk"):
 </form>"""
     slots = (f" · {view['device_cap']} device slots"
              if view.get("device_cap") is not None else "")
+    paid = (f" · paid until {_esc(view['paid_until'])}"
+            if view.get("paid_until") else "")
     queued = view["status"] == "pending"
     waiting = (f"""<p><b>Your account is queued for space.</b> It exists —
 devices join the moment it activates. The desk promotes queued accounts
@@ -2590,7 +2604,7 @@ itself when room frees; a code activates you right now:</p>
 <p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
 <p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
-expires {_esc(view['expires'])} · {usage}{slots}.</p>
+expires {_esc(view['expires'])}{paid} · {usage}{slots}.</p>
 {waiting}
 <h2>Devices</h2>
 <p>{_esc(conversion_sentence(view['conversion']))}.</p>

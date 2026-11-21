@@ -2956,6 +2956,29 @@ class VoucherTests(DeskTestCase):
         self.assertEqual(code, 403)
         self.assertIn("invite-only", payload["error"])
 
+    def test_a_days_voucher_marks_the_account_paid(self):
+        """The code simulates a payment, so it writes what billing would:
+        paid_until — a trial that merely got longer would have it NULL."""
+        token = self._token()
+        _, minted = self.desk._mint_code({"days": 30, "plan": "plus"})
+        code, applied = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(applied["paid_until"], applied["expires"])
+        # a non-days payload does not fabricate a payment marker
+        _, minted2 = self.desk._mint_code({"bytes": 5000})
+        self.desk.voucher({"token": token, "code": minted2["code"]})
+        row = self.desk.db.execute("SELECT paid_until FROM accounts").fetchone()
+        self.assertEqual(row["paid_until"], applied["expires"])  # unchanged, not cleared
+
+    def test_a_signup_code_with_days_lands_paid(self):
+        _, minted = self.desk._mint_code({"days": 60})
+        code, payload = self.desk.signup({"code": minted["code"]})
+        self.assertEqual(code, 200)
+        row = self.desk.db.execute(
+            "SELECT expires, paid_until FROM accounts WHERE token=?",
+            (token_digest(payload["token"]),)).fetchone()
+        self.assertEqual(row["paid_until"], row["expires"])
+
     def test_a_voucher_grants_device_slots_additively(self):
         """The code is the purchase: slots on the account, not a global
         change — other accounts keep the default."""
