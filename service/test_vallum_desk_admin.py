@@ -90,6 +90,39 @@ class AdminCliTests(unittest.TestCase):
         self.assertEqual((row["days"], row["bytes"], row["plan"]),
                          (30, 2 * 1024 ** 3, "plus"))
 
+    def test_mint_code_carries_device_slots(self):
+        out = self.cli("mint-code", "--devices", "10", "--plan", "plus")
+        code = out.splitlines()[0].strip()
+        row = self.desk.db.execute(
+            "SELECT devices, plan FROM codes WHERE code=?", (code,)).fetchone()
+        self.assertEqual((row["devices"], row["plan"]), (10, "plus"))
+
+    def test_queue_reports_seats_and_the_fifo(self):
+        self.desk.config.open_signup = True
+        self.desk.config.max_active_accounts = 1
+        self.desk.signup({}, client_ip="198.51.100.1")
+        self.desk.signup({}, client_ip="198.51.100.2")
+        out = self.cli("queue")
+        self.assertIn("1/1 active", out)
+        self.assertIn("0 free", out)
+        self.assertIn("1 queued", out)
+        self.assertIn("#1 account-2", out)
+
+    def test_promote_activates_a_queued_account(self):
+        self.desk.config.open_signup = True
+        self.desk.config.max_active_accounts = 0
+        self.desk.signup({}, client_ip="198.51.100.9")
+        out = self.cli("promote", "--label", "account-1")
+        self.assertIn("account-1 active", out)
+        row = self.desk.db.execute("SELECT status FROM accounts WHERE id=1").fetchone()
+        self.assertEqual(row["status"], "active")
+
+    def test_set_plan_changes_the_device_allowance(self):
+        payload = self.signup()
+        out = self.cli("set-plan", "--token", payload["token"], "--device-cap", "9")
+        row = self.desk.db.execute("SELECT device_cap FROM accounts").fetchone()
+        self.assertEqual(row["device_cap"], 9)
+
     def test_accounts_lists_the_accounts(self):
         payload = self.signup()
         out = self.cli("accounts")

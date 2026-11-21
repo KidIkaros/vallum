@@ -1108,10 +1108,12 @@ class Desk:
 
     def voucher(self, body):
         """A code's payload applied to an existing account — Mullvad's
-        submit-voucher shape. Additive: the code's days extend the expiry
-        (from its current value, or today if it already lapsed), its bytes
-        grow the shared cap, its label replaces the plan; consumed bytes
-        stay consumed. The burn and the apply are one locked step."""
+        submit-voucher shape, and the payment simulation: days extend the
+        expiry (from its current value, or today if it already lapsed) and
+        stamp paid_until; bytes grow the shared cap; device slots widen the
+        allowance; the label replaces the plan; consumed bytes stay
+        consumed. On a queued account it also activates. The burn and the
+        apply are one locked step."""
         token = body.get("token") or ""
         code = (body.get("code") or "").strip()
         if not code:
@@ -1623,12 +1625,17 @@ class Desk:
     def _activate_pending(self, account_id):
         """Grant a queued account the open trial it would have had at
         arrival — expiry minted fresh so the wait never eats the clock.
-        The one grant shared by the sweep's FIFO and the admin's promote."""
+        The one grant shared by the sweep's FIFO and the admin's promote.
+
+        The WHERE names the legal transition: only a still-pending row is
+        touched, so the write documents the state machine instead of
+        blindly stamping 'active' over whatever the row has become."""
         with self.lock:
-            self.db.execute(
+            cursor = self.db.execute(
                 "UPDATE accounts SET status='active', bytes_cap=?, expires=? "
-                "WHERE id=?",
+                "WHERE id=? AND status='pending'",
                 (self.config.open_trial_bytes, self._trial_expiry(), account_id))
+            return cursor.rowcount == 1
 
     def _promote_pending(self):
         """Activate queued accounts FIFO while the desk has room.
@@ -1643,9 +1650,8 @@ class Desk:
             queued = self.db.execute(
                 "SELECT id, label FROM accounts WHERE status='pending' "
                 "ORDER BY id LIMIT ?", (room,)).fetchall()
-        for row in queued:
-            self._activate_pending(row["id"])
-        return [f"promoted {row['label']} (space freed)" for row in queued]
+        return [f"promoted {row['label']} (space freed)"
+                for row in queued if self._activate_pending(row["id"])]
 
     def _sweep_orphans(self):
         """Mark removed every peer row whose account is no longer active.
@@ -1779,9 +1785,10 @@ class Desk:
         }
 
     def _mint_code(self, body):
-        """Mint a single-use invite code. The code may carry a plan payload —
-        days, a byte cap, a plan label — which a signup presenting the code
-        lands instead of the trial defaults."""
+        """Mint a single-use code — the purchase record. Its payload is the
+        whole entitlement: days, a byte cap, device slots, a plan label.
+        A signup presenting it lands the payload; an account redeeming it
+        adds it. Payload-less, it is the trial."""
         code = secrets.token_hex(8)
         days = body.get("days")
         cap = body.get("bytes")
@@ -1965,7 +1972,9 @@ class Desk:
         if account["status"] != "pending":
             return 409, {"error": f"{label} is {account['status']} — "
                                   "only queued accounts promote"}
-        self._activate_pending(account["id"])
+        if not self._activate_pending(account["id"]):
+            return 409, {"error": f"{label} left the queue mid-command — "
+                                  "check `queue` again"}
         return 200, {"promoted": label,
                      "note": "active with the open trial — the account page "
                              "just works; nothing is sent to the user"}
@@ -2595,11 +2604,12 @@ def account_page(view, token, notice="", operator="vallum desk"):
              if view.get("device_cap") is not None else "")
     paid = (f" · paid until {_esc(view['paid_until'])}"
             if view.get("paid_until") else "")
+    voucher_block = f"<h3>Have a code?</h3>{voucher_form}"
     queued = view["status"] == "pending"
     waiting = (f"""<p><b>Your account is queued for space.</b> It exists —
 devices join the moment it activates. The desk promotes queued accounts
 itself when room frees; a code activates you right now:</p>
-<h3>Have a code?</h3>{voucher_form}""" if queued else "")
+{voucher_block}""" if queued else "")
     return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
 <p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
@@ -2615,7 +2625,7 @@ expires {_esc(view['expires'])}{paid} · {usage}{slots}.</p>
 <label>device name <input name="name" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits and dashes" required></label>
 <button>Get a join ticket</button>
 </form>
-{"" if queued else f"<h3>Have a code?</h3>{voucher_form}"}
+{"" if queued else voucher_block}
 <p><small>Your account number: <code>{_esc(token)}</code> — keep it safe;
 it is the only credential.</small></p>
 {DESK_FOOTER}"""
