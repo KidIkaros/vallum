@@ -64,6 +64,16 @@ approves, never transports.
   reach the desk directly.
 - **B — device-pull (chosen):** zero code; the client pulls and redeems live. Requires
   the client to reach the desk (it already does for the account read).
+- **C — OCRA-derived signup code (considered, rejected):** the operator proposed using
+  the SDK's OCRA (OriginSDK `src/ocra.rs`, RFC 6287; HOTP also present in `src/drbg/otp.rs`)
+  to generate a short code at signup. Rejected: OCRA is challenge–response and requires a
+  pre-shared key `K` both sides hold; enrolment is the act of *establishing* that key, so
+  the device holds nothing and cannot compute/verify a response. An OCRA-derived signup
+  code therefore collapses to a bearer token the desk looks up — identical to a random
+  code, with more machinery and no added security. OCRA fits post-enrolment step-up auth,
+  not bootstrap. If a human-transferable code is wanted (fallback A), use a **CSPRNG**
+  8+ digit code, single-use, short-TTL, burn-after-N-failures, bound to account + device
+  public line; the security is entropy + rate-limit + binding, not the derivation.
 
 ## Abuse resistance — bounded, not "impervious"
 
