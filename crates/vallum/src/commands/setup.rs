@@ -1231,7 +1231,7 @@ fn read_ticket_arg(arg: &str, stdin: impl std::io::BufRead) -> Result<String, Er
             say!("note: a ticket passed as an argument is visible in `ps` and stays in");
             say!("      shell history; `--join -` reads it from stdin instead");
         }
-        return Ok(arg.to_owned());
+        return unwrap_join_uri(arg);
     }
     let ticket = read_token_arg(Some("-"), stdin)?;
     if ticket.is_empty() {
@@ -1239,7 +1239,89 @@ fn read_ticket_arg(arg: &str, stdin: impl std::io::BufRead) -> Result<String, Er
             "no ticket on stdin: paste the `vallum1-join:…` line".to_owned(),
         ));
     }
+    unwrap_join_uri(&ticket)
+}
+
+/// A `vallum://join?ticket=…[&account=…][&desk=…]` URI is the desk's own
+/// envelope — its connect links and buttons emit that shape, and a pasted
+/// one lands here whenever vallum-uri's .desktop handler is not in the
+/// path. The ticket comes out of the envelope; `account`/`desk` take the
+/// same env channel vallum-uri sets (ADR-0046/0047), so the config records
+/// the same account either way.
+fn unwrap_join_uri(text: &str) -> Result<String, Error> {
+    if text.starts_with("vallum://") && !text.starts_with("vallum://join?") {
+        return Err(Error::Usage(
+            "that is a vallum:// link but not a join link — pass the \
+             `vallum://join?ticket=…` URI or the raw `vallum1-join:…` ticket"
+                .to_owned(),
+        ));
+    }
+    let Some(query) = text.strip_prefix("vallum://join?") else {
+        return Ok(text.to_owned());
+    };
+    let mut ticket = String::new();
+    for pair in query.split('&') {
+        let Some((key, raw)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = percent_decode(raw)?;
+        match key {
+            "ticket" => ticket = value,
+            "account" => {
+                let hex_ok = value.len() == 32
+                    && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if !hex_ok {
+                    return Err(Error::Usage(
+                        "the account number is 32 lowercase hex characters".to_owned(),
+                    ));
+                }
+                std::env::set_var("VALLUM_ACCOUNT", &value);
+            }
+            "desk" => {
+                crate::commands::account::parse_desk_endpoint(&value)?;
+                std::env::set_var("VALLUM_DESK_ENDPOINT", &value);
+            }
+            _ => {}
+        }
+    }
+    if ticket.is_empty() {
+        return Err(Error::Usage(
+            "a vallum://join URI carries a `ticket` parameter — this one has none".to_owned(),
+        ));
+    }
     Ok(ticket)
+}
+
+/// The `ticket=…`/`desk=…` values arrive percent-encoded: the ticket's `/`
+/// and `:` are escaped inside the URI. `+` means space under form encoding;
+/// the desk emits `%20`, but a link copied through a form-aware tool can
+/// carry it.
+fn percent_decode(raw: &str) -> Result<String, Error> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = raw.get(i + 1..i + 3).ok_or_else(|| {
+                    Error::Usage("a truncated %-escape in the URI".to_owned())
+                })?;
+                out.push(u8::from_str_radix(hex, 16).map_err(|_| {
+                    Error::Usage(format!("a bad %-escape `%{hex}` in the URI"))
+                })?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).map_err(|_| Error::Usage("the URI is not UTF-8".to_owned()))
 }
 
 /// Resolve `--token`: `-` reads a line from `stdin` so the token stays out of
@@ -1788,6 +1870,58 @@ mod tests {
         let ticket = "vallum1-join:192.168.1.1:51821/laptop/abc123/fingerprint";
         let mut cursor = std::io::Cursor::new("");
         assert_eq!(read_ticket_arg(ticket, &mut cursor).unwrap(), ticket);
+    }
+
+    /// The desk's connect button emits a `vallum://join` URI, not the raw
+    /// ticket. Pasted to `join -`, the envelope opens to the same ticket.
+    #[test]
+    fn a_join_uri_unwraps_to_its_ticket() {
+        let ticket = "vallum1-join:192.168.1.1:51821/laptop/abc123/fingerprint";
+        let uri = "vallum://join?ticket=vallum1-join%3A192.168.1.1%3A51821%2Flaptop%2Fabc123%2Ffingerprint";
+        assert_eq!(unwrap_join_uri(uri).unwrap(), ticket);
+    }
+
+    /// `account`/`desk` take the env channel vallum-uri already sets — a URI
+    /// pasted to `join -` records the same account the .desktop path does.
+    #[test]
+    fn a_join_uri_carries_the_account_and_desk_into_the_env() {
+        let uri = "vallum://join?ticket=vallum1-join%3Ah%3A1%2Fn%2Fi%2Ff\
+                   &account=0123456789abcdef0123456789abcdef\
+                   &desk=https%3A%2F%2Fdesk.example.com";
+        assert_eq!(
+            unwrap_join_uri(uri).unwrap(),
+            "vallum1-join:h:1/n/i/f"
+        );
+        assert_eq!(
+            std::env::var("VALLUM_ACCOUNT").unwrap(),
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            std::env::var("VALLUM_DESK_ENDPOINT").unwrap(),
+            "https://desk.example.com"
+        );
+        std::env::remove_var("VALLUM_ACCOUNT");
+        std::env::remove_var("VALLUM_DESK_ENDPOINT");
+    }
+
+    /// A malformed account or desk refuses rather than joining with half
+    /// the envelope honoured — the same strictness vallum-uri applies.
+    #[test]
+    fn a_join_uri_refuses_a_bad_account_or_desk() {
+        let base = "vallum://join?ticket=vallum1-join%3Ah%3A1%2Fn%2Fi%2Ff";
+        assert!(unwrap_join_uri(&format!("{base}&account=tooshort")).is_err());
+        assert!(unwrap_join_uri(&format!("{base}&desk=notaurl")).is_err());
+        assert!(unwrap_join_uri("vallum://join?account=0123456789abcdef0123456789abcdef").is_err());
+    }
+
+    /// Other `vallum://` links (e.g. `account`) name what they are rather
+    /// than falling through to the bare-server `--invite-id` path.
+    #[test]
+    fn a_non_join_vallum_uri_is_named_not_confused() {
+        let error = unwrap_join_uri("vallum://account?token=0123456789abcdef0123456789abcdef")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a join link"), "{error}");
     }
 
     /// A name is shell input, not an argument: it reaches the remote's

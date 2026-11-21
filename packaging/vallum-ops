@@ -8,7 +8,8 @@
 #
 #   vallum-ops full-tunnel [iface]   # the phase-3 trial (drift check, 90s revert timer)
 #   vallum-ops revert [iface]        # panic, restore split config, restart unit
-#   vallum-ops join                  # redeem a vallum1-join: ticket read on stdin
+#   vallum-ops join                  # redeem a ticket or vallum://join URI on stdin
+#   vallum-ops remove <name>         # reverse join: stop the client, drop config+key
 #   vallum-ops setup-remote <u@h>    # SSH enrolment against a remote server
 #   vallum-ops setup-server [..]     # initialise this host as a server
 #   vallum-ops invite <name> [..]    # mint an invite + start the responder
@@ -120,13 +121,15 @@ full-tunnel)
     exec bash "$LIB/go-full-tunnel.sh" "$target_iface"
     ;;
 join)
-    # Redeem a vallum1-join:... ticket passed on stdin. Line 1 is the
-    # ticket; an optional line 2 is the desk account token, re-exported as
-    # VALLUM_ACCOUNT; an optional line 3 is the desk origin, re-exported as
-    # VALLUM_DESK_ENDPOINT. Both ride stdin because the caller's env dies at
-    # sudo/pkexec (sudoers grants the dispatcher only, no SETENV), and argv
-    # would put the credential in ps. `vallum join` seals them into [account]
-    # (ADR-0046, #32) — an env-only endpoint never crossed sudo.
+    # Redeem a ticket passed on stdin. Line 1 is the ticket — the raw
+    # `vallum1-join:…` string or the desk's `vallum://join?ticket=…` URI,
+    # which `vallum join` unwraps itself; an optional line 2 is the desk
+    # account token, re-exported as VALLUM_ACCOUNT; an optional line 3 is
+    # the desk origin, re-exported as VALLUM_DESK_ENDPOINT. Both ride stdin
+    # because the caller's env dies at sudo/pkexec (sudoers grants the
+    # dispatcher only, no SETENV), and argv would put the credential in ps.
+    # `vallum join` seals them into [account] (ADR-0046, #32) — an env-only
+    # endpoint never crossed sudo.
     IFS= read -r join_ticket
     IFS= read -r join_account || join_account=""
     IFS= read -r join_desk || join_desk=""
@@ -142,6 +145,22 @@ join)
     else
         printf '%s\n' "$join_ticket" | "$VALLUM_BIN" join -
     fi
+    ;;
+remove)
+    # Reverse `join` for a client this machine enrolled: disable and stop
+    # its units, then drop the config + key from /etc/vallum — the out-of-
+    # /etc cleanup no unprivileged user can do themselves (`vallum client
+    # teardown --purge` needs root for the systemd half). A console's
+    # "remove this account" affordance has nothing else to call.
+    iface=${2:-}
+    require_iface "$iface"
+    target_conf=$(conf_or_fail "$iface") || exit 1
+    if grep -q '^\[enroll\]' "$target_conf" 2>/dev/null; then
+        echo "vallum-ops: '$target_conf' is a server config — remove is for" >&2
+        echo "  enrolled clients; a server's teardown is 'vallum server teardown'." >&2
+        exit 2
+    fi
+    exec "$VALLUM_BIN" client teardown --config "$target_conf" --purge
     ;;
 setup-remote)
     # Enrol this client over SSH against a remote Vallum server.
@@ -377,16 +396,25 @@ status)
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
     stem=$(stem_or_self "$req_iface")
+    # `show --config` resolves the socket itself: the daemon names it for
+    # the INTERFACE (`vallum-u0007-do`), which is not the config stem on an
+    # enrolled client — a stem-built path silently answered "handshake: none"
+    # for a live tunnel.
+    target_conf=$(conf_or_fail "$req_iface") || exit 1
     echo "unit:      $(systemctl is-active "vallum@$stem") ($(systemctl is-enabled "vallum@$stem" 2>&1))"
     echo "guard:     $(systemctl is-active "vallum-guard@$stem" 2>&1)"
     echo "quick:     $(systemctl is-active "vallum-quick@$stem" 2>&1)"
     echo "dead-man:  $(systemctl is-active "vallum-deadman@$stem.timer" 2>&1)"
     echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
     echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
-    echo "handshake: $(/usr/bin/vallum show --control "/run/vallum/$stem.sock" 2>/dev/null | grep -m1 last_handshake_time_sec || echo none)"
+    # Three states, not one "none": the field only exists for a peer with a
+    # live session — absent can mean "no session" or "daemon did not answer".
+    show_out=$(/usr/bin/vallum show --config "$target_conf" 2>/dev/null)
+    hs=$(grep -m1 last_handshake_time_sec <<<"$show_out" || true)
+    echo "handshake: ${hs:-$([ -n "$show_out" ] && echo 'no live session' || echo 'no answer')}"
     # The build the daemon is actually running, so two hosts can be compared
     # without trusting either one's working tree.
-    echo "build:     $(/usr/bin/vallum show --control "/run/vallum/$stem.sock" 2>/dev/null | sed -n 's/^ *vallum_build=//p' | head -1 || echo none)"
+    echo "build:     $(sed -n 's/^ *vallum_build=//p' <<<"$show_out" | head -1 || echo none)"
     # Every enabled tunnel unit needs a config, or boot ends with a failed unit
     # the operator has to interpret. A leftover test unit (vallum@owtest0) did
     # exactly that until 2026-11-11. Enabled instances of a template are the
@@ -413,7 +441,7 @@ journal)
         --no-pager -o short-iso -n "$lines"
     ;;
 *)
-    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update}" >&2
+    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|remove <name>|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update}" >&2
     exit 2
     ;;
 esac

@@ -87,7 +87,11 @@ pub fn teardown(args: &TeardownArgs) -> Result<(), Error> {
         .and_then(|cfg| cfg.interface.control.clone())
         .unwrap_or_else(|| vallum_config::socket_path(&interface));
 
+    // The set join enables: the tunnel, its route/DNS helper, and the
+    // watcher — teardown reverses join or the leftover units fire at boot
+    // against a config that may already be gone.
     for unit in [
+        format!("vallum-quick-watch@{instance}"),
         format!("vallum-quick@{instance}"),
         format!("vallum@{instance}"),
     ] {
