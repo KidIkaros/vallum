@@ -422,8 +422,10 @@ install_binaries() {
     # it is traversable. Fail-soft: a host without group management keeps the
     # owner-only socket — the daemon still runs, the console just elevates. The
     # daemon widens the socket to 0660 only when it is root or in this group, so a
-    # personal client dropped to its login user is unaffected.
-    if command -v groupadd >/dev/null 2>&1; then
+    # personal client dropped to its login user is unaffected. A staged install
+    # (--root) touches no live system: there is no /etc/group to edit and the
+    # caller is not root, so the whole block is skipped there.
+    if [ -z "${ROOT:-}" ] && command -v groupadd >/dev/null 2>&1; then
         getent group vallum >/dev/null 2>&1 || run groupadd --system vallum
         if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && command -v usermod >/dev/null 2>&1; then
             run usermod -aG vallum "$SUDO_USER"
