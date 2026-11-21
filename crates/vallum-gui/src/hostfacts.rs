@@ -237,10 +237,14 @@ pub(crate) fn plan_from_facts(facts: &HostFacts, already_full: bool) -> serde_js
 }
 
 /// The control-surface write gate. Every endpoint that can change host state
-/// or touch the tunnel refuses to act unless the control socket is 0600 and
-/// the runtime directory is not world-writable. A wider socket mode exposes
-/// `--dump` (the private key) to every local user, so writes fail loudly
-/// rather than succeed silently in a broken deployment.
+/// or touch the tunnel refuses to act when the control socket is reachable
+/// by "other" users — a broken deployment exposes --dump to every local
+/// account. Group access is a deployment *choice*, not breakage: ADR-0048
+/// widens the socket to 0660 root:vallum on purpose, and the daemon itself
+/// enforces read-vs-write per peer credential (group members get the
+/// redacted console and EPERM on mutations). The gate's job is only to keep
+/// the GUI's mutations from running inside a deployment that is wrong in a
+/// way the daemon cannot compensate for.
 /// What is on this host, before any daemon exists to ask. Every field is a fact
 /// read from disk or systemd — a first-run screen that guesses is worse than one
 /// that says nothing.
@@ -372,9 +376,13 @@ pub(crate) fn write_gate(socket: &std::path::Path) -> Result<(), String> {
     let meta =
         std::fs::metadata(socket).map_err(|error| format!("control socket unreadable: {error}"))?;
     let mode = meta.permissions().mode() & 0o777;
-    if mode != 0o600 {
+    // "other" bits are the broken-deployment signature: owner (0600) and the
+    // ADR-0048 group console (0660) are both intended. Who may actually mutate
+    // is the daemon's call — SO_PEERCRED, not mode bits.
+    if mode & 0o007 != 0 {
         return Err(format!(
-            "control socket is {:o}, not 0600 — writes refused: a wider mode exposes --dump (the private key)",
+            "control socket is {:o} — other-users can reach it, writes refused: \
+             a socket any local account can open exposes --dump (the private key)",
             mode
         ));
     }
