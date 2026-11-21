@@ -2396,6 +2396,31 @@ it is the only credential.</small></p>
 {DESK_FOOTER}"""
 
 
+def revoke_confirm_page(view, peer, token, operator="vallum desk"):
+    """The forcing function on the only destructive self-service action:
+    removal is a second click that names what it costs. No-script — a bare
+    POST answers this page instead of acting."""
+    device = next((d for d in view["devices"] if d["peer"] == peer), None)
+    label = _esc(device["label"]) if device else _esc(peer)
+    return f"""<!doctype html><title>remove a device — {_esc(operator)}</title>
+{DESK_STYLE}
+<p><small>{_esc(operator)}</small></p>
+<h1>Remove {label}?</h1>
+<p>This withdraws the device from the server — it must enrol again with a
+new ticket to reconnect. The account and its other devices are unaffected.</p>
+<form method="post" action="/account/revoke">
+<input type="hidden" name="token" value="{_esc(token)}">
+<input type="hidden" name="peer" value="{_esc(peer)}">
+<input type="hidden" name="confirm" value="yes">
+<button>Remove it</button>
+</form>
+<form method="post" action="/account">
+<input type="hidden" name="token" value="{_esc(token)}">
+<button>Keep it</button>
+</form>
+{DESK_FOOTER}"""
+
+
 def make_handler(desk):
     """The HTTP adapter. It translates requests into desk calls and nothing
     else: no account rule lives here."""
@@ -2559,6 +2584,19 @@ def make_handler(desk):
                                         status=code, private=True)
                     return
                 elif self.path == "/account/revoke":
+                    if body.get("confirm") != "yes":
+                        # A bare click must not withdraw a device: the
+                        # forcing function names the cost on a second,
+                        # explicit step (no-script, like every page here).
+                        view_code, view = desk.account(body.get("token") or "")
+                        if view_code != 200:
+                            self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
+                                            status=view_code, private=True)
+                        else:
+                            self._send_html(revoke_confirm_page(view, body.get("peer", ""),
+                                                                body.get("token", ""), desk.config.operator_name),
+                                            private=True)
+                        return
                     code, payload = desk.remove_device(body)
                     notice = (f"removed {payload['removed']}" if code == 200
                               else payload.get("error", "remove failed"))

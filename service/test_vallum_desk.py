@@ -1867,7 +1867,7 @@ class AccountPageTests(HttpTests):
         self.desk.add_device({"token": token, "name": "friend"})
         self.desk.add_device({"token": token, "name": "laptop"})
         status, _, _ = self.post_headers(
-            "/account/revoke", f"token={token}&peer=u0002-laptop",
+            "/account/revoke", f"token={token}&peer=u0002-laptop&confirm=yes",
             "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         self.assertEqual(self.daemon.removed, ["u0002-laptop"])
@@ -1876,10 +1876,30 @@ class AccountPageTests(HttpTests):
         _, other_device = self.desk.add_device({"token": other_token, "name": "other"})
         other_peer = other_device["peer"]
         status, _, _ = self.post_headers(
-            "/account/revoke", f"token={token}&peer={other_peer}",
+            "/account/revoke", f"token={token}&peer={other_peer}&confirm=yes",
             "application/x-www-form-urlencoded")
         self.assertEqual(status, 404)
         self.assertNotIn(other_peer, self.daemon.removed)
+
+    def test_a_bare_revoke_click_confirms_before_it_acts(self):
+        # The only destructive self-service action needs a forcing function:
+        # the first click answers a page naming what removal costs, and the
+        # peer is untouched until `confirm=yes` arrives.
+        token = self._token()
+        self.desk.add_device({"token": token, "name": "laptop"})
+        status, _, page = self.post_headers(
+            "/account/revoke", f"token={token}&peer=u0001-laptop",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn("Remove laptop?", page)
+        self.assertIn('name="confirm" value="yes"', page)
+        self.assertEqual(self.daemon.removed, [])
+        status, _, page = self.post_headers(
+            "/account/revoke", f"token={token}&peer=u0001-laptop&confirm=yes",
+            "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.daemon.removed, ["u0001-laptop"])
+        self.assertIn("removed u0001-laptop", page)
 
     def test_the_ticket_page_emits_the_deep_link_and_the_number(self):
         token = self._token()
