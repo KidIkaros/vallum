@@ -736,14 +736,64 @@ class OnDemandTests(DeskTestCase):
         other = self.desk.signup({}, client_ip="198.51.100.10")
         self.assertEqual(other[0], 200)
 
-    def test_capacity_is_a_ceiling_not_a_formality(self):
+    def test_capacity_queues_an_open_signup_instead_of_refusing_it(self):
+        """Account then code: space gates entitlement, never existence — at
+        capacity the account persists pending, retained for activation."""
         self.open_desk()
         for n in range(2):
             self.assertEqual(
                 self.desk.signup({}, client_ip=f"198.51.100.{n}")[0], 200)
         code, payload = self.desk.signup({}, client_ip="198.51.100.9")
-        self.assertEqual(code, 503)
-        self.assertIn("capacity", payload["error"])
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["status"], "pending")
+        self.assertEqual(payload["bytes_cap"], 0)
+        self.assertIn("token", payload)  # the account exists — it has a number
+
+    def test_a_pending_account_cannot_add_devices_until_activated(self):
+        self.open_desk()
+        self.config.max_active_accounts = 0  # every open signup queues
+        _, account = self.desk.signup({}, client_ip="198.51.100.9")
+        code, payload = self.desk.add_device(
+            {"token": account["token"], "name": "laptop"})
+        self.assertEqual(code, 403)
+        self.assertIn("queued", payload["error"])
+
+    def test_a_voucher_activates_a_queued_account_immediately(self):
+        self.open_desk()
+        self.config.max_active_accounts = 0
+        _, account = self.desk.signup({}, client_ip="198.51.100.9")
+        _, minted = self.desk._mint_code({"days": 30, "bytes": 5000, "plan": "plus"})
+        code, applied = self.desk.voucher(
+            {"token": account["token"], "code": minted["code"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(applied["plan"], "plus")
+        self.assertEqual(applied["bytes_cap"], 5000)
+        row = self.desk.db.execute(
+            "SELECT status FROM accounts WHERE label=?",
+            (f"account-1",)).fetchone()
+        self.assertEqual(row["status"], "active")
+        # and devices join now
+        code, _ = self.desk.add_device({"token": account["token"], "name": "laptop"})
+        self.assertEqual(code, 200)
+
+    def test_the_sweep_promotes_queued_accounts_as_space_frees(self):
+        self.open_desk()
+        self.config.max_active_accounts = 1
+        _, first = self.desk.signup({}, client_ip="198.51.100.1")
+        _, queued = self.desk.signup({}, client_ip="198.51.100.2")
+        self.assertEqual(queued["status"], "pending")
+        # space frees — the first account leaves active
+        self.desk.db.execute(
+            "UPDATE accounts SET status='revoked' WHERE id=1")
+        actions = self.desk.sweep_once()
+        self.assertTrue(any("promoted" in a for a in actions))
+        row = self.desk.db.execute(
+            "SELECT status, bytes_cap FROM accounts WHERE id=2").fetchone()
+        self.assertEqual(row["status"], "active")
+        self.assertEqual(row["bytes_cap"], 500)  # the open trial, minted fresh
+        # the promoted account behaves like any signup
+        code, _ = self.desk.add_device({"token": queued["token"], "name": "laptop"})
+        self.assertEqual(code, 200)
 
     def test_closed_mode_still_refuses_without_a_code(self):
         code, payload = self.desk.signup({}, client_ip="198.51.100.9")
@@ -1537,6 +1587,23 @@ class ContactChannelTests(unittest.TestCase):
             desk_origin="https://desk.wingman.gold")
         self.assertIn("open-client", html)
         self.assertIn("vallum://account?token=", html)
+
+    def test_the_created_page_says_what_queued_means(self):
+        html = desk_module.account_created_page(
+            {"token": "a" * 32, "recovery_code": "b" * 16, "status": "pending",
+             "expires": "2026-12-03", "plan": "trial", "bytes_cap": 0})
+        self.assertIn("queued for space", html)
+        self.assertIn("a code activates", html)
+        self.assertIn("While you wait", html)
+
+    def test_the_account_page_leads_with_activation_when_queued(self):
+        view = {"label": "account-1", "plan": "trial", "status": "pending",
+                "expires": "2026-12-03", "bytes_cap": 0, "bytes_used": 0,
+                "conversion": desk_module.account_conversion([]), "devices": []}
+        html = desk_module.account_page(view, "t" * 32)
+        self.assertIn("queued for space", html)
+        # the code form is hoisted above the device table for a queued account
+        self.assertLess(html.index("account/voucher"), html.index("<h2>Devices"))
 
 
 class ReturnUsageTests(DeskTestCase):

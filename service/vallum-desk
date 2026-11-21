@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS codes (
 );
 """
 
-ACCOUNT_STATUSES = ("active", "expired", "overquota", "revoked")
+ACCOUNT_STATUSES = ("active", "pending", "expired", "overquota", "revoked")
 
 # Refusal classes for the conversion funnel's per-step counters (premortem
 # 2026-11-19, mode 5). The HTTP code maps to a stable, readable reason label so a
@@ -743,8 +743,11 @@ class Desk:
                     return 403, {"error": "unknown invite code — this desk is invite-only"}
             active = self.db.execute(
                 "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0]
-            if active >= self.config.max_active_accounts:
-                return 503, {"error": "this desk is at capacity — ask the operator"}
+            # Account creation is never refused: at capacity an open signup
+            # lands pending — retained, promoted by the sweep when space
+            # frees, or activated now by a voucher. A code bypasses the cap:
+            # the operator issued it knowing the space.
+            pending = not code and active >= self.config.max_active_accounts
             # A code may carry a plan payload (days/bytes/plan); a payload-less
             # code — minted bare, or from the operator's file — means the trial.
             if known and (known["days"] or known["bytes"] or known["plan"]):
@@ -753,7 +756,8 @@ class Desk:
                 plan = known["plan"] or "trial"
             else:
                 expires = self._trial_expiry()
-                cap = self.config.trial_bytes if code else self.config.open_trial_bytes
+                cap = (0 if pending else
+                       self.config.trial_bytes if code else self.config.open_trial_bytes)
                 plan = "trial"
             token = secrets.token_hex(16)
             # A recovery code shown once alongside the number, stored hashed: the
@@ -776,7 +780,8 @@ class Desk:
                     "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip,"
                     "recovery_code_hash) "
                     "VALUES (NULL,?,?,?,?,?,?,?,?,?,?)",
-                    ("account", token_digest(token), origin, plan, self._now(), expires, cap, "active",
+                    ("account", token_digest(token), origin, plan, self._now(), expires, cap,
+                     "pending" if pending else "active",
                      client_ip if client_ip and client_ip != "unknown" else None,
                      recovery_code_hash))
                 label = f"account-{cursor.lastrowid}"
@@ -795,6 +800,7 @@ class Desk:
                 raise
         return 200, {"token": token, "recovery_code": recovery_code, "expires": expires,
                      "plan": plan, "bytes_cap": cap,
+                     "status": "pending" if pending else "active",
                      "install": "curl -fsSL -o /tmp/vallum-install.sh "
                                f"{self.config.install_source}"
                                " && sudo bash /tmp/vallum-install.sh --from-release --install-only",
@@ -1011,6 +1017,10 @@ class Desk:
             if not account:
                 return 404, {"error": "unknown account token"}
             if account["status"] != "active":
+                if account["status"] == "pending":
+                    return 403, {"error": "your account is queued for space — a code "
+                                          "activates it now below, or the desk promotes "
+                                          "queued accounts itself when room frees"}
                 return 403, {"error": f"account is {account['status']} — "
                                       "devices can only join an active account"}
         daemon_peers = self._daemon_peers()
@@ -1068,9 +1078,9 @@ class Desk:
             account = self._account_by_token(token)
             if not account:
                 return 404, {"error": "unknown account token"}
-            if account["status"] != "active":
+            if account["status"] not in ("active", "pending"):
                 return 403, {"error": f"account is {account['status']} — "
-                                      "only an active account redeems a code"}
+                                      "only an active or queued account redeems a code"}
             known = self.db.execute(
                 "SELECT used_by, days, bytes, plan FROM codes WHERE code=?",
                 (code,)).fetchone()
@@ -1085,6 +1095,10 @@ class Desk:
                 return 400, {"error": "this code carries no plan payload — "
                                       "nothing to grant (it still works for signup)"}
             updates, values = [], []
+            if account["status"] == "pending":
+                # A code is capacity, granted: the queued account skips the
+                # sweep's waitlist entirely.
+                updates.append("status='active'")
             if known["days"]:
                 # ISO dates compare lexicographically: the later of the two.
                 base = max(account["expires"], datetime.date.today().isoformat())
@@ -1533,8 +1547,37 @@ class Desk:
                 actions.append(self._revoke(row, reason, used))
         actions.extend(self._sweep_orphans())
         actions.extend(self._sweep_ghost_reservations(active, self._daemon_peers()))
+        actions.extend(self._promote_pending())
         self.record_connection_days()
         return actions
+
+    def _promote_pending(self):
+        """Activate queued accounts FIFO while the desk has room.
+
+        A pending account is a signup the cap refused capacity, not
+        existence: space is the queue's only credential. Promotion grants
+        the same open trial it would have had at arrival — the wait does
+        not eat the clock, so expiry is minted fresh here."""
+        with self.lock:
+            room = (self.config.max_active_accounts - self.db.execute(
+                "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0])
+            if room <= 0:
+                return []
+            queued = self.db.execute(
+                "SELECT id, label FROM accounts WHERE status='pending' "
+                "ORDER BY id LIMIT ?", (room,)).fetchall()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                for row in queued:
+                    self.db.execute(
+                        "UPDATE accounts SET status='active', bytes_cap=?, "
+                        "expires=? WHERE id=?",
+                        (self.config.open_trial_bytes, self._trial_expiry(), row["id"]))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return [f"promoted {row['label']} (space freed)" for row in queued]
 
     def _sweep_orphans(self):
         """Mark removed every peer row whose account is no longer active.
@@ -2096,6 +2139,13 @@ def account_created_page(payload, operator="vallum desk",
     expires = _esc(payload.get("expires", ""))
     plan = _esc(payload.get("plan") or "trial")
     gib = payload.get("bytes_cap", 0) // (1024 ** 3)
+    queued = payload.get("status") == "pending"
+    state_line = ("<p><b>Your account is queued for space.</b> It exists now — "
+                  "the desk activates queued accounts itself when room frees, "
+                  "and a code activates yours immediately from the account page.</p>"
+                  if queued else
+                  f"<p>Plan {plan} until {expires} or {gib} GiB "
+                  "(shared across your devices).</p>")
     # A no-script download (data URI) so closing the tab cannot lose the
     # shown-once secrets, plus local-only copy buttons (clipboard, no network,
     # no storage — the page still works with scripting off).
@@ -2104,7 +2154,7 @@ def account_created_page(payload, operator="vallum desk",
         f"Vallum account — {operator}",
         f"Account number: {payload.get('token', '')}",
         f"Recovery code: {payload.get('recovery_code', '')}",
-        f"Plan: {plan} until {expires}",
+        f"Status: queued for space" if queued else f"Plan: {plan} until {expires}",
         "",
         "Keep this file private. The account number is the only credential this",
         "account has; the recovery code proves ownership if you lose the number.",
@@ -2140,7 +2190,7 @@ no device — add one from your account page.</small></p>"""
 <p>Shown once. Copy your account number now — the desk does not send it
 anywhere else. It is the only credential this account ever has; treat it
 like a password.</p>
-<p>Plan {plan} until {expires} or {gib} GiB (shared across your devices).</p>
+{state_line}
 <pre id="acct-token">{token}</pre>
 <button type="button" data-copy="acct-token">Copy account number</button>
 <p>Also copy your <b>recovery code</b> and store it <i>separately</i>. If you
@@ -2151,7 +2201,9 @@ ownership.</p>
 <button type="button" data-copy="acct-recovery">Copy recovery code</button>
 {download}
 {open_client}
-<h2>Next: add a device</h2>
+<h2>{"While you wait: install the client" if queued else "Next: add a device"}</h2>
+{"" if not queued else "<p>Devices join once the account activates — a code on "
+"your account page activates it now, or the desk promotes it when space frees.</p>"}
 <p>Open your account and use <b>Add a device</b> — each device gets its own
 join ticket, minted when the device enrols. Installing the client can come
 first; your account outlives any ticket.</p>
@@ -2394,11 +2446,22 @@ def account_page(view, token, notice="", operator="vallum desk"):
              f"usage unknown — the server could not be asked "
              f"({cap_gib:.1f} GiB cap, shared across devices)")
     banner = f"<p><b>{_esc(notice)}</b></p>" if notice else ""
+    voucher_form = f"""<form method="post" action="/account/voucher">
+<input type="hidden" name="token" value="{_esc(token)}">
+<label>code <input name="code" required></label>
+<button>Apply</button>
+</form>"""
+    queued = view["status"] == "pending"
+    waiting = (f"""<p><b>Your account is queued for space.</b> It exists —
+devices join the moment it activates. The desk promotes queued accounts
+itself when room frees; a code activates you right now:</p>
+<h3>Have a code?</h3>{voucher_form}""" if queued else "")
     return f"""<!doctype html><title>{_esc(operator)} — account</title>{ACCOUNT_STYLE}
 <p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
 <p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
 expires {_esc(view['expires'])} · {usage}.</p>
+{waiting}
 <h2>Devices</h2>
 <p>{_esc(conversion_sentence(view['conversion']))}.</p>
 <table><tr><th>name</th><th>peer</th><th>status</th><th>connection</th><th></th></tr>{devices}</table>
@@ -2408,12 +2471,7 @@ expires {_esc(view['expires'])} · {usage}.</p>
 <label>device name <input name="name" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits and dashes" required></label>
 <button>Get a join ticket</button>
 </form>
-<h3>Have a code?</h3>
-<form method="post" action="/account/voucher">
-<input type="hidden" name="token" value="{_esc(token)}">
-<label>code <input name="code" required></label>
-<button>Apply</button>
-</form>
+{"" if queued else f"<h3>Have a code?</h3>{voucher_form}"}
 <p><small>Your account number: <code>{_esc(token)}</code> — keep it safe;
 it is the only credential.</small></p>
 {DESK_FOOTER}"""
