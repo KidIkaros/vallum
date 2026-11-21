@@ -61,10 +61,10 @@ pub fn seal_ticket<S: CryptoSuite + ?Sized>(
     let encapsulation = suite
         .kem_encaps(device_pk, randomness)
         .map_err(|error| format!("seal encaps: {error}"))?;
-    let key = seal_key(suite, &encapsulation.shared_secrets, aad)?;
-    let ct = suite
-        .aead_seal(&key, nonce, aad, ticket)
-        .map_err(|error| format!("seal aead: {error}"))?;
+    let mut key = seal_key(suite, &encapsulation.shared_secrets, aad)?;
+    let ct = suite.aead_seal(&key, nonce, aad, ticket);
+    vallum_crypto::scrub(&mut key);
+    let ct = ct.map_err(|error| format!("seal aead: {error}"))?;
     Ok(SealedTicket {
         kem_ct: encapsulation.ciphertext.as_bytes().to_vec(),
         nonce: *nonce,
@@ -83,10 +83,10 @@ pub fn open_ticket<S: CryptoSuite + ?Sized>(
     let legs = suite
         .kem_decaps(device_sk, &sealed.kem_ct)
         .map_err(|error| format!("open decaps: {error}"))?;
-    let key = seal_key(suite, &legs, aad)?;
-    suite
-        .aead_open(&key, &sealed.nonce, aad, &sealed.ct)
-        .map_err(|error| format!("open aead: {error}"))
+    let mut key = seal_key(suite, &legs, aad)?;
+    let opened = suite.aead_open(&key, &sealed.nonce, aad, &sealed.ct);
+    vallum_crypto::scrub(&mut key);
+    opened.map_err(|error| format!("open aead: {error}"))
 }
 
 impl SealedTicket {
@@ -204,4 +204,59 @@ mod tests {
         let bad = r#"{"kem_ct":"00","nonce":"00","ct":"00"}"#;
         assert!(SealedTicket::from_json(bad).is_err());
     }
+
+    // ── frozen vector ────────────────────────────────────────────────
+    //
+    // ADR-0049 promised a known-answer test: same inputs → same blob is
+    // `the_same_inputs_seal_deterministically`, but that pins only
+    // self-consistency. This freezes the actual bytes. `kem_ct` is several
+    // KB, so it is pinned by length + a suite hash (the same convention
+    // interop.rs uses for its large messages); `ct` is small and pinned
+    // verbatim — and since it is an AEAD under a key derived from the KEM
+    // shared secrets, it transitively pins the whole composition.
+
+    #[test]
+    #[ignore = "run with --ignored to print the current seal vector"]
+    fn dump_seal_vector() {
+        let (pk, _sk) = device_keypair(&[7u8; 32]);
+        let ticket = b"vallum1-join:host:51820/laptop/id/token/fp";
+        let sealed = seal_ticket(&suite(), ticket, &pk, AAD, &[1u8; 32], &[2u8; 24]).expect("seal");
+        println!("kem_ct_len {}", sealed.kem_ct.len());
+        println!(
+            "kem_ct_hash {}",
+            hex_encode(&suite().hash(b"vallum-seal-kat-v1", &sealed.kem_ct))
+        );
+        println!("ct         {}", hex_encode(&sealed.ct));
+    }
+
+    #[test]
+    fn the_seal_composition_is_frozen() {
+        // Regenerate with:
+        //   cargo test -p vallum --lib seal::tests::dump_seal_vector -- --ignored --nocapture
+        let (pk, sk) = device_keypair(&[7u8; 32]);
+        let ticket = b"vallum1-join:host:51820/laptop/id/token/fp";
+        let sealed = seal_ticket(&suite(), ticket, &pk, AAD, &[1u8; 32], &[2u8; 24]).expect("seal");
+        assert_eq!(sealed.kem_ct.len(), KAT_KEM_CT_LEN);
+        assert_eq!(
+            hex_encode(&suite().hash(b"vallum-seal-kat-v1", &sealed.kem_ct)),
+            KAT_KEM_CT_HASH,
+            "the KEM leg changed bytes — the seal contract is broken"
+        );
+        assert_eq!(
+            hex_encode(&sealed.ct),
+            KAT_CT,
+            "the combined key or AEAD changed — the seal contract is broken"
+        );
+        // A frozen blob must still open — the vector is a live contract, not
+        // a museum piece.
+        assert_eq!(
+            open_ticket(&suite(), &sealed, &sk, AAD).expect("open"),
+            ticket
+        );
+    }
+
+    const KAT_KEM_CT_LEN: usize = 2159;
+    const KAT_KEM_CT_HASH: &str =
+        "fb6a9bea418edeaf86fd2a48460ced7532d3e6f169378b752592b6c7483f991d";
+    const KAT_CT: &str = "6b14a1957d9f956443a047d55b963eac9a6b420c71ed8137603bc80480b9858ed69c8d0319f01526e588ac890a22499aece5437bf29478173f13e3404988db312d724435e44ff8e7d9c2";
 }

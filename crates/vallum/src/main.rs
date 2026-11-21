@@ -184,7 +184,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run::run(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keys::keygen(&args),
         Command::Pubkey(args) => keys::pubkey(&args, cli.allow_insecure_key_permissions),
-        Command::OpenTicket(args) => keys::open_ticket(&args),
+        Command::OpenTicket(args) => keys::open_ticket(&args, cli.allow_insecure_key_permissions),
         Command::Genpsk => keys::genpsk(),
         Command::Show(args) => control::show(&args),
         Command::Setconf(args) => control::setconf(&args, true),

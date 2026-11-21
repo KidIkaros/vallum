@@ -55,7 +55,13 @@ pub struct OpenTicketArgs {
 /// Device-pull (ADR-0049): open a ticket sealed to this device's KEM key, printing
 /// the plaintext join ticket for `vallum join`. The seal is verified against the
 /// AAD, so a blob bound to another account/device does not open.
-pub fn open_ticket(args: &OpenTicketArgs) -> Result<(), Error> {
+pub fn open_ticket(args: &OpenTicketArgs, allow_insecure_key: bool) -> Result<(), Error> {
+    // Same rule as `pubkey` and `run`: the mode is checked before the secret
+    // is read — a group- or world-readable device key must not quietly open
+    // tickets.
+    if let Some(warning) = keys::check_permissions(&args.private_key, allow_insecure_key)? {
+        eprintln!("vallum: warning: {warning} (allowed by --allow-insecure-key-permissions)");
+    }
     let secret = keys::load_secret(&args.private_key)?;
     let suite = SdkSuite::from_id(secret.suite)
         .map_err(|e| Error::Suite(format!("key suite 0x{:04x}: {e}", secret.suite)))?;

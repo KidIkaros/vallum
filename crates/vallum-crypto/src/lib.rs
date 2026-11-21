@@ -51,7 +51,7 @@ pub use suite::{
 ///
 /// Safe (no `unsafe`): zeroes the bytes and then forces the compiler to treat
 /// the buffer as observable via [`core::hint::black_box`].
-pub(crate) fn scrub(buf: &mut [u8]) {
+pub fn scrub(buf: &mut [u8]) {
     for byte in buf.iter_mut() {
         *byte = 0;
     }

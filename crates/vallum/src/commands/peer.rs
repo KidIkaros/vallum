@@ -849,6 +849,14 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 .to_owned(),
         ));
     }
+    // The AAD is what binds a sealed blob to one account + device. Canonical
+    // shape is `account_id || public_line` (vallum-desk builds it the same
+    // way); a free-form AAD binds nothing meaningful, so the line part must
+    // match the key being sealed to — checked before minting for the same
+    // reason as the presence check above.
+    if let (Some(aad), Some(line)) = (&args.seal_aad, &expect) {
+        validate_seal_aad(aad, line)?;
+    }
     // Prove a responder could answer the ticket BEFORE minting it: an invite
     // that names an unreachable endpoint or an unbindable port fails silently
     // at `vallum join`, and auto-starting a responder for it opens a port
@@ -2059,6 +2067,33 @@ fn validate_public_line(server: &Server, line: &str) -> Result<vallum_core::Peer
     Ok(identity)
 }
 
+/// `--seal-aad` is a *shape*, not a string: `account_id || public_line`, where
+/// the line part must be the same line the ticket seals to. Anything else still
+/// encrypts, but binds the blob to an identity that was never intended — a
+/// mis-bound blob is a silent replay surface.
+fn validate_seal_aad(aad: &str, line: &str) -> Result<(), Error> {
+    let Some((account, sealed_line)) = aad.split_once("||") else {
+        return Err(Error::Usage(
+            "--seal-aad must be `account_id || public_line` (the desk builds it \
+             as `{account}||{public_line}`)"
+                .to_owned(),
+        ));
+    };
+    if account.is_empty() {
+        return Err(Error::Usage(
+            "--seal-aad has an empty account id before `||`".to_owned(),
+        ));
+    }
+    if sealed_line != line {
+        return Err(Error::Usage(
+            "--seal-aad names a different public line than --public-key — the \
+             blob would bind to a device it is not sealed to"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_host_prefix(text: &str) -> Result<IpNet, Error> {
     if let Ok(network) = text.parse::<IpNet>() {
         return Ok(network);
@@ -2642,6 +2677,28 @@ mod tests {
         assert!(error.to_string().contains("overlaps"));
         ensure_no_overlap(&file, "laptop", &["10.7.0.3/32".to_owned()]).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The AAD is what binds a sealed invite to one account + device, so the
+    /// CLI enforces the canonical `account || public_line` shape — including
+    /// that the line part is the very key being sealed to.
+    #[test]
+    fn a_seal_aad_must_name_the_line_being_sealed_to() {
+        let line = "vallum1:0003:abcd:-";
+        validate_seal_aad("account-1||vallum1:0003:abcd:-", line).unwrap();
+
+        let error = validate_seal_aad("just-a-string", line).unwrap_err();
+        assert!(error.to_string().contains("account_id || public_line"));
+
+        let error = validate_seal_aad("||vallum1:0003:abcd:-", line).unwrap_err();
+        assert!(error.to_string().contains("empty account"));
+
+        let error = validate_seal_aad("account-1||vallum1:0003:beef:-", line).unwrap_err();
+        assert!(error.to_string().contains("different public line"));
+
+        // A trailing `||` would still encrypt, but binds to nothing — refuse.
+        let error = validate_seal_aad("account-1||vallum1:0003:abcd:-||x", line).unwrap_err();
+        assert!(error.to_string().contains("different public line"));
     }
 
     /// The enrolment the responder performs is built from the invite alone,
