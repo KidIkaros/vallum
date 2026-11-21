@@ -427,6 +427,7 @@ fn as_server(args: &SetupArgs) -> Result<(), Error> {
                     psk: false,
                     shaping: None,
                     ttl: 15,
+                    seal_aad: None,
                     json: false,
                 },
             ),

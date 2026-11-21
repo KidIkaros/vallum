@@ -37,6 +37,51 @@ pub struct PubkeyArgs {
     private_key: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct OpenTicketArgs {
+    /// The device private key the ticket was sealed to.
+    #[arg(long, short = 'k', alias = "key", value_name = "FILE")]
+    private_key: PathBuf,
+
+    /// The AAD the ticket was sealed with (`account_id || public_line`).
+    #[arg(long, value_name = "AAD")]
+    aad: String,
+
+    /// The sealed-ticket JSON file (`kem_ct`/`nonce`/`ct`); reads stdin when omitted.
+    #[arg(long, value_name = "FILE")]
+    sealed: Option<PathBuf>,
+}
+
+/// Device-pull (ADR-0049): open a ticket sealed to this device's KEM key, printing
+/// the plaintext join ticket for `vallum join`. The seal is verified against the
+/// AAD, so a blob bound to another account/device does not open.
+pub fn open_ticket(args: &OpenTicketArgs) -> Result<(), Error> {
+    let secret = keys::load_secret(&args.private_key)?;
+    let suite = SdkSuite::from_id(secret.suite)
+        .map_err(|e| Error::Suite(format!("key suite 0x{:04x}: {e}", secret.suite)))?;
+    let identity = keys::identity(&suite, &secret)?;
+    let text = match &args.sealed {
+        Some(path) => std::fs::read_to_string(path).map_err(|source| Error::IoPath {
+            action: "read sealed ticket",
+            path: path.clone(),
+            source,
+        })?,
+        None => {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(Error::Io)?;
+            buf
+        }
+    };
+    let sealed = crate::seal::SealedTicket::from_json(&text).map_err(Error::Usage)?;
+    let ticket = crate::seal::open_ticket(&suite, &sealed, identity.secret(), args.aad.as_bytes())
+        .map_err(Error::Usage)?;
+    let ticket = String::from_utf8(ticket)
+        .map_err(|_| Error::Usage("sealed ticket did not open to a join ticket".to_owned()))?;
+    println!("{}", ticket.trim());
+    Ok(())
+}
+
 pub fn genpsk() -> Result<(), Error> {
     let mut psk = [0u8; 32];
     getrandom::fill(&mut psk)

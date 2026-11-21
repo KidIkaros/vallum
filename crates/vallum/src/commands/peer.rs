@@ -784,6 +784,14 @@ pub struct InviteArgs {
     #[arg(long, value_name = "MINUTES", default_value = "15")]
     pub ttl: u64,
 
+    /// Seal the ticket to the device's public-line KEM key for device-pull
+    /// enrolment (ADR-0049). The value is the AAD binding the blob to one account
+    /// and device (e.g. `account_id || public_line`); the JSON then carries
+    /// `sealed_ticket` + `seal_aad` instead of the plaintext ticket. Requires
+    /// `--public-key`/`--public-key-file` and `--json`.
+    #[arg(long, value_name = "AAD", requires = "json")]
+    pub seal_aad: Option<String>,
+
     /// Emit JSON instead of a report.
     #[arg(long)]
     pub json: bool,
@@ -857,7 +865,7 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
         &interface,
         &args.name,
         args.ttl * 60,
-        expect,
+        expect.clone(),
         args.psk,
         args.shaping.clone(),
     )?;
@@ -877,9 +885,44 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     .encode();
 
     if args.json {
-        say!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+        let report = if let Some(aad) = &args.seal_aad {
+            // Device-pull (ADR-0049): seal the ticket to the device's KEM key so
+            // the desk relays only ciphertext. The plaintext ticket/token never
+            // leaves this process. Requires the device's public line.
+            let line = expect.as_deref().ok_or_else(|| {
+                Error::Usage(
+                    "--seal-aad requires the device's public line (--public-key or --public-key-file)"
+                        .to_owned(),
+                )
+            })?;
+            let identity = validate_public_line(&server, line)?;
+            let mut nonce = [0u8; 24];
+            getrandom::fill(&mut nonce)
+                .map_err(|e| Error::Io(std::io::Error::other(format!("getrandom: {e}"))))?;
+            let sealed = crate::seal::seal_ticket(
+                &server.suite,
+                ticket.as_bytes(),
+                identity.kem(),
+                aad.as_bytes(),
+                &entropy::seed(),
+                &nonce,
+            )
+            .map_err(Error::Usage)?;
+            serde_json::json!({
+                "name": args.name,
+                "id": id,
+                "fingerprint": server_fingerprint,
+                "expires_in_secs": args.ttl * 60,
+                "join": format!("{host}:{port}"),
+                "sealed_ticket": {
+                    "kem_ct": keys::hex_encode(&sealed.kem_ct),
+                    "nonce": keys::hex_encode(&sealed.nonce),
+                    "ct": keys::hex_encode(&sealed.ct),
+                },
+                "seal_aad": aad,
+            })
+        } else {
+            serde_json::json!({
                 "name": args.name,
                 "id": id,
                 "token": token.display(),
@@ -887,8 +930,12 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 "expires_in_secs": args.ttl * 60,
                 "join": format!("{host}:{port}"),
                 "ticket": ticket,
-            }))
-            .map_err(|error| Error::Usage(format!("json: {error}")))?
+            })
+        };
+        say!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| Error::Usage(format!("json: {error}")))?
         );
         return Ok(());
     }

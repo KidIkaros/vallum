@@ -12,7 +12,7 @@ use vallum::commands::control::{SetconfArgs, ShowArgs, ShowconfArgs, StopArgs};
 use vallum::commands::doctor::DoctorArgs;
 use vallum::commands::identity::IdentityArgs;
 use vallum::commands::import::ImportArgs;
-use vallum::commands::keys::{KeygenArgs, PubkeyArgs};
+use vallum::commands::keys::{KeygenArgs, OpenTicketArgs, PubkeyArgs};
 use vallum::commands::metrics::MetricsArgs;
 use vallum::commands::peer::PeerArgs;
 use vallum::commands::policy::PolicyArgs;
@@ -70,6 +70,8 @@ enum Command {
     Keygen(KeygenArgs),
     /// Print the public line for an existing private key.
     Pubkey(PubkeyArgs),
+    /// Open a join ticket sealed to this device's key (device-pull, ADR-0049).
+    OpenTicket(OpenTicketArgs),
     /// Generate a 32-byte preshared key as 64 hex characters.
     Genpsk,
     /// Show a running daemon's device and peers.
@@ -182,6 +184,7 @@ fn main() -> ExitCode {
         Command::Run(args) => run::run(&args, cli.allow_insecure_key_permissions),
         Command::Keygen(args) => keys::keygen(&args),
         Command::Pubkey(args) => keys::pubkey(&args, cli.allow_insecure_key_permissions),
+        Command::OpenTicket(args) => keys::open_ticket(&args),
         Command::Genpsk => keys::genpsk(),
         Command::Show(args) => control::show(&args),
         Command::Setconf(args) => control::setconf(&args, true),
