@@ -2113,18 +2113,11 @@ def account_created_page(payload, operator="vallum desk",
     if desk_origin:
         account_uri += f"&desk={quote(desk_origin, safe='')}"
     open_client = (f"""
-<p><button id="open-client">Open in Vallum client</button>
+<p><button id="open-client" data-uri="{_esc(account_uri)}"
+ data-fallback="client-fallback">Open in Vallum client</button>
 <span id="client-fallback" hidden><br><small>Nothing opened? Install the
 client first — step 1 below — or keep the number: your account page needs
 only it.</small></span>
-<script>document.getElementById("open-client").onclick = function() {{
-  var handed = false;
-  window.addEventListener("blur", function() {{ handed = true; }}, {{once: true}});
-  window.location = {json.dumps(account_uri)};
-  setTimeout(function() {{
-    if (!handed) {{ document.getElementById("client-fallback").hidden = false; }}
-  }}, 3000);
-}};</script>
 <small>Hands the account number to your client without re-typing it. Enrols
 no device — add one from your account page.</small></p>"""
                    if token else "")
@@ -2160,18 +2153,7 @@ first; your account outlives any ticket.</p>
 <code>/account</code> with your account number — and add your first device.</p></li>
 </ol>
 {manage}
-<script>
-// Local-only convenience: copy to clipboard, no network, no storage. The
-// numbers above stay selectable, so the page works with scripting off.
-document.querySelectorAll('[data-copy]').forEach(function (b) {{
-  b.addEventListener('click', function () {{
-    var t = document.getElementById(b.getAttribute('data-copy')).textContent;
-    var done = function (ok) {{ b.textContent = ok ? 'Copied' : 'Select the text above and copy'; }};
-    if (navigator.clipboard) {{ navigator.clipboard.writeText(t).then(function () {{ done(true); }}, function () {{ done(false); }}); }}
-    else {{ done(false); }}
-  }});
-}});
-</script>
+<script src="/desk.js"></script>
 {DESK_FOOTER}"""
 
 
@@ -2213,21 +2195,16 @@ def ticket_page(payload, operator="vallum desk",
         # fallback keeps a bare payload renderable.
         uri = payload.get("connect") or connect_uri(payload["ticket"], payload["token"])
         # A vallum:// click with no client installed produces nothing visible
-        # on some browsers — no error, no dialog. If the handoff never blurs
-        # this window, reveal the recovery path (install, or join by hand).
+        # on some browsers — no error, no dialog. The URI rides a data
+        # attribute (never href — prefetchers and Referer only touch those);
+        # desk.js fires it and reveals the recovery hint when no handoff
+        # blurs the window.
         connect = f"""
-<p><button id="connect">Connect this device</button></p>
+<p><button id="connect" data-uri="{_esc(uri)}"
+ data-fallback="connect-fallback">Connect this device</button></p>
 <p id="connect-fallback" hidden><small>Nothing opened? Install the client
 first — step 1 below — then click again; or join by hand with step 2's
-<code>sudo vallum join -</code>.</small></p>
-<script>document.getElementById("connect").onclick = function() {{
-  var handed = false;
-  window.addEventListener("blur", function() {{ handed = true; }}, {{once: true}});
-  window.location = {json.dumps(uri)};
-  setTimeout(function() {{
-    if (!handed) {{ document.getElementById("connect-fallback").hidden = false; }}
-  }}, 3000);
-}};</script>"""
+<code>sudo vallum join -</code>.</small></p>"""
     return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
 {DESK_STYLE}
 <h1>Your join ticket</h1>
@@ -2252,6 +2229,7 @@ account ever has. Save it; the desk does not send it anywhere else.</p>
 <code>sudo vallum join -</code> reads it from stdin.</p></li>
 </ol>
 {manage}
+<script src="/desk.js"></script>
 {DESK_FOOTER}"""
 
 
@@ -2303,6 +2281,43 @@ DESK_STYLE = (
     "</style>")
 ACCOUNT_STYLE = DESK_STYLE
 DESK_FOOTER = "<footer>every boundary under watch</footer>"
+
+# The one script the desk serves: progressive enhancement only, fetched
+# same-origin so a strict `script-src 'self'` CSP admits it where inline
+# blocks were refused. Every affordance it powers has a no-script fallback
+# in the markup — numbers stay selectable, forms still post.
+DESK_JS = """\
+// Vallum desk — progressive enhancement. Loaded same-origin (/desk.js).
+// Copy buttons: clipboard where available, a label nudge otherwise.
+document.querySelectorAll("[data-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = document.getElementById(b.getAttribute("data-copy")).textContent;
+    var done = function (ok) { b.textContent = ok ? "Copied" : "Select the text above and copy"; };
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(t).then(function () { done(true); }, function () { done(false); });
+    } else { done(false); }
+  });
+});
+// Deep-link buttons (vallum://join, vallum://account): fire the URI, then
+// watch for the window blur a real handoff causes. No blur in 3s means the
+// scheme had no client — reveal the recovery hint instead of dying silent.
+document.querySelectorAll("[data-uri]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var handed = false;
+    window.addEventListener("blur", function () { handed = true; }, {once: true});
+    window.location = b.getAttribute("data-uri");
+    var fallback = b.getAttribute("data-fallback");
+    if (fallback) {
+      setTimeout(function () {
+        if (!handed) {
+          var el = document.getElementById(fallback);
+          if (el) { el.hidden = false; }
+        }
+      }, 3000);
+    }
+  });
+});
+"""
 
 
 def account_shell_page(operator="vallum desk", contact=""):
@@ -2436,7 +2451,8 @@ def make_handler(desk):
             # front that would go on saying "ok" after the daemon died.
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if self.command != "HEAD":
+                self.wfile.write(body)
 
         def _body(self):
             try:
@@ -2499,7 +2515,21 @@ def make_handler(desk):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Robots-Tag", "noindex")
             self.end_headers()
-            self.wfile.write(body.encode())
+            if self.command != "HEAD":
+                self.wfile.write(body.encode())
+
+        def _send_js(self, body=DESK_JS):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body.encode())
+
+        def do_HEAD(self):
+            # Monitors and link checkers HEAD; 501 read as "the site is
+            # down" when the pages were fine. Same routes, headers only.
+            self.do_GET()
 
         def do_GET(self):
             if self.path == "/healthz":
@@ -2513,6 +2543,11 @@ def make_handler(desk):
                 self._send_html(index_page(desk.config.open_signup, desk.config.operator_name,
                                            desk.config.install_source, desk.config.repo_url,
                                            desk.config.contact))
+                return
+            if self.path == "/desk.js":
+                # Public static content — no credentials — so fronts may
+                # cache it; the pages reference it under script-src 'self'.
+                self._send_js()
                 return
             if self.path == "/account":
                 self._send_html(account_shell_page(desk.config.operator_name, desk.config.contact))
@@ -2738,9 +2773,11 @@ def main(argv=None):
         request_queue_size = 64
 
     server = DeskServer((config.bind, config.port), make_handler(desk))
+    db_codes = desk.db.execute(
+        "SELECT COUNT(*) FROM codes WHERE used_by IS NULL").fetchone()[0]
     print(f"desk: serving on {config.bind}:{config.port} (config {config.config}, "
-          f"{len(desk.file_codes())} invite codes, trials {config.trial_days}d/"
-          f"{config.trial_bytes}B)")
+          f"{len(desk.file_codes())} file + {db_codes} issued invite codes, "
+          f"trials {config.trial_days}d/{config.trial_bytes}B)")
     server.serve_forever()
 
 

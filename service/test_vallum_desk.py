@@ -924,12 +924,12 @@ class HttpTests(WireTestCase):
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         origin = f"https://127.0.0.1:{self.port}"
-        self.assertIn(f"&desk={quote(origin, safe='')}", page)
+        self.assertIn(f"&amp;desk={quote(origin, safe='')}", page)
 
     def test_the_connect_button_recovers_a_silent_click(self):
         # No client installed → the vallum:// click can produce nothing
         # visible. The page must name the recovery when the handoff never
-        # happens: a hidden hint the blur-timeout reveals.
+        # happens: a hidden hint desk.js's blur-timeout reveals.
         status, body = self.post("/api/signup", "{}", "application/json")
         token = json.loads(body)["token"]
         status, page = self.post("/account/device", f"token={token}&name=laptop",
@@ -937,8 +937,8 @@ class HttpTests(WireTestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="connect-fallback" hidden', page)
         self.assertIn("Nothing opened?", page)
-        self.assertIn('"blur"', page)
-        self.assertIn("handed", page)
+        self.assertIn('data-fallback="connect-fallback"', page)
+        self.assertIn('src="/desk.js"', page)
 
     def test_the_open_client_button_recovers_a_silent_click(self):
         # Same failure mode on the account handoff: no client → the
@@ -949,7 +949,27 @@ class HttpTests(WireTestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="client-fallback" hidden', page)
         self.assertIn("Nothing opened?", page)
-        self.assertIn('"blur"', page)
+        self.assertIn('data-fallback="client-fallback"', page)
+        self.assertIn('src="/desk.js"', page)
+
+    def test_desk_js_carries_the_handoff_logic(self):
+        # The strict-CSP script lives same-origin: the click handlers fire
+        # data-uri, watch the handoff blur, and reveal the fallback.
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/desk.js",
+                                    timeout=5) as r:
+            js = r.read().decode()
+        self.assertEqual(r.status, 200)
+        self.assertIn("data-uri", js)
+        self.assertIn("blur", js)
+        self.assertIn("handed", js)
+        self.assertIn("clipboard", js)
+
+    def test_head_is_answered_not_refused(self):
+        # Monitors HEAD: 501 read as "down" while the pages were fine.
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/",
+                                     method="HEAD")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            self.assertEqual(r.status, 200)
 
     def test_the_per_ip_limit_sees_the_visitor_behind_the_proxy(self):
         # The desk is loopback-only and fronted by Caddy. Reading
@@ -1908,7 +1928,7 @@ class AccountPageTests(HttpTests):
         self.assertEqual(status, 200)
         from urllib.parse import quote
         expected = (f"vallum://join?ticket={quote('vallum1-join:203.0.113.9:51922/u0001-form-use/deadbeef/token/fingerprint', safe='')}"
-                    f"&account={token}")
+                    f"&amp;account={token}")
         self.assertIn(expected, page)
         # The URI is fired by script — the token must never sit in an href
         # or another attribute a prefetcher or Referer header would carry.
@@ -1964,7 +1984,7 @@ class AccountPageTests(HttpTests):
             "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
         origin = f"https://127.0.0.1:{self.port}"
-        self.assertIn(f"&desk={quote(origin, safe='')}", page)
+        self.assertIn(f"&amp;desk={quote(origin, safe='')}", page)
 
     def test_the_voucher_box_applies_the_code(self):
         token = self._token()
