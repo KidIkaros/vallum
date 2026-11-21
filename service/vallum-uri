@@ -2,8 +2,21 @@
 """vallum-uri — the x-scheme-handler target for vallum:// URIs.
 
 A browser-opened `vallum://join?ticket=…&account=…[&desk=…]` arrives here
-as argv[1]. The URI is validated byte-strictly, then enrolment runs through
-the privileged dispatcher when passwordless sudo grants it:
+as argv[1]. Where the link is confirmed matters: a browser can fire the
+scheme with no intent behind it, so something must ask before anything
+acts. In order:
+
+1. On a display with the Vallum app installed, the URI is handed to
+   `vallum-gui` — its in-app surface confirms (or refuses visibly), the
+   same surface the link gets when the GUI's own .desktop owns the scheme.
+2. On a GUI-less desktop the .desktop is Terminal=true — the link arrived
+   in a console window of our own, and the ask happens there. A display
+   with no console to answer in is a drive-by: refused.
+3. Headless is a script or an operator's own shell — no browser can fire
+   the scheme there — so enrolment proceeds.
+
+When it does act, the URI is validated byte-strictly, then enrolment runs
+through the privileged dispatcher when passwordless sudo grants it:
 
     sudo -n vallum-ops join   (ticket/token/desk on stdin lines 1/2/3, #32)
 
@@ -25,10 +38,13 @@ vallum://account (ADR-0047 Q4) records the account number client-side so
 `vallum account` can manage it without re-pasting the shown-once number; it
 enrols no device. The token rides the URI fired by script, keeping it out of
 browser history and prefetchers, the same pattern as the join Connect link.
+A different number already recorded is a conflict, never a silent swap —
+the same account re-records, another is refused and says how to replace it.
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -94,12 +110,36 @@ def _account_config_path():
     return os.path.join(base, "vallum", "account.toml")
 
 
+def _recorded_token(path):
+    """The account number an existing account.toml records, or None."""
+    try:
+        with open(path) as f:
+            for line in f:
+                match = re.match(r'\s*token\s*=\s*"([0-9a-f]{32})"', line)
+                if match:
+                    return match.group(1)
+    except OSError:
+        pass
+    return None
+
+
 def _record_account(token, desk):
     """Write the account number client-side (ADR-0047 Q4) so `vallum account`
     can manage it without re-pasting the shown-once number. A minimal config:
     [account] is what the read uses; the [interface] stub satisfies the parser
-    and is never run — this handoff enrols no device. 0600: bearer credential."""
+    and is never run — this handoff enrols no device. 0600: bearer credential.
+
+    A drive-by `vallum://account` must not clobber the account this machine
+    already manages: re-recording the SAME number is idempotent, but a
+    different one means two links disagree about identity — refuse and name
+    the remedy rather than swap credentials on a web page's say-so."""
     path = _account_config_path()
+    existing = _recorded_token(path)
+    if existing is not None and existing != token:
+        raise ValueError(
+            f"{path} already records a different account — refusing to "
+            "overwrite it on a link's say-so. If this account really replaces "
+            "it, remove the file first or record by hand with `vallum account`.")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     lines = ["# Vallum account, recorded from the desk's open-in-client link.",
              "# Account-only: no device is enrolled here; add one from the desk.",
@@ -114,6 +154,40 @@ def _record_account(token, desk):
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
     return path
+
+
+def _hand_to_gui(uri):
+    """The Vallum app is the right surface for a vallum:// URI — its in-app
+    dialog asks before anything acts, the same surface the link gets when
+    the GUI's own .desktop owns the scheme. Only on a display: headless has
+    no webview to ask in (and no browser to drive-by from)."""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    gui = shutil.which("vallum-gui")
+    if gui is None:
+        return False
+    subprocess.Popen([gui, uri],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return True
+
+
+def _tty_confirm(question, out=sys.stdout, inp=sys.stdin):
+    """A GUI-less desktop launch: the .desktop is Terminal=true, so the link
+    arrived in a console window of our own — ask there, not in a foreign
+    popup. A display with no TTY means an API-fired URI nobody can answer
+    for: refuse (None). No display at all is a script or an operator's own
+    shell — there is no browser to drive-by from: proceed."""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    if not inp.isatty():
+        return None
+    print(f"{question} [y/N] ", end="", file=out, flush=True)
+    try:
+        line = inp.readline()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return line.strip().lower() in ("y", "yes")
 
 
 def _privileged_join_available():
@@ -136,6 +210,13 @@ def main(argv=None):
         print("usage: vallum-uri 'vallum://join?...' | 'vallum://account?token=...'",
               file=sys.stderr)
         return 2
+    # The Vallum app is the right surface for a deep link: its dialog asks
+    # before anything acts, including a malformed link's visible refusal.
+    # Only when no app exists does this script act itself.
+    if _hand_to_gui(argv[0]):
+        print("vallum-uri: opened the Vallum app — the link asks there "
+              "before anything happens.")
+        return 0
     action = urllib.parse.urlparse(argv[0]).netloc or \
         urllib.parse.urlparse(argv[0]).path.lstrip("/")
     if action == "account":
@@ -144,7 +225,22 @@ def main(argv=None):
         except ValueError as error:
             print(f"vallum-uri: refused — {error}", file=sys.stderr)
             return 2
-        path = _record_account(token, desk)
+        confirmed = _tty_confirm(
+            f"Record a Vallum account number (…{token[-8:]})"
+            + (f" at {desk}" if desk else "")
+            + " on this machine?")
+        if confirmed is None:
+            print("vallum-uri: refused — a browser can fire vallum:// with "
+                  "no intent behind it, and there is no console to ask in. "
+                  "Record by hand: `vallum account`.", file=sys.stderr)
+            return 2
+        if not confirmed:
+            return 0  # the user said no — nothing happened
+        try:
+            path = _record_account(token, desk)
+        except ValueError as error:
+            print(f"vallum-uri: refused — {error}", file=sys.stderr)
+            return 2
         print(f"vallum-uri: recorded your account at {path}")
         print(f"Manage it with: vallum account --config {path}")
         return 0
@@ -153,6 +249,17 @@ def main(argv=None):
     except ValueError as error:
         print(f"vallum-uri: refused — {error}", file=sys.stderr)
         return 2
+    endpoint = ticket.split(":", 1)[1].split("/", 1)[0]  # host:port for the ask
+    confirmed = _tty_confirm(
+        f"Join the Vallum network at {endpoint}? "
+        "This enrols the device and installs a tunnel.")
+    if confirmed is None:
+        print("vallum-uri: refused — a browser can fire vallum:// with no "
+              "intent behind it, and there is no console to ask in. Enrol "
+              "by hand: `vallum join`.", file=sys.stderr)
+        return 2
+    if not confirmed:
+        return 0  # the user said no — the ticket stays unspent
     # Prefer the privileged dispatcher: as root, `vallum join` installs the
     # service and proves the tunnel, so the single-use ticket buys a working
     # tunnel. The ticket/token/desk ride stdin (sudo strips env; #32), never

@@ -97,10 +97,23 @@ class ParseTests(unittest.TestCase):
                 parse_uri(uri(desk=bad))
 
 
+def stub_launch_surfaces(test):
+    """The GUI handoff and the TTY confirm are launch surfaces — a display
+    or a real vallum-gui on PATH must not change what main() does under
+    test. Stub both so the suite is hermetic on any host."""
+    test.addCleanup(setattr, uri_module, "_hand_to_gui",
+                    uri_module._hand_to_gui)
+    uri_module._hand_to_gui = lambda _uri: False
+    test.addCleanup(setattr, uri_module, "_tty_confirm",
+                    uri_module._tty_confirm)
+    uri_module._tty_confirm = lambda _q, **kw: True
+
+
 class MainTests(unittest.TestCase):
     """main() drives a stub `vallum` on PATH — the seam is exec."""
 
     def setUp(self):
+        stub_launch_surfaces(self)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.capture = os.path.join(self.tempdir.name, "capture")
@@ -175,6 +188,7 @@ class PrivilegedJoinTests(unittest.TestCase):
     working tunnel. Ticket/token/desk ride stdin lines 1/2/3 (#32), not argv."""
 
     def setUp(self):
+        stub_launch_surfaces(self)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.capture = os.path.join(self.tempdir.name, "capture")
@@ -216,6 +230,7 @@ class AccountHandoffTests(unittest.TestCase):
     is enrolled, and the token never sits in argv."""
 
     def setUp(self):
+        stub_launch_surfaces(self)
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.old_xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -254,6 +269,126 @@ class AccountHandoffTests(unittest.TestCase):
     def test_garbage_desk_is_refused(self):
         self.assertEqual(uri_module.main(
             [f"vallum://account?token={TOKEN32}&desk=http://desk.example.com"]), 2)
+
+    def test_a_different_account_is_never_clobbered_by_a_link(self):
+        # The credential-loss case: a page can fire vallum://account with
+        # no intent behind it — it must not swap which account this machine
+        # manages. Same number re-records; a different one is refused.
+        other = "f" * 32
+        self.assertEqual(uri_module.main(
+            [f"vallum://account?token={TOKEN32}"]), 0)
+        self.assertEqual(uri_module.main(
+            [f"vallum://account?token={other}"]), 2)
+        with open(self._config()) as f:
+            text = f.read()
+        self.assertIn(f'token = "{TOKEN32}"', text)
+        self.assertNotIn(other, text)
+
+    def test_the_same_account_re_records_idempotently(self):
+        self.assertEqual(uri_module.main(
+            [f"vallum://account?token={TOKEN32}"]), 0)
+        self.assertEqual(uri_module.main(
+            [f"vallum://account?token={TOKEN32}&desk=https://desk.wingman.gold"]),
+            0)
+        with open(self._config()) as f:
+            text = f.read()
+        self.assertIn(f'token = "{TOKEN32}"', text)
+        self.assertIn('endpoint = "https://desk.wingman.gold"', text)
+
+
+class _FakeTty:
+    """A readable stream that claims to be a terminal."""
+
+    def __init__(self, line):
+        self.line = line
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self.line
+
+
+class LaunchSurfaceTests(unittest.TestCase):
+    """Where a vallum:// URI is confirmed is the finding: in the app when it
+    exists, in the handler's own console window otherwise, never in a foreign
+    popup — and never at all on a drive-by with no console to answer."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.old_display = {k: os.environ.get(k)
+                            for k in ("DISPLAY", "WAYLAND_DISPLAY")}
+        self.addCleanup(self._restore_display)
+
+    def _restore_display(self):
+        for key, value in self.old_display.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _display(self, on=True):
+        if on:
+            os.environ["DISPLAY"] = ":99"
+        else:
+            os.environ.pop("DISPLAY", None)
+            os.environ.pop("WAYLAND_DISPLAY", None)
+
+    def _gui_stub(self):
+        capture = os.path.join(self.tempdir.name, "gui-capture")
+        stub = os.path.join(self.tempdir.name, "vallum-gui")
+        with open(stub, "w") as f:
+            f.write(f"#!/bin/sh\necho \"gui:$1\" > {capture}\n")
+        os.chmod(stub, 0o755)
+        old_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{self.tempdir.name}:{old_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+        return capture
+
+    def test_a_display_with_the_app_hands_the_link_over(self):
+        # Whatever the URI — even malformed — the app's surface shows the
+        # confirm or the refusal; the handler acts itself only when no app
+        # exists to ask in.
+        capture = self._gui_stub()
+        self._display()
+        self.assertEqual(uri_module.main(["vallum://bogus?x=1"]), 0)
+        import time
+        for _ in range(50):
+            if os.path.exists(capture):
+                break
+            time.sleep(0.02)
+        with open(capture) as f:
+            self.assertIn("gui:vallum://bogus?x=1", f.read())
+
+    def test_headless_never_hands_off(self):
+        self._gui_stub()
+        self._display(on=False)
+        self.assertFalse(uri_module._hand_to_gui(uri()))
+
+    def test_headless_confirm_proceeds(self):
+        # No display: the URI arrived by script or by hand — there is no
+        # browser to drive-by from, and no one to hang on a question.
+        self._display(on=False)
+        self.assertTrue(uri_module._tty_confirm("anything?"))
+
+    def test_a_display_without_a_console_is_a_drive_by_refusal(self):
+        import io
+        self._display()
+        self.assertIsNone(
+            uri_module._tty_confirm("anything?", out=io.StringIO(),
+                                    inp=io.StringIO("y\n")))
+
+    def test_the_console_ask_only_says_yes_to_y(self):
+        import io
+        self._display()
+        for line, expected in (("y\n", True), ("yes\n", True), ("Y\n", True),
+                               ("n\n", False), ("\n", False), ("", False),
+                               ("yess\n", False)):
+            self.assertIs(
+                uri_module._tty_confirm("q?", out=io.StringIO(),
+                                        inp=_FakeTty(line)),
+                expected, line)
 
 
 if __name__ == "__main__":
