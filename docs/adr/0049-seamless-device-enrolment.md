@@ -75,6 +75,28 @@ approves, never transports.
   8+ digit code, single-use, short-TTL, burn-after-N-failures, bound to account + device
   public line; the security is entropy + rate-limit + binding, not the derivation.
 
+## Ticket delivery: sealed to the device's own KEM key
+
+The device's public line (`vallum1:<suite>:<kem-pk>:<signing-pk>`) already carries a
+hybrid KEM public key. The desk seals the ticket to it rather than sending it in the
+clear over HTTPS:
+
+1. Desk encapsulates to the device's KEM public key (`X25519NtruMlKemKem`, the same
+   tri-hybrid the tunnel uses) → `(kem_ciphertext, shared_secret)`.
+2. `HKDF` (domain-separated, e.g. info = "vallum-desk-ticket-v1") → a 32-byte AEAD key.
+3. `XChaCha20Poly1305.encrypt_aad(key, random_nonce, ticket, aad = account_id || device_public_line)`.
+4. Return `(kem_ciphertext, nonce, aead_ciphertext)`; the device decapsulates with its
+   private key, derives the same key, and decrypts. AAD binds the blob to the account +
+   device so a blob cannot be replayed onto another identity.
+
+This is post-quantum, reuses the device identity key (no extra exchange), and keeps the
+ticket out of the TLS proxy and desk logs. **Scope, honestly:** the desk mints the ticket
+so it knows the plaintext; the seal protects the desk→device hop, not the desk process.
+Verified HTTPS already blocks network MITM — this is defense-in-depth for the no-leaks
+goal. The SDK has no ready-made HPKE/sealed-box; this is a small compose-from-primitives
+module (`seal_ticket` / `open_ticket`) on an EXPERIMENTAL/unaudited SDK, so it is built
+TDD-at-the-seam with test vectors for the KEM→KDF→AEAD composition and the AAD binding.
+
 ## Abuse resistance — bounded, not "impervious"
 
 The existing gates bound every axis an anonymous visitor can push (capacity, IP/day,
