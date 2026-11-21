@@ -439,6 +439,17 @@ if [ "$DRY" -eq 0 ]; then
         || fail "self-verification of dist/SHA256SUMS.sig failed"
     ok "SHA256SUMS signed with $(ssh-keygen -lf "$SIGN_KEY" | awk '{print $2}')"
 
+    # The dispatcher is a signed artefact in its own right: `vallum-ops
+    # self-update` verifies vallum-ops.sig against the key embedded in the
+    # installed script, so regenerating it here keeps the committed sig in
+    # step with the file a release ships.
+    ssh-keygen -Y sign -f "$SIGN_KEY" -n file packaging/vallum-ops
+    ssh-keygen -Y verify -f packaging/allowed_signers -n file \
+        -s packaging/vallum-ops.sig -I vallum-release < packaging/vallum-ops >/dev/null \
+        || fail "self-verification of packaging/vallum-ops.sig failed"
+    cp packaging/vallum-ops packaging/vallum-ops.sig dist/
+    ok "vallum-ops.sig refreshed (self-update's signed channel)"
+
     ls -l dist
 else
     echo "   would assemble dist/$name{,-aarch64}.tar.gz, the .deb, the .rpm,"

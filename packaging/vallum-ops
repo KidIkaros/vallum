@@ -16,6 +16,7 @@
 #   vallum-ops enroll-off [iface]    # close the UDP 51821 enrolment responder
 #   vallum-ops status [iface]        # units, route, handshake, resolver, public IP
 #   vallum-ops journal [N] [iface]   # last N lines from the vallum units' journals
+#   vallum-ops self-update [path]    # install a signed newer copy of this dispatcher
 set -uo pipefail
 
 # LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
@@ -25,6 +26,12 @@ set -uo pipefail
 # escalation for whoever owned that checkout (review, 2026-11-11).
 LIB=${VALLUM_LIB:-/usr/local/lib/vallum}
 VALLUM_BIN=${VALLUM_BIN:-/usr/bin/vallum}
+# The release trust anchor, embedded in this file itself: this script IS the
+# signed artefact, so the key that vouches for a candidate cannot be swapped
+# by whoever owns the directory it sits in. The same key as
+# packaging/vallum-release.pub — release.sh signs SHA256SUMS with it, and a
+# `vallum-ops.sig` beside a candidate is what self-update verifies.
+OPS_RELEASE_SIGNER='vallum-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOcys6KuFRBEnzkhjmC5OvVQDUNCOl39qxrFcQO05dwQ'
 # The source tree, if this host has one. `sudo` resets the environment, so the
 # path cannot come from VALLUM_REPO alone: it comes from a root-owned pointer
 # file that an operator writes once. Nothing is compiled into this file.
@@ -370,8 +377,32 @@ sync)
     exec bash "$REPO/scripts/vallum-sync.sh" "${2:-}"
     ;;
 self-update)
+    # Install a newer copy of this dispatcher. The candidate is argv's path,
+    # else the repo's packaged file.
+    src=${2:-$REPO/packaging/vallum-ops}
+    [ -f "$src" ] || { echo "vallum-ops: no dispatcher at '$src'" >&2; exit 1; }
+    sig=${src}.sig
+    if [ -f "$sig" ]; then
+        # A signed artefact proves itself: the release key vouching for these
+        # bytes makes the owning uid of the tree irrelevant — the trust model
+        # the unsigned path needed root-owned sources for, the signature
+        # carries in the file. A sig that does not verify is a refusal, never
+        # a fallback to weaker evidence.
+        anchor=$(mktemp /run/vallum/ops-signers.XXXXXX 2>/dev/null || mktemp) || exit 1
+        printf '%s\n' "$OPS_RELEASE_SIGNER" > "$anchor"
+        if ssh-keygen -Y verify -f "$anchor" -n file -I vallum-release \
+                -s "$sig" < "$src" 2>/dev/null; then
+            rm -f "$anchor"
+            install -m 755 "$src" /usr/local/sbin/vallum-ops
+            echo "dispatcher updated (release-signed)"
+            exit 0
+        fi
+        rm -f "$anchor"
+        echo "vallum-ops: $sig does not verify against the release key — refusing" >&2
+        exit 1
+    fi
     require_trusted_source
-    install -m 755 "$REPO/packaging/vallum-ops" /usr/local/sbin/vallum-ops
+    install -m 755 "$src" /usr/local/sbin/vallum-ops
     echo "dispatcher updated"
     exit 0
     ;;
@@ -441,7 +472,7 @@ journal)
         --no-pager -o short-iso -n "$lines"
     ;;
 *)
-    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|remove <name>|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update}" >&2
+    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|remove <name>|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update [path]}" >&2
     exit 2
     ;;
 esac

@@ -45,6 +45,9 @@ installer=$(awk '/^RELEASE_SIGNING_PUBKEY="/ { inside = 1 }
 
 pub=$(keys_from < packaging/vallum-release.pub)
 signers=$(keys_from < packaging/allowed_signers)
+ops=$(awk '/^OPS_RELEASE_SIGNER=/ { inside = 1 }
+           inside { print }
+           inside && /'"'"'[[:space:]]*$/ { inside = 0 }' packaging/vallum-ops | keys_from)
 
 status=0
 report() { # $1 = file, $2 = keys
@@ -58,6 +61,25 @@ report() { # $1 = file, $2 = keys
 report scripts/install.sh "$installer"
 report packaging/vallum-release.pub "$pub"
 report packaging/allowed_signers "$signers"
+report packaging/vallum-ops "$ops"
+
+# The dispatcher's detached sig is self-update's trust channel — a stale sig
+# (the file changed after signing) means `vallum-ops self-update` refuses
+# the shipped file, and nobody notices until the day it is needed.
+if [ -f packaging/vallum-ops.sig ]; then
+    if command -v ssh-keygen >/dev/null 2>&1 && \
+        ssh-keygen -Y verify -f packaging/allowed_signers -n file \
+            -s packaging/vallum-ops.sig -I vallum-release \
+            < packaging/vallum-ops >/dev/null 2>&1; then
+        printf '   ok    %-32s verifies over the current file\n' "packaging/vallum-ops.sig"
+    else
+        printf '   MISS  packaging/vallum-ops.sig does not verify over vallum-ops — resign it\n' >&2
+        status=1
+    fi
+else
+    printf '   MISS  packaging/vallum-ops.sig is absent — vallum-ops self-update has no signed channel\n' >&2
+    status=1
+fi
 
 if command -v ssh-keygen >/dev/null 2>&1 && [ -n "$pub" ]; then
     while IFS= read -r key; do
@@ -69,7 +91,7 @@ $pub
 EOF
 fi
 
-if [ "$installer" != "$pub" ] || [ "$pub" != "$signers" ]; then
+if [ "$installer" != "$pub" ] || [ "$pub" != "$signers" ] || [ "$pub" != "$ops" ]; then
     cat >&2 <<'EOF'
 
 The trust anchor disagrees across files. install.sh is the copy that decides what
