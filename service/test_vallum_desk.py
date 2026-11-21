@@ -60,6 +60,19 @@ class FakeDaemon(desk_module.Daemon):
         self.pins[peer] = public_key
         return f"vallum1-join:203.0.113.9:51922/{peer}/deadbeef/token/fingerprint"
 
+    def mint_sealed_ticket(self, peer, public_key, seal_aad):
+        if self._refuse:
+            raise RuntimeError("the daemon said no")
+        self.minted.append(peer)
+        self.pins[peer] = public_key
+        if not hasattr(self, "sealed_aads"):
+            self.sealed_aads = {}
+        self.sealed_aads[peer] = seal_aad
+        return {"sealed_ticket": {"kem_ct": "aa", "nonce": "bb", "ct": "cc"},
+                "seal_aad": seal_aad, "join": "203.0.113.9:51922",
+                "fingerprint": "fp", "name": peer, "id": "deadbeef",
+                "expires_in_secs": 900}
+
     def counters(self):
         if self._refuse_counters:
             raise RuntimeError("the daemon did not answer")
@@ -123,6 +136,53 @@ class DeskTestCase(unittest.TestCase):
         _, account = self.signup(code=code)
         _, device = self.desk.add_device({"token": account["token"], "name": name})
         return account, device
+
+
+class DevicePullSealTests(DeskTestCase):
+    """ADR-0049: device-pull — the desk relays a ticket sealed to the device's
+    key, never the plaintext; the AAD binds the blob to one account + device."""
+
+    PUB = "vallum1:0003:" + "ab" * 64 + ":-"
+
+    def test_seal_returns_ciphertext_not_the_ticket(self):
+        _, account = self.signup()
+        code, payload = self.desk.add_device(
+            {"token": account["token"], "name": "laptop",
+             "public_key": self.PUB, "seal": True})
+        self.assertEqual(code, 200)
+        self.assertIn("sealed_ticket", payload)
+        self.assertNotIn("ticket", payload)
+        self.assertNotIn("connect", payload)
+        self.assertTrue(payload["seal_aad"].endswith("||" + self.PUB))
+        self.assertTrue(payload["pinned"])
+        self.assertEqual(self.daemon.sealed_aads[payload["peer"]], payload["seal_aad"])
+
+    def test_seal_without_a_public_key_is_refused(self):
+        _, account = self.signup()
+        code, payload = self.desk.add_device(
+            {"token": account["token"], "name": "laptop", "seal": True})
+        self.assertEqual(code, 400)
+        self.assertIn("public_key", payload["error"])
+
+    def test_seal_still_enforces_the_device_cap(self):
+        _, account = self.signup()
+        for i in range(self.config.device_cap):
+            code, _ = self.desk.add_device(
+                {"token": account["token"], "name": f"d{i}",
+                 "public_key": self.PUB, "seal": True})
+            self.assertEqual(code, 200)
+        code, _ = self.desk.add_device(
+            {"token": account["token"], "name": "over",
+             "public_key": self.PUB, "seal": True})
+        self.assertEqual(code, 429)
+
+    def test_unsealed_add_device_still_returns_the_plain_ticket(self):
+        _, account = self.signup()
+        code, payload = self.desk.add_device(
+            {"token": account["token"], "name": "laptop", "public_key": self.PUB})
+        self.assertEqual(code, 200)
+        self.assertIn("ticket", payload)
+        self.assertNotIn("sealed_ticket", payload)
 
 
 class ResetTokenTests(DeskTestCase):

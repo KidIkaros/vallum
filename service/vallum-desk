@@ -313,6 +313,14 @@ class Daemon:
         """
         raise NotImplementedError
 
+    def mint_sealed_ticket(self, peer, public_key, seal_aad):
+        """Device-pull (ADR-0049): mint a ticket **sealed to the device's KEM
+        key** and return the invite report dict (`sealed_ticket`, `seal_aad`,
+        `join`, `fingerprint`, …). The plaintext ticket never leaves the daemon
+        process; the desk relays only ciphertext. Requires the device public line.
+        """
+        raise NotImplementedError
+
     def counters(self):
         """Return peer name → bytes used."""
         raise NotImplementedError
@@ -392,6 +400,21 @@ class DaemonCli(Daemon):
         if not ticket:
             raise RuntimeError("invite produced no join ticket — refusing to hand out a placeholder")
         return ticket
+
+    def mint_sealed_ticket(self, peer, public_key, seal_aad):
+        """The sealed-ticket report (ADR-0049). `--seal-aad` makes the daemon seal
+        the ticket to the device's public-line KEM key and emit `sealed_ticket`
+        instead of the plaintext ticket; the desk relays only the ciphertext."""
+        args = ["peer", "invite", peer, "--json",
+                "--public-key", public_key, "--seal-aad", seal_aad]
+        out = self._run(*args)
+        try:
+            invite = json.loads(out)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"sealed invite's JSON did not parse: {error}") from error
+        if not isinstance(invite, dict) or not invite.get("sealed_ticket"):
+            raise RuntimeError("invite produced no sealed ticket — refusing to hand out a placeholder")
+        return invite
 
     def counters(self):
         """peer name → bytes used, from the daemon's JSON snapshot.
@@ -906,6 +929,13 @@ class Desk:
                                       "vallum1:<suite>:<kem>:<signing|->, from "
                                       "`vallum pubkey --key <file>` (generate the key on "
                                       "the device with `vallum keygen --key <file>`)"}
+        # Device-pull (ADR-0049): the client asks for the ticket sealed to its own
+        # key so it can open and redeem it with no human carrying a code. Sealing
+        # needs the device's public line — the KEM key to seal to.
+        seal = bool(body.get("seal"))
+        if seal and not public_key:
+            return 400, {"error": "seal requires public_key — the device's public line "
+                                  "to seal the ticket to (device-pull, ADR-0049)"}
         # The lookup, cap check, and the peers row are one locked step —
         # the row IS the reservation, so a racing request counts it, and a
         # racing read on the shared connection never interleaves. The
@@ -930,7 +960,11 @@ class Desk:
             peer = self._next_peer_name(label)
             self._insert_peer(account["id"], peer, label)
         try:
-            ticket = self.daemon.mint_ticket(peer, public_key=public_key)
+            if seal:
+                seal_aad = f"{account['id']}||{public_key}"
+                sealed_report = self.daemon.mint_sealed_ticket(peer, public_key, seal_aad)
+            else:
+                ticket = self.daemon.mint_ticket(peer, public_key=public_key)
         except RuntimeError as error:
             with self.lock:
                 self.db.execute("DELETE FROM peers WHERE peer=?", (peer,))
@@ -940,6 +974,14 @@ class Desk:
                 "SELECT 1 FROM peers WHERE peer=? AND status='active'", (peer,)).fetchone()
         if not still:
             return 409, {"error": "the account was revoked while the ticket was minting"}
+        if seal:
+            # Only ciphertext leaves the desk: the client opens it with its key.
+            return 200, {"sealed_ticket": sealed_report["sealed_ticket"],
+                         "seal_aad": seal_aad, "peer": peer, "plan": account["plan"],
+                         "expires": account["expires"], "bytes_cap": account["bytes_cap"],
+                         "pinned": True, "join": sealed_report.get("join"),
+                         "fingerprint": sealed_report.get("fingerprint"),
+                         "expires_in_secs": sealed_report.get("expires_in_secs")}
         return 200, {"ticket": ticket, "peer": peer, "plan": account["plan"],
                      "expires": account["expires"], "bytes_cap": account["bytes_cap"],
                      "pinned": public_key is not None,
