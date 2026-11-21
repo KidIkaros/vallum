@@ -95,6 +95,10 @@ fi
 say "author path: none"
 
 say "minting a real ticket on the server"
+# The join needs a live responder: enrolment is opt-in on the server, so the
+# gate turns it on for the ticket's lifetime and cleanup turns it back off.
+ssh "$VPS" "sudo -n /usr/bin/vallum server enroll --enable --config "${CONFIG:-/etc/vallum/vallum0.toml}"" >/dev/null 2>&1 \
+    || die "could not enable enrolment on $VPS"
 # Extract locally: nested quoting through ssh mangled the token on the first
 # attempt, and a ticket that is silently empty looks like a broken invite path.
 ssh "$VPS" "sudo -n /usr/bin/vallum peer remove $PEER --config "${CONFIG:-/etc/vallum/vallum0.toml}"" >/dev/null 2>&1
