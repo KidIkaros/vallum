@@ -2039,13 +2039,21 @@ Linux + systemd; the release signature verifies itself before anything is
 installed. Source and docs: <a href="{_esc(repo_url)}">{_esc(repo_url.split("://", 1)[-1])}</a>.</p>"""
 
 
-def contact_link(contact, label):
+def contact_link(contact, label, subject="", body=""):
     """A reachable operator channel (invite requests, recovery, feedback).
-    An empty contact falls back to guidance rather than a dead link."""
+    An empty contact falls back to guidance rather than a dead link. The
+    mailto carries the intent: a blank draft leaves the reader guessing
+    what the mail app just opened for."""
     if not contact:
         return "the operator who issued your invite code"
     if "@" in contact and "://" not in contact:
-        return f'<a href="mailto:{_esc(contact)}">{_esc(label)}</a>'
+        from urllib.parse import quote
+        query = ""
+        if subject:
+            query += f"?subject={quote(subject)}"
+        if body:
+            query += f"{'&' if query else '?'}body={quote(body)}"
+        return f'<a href="mailto:{_esc(contact)}{_esc(query)}">{_esc(label)}</a>'
     return f'<a href="{_esc(contact)}">{_esc(label)}</a>'
 
 
@@ -2055,8 +2063,8 @@ def index_page(open_signup, operator="vallum desk",
     code_field = "" if open_signup else (
         '<label>invite code<br><input name="code" required></label><br><br>')
     invite_request = ("" if open_signup else
-                      f'<p>No invite code? {contact_link(contact, "Request an invite")}.</p>')
-    feedback = (f'<p><small>Feedback? {contact_link(contact, "Tell the operator")}.</small></p>'
+                      f'<p>No invite code? {contact_link(contact, "Request an invite", subject="Vallum invite request", body="Hi — could I get an invite code for the Vallum desk?")}.</p>')
+    feedback = (f'<p><small>Feedback? {contact_link(contact, "Tell the operator", subject="Vallum desk feedback")}.</small></p>'
                 if contact else "")
     intro = ("Create an account, then add your devices from your account page; "
              "your key never leaves your machine." if open_signup else
@@ -2239,7 +2247,7 @@ def error_page(message, operator="vallum desk", contact=""):
 <p><small>{_esc(operator)}</small></p>
 <h1>Signup failed</h1><p>{_esc(message)}</p>
 <p>Lost your number? Your recovery code lets the operator verify ownership
-and issue a new one — {contact_link(contact, "contact the operator")}.</p>
+and issue a new one — {contact_link(contact, "contact the operator", subject="Vallum desk — recovery request")}.</p>
 <p><a href="/">Try again</a></p>
 {DESK_FOOTER}"""
 
@@ -2335,7 +2343,7 @@ the only credential — treat it like a password.</p>
 <details><summary>Lost your number?</summary>
 <p>If you saved your <b>recovery code</b>, the operator can verify it and
 issue a new number — your devices and plan survive.
-{contact_link(contact, "Contact the operator")} with your recovery code.
+{contact_link(contact, "Contact the operator", subject="Vallum account recovery", body="Recovery code: ")} with your recovery code.
 Without the number or the recovery code the account cannot be recovered;
 create a new one with a fresh invite.</p>
 </details>

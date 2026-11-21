@@ -1493,6 +1493,16 @@ class ContactChannelTests(unittest.TestCase):
         self.assertIn("Request an invite", html)
         self.assertIn("mailto:ops@example.com", html)
 
+    def test_the_request_mailto_carries_the_intent(self):
+        # A bare mailto opens a blank draft — the clicker is left guessing
+        # what the mail app opened for. The draft must arrive addressed.
+        html = desk_module.index_page(False, contact="ops@example.com")
+        self.assertIn("subject=Vallum%20invite%20request", html)
+        self.assertIn("body=", html)
+        html = desk_module.account_shell_page(contact="ops@example.com")
+        self.assertIn("subject=Vallum%20account%20recovery", html)
+        self.assertIn("body=Recovery%20code", html)
+
     def test_open_signup_index_needs_no_invite_request(self):
         html = desk_module.index_page(True, contact="ops@example.com")
         self.assertNotIn("Request an invite", html)
