@@ -432,7 +432,10 @@ install_binaries() {
         fi
         if getent group vallum >/dev/null 2>&1; then
             run chgrp vallum "$RUNTIME_DIR"
-            run chmod 0770 "$RUNTIME_DIR"
+            # Sticky: a group member must not unlink a socket it does not own
+            # — socket replacement hands every console's set/setconf bodies
+            # (private keys, peer PSKs) to an impostor (ADR-0048).
+            run chmod 1770 "$RUNTIME_DIR"
         fi
     fi
 }

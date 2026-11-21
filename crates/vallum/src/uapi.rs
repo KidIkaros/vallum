@@ -570,14 +570,21 @@ pub struct PeerState {
     pub epoch: u64,
 }
 
-/// Render a `get` response.
+/// Render a `get` response. `redact` elides key material: a `vallum`-group
+/// console (SO_PEERCRED-verified non-owner, ADR-0048) sees the snapshot but
+/// never the device private key or peer PSKs — the fields stay present with
+/// a `(redacted)` marker so parsers keep their shape.
 #[must_use]
-pub fn render_get(state: &DeviceState) -> String {
+pub fn render_get(state: &DeviceState, redact: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "{}={}\n",
         field::PRIVATE_KEY,
-        hex_encode(state.private_key.as_bytes())
+        if redact {
+            "(redacted)".to_owned()
+        } else {
+            hex_encode(state.private_key.as_bytes())
+        }
     ));
     out.push_str(&format!(
         "{}={}\n",
@@ -724,7 +731,15 @@ pub fn render_get(state: &DeviceState) -> String {
             peer.public_line
         ));
         if let Some(psk) = peer.preshared_key {
-            out.push_str(&format!("{}={}\n", field::PRESHARED_KEY, hex_encode(&psk)));
+            out.push_str(&format!(
+                "{}={}\n",
+                field::PRESHARED_KEY,
+                if redact {
+                    "(redacted)".to_owned()
+                } else {
+                    hex_encode(&psk)
+                }
+            ));
         }
         match peer.endpoint {
             Some(endpoint) => out.push_str(&format!("{}={endpoint}\n", field::ENDPOINT)),
@@ -1322,7 +1337,7 @@ mod tests {
 
         #[test]
         fn a_get_response_round_trips(state in a_state()) {
-            let response = parse_response(&render_get(&state));
+            let response = parse_response(&render_get(&state, false));
             let port = state.listen.port().to_string();
             let fwmark = state.fwmark.to_string();
             prop_assert_eq!(response.peers.len(), state.peers.len());
@@ -1525,7 +1540,7 @@ mod tests {
                 previous_public_key: vec![3u8; 32],
             }],
         };
-        let text = render_get(&state);
+        let text = render_get(&state, false);
         assert!(text.contains("private_key=0101"));
         assert!(text.contains("vallum_interface=vallum0"));
         assert!(text.contains("vallum_carrier=udp"));
@@ -1599,7 +1614,7 @@ mod tests {
                 previous_public_key: Vec::new(),
             }],
         };
-        let response = parse_response(&render_get(&state));
+        let response = parse_response(&render_get(&state, false));
         assert_eq!(response.field(field::VALLUM_INTERFACE), Some("vallum0"));
         assert_eq!(response.peers.len(), 1);
         assert_eq!(response.peer_field(0, "vallum_name"), Some("laptop"));

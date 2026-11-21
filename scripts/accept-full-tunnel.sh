@@ -75,7 +75,7 @@ done
 for h in vallum-heal-runtime-dir vallum-cleanup vallum-guard-deadman vallum-panic; do
     docker cp "packaging/$h" "$NAME:/usr/local/sbin/$h" >/dev/null
 done
-ex 'chmod +x /usr/bin/vallum* /usr/local/sbin/vallum-*; mkdir -p /run/vallum; chmod 0770 /run/vallum; systemctl daemon-reload' \
+ex 'chmod +x /usr/bin/vallum* /usr/local/sbin/vallum-*; mkdir -p /run/vallum; chmod 1770 /run/vallum; systemctl daemon-reload' \
     || die "install step failed"
 
 say "joining (the join config is split: on-link server, no default route)"

@@ -24,9 +24,11 @@ if [ -z "$grp" ]; then
     grp=$(id -gn "$usr" 2>/dev/null)
 fi
 
-install -d -m 0770 "$DIR"
+install -d -m 1770 "$DIR"
 if [ -n "$grp" ]; then
     chgrp "$grp" "$DIR" 2>/dev/null || true
 fi
-chmod 0770 "$DIR"
+# Sticky: group members must not unlink a socket they do not own — socket
+# replacement is an impostor-control-plane attack (ADR-0048).
+chmod 1770 "$DIR"
 exit 0

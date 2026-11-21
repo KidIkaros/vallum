@@ -94,7 +94,7 @@ for name in $(names); do
             docker cp "packaging/$h" "vm-$name:/usr/local/sbin/$h" >/dev/null
         done
         docker exec "vm-$name" bash -c \
-            'chmod +x /usr/bin/vallum* /usr/local/sbin/vallum-*; mkdir -p /run/vallum; chmod 0770 /run/vallum; systemctl daemon-reload' >/dev/null 2>&1
+            'chmod +x /usr/bin/vallum* /usr/local/sbin/vallum-*; mkdir -p /run/vallum; chmod 1770 /run/vallum; systemctl daemon-reload' >/dev/null 2>&1
         # `ping: not found` reads exactly like a dead tunnel; the image ships no
         # iputils. Install the probe before trusting its verdict.
         docker exec "vm-$name" bash -c \

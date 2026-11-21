@@ -331,9 +331,12 @@ impl std::fmt::Debug for Attached {
 pub(crate) enum Input {
     Ip(Vec<u8>),
     Datagram(SocketAddr, Vec<u8>),
-    /// A control request, answered on the loop thread.
+    /// A control request, answered on the loop thread. `privileged` is the
+    /// accept loop's SO_PEERCRED verdict — false for a `vallum`-group console,
+    /// whose `get` is rendered with secrets redacted (ADR-0048).
     Control {
         request: crate::uapi::Request,
+        privileged: bool,
         reply: mpsc::Sender<String>,
     },
 }
@@ -839,7 +842,11 @@ pub fn run(
         }
 
         let event = match rx.recv_timeout(tick) {
-            Ok(Input::Control { request, reply }) => {
+            Ok(Input::Control {
+                request,
+                privileged,
+                reply,
+            }) => {
                 // Reassembly counters live in `segments`, so fold them in before
                 // the request handler takes its snapshot.
                 stats.reassembled = segments.reassembled();
@@ -850,7 +857,9 @@ pub fn run(
                 stats.dropped_unknown_index = device.dropped_unknown_index();
                 shared_stats.publish(&stats);
                 let body = match control.as_mut() {
-                    Some(server) => control::handle(&mut device, &mut server.context, request),
+                    Some(server) => {
+                        control::handle(&mut device, &mut server.context, request, privileged)
+                    }
                     None => crate::uapi::render_errno(crate::uapi::errno::ENOSYS),
                 };
                 let _ = reply.send(body);

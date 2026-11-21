@@ -26,10 +26,10 @@ A dedicated system group, **`vallum`**, is the control-socket access group.
    `0700` staging directory, then hard-linked into place — it is never reachable under
    a provisional mode. After that, `widen_to_control_group` publishes it `0660` with
    group `vallum` **only when the daemon is root or already runs as the `vallum`
-   group**. A root daemon also puts `/run/vallum` in that group (`0770`) so the socket
+   group**. A root daemon also puts `/run/vallum` in that group (`1770`) so the socket
    is traversable.
 2. **Installer** (`install.sh`): creates the `vallum` group if absent, adds the
-   invoking user to it, and sets `/run/vallum` to `0770 root:vallum`. Fail-soft: a host
+   invoking user to it, and sets `/run/vallum` to `1770 root:vallum`. Fail-soft: a host
    without group management keeps the owner-only socket; the daemon still runs.
 3. **Personal client unchanged**: a daemon dropped to its login user (a different
    group) keeps `0600`. Its console runs as the socket's owner and reads it directly —
@@ -44,7 +44,18 @@ including `set`. **Membership in `vallum` grants control of the daemon, not just
 visibility.** The group is therefore the *trusted-operator set* — the same people who
 may start/stop the tunnel — not "any local user". This is the deliberate tradeoff
 against per-read polkit prompts, and it is consistent with the runtime dir already
-being `0770` for "the group that runs daemons" (ADR-0017, `vallum-tmpfiles.conf`).
+being `1770` for "the group that runs daemons" (ADR-0017, `vallum-tmpfiles.conf`).
+
+### The socket-replacement nuance (amended 2026-11-21)
+
+A group-**writable** dir lets any member unlink another member's socket and bind an
+impostor in its place; every console then hands its `set`/`setconf` bodies —
+`private_key=` and peer PSKs — to the impostor. The dir is therefore **sticky**
+(`1770`) at every site that sets the mode (tmpfiles, installer, daemon re-widening,
+`vallum-heal-runtime-dir`): members publish and reclaim only their *own* sockets.
+Consequence, named: a stale socket owned by a different uid (a root→dropped-user
+migration) can no longer be reclaimed by the dropped daemon — `serve` reports it
+explicitly and root removes it.
 
 ## Alternatives rejected
 

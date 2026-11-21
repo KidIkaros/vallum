@@ -293,7 +293,7 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
     if parent == crate::host::paths::runtime_dir() && nix::unistd::geteuid().is_root() {
         if let Some(gid) = CONTROL_GROUP_GID.get().copied().flatten() {
             let _ = nix::unistd::chown(parent, None, Some(nix::unistd::Gid::from_raw(gid)));
-            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o770));
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o1770));
         }
     }
     let staging = parent.join(format!(
@@ -313,6 +313,30 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
     let _ = fs::remove_file(&staged);
     let _ = fs::remove_dir(&staging);
     Ok(listener)
+}
+
+/// Whether the peer at the other end of an accepted connection may mutate —
+/// the daemon's own uid or root. Anyone else who can connect is a `vallum`
+/// group console: `get` answers with secrets redacted and `set`/`stop` is
+/// refused. `getsockopt` is on the seccomp allow-list, so this is safe to call
+/// after the filter installs; a credential the kernel cannot produce is
+/// treated as unprivileged, the fail-closed direction.
+#[cfg(target_os = "linux")]
+fn peer_is_privileged(stream: &UnixStream) -> bool {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    match getsockopt(stream, PeerCredentials) {
+        Ok(cred) => {
+            let uid = cred.uid();
+            uid == 0 || uid == nix::unistd::geteuid().as_raw()
+        }
+        Err(_) => false,
+    }
+}
+
+/// No peercred on non-Linux targets — the socket is same-user there anyway.
+#[cfg(not(target_os = "linux"))]
+fn peer_is_privileged(_stream: &UnixStream) -> bool {
+    true
 }
 
 /// Bind the socket and serve requests until shutdown.
@@ -337,6 +361,20 @@ pub(crate) fn serve(
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        // The runtime dir is sticky (1770): only the owner may unlink a
+        // socket. A stale socket left by a daemon running under a different
+        // uid (root → dropped-user migration) is reclaimed by root, not by
+        // this process — name that instead of a bare EPERM.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "`{}` is a stale socket owned by another uid — remove it as root \
+                     (the runtime dir is sticky by design, ADR-0048)",
+                    path.display()
+                ),
+            ));
+        }
         Err(error) => return Err(error),
     }
     let listener = bind_private(&path)?;
@@ -399,8 +437,16 @@ pub(crate) fn serve(
                 // a daemon to stop and is then told nothing cannot tell success
                 // from a dead socket, and the process may exit while this thread
                 // is still writing.
+                // SO_PEERCRED: the `vallum` group gets the console's intended
+                // role — `get` answers with secrets redacted; `set`/`stop` are
+                // refused. The socket mode cannot express this (group needs the
+                // write bit merely to connect), so the credential does it.
+                let privileged = peer_is_privileged(&stream);
                 let mut stop_after_reply = false;
                 let reply = match uapi::parse(&text) {
+                    Ok(request) if !privileged && !matches!(request, Request::Get) => {
+                        uapi::render_errno(EPERM)
+                    }
                     Ok(Request::Stop) => {
                         stop_after_reply = true;
                         uapi::render_ok()
@@ -410,6 +456,7 @@ pub(crate) fn serve(
                         if tx
                             .send(Input::Control {
                                 request,
+                                privileged,
                                 reply: reply_tx,
                             })
                             .is_err()
@@ -481,11 +528,21 @@ pub fn request(path: &Path, body: &str) -> Result<String, crate::error::Error> {
     Ok(reply)
 }
 
-/// Answer one request against the device.
+/// Answer one request against the device. `privileged` is the accept loop's
+/// SO_PEERCRED verdict: an unprivileged `get` renders with secrets redacted
+/// (the `vallum`-group console's read role); `set` is refused at the accept
+/// loop and refused again here in case a caller ever reaches this seam
+/// directly.
 #[must_use]
-pub fn handle(device: &mut Device, context: &mut ControlContext, request: Request) -> String {
+pub fn handle(
+    device: &mut Device,
+    context: &mut ControlContext,
+    request: Request,
+    privileged: bool,
+) -> String {
     match request {
-        Request::Get => uapi::render_get(&snapshot(device, context)),
+        Request::Get => uapi::render_get(&snapshot(device, context), !privileged),
+        Request::Set(_) if !privileged => uapi::render_errno(EPERM),
         Request::Set(set) => match apply(device, context, set) {
             Ok(()) => uapi::render_ok(),
             Err(errno) => uapi::render_errno(errno),
@@ -835,9 +892,9 @@ mod tests {
             crate::keys::hex_encode(peer.public().as_bytes())
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=0"));
 
-        let reply = handle(&mut device, &mut context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         assert!(reply.contains("allowed_ip=10.7.0.2/32"));
         assert!(reply.contains("vallum_epoch=0"));
     }
@@ -861,7 +918,7 @@ mod tests {
             crate::keys::hex_encode(peer.public().as_bytes())
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=0"));
 
         // Now replace the set with one peer whose key is the wrong length.
         // It parses - the length is the device's business - and the device
@@ -869,18 +926,70 @@ mod tests {
         let body =
             "set=1\nreplace_peers=true\npublic_key=00112233445566778899\nallowed_ip=10.7.0.3/32\n";
         let request = uapi::parse(body).expect("the request parses");
-        let reply = handle(&mut device, &mut context, request);
+        let reply = handle(&mut device, &mut context, request, true);
         assert!(
             !reply.contains("errno=0"),
             "the bad peer must be refused: {reply}"
         );
 
         // The peer that was there is still there.
-        let reply = handle(&mut device, &mut context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         assert!(
             reply.contains("allowed_ip=10.7.0.2/32"),
             "a refused peer must not take the others with it: {reply}"
         );
+    }
+
+    #[test]
+    fn the_group_console_reads_without_secrets_and_cannot_write() {
+        // ADR-0048's read role made real: a `vallum`-group member connects but
+        // is not the socket owner — `get` answers the snapshot with keys
+        // elided, `set` and `stop` are refused rather than answered.
+        let suite: Arc<dyn CryptoSuite> = Arc::new(vallum_crypto_sdk::SdkSuite::tri_hybrid());
+        let me = StaticIdentity::generate(&*suite, &[0x01; 32]).expect("identity");
+        let peer = StaticIdentity::generate(&*suite, &[0x02; 32]).expect("identity");
+        let mut rng = ZeroRng;
+        let mut device =
+            Device::new(Arc::clone(&suite), me, Vec::new(), &mut rng, 0).expect("device");
+        let mut context = context(suite);
+
+        let body = format!(
+            "set=1\npublic_key={}\npreshared_key={}\nallowed_ip=10.7.0.2/32\n",
+            crate::keys::hex_encode(peer.public().as_bytes()),
+            "ab".repeat(32)
+        );
+        let request = uapi::parse(&body).expect("a legal set");
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=0"));
+
+        // Unprivileged get: the snapshot answers, the secrets do not.
+        let reply = handle(&mut device, &mut context, Request::Get, false);
+        assert!(reply.contains("private_key=(redacted)"), "{reply}");
+        assert!(reply.contains("preshared_key=(redacted)"), "{reply}");
+        assert!(
+            !reply.contains(&"ab".repeat(32)),
+            "the PSK must not leak: {reply}"
+        );
+        assert!(
+            reply.contains("allowed_ip=10.7.0.2/32"),
+            "the rest of the snapshot stays: {reply}"
+        );
+
+        // Mutations are refused at the handler too — the accept loop is not
+        // the only place that must say no.
+        let request = uapi::parse(&body).expect("a legal set");
+        let reply = handle(&mut device, &mut context, request, false);
+        assert!(
+            reply.contains("errno=1"),
+            "unprivileged set must be EPERM: {reply}"
+        );
+    }
+
+    #[test]
+    fn peer_credentials_mark_the_owner_privileged() {
+        // UnixStream::pair carries this process's own uid — the same check a
+        // `vallum` member fails and the owner passes.
+        let (_a, b) = UnixStream::pair().expect("a socket pair");
+        assert!(peer_is_privileged(&b));
     }
 
     #[test]
@@ -899,9 +1008,9 @@ mod tests {
             crate::keys::hex_encode(&[0x07; 32])
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=0"));
 
-        let reply = handle(&mut device, &mut context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         assert!(
             reply.contains(&crate::keys::hex_encode(&[0x07; 32])),
             "the reported key must be the key in use: {reply}"
@@ -927,11 +1036,11 @@ mod tests {
             "set=1\npublic_key={key}\nallowed_ip=10.7.0.2/32\n"
         ))
         .expect("a legal set");
-        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, add, true).contains("errno=0"));
         let remove =
             uapi::parse(&format!("set=1\npublic_key={key}\nremove=true\n")).expect("a legal set");
-        assert!(handle(&mut device, &mut context, remove).contains("errno=0"));
-        let reply = handle(&mut device, &mut context, Request::Get);
+        assert!(handle(&mut device, &mut context, remove, true).contains("errno=0"));
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         assert!(!reply.contains(&format!("public_key={key}")));
     }
 
@@ -946,7 +1055,7 @@ mod tests {
         let before = context.socket.generation();
 
         let request = uapi::parse("set=1\nlisten_port=0\n").expect("a legal set");
-        assert!(handle(&mut device, &mut context, request).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=0"));
         assert!(context.socket.generation() > before);
         assert_ne!(context.listen.port(), 0);
     }
@@ -965,7 +1074,7 @@ mod tests {
             crate::keys::hex_encode(peer.public().as_bytes())
         );
         let request = uapi::parse(&body).expect("a legal set");
-        assert!(handle(&mut device, &mut context, request).contains("errno=2"));
+        assert!(handle(&mut device, &mut context, request, true).contains("errno=2"));
     }
 
     /// A rotation update names both keys and lives on the row it names.
@@ -990,16 +1099,16 @@ mod tests {
             "set=1\npublic_key={old_key}\nvallum_name=laptop\nallowed_ip=10.7.0.2/32\n"
         ))
         .expect("a legal set");
-        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, add, true).contains("errno=0"));
 
         let rotate = uapi::parse(&format!(
             "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
              \nvallum_name=laptop\nupdate_only=true\n"
         ))
         .expect("a legal rotation");
-        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, rotate, true).contains("errno=0"));
 
-        let reply = handle(&mut device, &mut context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         // The row is keyed by the new key now, and the window reports the old.
         assert!(reply.contains(&format!("public_key={new_key}")), "{reply}");
         assert!(
@@ -1039,17 +1148,17 @@ mod tests {
             "set=1\npublic_key={old_key}\nvallum_name=laptop\n"
         ))
         .expect("a legal set");
-        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, add, true).contains("errno=0"));
         let rotate = uapi::parse(&format!(
             "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
              \nvallum_name=laptop\nupdate_only=true\n"
         ))
         .expect("a legal rotation");
-        assert!(handle(&mut device, &mut context, rotate.clone()).contains("errno=0"));
-        let before = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+        assert!(handle(&mut device, &mut context, rotate.clone(), true).contains("errno=0"));
+        let before = uapi::parse_response(&handle(&mut device, &mut context, Request::Get, true));
 
-        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
-        let after = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+        assert!(handle(&mut device, &mut context, rotate, true).contains("errno=0"));
+        let after = uapi::parse_response(&handle(&mut device, &mut context, Request::Get, true));
         assert_eq!(
             before, after,
             "a replayed rotation changed the running state"
@@ -1079,23 +1188,23 @@ mod tests {
             "set=1\npublic_key={old_key}\nvallum_name=laptop\n"
         ))
         .expect("a legal set");
-        assert!(handle(&mut device, &mut context, add).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, add, true).contains("errno=0"));
         let rotate = uapi::parse(&format!(
             "set=1\npublic_key={new_key}\nvallum_previous_public_key={old_key}\
              \nvallum_name=laptop\nupdate_only=true\n"
         ))
         .expect("a legal rotation");
-        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, rotate, true).contains("errno=0"));
 
         let finalize = uapi::parse(&format!(
             "set=1\npublic_key={new_key}\nvallum_previous_public_key=(none)\
              \nupdate_only=true\n"
         ))
         .expect("a legal finalize");
-        assert!(handle(&mut device, &mut context, finalize).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, finalize, true).contains("errno=0"));
 
         assert!(!device.peer_by_kem(old.public().as_bytes()).is_some());
-        let reply = uapi::parse_response(&handle(&mut device, &mut context, Request::Get));
+        let reply = uapi::parse_response(&handle(&mut device, &mut context, Request::Get, true));
         assert_eq!(
             reply.peer_field(0, uapi::field::VALLUM_PREVIOUS_PUBLIC_KEY),
             Some("(none)")
@@ -1123,11 +1232,11 @@ mod tests {
              \nvallum_name=laptop\n"
         ))
         .expect("a legal rotation on an empty daemon");
-        assert!(handle(&mut device, &mut context, rotate).contains("errno=0"));
+        assert!(handle(&mut device, &mut context, rotate, true).contains("errno=0"));
 
         assert!(device.peer_by_kem(new.public().as_bytes()).is_some());
         assert!(device.peer_by_kem(old.public().as_bytes()).is_some());
-        let reply = handle(&mut device, &mut context, Request::Get);
+        let reply = handle(&mut device, &mut context, Request::Get, true);
         assert!(reply.contains(&format!("public_key={new_key}")), "{reply}");
         assert!(
             reply.contains(&format!(
