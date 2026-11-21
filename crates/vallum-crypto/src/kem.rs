@@ -61,17 +61,21 @@ pub fn frame(parts: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Combine the per-leg shared secrets into a session key, binding `transcript`.
+/// Combine the per-leg shared secrets into a key, binding `salt` and `info`.
 ///
-/// `legs` must be in the suite's combiner order.
+/// The single combiner core: `KDF(salt, ss_1 ‖ ss_2 ‖ …, info)`. Every caller
+/// (the handshake KEM schedule, the ticket seal) goes through here so the
+/// concatenation + KDF + scrub exists once, on the abstract suite — not copied
+/// per use site, and not coupled to a concrete provider's combiner.
 ///
 /// # Errors
 ///
-/// [`KdfError`] if `legs` is empty or the suite's KDF fails.
-pub fn derive_kem_key<S: CryptoSuite + ?Sized>(
+/// [`KdfError`] if `legs` is empty, `out` is empty, or the suite's KDF fails.
+pub fn derive_combined_key<S: CryptoSuite + ?Sized>(
     suite: &S,
-    transcript: &[u8],
+    salt: &[u8],
     legs: &[SharedSecret],
+    info: &[u8],
     out: &mut [u8],
 ) -> Result<(), KdfError> {
     if legs.is_empty() {
@@ -86,10 +90,26 @@ pub fn derive_kem_key<S: CryptoSuite + ?Sized>(
         ikm.extend_from_slice(ss.as_bytes());
     }
 
-    let result = suite.kdf(transcript, &ikm, KEM_INFO, out);
+    let result = suite.kdf(salt, &ikm, info, out);
 
     crate::scrub(&mut ikm);
     result
+}
+
+/// Combine the per-leg shared secrets into a session key, binding `transcript`.
+///
+/// `legs` must be in the suite's combiner order.
+///
+/// # Errors
+///
+/// [`KdfError`] if `legs` is empty or the suite's KDF fails.
+pub fn derive_kem_key<S: CryptoSuite + ?Sized>(
+    suite: &S,
+    transcript: &[u8],
+    legs: &[SharedSecret],
+    out: &mut [u8],
+) -> Result<(), KdfError> {
+    derive_combined_key(suite, transcript, legs, KEM_INFO, out)
 }
 
 /// Hash the handshake transcript: `suite_id ‖ messages`.

@@ -69,7 +69,9 @@ pub fn open_ticket(args: &OpenTicketArgs) -> Result<(), Error> {
         None => {
             use std::io::Read;
             let mut buf = String::new();
-            std::io::stdin().read_to_string(&mut buf).map_err(Error::Io)?;
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(Error::Io)?;
             buf
         }
     };

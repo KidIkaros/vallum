@@ -34,28 +34,17 @@ pub struct SealedTicket {
     pub ct: Vec<u8>,
 }
 
-/// Combine the per-leg secrets as the protocol combiner does (raw concatenation),
-/// then derive the AEAD key with the seal info and the AAD as salt.
+/// Derive the seal AEAD key through the single combiner core (`derive_combined_key`),
+/// with the AAD as salt and a seal-specific info — no copied concat/KDF here.
 fn seal_key<S: CryptoSuite + ?Sized>(
     suite: &S,
     legs: &[SharedSecret],
     aad: &[u8],
 ) -> Result<[u8; 32], String> {
-    if legs.is_empty() {
-        return Err("seal: no hybrid-combiner legs".to_owned());
-    }
-    let mut ikm = Vec::with_capacity(32 * legs.len());
-    for leg in legs {
-        ikm.extend_from_slice(leg.as_bytes());
-    }
     let mut key = [0u8; 32];
-    let result = suite
-        .kdf(aad, &ikm, SEAL_INFO, &mut key)
-        .map_err(|error| format!("seal kdf: {error}"));
-    for byte in ikm.iter_mut() {
-        *byte = 0;
-    }
-    result.map(|()| key)
+    vallum_crypto::derive_combined_key(suite, aad, legs, SEAL_INFO, &mut key)
+        .map_err(|error| format!("seal kdf: {error}"))?;
+    Ok(key)
 }
 
 /// Seal `ticket` to `device_pk`. `aad` should be `account_id || device_public_line`.
@@ -190,7 +179,10 @@ mod tests {
         let (pk, _sk) = device_keypair(&[7u8; 32]);
         let a = seal_ticket(&suite(), b"ticket", &pk, AAD, &[1u8; 32], &[2u8; 24]).expect("seal");
         let b = seal_ticket(&suite(), b"ticket", &pk, AAD, &[1u8; 32], &[2u8; 24]).expect("seal");
-        assert_eq!(a, b, "exact vectors: same (pk, randomness, nonce) → same blob");
+        assert_eq!(
+            a, b,
+            "exact vectors: same (pk, randomness, nonce) → same blob"
+        );
     }
 
     #[test]
@@ -200,7 +192,10 @@ mod tests {
             seal_ticket(&suite(), b"ticket", &pk, AAD, &[1u8; 32], &[2u8; 24]).expect("seal");
         let parsed = SealedTicket::from_json(&sealed.to_json()).expect("parse");
         assert_eq!(parsed, sealed);
-        assert_eq!(open_ticket(&suite(), &parsed, &sk, AAD).expect("open"), b"ticket");
+        assert_eq!(
+            open_ticket(&suite(), &parsed, &sk, AAD).expect("open"),
+            b"ticket"
+        );
     }
 
     #[test]
