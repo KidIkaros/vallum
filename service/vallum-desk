@@ -2442,11 +2442,11 @@ account ever has. Save it; the desk does not send it anywhere else.</p>
 {DESK_FOOTER}"""
 
 
-def error_page(message, operator="vallum desk", contact=""):
-    return f"""<!doctype html><title>signup failed — {_esc(operator)}</title>
+def error_page(message, operator="vallum desk", contact="", heading="Signup failed"):
+    return f"""<!doctype html><title>{_esc(heading.lower())} — {_esc(operator)}</title>
 {DESK_STYLE}
 <p><small>{_esc(operator)}</small></p>
-<h1>Signup failed</h1><p>{_esc(message)}</p>
+<h1>{_esc(heading)}</h1><p>{_esc(message)}</p>
 <p>Lost your number? Your recovery code lets the operator verify ownership
 and issue a new one — {contact_link(contact, "contact the operator", subject="Vallum desk — recovery request")}.</p>
 <p><a href="/">Try again</a></p>
@@ -2826,7 +2826,8 @@ def make_handler(desk):
                     if code == 200:
                         self._send_html(account_page(view, body["token"], operator=desk.config.operator_name), private=True)
                     else:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact,
+                                                   heading="Could not open the account"),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/device":
@@ -2839,7 +2840,8 @@ def make_handler(desk):
                                                     desk.config.install_source, desk.config.repo_url),
                                         private=True)
                     else:
-                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name, desk.config.contact),
+                        self._send_html(error_page(payload.get("error", ""), desk.config.operator_name, desk.config.contact,
+                                                   heading="Could not add the device"),
                                         status=code, private=True)
                     return
                 elif self.path == "/account/revoke":
@@ -2849,7 +2851,8 @@ def make_handler(desk):
                         # explicit step (no-script, like every page here).
                         view_code, view = desk.account(body.get("token") or "")
                         if view_code != 200:
-                            self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
+                            self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact,
+                                                       heading="Could not open the account"),
                                             status=view_code, private=True)
                         else:
                             self._send_html(revoke_confirm_page(view, body.get("peer", ""),
@@ -2861,7 +2864,8 @@ def make_handler(desk):
                               else payload.get("error", "remove failed"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact,
+                                                   heading="Could not open the account"),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),
@@ -2874,7 +2878,8 @@ def make_handler(desk):
                               else payload.get("error", "code refused"))
                     view_code, view = desk.account(body.get("token") or "")
                     if view_code != 200:
-                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact),
+                        self._send_html(error_page(view.get("error", ""), desk.config.operator_name, desk.config.contact,
+                                                   heading="Could not open the account"),
                                         status=view_code, private=True)
                     else:
                         self._send_html(account_page(view, body.get("token", ""), notice, desk.config.operator_name),

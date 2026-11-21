@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/KidIkaros/vallum/releases"><img src="https://img.shields.io/badge/version-1.10.0-39c5cf.svg?style=flat-square" alt="Version 1.10.0"></a>
+  <a href="https://github.com/KidIkaros/vallum/releases"><img src="https://img.shields.io/github/v/release/KidIkaros/vallum?color=39c5cf&style=flat-square" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3fb950.svg?style=flat-square" alt="License: Apache-2.0"></a>
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/rust-1.95%2B-orange.svg?style=flat-square" alt="Rust 1.95+"></a>
   <a href="https://github.com/KidIkaros/vallum"><img src="https://img.shields.io/badge/suite-0x0003%20Tri--Hybrid-bc8cff.svg?style=flat-square" alt="Tri-Hybrid Suite"></a>

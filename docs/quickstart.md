@@ -119,6 +119,8 @@ prints all four in this order:
 # for the enrolment only.
 sudo vallum peer invite laptop
 sudo vallum join vallum1-join:<host>:<port>/<name>/<id>/<token>/<fp>
+# The desk's `vallum://join?ticket=…&account=…&desk=…` URI unwraps the same
+# way — paste the whole link instead of extracting the ticket by hand.
 
 # Or over SSH: the key is generated here, only the public line crosses.
 sudo vallum setup --remote you@vpn.example.com

@@ -39,6 +39,28 @@ REPO=${VALLUM_REPO:-$(cat /etc/vallum/repo 2>/dev/null || true)}
 CONF=/etc/vallum/vallum0.toml
 IFACE=vallum0
 
+usage() {
+    cat >&2 <<'EOF'
+vallum-ops — the named, audited privileged operations:
+
+  full-tunnel [iface]     the phase-3 trial (drift check, 90s revert timer)
+  revert [iface]          panic, restore split config, restart unit
+  join                    redeem a ticket or vallum://join URI on stdin
+  remove <name>           reverse join: stop the client, drop config+key
+  setup-remote <u@h> [name]   SSH enrolment against a remote server
+  setup-server [addr] [listen] [endpoint]   initialise this host as a server
+  invite <name> [ttl] [iface] [pinned]      mint an invite + start the responder
+  enroll-off [iface]      close the UDP 51821 enrolment responder
+  service <start|stop|restart> [iface]
+  status [iface]          units, route, handshake, resolver, public IP
+  journal [N] [iface]     last N lines from the vallum units' journals
+  enable|disable [iface]  boot-start the tunnel unit on or off
+  trace [iface]           watch the tunnel's packet path
+  sync                    make the host match the build under test
+  self-update [path]      install a signed newer copy of this dispatcher
+EOF
+}
+
 require_iface() {
     case "${1:-}" in
         # A leading dash survives the charset check but lands in argv — a
@@ -96,26 +118,28 @@ conf_or_fail() {
     resolve_conf "$req"
 }
 
-# A verb that installs from a working tree must not exec code from a directory
-# its owner can rewrite: under a NOPASSWD sudoers rule that is password-less
-# root for that user (ADR-0029). Root-owned sources pass; a single-user dev host
-# opts in explicitly with a marker only root can create.
+# A verb that installs from a working path must not exec or install code its
+# owner can rewrite: under a NOPASSWD sudoers rule that is password-less root
+# for that user (ADR-0029). Both the artefact and the directory holding it
+# must be root-owned — a root-owned file in a writable directory is one `mv`
+# away from anyone's bytes. A single-user dev host opts in explicitly with a
+# marker only root can create.
 require_trusted_source() {
-    if [ -z "$REPO" ]; then
-        echo "vallum-ops: VALLUM_REPO is not set — this verb needs a source tree." >&2
-        echo "  Install with scripts/install.sh as root, or set VALLUM_REPO." >&2
-        exit 1
-    fi
+    local src=$1
     if [ -e /etc/vallum/allow-untrusted-source ]; then
         echo "vallum-ops: WARNING: /etc/vallum/allow-untrusted-source is present;" >&2
-        echo "  installing from $REPO without checking who owns it." >&2
+        echo "  installing from $src without checking who owns it." >&2
         return 0
     fi
-    owner=$(stat -c %u "$REPO" 2>/dev/null || echo 1)
-    if [ "$owner" != 0 ]; then
-        echo "vallum-ops: refusing to install from $REPO: it is owned by uid $owner, not root." >&2
-        echo "  Anyone who can write that tree gets root here. Install with scripts/install.sh" >&2
-        echo "  as root, or, on a single-user development host only, create" >&2
+    local owner dir_owner
+    owner=$(stat -c %u "$src" 2>/dev/null || echo 1)
+    dir_owner=$(stat -c %u "$(dirname -- "$src")" 2>/dev/null || echo 1)
+    if [ "$owner" != 0 ] || [ "$dir_owner" != 0 ]; then
+        echo "vallum-ops: refusing to install from $src — it or its directory is" >&2
+        echo "  not root-owned (uid $owner in dir uid $dir_owner). Anything that can" >&2
+        echo "  rewrite those bytes gets root here. Sign the file instead" >&2
+        echo "  (vallum-ops.sig beside it), install with scripts/install.sh as root," >&2
+        echo "  or, on a single-user development host only, create" >&2
         echo "  /etc/vallum/allow-untrusted-source (root-owned) to accept the risk." >&2
         exit 1
     fi
@@ -366,7 +390,12 @@ sync)
     # stop. Never runs the cleanup itself — the floor fires at boot only.
     # `--check` reports drift without touching it, so a console can ask
     # "is anything stale?" as a read.
-    require_trusted_source
+    if [ -z "$REPO" ]; then
+        echo "vallum-ops: VALLUM_REPO is not set — sync needs a source tree." >&2
+        echo "  Install with scripts/install.sh as root, or set VALLUM_REPO." >&2
+        exit 1
+    fi
+    require_trusted_source "$REPO"
     case "${2:-}" in
         "" | --check) ;;
         *)
@@ -401,7 +430,7 @@ self-update)
         echo "vallum-ops: $sig does not verify against the release key — refusing" >&2
         exit 1
     fi
-    require_trusted_source
+    require_trusted_source "$src"
     install -m 755 "$src" /usr/local/sbin/vallum-ops
     echo "dispatcher updated"
     exit 0
@@ -439,13 +468,25 @@ status)
     echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
     echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
     # Three states, not one "none": the field only exists for a peer with a
-    # live session — absent can mean "no session" or "daemon did not answer".
-    show_out=$(/usr/bin/vallum show --config "$target_conf" 2>/dev/null)
+    # live session. Absent is split by show's own honesty — with no daemon to
+    # ask it prints the configured device plus a "no daemon connected" note.
+    # The note rides stderr, so a second call captures it: output alone never
+    # proves the daemon answered.
+    show_out=$($VALLUM_BIN show --config "$target_conf" 2>/dev/null)
+    show_err=$($VALLUM_BIN show --config "$target_conf" 2>&1 >/dev/null)
     hs=$(grep -m1 last_handshake_time_sec <<<"$show_out" || true)
-    echo "handshake: ${hs:-$([ -n "$show_out" ] && echo 'no live session' || echo 'no answer')}"
+    if [ -n "$hs" ]; then
+        hs_state=$hs
+    elif [ -z "$show_out" ] || grep -q "no daemon connected" <<<"$show_err"; then
+        hs_state="no answer"
+    else
+        hs_state="no live session"
+    fi
+    echo "handshake: $hs_state"
     # The build the daemon is actually running, so two hosts can be compared
     # without trusting either one's working tree.
-    echo "build:     $(sed -n 's/^ *vallum_build=//p' <<<"$show_out" | head -1 || echo none)"
+    build=$(sed -n 's/^ *vallum_build=//p' <<<"$show_out" | head -1)
+    echo "build:     ${build:-none}"
     # Every enabled tunnel unit needs a config, or boot ends with a failed unit
     # the operator has to interpret. A leftover test unit (vallum@owtest0) did
     # exactly that until 2026-11-11. Enabled instances of a template are the
@@ -459,6 +500,10 @@ status)
             echo "boot:      vallum@$name is enabled but /etc/vallum/$name.toml is missing"
     done
     echo "public ip: $(curl -s --max-time 8 https://ifconfig.me 2>/dev/null || echo unknown)"
+    # The dev-host opt-out of the source-ownership check is silent everywhere
+    # else — status is the one place it should never be invisible.
+    [ -e /etc/vallum/allow-untrusted-source ] && \
+        echo "trust:     allow-untrusted-source present — unsigned self-updates install"
     ;;
 journal)
     lines=${2:-40}
@@ -471,8 +516,14 @@ journal)
     journalctl -u "vallum@$stem" -u "vallum-quick@$stem" -u "vallum-guard@$stem" \
         --no-pager -o short-iso -n "$lines"
     ;;
+help|-h|--help)
+    usage
+    ;;
 *)
-    echo "usage: vallum-ops {full-tunnel [iface]|revert [iface]|join|remove <name>|setup-remote <user@host> [name]|setup-server [addr] [listen] [endpoint]|invite <name> [ttl] [iface] [pinned]|enroll-off [iface]|service <start|stop|restart> [iface]|status [iface]|journal [N] [iface]|enable [iface]|disable [iface]|trace [iface]|sync|self-update [path]}" >&2
+    if [ -n "${1:-}" ]; then
+        echo "vallum-ops: unknown verb '$1'" >&2
+    fi
+    usage
     exit 2
     ;;
 esac

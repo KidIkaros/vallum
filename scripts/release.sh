@@ -443,6 +443,9 @@ if [ "$DRY" -eq 0 ]; then
     # self-update` verifies vallum-ops.sig against the key embedded in the
     # installed script, so regenerating it here keeps the committed sig in
     # step with the file a release ships.
+    # -Y sign refuses to overwrite interactively: the sig is committed, so a
+    # re-release would hang on a prompt nobody is watching.
+    rm -f packaging/vallum-ops.sig
     ssh-keygen -Y sign -f "$SIGN_KEY" -n file packaging/vallum-ops
     ssh-keygen -Y verify -f packaging/allowed_signers -n file \
         -s packaging/vallum-ops.sig -I vallum-release < packaging/vallum-ops >/dev/null \
