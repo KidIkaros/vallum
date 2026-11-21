@@ -55,6 +55,21 @@ SCHEMA_VERSION = 6
 # `vallum status` and a user reading the account page are told the same thing.
 SESSION_LIVE_SECONDS = 180
 
+# A request body is a small JSON or form document — the largest legitimate
+# one (a sealed-ticket add_device) is a few KB. Anything bigger is a memory
+# exhaustion attempt; refuse it before reading.
+MAX_BODY = 64 * 1024
+
+
+class BodyTooLarge(Exception):
+    """The request's Content-Length exceeds MAX_BODY (or is unparseable)."""
+
+
+# How long a /healthz answer stays fresh. The route is unauthenticated on
+# purpose, so the checks behind it (a daemon subprocess and a systemctl
+# call) must not be payable per request by anyone on the network.
+HEALTHZ_TTL = 5.0
+
 # How long a join ticket lives: `INVITE_TTL_SECS = 15 * 60` in
 # crates/vallum/src/enroll.rs — "one sitting: enough to walk to the other
 # machine". The ticket page says this window out loud (#27): the alpha's
@@ -560,6 +575,7 @@ class Desk:
         # may already hold it when calling them — every self.db access runs
         # under it, since one sqlite3.Connection is not concurrent-safe.
         self.lock = threading.RLock()
+        self._health_cache = (0.0, None)
 
     # -- inputs ---------------------------------------------------------
 
@@ -936,15 +952,16 @@ class Desk:
         if seal and not public_key:
             return 400, {"error": "seal requires public_key — the device's public line "
                                   "to seal the ticket to (device-pull, ADR-0049)"}
-        # The lookup, cap check, and the peers row are one locked step —
-        # the row IS the reservation, so a racing request counts it, and a
-        # racing read on the shared connection never interleaves. The
-        # daemon call stays outside the lock: a subprocess under a mutex
-        # serializes the desk, and a failed mint deletes the reservation.
-        # The daemon's actual peers are the source of truth for the cap
-        # (ADR-0047 §1): fetched once here, then used inside the locked step
-        # to release ghost reservations and count live devices.
-        daemon_peers = self._daemon_peers()
+        # Authenticate BEFORE the daemon call: `vallum show --json` is a
+        # subprocess that can take seconds, and an unauthenticated request
+        # must not be able to spend it. The lookup, cap check, and the peers
+        # row are locked steps — the row IS the reservation, so a racing
+        # request counts it, and a racing read on the shared connection never
+        # interleaves. The daemon call stays outside the lock: a subprocess
+        # under a mutex serializes the desk, and a failed mint deletes the
+        # reservation. The daemon's actual peers are the source of truth for
+        # the cap (ADR-0047 §1): fetched once here, then used inside the
+        # locked step to release ghost reservations and count live devices.
         with self.lock:
             account = self.db.execute(
                 "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
@@ -953,6 +970,8 @@ class Desk:
             if account["status"] != "active":
                 return 403, {"error": f"account is {account['status']} — "
                                       "devices can only join an active account"}
+        daemon_peers = self._daemon_peers()
+        with self.lock:
             live = self._live_device_count(account, daemon_peers)
             if live >= self.config.device_cap:
                 return 429, {"error": "device limit — an account carries at most "
@@ -1340,8 +1359,13 @@ class Desk:
 
         Unauthenticated on purpose: it is the one route a probe hits, and it
         names no account, no peer and no count — only whether each dependency
-        answered.
+        answered. Because it is unauthenticated, its subprocesses are cached
+        for HEALTHZ_TTL seconds — a probe sees staleness in seconds, an
+        attacker cannot spend forks per request.
         """
+        now = time.monotonic()
+        if now - self._health_cache[0] < HEALTHZ_TTL and self._health_cache[1] is not None:
+            return self._health_cache[1]
         checks = {}
         try:
             with self.lock:
@@ -1361,7 +1385,9 @@ class Desk:
         # between enrolments. It tells the operator whether a minted ticket will
         # currently join — arm the responder before distributing tickets.
         checks["enrolment"] = self._enrolment_state()
-        return (200 if ok else 503), {"ok": ok, "checks": checks}
+        result = (200 if ok else 503), {"ok": ok, "checks": checks}
+        self._health_cache = (now, result)
+        return result
 
     def _enrolment_state(self):
         """Whether the enrolment responder is currently listening. By design
@@ -1566,7 +1592,11 @@ class Desk:
     def _is_admin(self, body):
         given = body.get("admin_token") or ""
         # Constant-time: the token is a secret, and a timing side channel on
-        # its comparison is a side channel on the service.
+        # its comparison is a side channel on the service. An empty stored
+        # token or an empty presented one is never admin — compare_digest
+        # would call ""=="" a match.
+        if not given or not self.config.admin_token:
+            return False
         return secrets.compare_digest(given, self.config.admin_token)
 
     def _admin_routes(self):
@@ -2313,7 +2343,12 @@ def make_handler(desk):
             self.wfile.write(body)
 
         def _body(self):
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise BodyTooLarge("a non-numeric Content-Length")
+            if length > MAX_BODY:
+                raise BodyTooLarge(f"body over {MAX_BODY} bytes")
             raw = self.rfile.read(length) or b""
             if "application/x-www-form-urlencoded" in (self.headers.get("Content-Type") or ""):
                 from urllib.parse import parse_qs
@@ -2326,9 +2361,12 @@ def make_handler(desk):
                                      "send it with Content-Type: application/json")
                 return fields
             try:
-                return json.loads(raw or "{}")
+                parsed = json.loads(raw or "{}")
             except json.JSONDecodeError:
                 return {}
+            # Only a dict body is a request — a JSON list or scalar would
+            # crash the first .get() downstream.
+            return parsed if isinstance(parsed, dict) else {}
 
         def _client_ip(self):
             """The visitor, not the proxy.
@@ -2394,7 +2432,11 @@ def make_handler(desk):
 
         def do_POST(self):
             try:
-                body = self._body()
+                try:
+                    body = self._body()
+                except BodyTooLarge as error:
+                    self._send(413, {"error": str(error)})
+                    return
                 if self.path == "/api/signup":
                     code, payload = desk.signup(body, self._client_ip())
                 elif self.path == "/signup":
@@ -2527,13 +2569,22 @@ def parse_args(argv=None):
 
 
 def admin_token_from(path):
-    """The operator's admin token, generated once if it does not exist."""
+    """The operator's admin token, generated once if it does not exist.
+
+    An existing-but-empty file (a crash between create and write, or a
+    `touch`) is treated as absent and regenerated: returning "" would make
+    `secrets.compare_digest("", "")` true for any request that omits the
+    token, which is an open admin endpoint."""
     if os.path.exists(path):
         with open(path) as f:
-            return f.read().strip()
+            token = f.read().strip()
+        if token:
+            return token
     token = secrets.token_hex(24)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    # 0600 at create, not after: a create-then-chmod gap leaves the token
+    # readable in between.
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         f.write(token + "\n")
     os.chmod(path, 0o600)
     print(f"desk: generated admin token in {path}")
@@ -2571,7 +2622,13 @@ def main(argv=None):
         print(funnel_exposition(desk.funnel()), end="")
         return 0
     threading.Thread(target=desk.sweep, daemon=True).start()
-    server = ThreadingHTTPServer((config.bind, config.port), make_handler(desk))
+    class DeskServer(ThreadingHTTPServer):
+        # Threads die with the process; a slow client gets a bounded socket
+        # so a pile of idle connections cannot hold every worker forever.
+        daemon_threads = True
+        request_queue_size = 64
+
+    server = DeskServer((config.bind, config.port), make_handler(desk))
     print(f"desk: serving on {config.bind}:{config.port} (config {config.config}, "
           f"{len(desk.file_codes())} invite codes, trials {config.trial_days}d/"
           f"{config.trial_bytes}B)")

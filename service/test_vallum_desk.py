@@ -246,6 +246,33 @@ class ResetTokenTests(DeskTestCase):
             {"admin_token": "wrong", "token": account["token"]})
         self.assertEqual(code, 403)
 
+    def test_missing_admin_token_is_never_admin(self):
+        """A request that omits admin_token must not be admin — the empty
+        string compare_digest would otherwise match an empty stored token."""
+        self.desk.config.admin_token = ""
+        code, _ = self.desk.admin("/api/admin/peers", {})
+        self.assertEqual(code, 403)
+
+
+class AdminTokenFileTests(unittest.TestCase):
+    """admin_token_from: an existing-but-empty file is regenerated, never
+    returned — "" would open the admin surface to requests without a token."""
+
+    def test_empty_file_is_regenerated_not_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin-token")
+            open(path, "w").close()
+            token = desk_module.admin_token_from(path)
+            self.assertTrue(token, "an empty file must yield a fresh token")
+            with open(path) as f:
+                self.assertEqual(f.read().strip(), token)
+
+    def test_created_file_is_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "admin-token")
+            desk_module.admin_token_from(path)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
 
 class StateFileModeTests(DeskTestCase):
     """The account database holds the only credential the desk issues."""
