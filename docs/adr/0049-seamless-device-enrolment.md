@@ -1,7 +1,7 @@
 # ADR-0049: Seamless device enrolment — the device pulls its ticket, the human carries nothing
 
 **Date**: 2026-11-20
-**Status**: proposed (awaiting operator ratification — two open decisions below)
+**Status**: accepted (operator-ratified 2026-11-21; device-pull + KEM seal implemented and dogfooded live — see `docs/qa/device-pull-dogfood-2026-11-21.md`; the Sybil-cost gate, decision 2, remains open)
 **Deciders**: operator (Ikaaros) + Hermes agent
 **Builds on**: ADR-0047 (account ≠ device), ADR-0046/#28 (verified desk read path), ADR-0013/0044 (machine ticket interface)
 **Diagnosed with**: thinking-in-systems (Meadows) + philosophy-of-software-design (Ousterhout)
