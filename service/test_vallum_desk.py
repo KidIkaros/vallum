@@ -850,6 +850,12 @@ class HttpTests(WireTestCase):
         self.assertNotIn("<script", page)
         self.assertNotIn('name="code"', page)  # open mode: no invite field
 
+    def test_the_index_reports_live_seats(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=5) as r:
+            page = r.read().decode()
+        self.assertEqual(r.status, 200)
+        self.assertIn("of 200 seats free", page)
+
     def test_the_index_asks_for_no_device_name(self):
         # ADR-0047: no device name on the web, ever. The form creates the
         # account; devices enrol from the account page, client-driven.
@@ -1571,6 +1577,18 @@ class ContactChannelTests(unittest.TestCase):
         html = desk_module.index_page(False)
         self.assertIn("the operator who issued your invite code", html)
         self.assertNotIn("mailto:", html)
+
+    def test_the_front_page_sells_the_journey_and_live_seats(self):
+        html = desk_module.index_page(True, capacity=(3, 200, 0))
+        self.assertIn("Create your account", html)
+        self.assertIn("Space activates it", html)
+        self.assertIn("197 of 200 seats free", html)
+
+    def test_the_front_page_names_the_queue_when_full(self):
+        html = desk_module.index_page(True, capacity=(200, 200, 4))
+        self.assertIn("at capacity", html)
+        self.assertIn("4 ahead", html)
+        self.assertIn("code activates it right away", html)
 
     def test_signup_page_offers_a_durable_download_and_copy(self):
         html = desk_module.account_created_page(
