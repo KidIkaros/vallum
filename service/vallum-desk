@@ -1562,13 +1562,21 @@ class Desk:
         self.record_connection_days()
         return actions
 
+    def _activate_pending(self, account_id):
+        """Grant a queued account the open trial it would have had at
+        arrival — expiry minted fresh so the wait never eats the clock.
+        The one grant shared by the sweep's FIFO and the admin's promote."""
+        with self.lock:
+            self.db.execute(
+                "UPDATE accounts SET status='active', bytes_cap=?, expires=? "
+                "WHERE id=?",
+                (self.config.open_trial_bytes, self._trial_expiry(), account_id))
+
     def _promote_pending(self):
         """Activate queued accounts FIFO while the desk has room.
 
         A pending account is a signup the cap refused capacity, not
-        existence: space is the queue's only credential. Promotion grants
-        the same open trial it would have had at arrival — the wait does
-        not eat the clock, so expiry is minted fresh here."""
+        existence: space is the queue's only credential."""
         with self.lock:
             room = (self.config.max_active_accounts - self.db.execute(
                 "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0])
@@ -1577,17 +1585,8 @@ class Desk:
             queued = self.db.execute(
                 "SELECT id, label FROM accounts WHERE status='pending' "
                 "ORDER BY id LIMIT ?", (room,)).fetchall()
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                for row in queued:
-                    self.db.execute(
-                        "UPDATE accounts SET status='active', bytes_cap=?, "
-                        "expires=? WHERE id=?",
-                        (self.config.open_trial_bytes, self._trial_expiry(), row["id"]))
-                self.db.execute("COMMIT")
-            except BaseException:
-                self.db.execute("ROLLBACK")
-                raise
+        for row in queued:
+            self._activate_pending(row["id"])
         return [f"promoted {row['label']} (space freed)" for row in queued]
 
     def _sweep_orphans(self):
@@ -1716,6 +1715,8 @@ class Desk:
             "/api/admin/peers": self._list_peers,
             "/api/admin/devices": self._list_devices,
             "/api/admin/codes": self._list_codes,
+            "/api/admin/queue": self._list_queue,
+            "/api/admin/promote": self._admin_promote,
             "/api/admin/sweep": self._run_sweep,
         }
 
@@ -1864,6 +1865,43 @@ class Desk:
                 "SELECT code, created, used_by, days, bytes, plan "
                 "FROM codes ORDER BY created").fetchall()
         return 200, {"codes": [dict(row) for row in rows]}
+
+    def _list_queue(self, body):
+        """The waitlist as the operator needs it: seat state plus the FIFO
+        order, with positions, so 'how long until this person activates'
+        is an answerable question."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT label, created FROM accounts WHERE status='pending' "
+                "ORDER BY id").fetchall()
+        active, queued = self.seat_state()
+        return 200, {"seats": {"active": active,
+                               "max": self.config.max_active_accounts,
+                               "free": max(0, self.config.max_active_accounts - active)},
+                     "queue": [{"position": n + 1, "label": row["label"],
+                                "created": row["created"]}
+                               for n, row in enumerate(rows)]}
+
+    def _admin_promote(self, body):
+        """Activate a queued account by label — the express lane that burns
+        no code. The grant is the sweep's own `_activate_pending`, so a
+        manual jump and an automatic one hand out the same trial."""
+        label = (body.get("label") or "").strip()
+        if not label:
+            return 400, {"error": "promote needs the account label — "
+                                  "/api/admin/queue names the queued ones"}
+        with self.lock:
+            account = self.db.execute(
+                "SELECT id, status FROM accounts WHERE label=?", (label,)).fetchone()
+        if not account:
+            return 404, {"error": f"no account named {label}"}
+        if account["status"] != "pending":
+            return 409, {"error": f"{label} is {account['status']} — "
+                                  "only queued accounts promote"}
+        self._activate_pending(account["id"])
+        return 200, {"promoted": label,
+                     "note": "active with the open trial — the account page "
+                             "just works; nothing is sent to the user"}
 
     def _run_sweep(self, body):
         return 200, {"actions": self.sweep_once()}

@@ -795,6 +795,39 @@ class OnDemandTests(DeskTestCase):
         code, _ = self.desk.add_device({"token": queued["token"], "name": "laptop"})
         self.assertEqual(code, 200)
 
+    def test_the_queue_endpoint_reports_seats_and_fifo_order(self):
+        self.open_desk()
+        self.config.max_active_accounts = 1
+        self.desk.signup({}, client_ip="198.51.100.1")
+        self.desk.signup({}, client_ip="198.51.100.2")
+        self.desk.signup({}, client_ip="198.51.100.3")
+        code, payload = self.desk._list_queue({})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["seats"],
+                         {"active": 1, "max": 1, "free": 0})
+        self.assertEqual([r["position"] for r in payload["queue"]], [1, 2])
+        self.assertEqual(payload["queue"][0]["label"], "account-2")
+
+    def test_admin_promote_activates_a_queued_account_without_a_code(self):
+        self.open_desk()
+        self.config.max_active_accounts = 0
+        _, account = self.desk.signup({}, client_ip="198.51.100.9")
+        code, payload = self.desk._admin_promote({"label": "account-1"})
+        self.assertEqual(code, 200)
+        row = self.desk.db.execute(
+            "SELECT status, bytes_cap FROM accounts WHERE id=1").fetchone()
+        self.assertEqual((row["status"], row["bytes_cap"]), ("active", 500))
+        # and it is done: devices join now
+        self.assertEqual(self.desk.add_device(
+            {"token": account["token"], "name": "laptop"})[0], 200)
+
+    def test_admin_promote_refuses_an_active_account(self):
+        self.open_desk()
+        self.desk.signup({}, client_ip="198.51.100.1")
+        code, payload = self.desk._admin_promote({"label": "account-1"})
+        self.assertEqual(code, 409)
+        self.assertIn("active", payload["error"])
+
     def test_closed_mode_still_refuses_without_a_code(self):
         code, payload = self.desk.signup({}, client_ip="198.51.100.9")
         self.assertEqual(code, 403)

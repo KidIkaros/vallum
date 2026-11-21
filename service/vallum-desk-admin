@@ -115,7 +115,7 @@ def main(argv=None):
     plan.add_argument("--paid-until")
     plan.add_argument("--plan")
     plan.add_argument("--status",
-                      choices=("active", "expired", "overquota", "revoked"))
+                      choices=("active", "pending", "expired", "overquota", "revoked"))
 
     revoke = sub.add_parser("revoke",
                             help="remove a device; --account removes them all")
@@ -141,6 +141,12 @@ def main(argv=None):
     adopt.add_argument("--peer", required=True)
     adopt.add_argument("--label")
     adopt.add_argument("--bytes-cap", type=int)
+
+    sub.add_parser("queue", help="seat state and the FIFO of queued accounts")
+    promote = sub.add_parser("promote",
+                             help="activate a queued account now — burns no code")
+    promote.add_argument("--label", required=True,
+                         help="the account label, e.g. account-7 (queue shows them)")
 
     sub.add_parser("sweep", help="run one enforcement pass now")
 
@@ -209,6 +215,23 @@ def main(argv=None):
         body = {"peer": args.peer, "label": args.label, "bytes_cap": args.bytes_cap}
         show(call(args.desk, "/api/admin/adopt", token,
                   {k: v for k, v in body.items() if v is not None}), args.json)
+    elif args.command == "queue":
+        result = call(args.desk, "/api/admin/queue", token)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            seats = result["seats"]
+            print(f"{seats['active']}/{seats['max']} active · "
+                  f"{seats['free']} free · {len(result['queue'])} queued")
+            for row in result["queue"]:
+                print(f"  #{row['position']} {row['label']} (since {row['created']})")
+    elif args.command == "promote":
+        result = call(args.desk, "/api/admin/promote", token,
+                      {"label": args.label})
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"{result['promoted']} active — {result['note']}")
     elif args.command == "sweep":
         show(call(args.desk, "/api/admin/sweep", token), args.json,
              ("actions", ["peer", "reason", "bytes", "error"]))
