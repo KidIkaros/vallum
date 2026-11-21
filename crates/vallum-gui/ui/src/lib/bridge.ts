@@ -193,20 +193,58 @@ export function preflight(): Promise<Preflight> {
 
 /** A vallum://join deep link the desktop opened the console with. */
 export interface JoinUriIntent {
+  kind: "join"
   ticket: string
   account: string
   endpoint: string
   desk: string
 }
 
-/** Take the pending vallum:// URI the app was launched with — one-shot.
- *  { intent } → show the confirm surface; { refusal } → a malformed URI
- *  arrived and was refused; null → nothing pending. */
-export type JoinUriTake = { intent: JoinUriIntent } | { refusal: string } | null
+/** A vallum://account deep link — the desk's "open in client" account
+ *  handoff (ADR-0047 Q4). Records the account client-side; enrols nothing. */
+export interface AccountUriIntent {
+  kind: "account"
+  token: string
+  desk: string
+}
 
-export function takeJoinUriIntent(): Promise<JoinUriTake> {
-  if (IN_TAURI) return invoke<JoinUriTake>("take_join_uri_intent")
-  return http<JoinUriTake>("/api/join-uri")
+export type UriIntent = JoinUriIntent | AccountUriIntent
+
+/** Take the pending vallum:// URI the app was launched with — one-shot.
+ *  { intent } → show the confirm surface for that kind; { refusal } → a
+ *  malformed URI arrived and was refused; null → nothing pending. */
+export type UriTake = { intent: UriIntent } | { refusal: string } | null
+
+export function takeUriIntent(): Promise<UriTake> {
+  if (IN_TAURI) return invoke<UriTake>("take_uri_intent")
+  return http<UriTake>("/api/uri-intent")
+}
+
+/** The tail of the account number already recorded on this machine —
+ *  what the vallum://account confirm shows before it can replace it. */
+export function recordedAccount(): Promise<{ tail?: string }> {
+  if (IN_TAURI) return invoke<{ tail?: string }>("recorded_account")
+  return http<{ tail?: string }>("/api/recorded-account")
+}
+
+/** The confirmed half of vallum://account — writes account.toml, or
+ *  reports { conflict } when a different number is already recorded and
+ *  `replace` was not the user's answer. */
+export function recordAccount(fields: {
+  token: string
+  desk: string
+  replace: boolean
+}): Promise<{ recorded?: string; conflict?: string; error?: string }> {
+  if (IN_TAURI)
+    return invoke("record_account", {
+      token: fields.token,
+      desk: fields.desk,
+      replace: fields.replace,
+    })
+  return http("/api/account-record", {
+    method: "POST",
+    body: JSON.stringify(fields),
+  })
 }
 
 export interface PingResult {

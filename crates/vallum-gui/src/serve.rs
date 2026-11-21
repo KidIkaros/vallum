@@ -301,9 +301,40 @@ fn handle(
     }
 
     // The deep link the desktop opened us with, once — same payload as the
-    // Tauri take_join_uri_intent command ({"intent"} / {"refusal"} / null).
-    if request.path == "/api/join-uri" {
-        json(&mut stream, "200 OK", &crate::take_pending_join_uri());
+    // Tauri take_uri_intent command ({"intent"} / {"refusal"} / null).
+    if request.path == "/api/uri-intent" {
+        json(&mut stream, "200 OK", &crate::take_pending_uri());
+        return Ok(());
+    }
+
+    // The account a vallum://account confirm can replace — the tail only.
+    if request.path == "/api/recorded-account" {
+        json(&mut stream, "200 OK", &crate::actions::recorded_account());
+        return Ok(());
+    }
+
+    // The confirmed half of vallum://account: writes account.toml, or
+    // reports the conflict when a different number is already recorded.
+    // Not a socket write — a same-uid config file, so no write_gate.
+    if request.path == "/api/account-record" && request.method == "POST" {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+        let token = body
+            .get("token")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let desk = body
+            .get("desk")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let replace = body
+            .get("replace")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        json(
+            &mut stream,
+            "200 OK",
+            &crate::actions::record_account(token, desk, replace),
+        );
         return Ok(());
     }
 

@@ -21,8 +21,11 @@ import {
 } from "@/lib/actions"
 import {
   preflight,
-  takeJoinUriIntent,
+  recordAccount,
+  recordedAccount,
+  takeUriIntent,
   type JoinUriIntent,
+  type UriIntent,
   type Preflight,
 } from "@/lib/bridge"
 import { formatError, nameProblem } from "@/lib/validate"
@@ -368,15 +371,23 @@ export function SetupServerDialog({ blocked }: { blocked?: string }) {
  *  opens a confirm surface — the endpoint and account are shown before
  *  anything enrols; a malformed URI is refused visibly instead. */
 export function JoinUriBridge() {
-  const [intent, setIntent] = useState<JoinUriIntent | null>(null)
+  const [intent, setIntent] = useState<UriIntent | null>(null)
   const [busy, setBusy] = useState(false)
   const [checked, setChecked] = useState(false)
+  // A different account number already recorded on this machine — either the
+  // tail probed on open or the tail the record call itself conflicted on.
+  const [conflict, setConflict] = useState<string | null>(null)
 
   useEffect(() => {
-    takeJoinUriIntent()
+    takeUriIntent()
       .then((take) => {
-        if (take && "intent" in take) setIntent(take.intent)
-        else if (take && "refusal" in take)
+        if (take && "intent" in take) {
+          setIntent(take.intent)
+          if (take.intent.kind === "account")
+            recordedAccount()
+              .then((existing) => setConflict(existing.tail ?? null))
+              .catch(() => {})
+        } else if (take && "refusal" in take)
           toast.error(`vallum:// link refused — ${take.refusal}`, {
             description: "Use Join network… and paste the invite ticket instead.",
             duration: 10000,
@@ -387,6 +398,92 @@ export function JoinUriBridge() {
   }, [])
 
   if (!checked || intent === null) return null
+
+  if (intent.kind === "account") {
+    const replacing = conflict !== null && conflict !== `…${intent.token.slice(-8)}`
+    return (
+      <Dialog
+        open
+        onOpenChange={(next) => {
+          if (!next) setIntent(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="text-base font-semibold">
+              {replacing ? "Replace the recorded account?" : "Record this account?"}
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              A Vallum webpage opened this link. Recording writes{" "}
+              <span className="font-mono">account.toml</span> so{" "}
+              <span className="font-mono">vallum account</span> can manage it —
+              no device is enrolled and nothing happens until you confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="border-border/60 bg-background/40 flex flex-col gap-1.5 rounded-lg border px-3 py-2.5 font-mono text-xs">
+            <div className="flex justify-between gap-3">
+              <span className="micro">account</span>
+              <span className="text-foreground">…{intent.token.slice(-8)}</span>
+            </div>
+            {intent.desk !== "" && (
+              <div className="flex justify-between gap-3">
+                <span className="micro">desk</span>
+                <span className="text-foreground">{intent.desk}</span>
+              </div>
+            )}
+            {replacing && (
+              <div className="flex justify-between gap-3">
+                <span className="micro">replaces</span>
+                <span className="text-fault">{conflict}</span>
+              </div>
+            )}
+          </div>
+          <DialogFooter showCloseButton>
+            <Button
+              id="account-uri-confirm"
+              size="sm"
+              variant={replacing ? "destructive" : "default"}
+              disabled={busy}
+              onClick={() => {
+                setBusy(true)
+                recordAccount({
+                  token: intent.token,
+                  desk: intent.desk,
+                  replace: replacing,
+                })
+                  .then((done) => {
+                    if (done.conflict) {
+                      // Another number is recorded — show whose, and let the
+                      // user decide rather than swap on the link's say-so.
+                      setConflict(done.conflict)
+                      return
+                    }
+                    if (done.error) {
+                      toast.error(done.error, { duration: 10000 })
+                      return
+                    }
+                    toast.success(`Account recorded at ${done.recorded}`)
+                    setIntent(null)
+                  })
+                  .catch((error) =>
+                    toast.error(formatError(error), { duration: 10000 }),
+                  )
+                  .finally(() => setBusy(false))
+              }}
+            >
+              {busy
+                ? "Recording…"
+                : replacing
+                  ? `Replace ${conflict} & record`
+                  : "Record account"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  const join: JoinUriIntent = intent
 
   return (
     <Dialog
@@ -408,16 +505,16 @@ export function JoinUriBridge() {
         <div className="border-border/60 bg-background/40 flex flex-col gap-1.5 rounded-lg border px-3 py-2.5 font-mono text-xs">
           <div className="flex justify-between gap-3">
             <span className="micro">server</span>
-            <span className="text-foreground">{intent.endpoint}</span>
+            <span className="text-foreground">{join.endpoint}</span>
           </div>
           <div className="flex justify-between gap-3">
             <span className="micro">account</span>
-            <span className="text-foreground">…{intent.account.slice(-8)}</span>
+            <span className="text-foreground">…{join.account.slice(-8)}</span>
           </div>
-          {intent.desk !== "" && (
+          {join.desk !== "" && (
             <div className="flex justify-between gap-3">
               <span className="micro">desk</span>
-              <span className="text-foreground">{intent.desk}</span>
+              <span className="text-foreground">{join.desk}</span>
             </div>
           )}
         </div>
@@ -430,11 +527,11 @@ export function JoinUriBridge() {
               setBusy(true)
               joinNetwork({
                 mode: "ticket",
-                ticket: intent.ticket,
+                ticket: join.ticket,
                 ssh_target: "",
                 name: "",
-                account: intent.account,
-                desk: intent.desk,
+                account: join.account,
+                desk: join.desk,
               })
                 .then((done) => {
                   toast.success(done.message)

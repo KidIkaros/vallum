@@ -157,6 +157,208 @@ pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
     })
 }
 
+/// A parsed `vallum://account` deep link — the desk's "open in client"
+/// handoff (ADR-0047 Q4). No ticket: this records the account number
+/// client-side so `vallum account` can manage it; enrolment is a
+/// separate join.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AccountUriIntent {
+    pub token: String,
+    /// The issuing desk's `https://` origin, when the URI carries `desk=`.
+    pub desk: String,
+}
+
+/// What a `vallum://` URI asks the console to do. `kind` rides the JSON so
+/// the UI picks the right confirm surface — enrolment and "record this
+/// account" are different asks with different consequences.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum UriIntent {
+    Join(JoinUriIntent),
+    Account(AccountUriIntent),
+}
+
+/// The shared desk-origin check — the charset bound is `vallum-ops`'s
+/// (the value crosses pkexec into a root shell script), and both deep-link
+/// actions validate the same way `service/vallum-uri` does.
+fn valid_desk_origin(desk: &str) -> bool {
+    desk.starts_with("https://")
+        && desk[8..].chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '[' | ']' | '_' | '-')
+        })
+}
+
+/// Parse a `vallum://account?token=<32hex>[&desk=<origin>]` URI — byte-strict,
+/// the same grammar `service/vallum-uri` enforces.
+pub fn parse_account_uri(uri: &str) -> Result<AccountUriIntent, String> {
+    let rest = uri.strip_prefix("vallum://").ok_or("not a vallum:// URI")?;
+    let (action, query) = rest.split_once('?').ok_or("missing ?token=… query")?;
+    if action != "account" {
+        return Err("unknown action — only vallum://account is served".to_owned());
+    }
+    let mut token = "";
+    let mut desk = "";
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err("malformed query parameter".to_owned());
+        };
+        match key {
+            "token" => token = value,
+            "desk" => desk = value,
+            _ => return Err(format!("unknown parameter `{key}`")),
+        }
+    }
+    let token = url_decode(token);
+    let desk = url_decode(desk);
+    if token.len() != 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("the account number is 32 hex characters".to_owned());
+    }
+    if !desk.is_empty() && !valid_desk_origin(&desk) {
+        return Err("the desk endpoint is not an https:// origin".to_owned());
+    }
+    Ok(AccountUriIntent { token, desk })
+}
+
+/// Dispatch any `vallum://` URI to its strict parser. The action is the
+/// authority segment before `?` — `vallum://join?…` or
+/// `vallum://account?…`. Anything else is a visible refusal, never an
+/// enrolment: a browser can fire this scheme with no intent behind it, so
+/// the parse is all that is trusted.
+pub fn parse_uri(uri: &str) -> Result<UriIntent, String> {
+    let rest = uri.strip_prefix("vallum://").ok_or("not a vallum:// URI")?;
+    match rest.split('?').next().unwrap_or_default() {
+        "join" => parse_join_uri(uri).map(UriIntent::Join),
+        "account" => parse_account_uri(uri).map(UriIntent::Account),
+        other => Err(format!(
+            "unknown action{} — vallum://join and vallum://account are served",
+            if other.is_empty() {
+                String::new()
+            } else {
+                format!(" `{other}`")
+            }
+        )),
+    }
+}
+
+/// Where `vallum account` reads the recorded number — the same path
+/// `service/vallum-uri` writes ($XDG_CONFIG_HOME/vallum/account.toml).
+fn account_config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })?;
+    Some(base.join("vallum").join("account.toml"))
+}
+
+/// The token an existing account.toml records — the `token = "…"` line
+/// inside `[account]`. Anything else (missing file, unreadable, no token)
+/// is "nothing recorded" — a malformed file does not buy a conflict veto.
+fn recorded_account_token(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_account = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_account = line == "[account]";
+            continue;
+        }
+        if in_account {
+            let Some(rest) = line.strip_prefix("token") else {
+                continue;
+            };
+            let Some(value) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            if value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(value.to_owned());
+            }
+            return None;
+        }
+    }
+    None
+}
+
+/// The recorded account's tail for the confirm surface — `{"tail": "…abcd1234"}`
+/// or empty when no account.toml exists. The tail only: the number itself
+/// does not round-trip the UI more than the URI already carried it.
+pub fn recorded_account() -> serde_json::Value {
+    account_config_path()
+        .as_deref()
+        .and_then(recorded_account_token)
+        .map(|token| serde_json::json!({ "tail": format!("…{}", &token[24..]) }))
+        .unwrap_or_default()
+}
+
+/// The confirmed write behind `vallum://account`. The UI shows the intent
+/// first — this is the second half of that confirm, so the token shape is
+/// validated again here rather than trusting the dialog. A different
+/// recorded number is a conflict, never a silent swap: `replace` is the
+/// dialog's explicit "yes, replace it" step. `{"recorded": path}` or
+/// `{"conflict": "…tail"}`.
+pub fn record_account(token: &str, desk: &str, replace: bool) -> serde_json::Value {
+    let Some(path) = account_config_path() else {
+        return serde_json::json!({ "error": "no config directory — XDG_CONFIG_HOME or HOME unset" });
+    };
+    record_account_at(&path, token, desk, replace)
+}
+
+/// The path-parameterised half, so tests write under a tempdir instead of
+/// sharing the process's HOME.
+fn record_account_at(
+    path: &std::path::Path,
+    token: &str,
+    desk: &str,
+    replace: bool,
+) -> serde_json::Value {
+    if token.len() != 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return serde_json::json!({ "error": "the account number is 32 hex characters" });
+    }
+    if !desk.is_empty() && !valid_desk_origin(desk) {
+        return serde_json::json!({ "error": "the desk endpoint is not an https:// origin" });
+    }
+    if let Some(existing) = recorded_account_token(path) {
+        if existing != token && !replace {
+            return serde_json::json!({ "conflict": format!("…{}", &existing[24..]) });
+        }
+    }
+    if let Some(dir) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            return serde_json::json!({ "error": format!("cannot create {}: {error}", dir.display()) });
+        }
+    }
+    // The same minimal config vallum-uri writes: [account] is what the read
+    // uses; the [interface] stub satisfies the parser and is never run —
+    // this handoff enrols no device.
+    let mut text = String::from(
+        "# Vallum account, recorded from the desk's open-in-client link.\n\
+         # Account-only: no device is enrolled here; add one from the desk.\n\
+         [interface]\n\
+         private_key = \"account.key\"\n\
+         \n\
+         [account]\n",
+    );
+    text.push_str(&format!("token = \"{token}\"\n"));
+    if !desk.is_empty() {
+        text.push_str(&format!("endpoint = \"{desk}\"\n"));
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600) // bearer credential
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()));
+    match result {
+        Ok(()) => serde_json::json!({ "recorded": path.display().to_string() }),
+        Err(error) => {
+            serde_json::json!({ "error": format!("cannot write {}: {error}", path.display()) })
+        }
+    }
+}
+
 /// Percent-decode a URI query value (+ is NOT space inside this grammar —
 /// tickets carry no spaces, so a literal + is passed through untouched).
 fn url_decode(value: &str) -> String {
@@ -1819,6 +2021,101 @@ public_key = "{old}"
             public_endpoint: "vpn.example.com:51820".to_owned(),
         })
         .is_ok());
+    }
+
+    /// vallum://account — the desk's open-in-client handoff (ADR-0047 Q4).
+    /// The strict grammar is the same one service/vallum-uri enforces.
+    #[test]
+    fn account_uri_parses_strictly() {
+        let token = "a".repeat(32);
+        let intent = parse_account_uri(&format!("vallum://account?token={token}")).unwrap();
+        assert_eq!(intent.token, token);
+        assert_eq!(intent.desk, "");
+
+        let intent = parse_account_uri(&format!(
+            "vallum://account?token={token}&desk=https%3A%2F%2Fdesk.example.com%3A8443"
+        ))
+        .unwrap();
+        assert_eq!(intent.desk, "https://desk.example.com:8443");
+
+        for bad in [
+            "vallum://account",
+            "vallum://account?token=nothex",
+            "vallum://account?token=0123456789abcdef0123456789abcde",
+            "vallum://account?token=fedcba9876543210fedcba9876543210&evil=1",
+            "vallum://account?token=fedcba9876543210fedcba9876543210&desk=http%3A%2F%2Fd.e",
+            "https://account?token=fedcba9876543210fedcba9876543210",
+        ] {
+            assert!(parse_account_uri(bad).is_err(), "{bad:?} must refuse");
+        }
+
+        // The dispatch surface: join routes to join, account to account,
+        // anything else is a refusal — never an enrolment.
+        assert!(matches!(
+            parse_uri(&format!("vallum://account?token={token}")).unwrap(),
+            UriIntent::Account(_)
+        ));
+        assert!(parse_uri("vallum://exec?x=1").is_err());
+        assert!(parse_uri("notauri").is_err());
+    }
+
+    /// The clobber guard: a different recorded number is a conflict the
+    /// dialog surfaces, never a silent swap; the same number re-records.
+    #[test]
+    fn record_account_refuses_to_clobber_a_different_account() {
+        let dir = std::env::temp_dir().join(format!("vallum-gui-account-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let path = dir.join("account.toml");
+        let token = "a".repeat(32);
+        let other = "f".repeat(32);
+
+        // Fresh record: 0600, minimal config, endpoint when the URI carried it.
+        let done = record_account_at(&path, &token, "https://desk.example.com", false);
+        assert!(done.get("recorded").is_some(), "{done}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&format!("token = \"{token}\"")), "{text}");
+        assert!(
+            text.contains("endpoint = \"https://desk.example.com\""),
+            "{text}"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        // A different number is a conflict, not a swap — and the file is
+        // untouched until the dialog's explicit replace comes back.
+        let conflict = record_account_at(&path, &other, "", false);
+        // The tail shown is the *recorded* number's — what would be replaced.
+        assert_eq!(
+            conflict.get("conflict").and_then(|v| v.as_str()),
+            Some("…aaaaaaaa"),
+            "{conflict}"
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&token));
+
+        // The same number re-records idempotently (an endpoint update is
+        // safe: it changes where `vallum account` asks, not whose).
+        let again = record_account_at(&path, &token, "", false);
+        assert!(again.get("recorded").is_some(), "{again}");
+
+        // The dialog's "yes, replace" step is the only path that swaps.
+        let replaced = record_account_at(&path, &other, "", true);
+        assert!(replaced.get("recorded").is_some(), "{replaced}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&other));
+
+        // Shape checks are enforced server-side too — the UI is a hint,
+        // never the trust boundary.
+        assert!(record_account_at(&path, "nothex", "", false)
+            .get("error")
+            .is_some());
+        assert!(record_account_at(&path, &token, "http://desk.e", false)
+            .get("error")
+            .is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
