@@ -99,6 +99,8 @@ def main(argv=None):
     mint.add_argument("--bytes", type=int, help="plan payload: byte cap granted")
     mint.add_argument("--gib", type=int, help="plan payload: cap in GiB")
     mint.add_argument("--plan", help="plan payload: plan label granted")
+    mint.add_argument("--devices", type=int,
+                      help="plan payload: device slots granted")
 
     sub.add_parser("accounts", help="list accounts")
     sub.add_parser("devices", help="list device peers across accounts")
@@ -111,6 +113,8 @@ def main(argv=None):
                                       "Visible in ps and shell history — prefer --token-file")
     plan.add_argument("--token-file", help="read the account number from a file instead")
     plan.add_argument("--bytes-cap", type=int)
+    plan.add_argument("--device-cap", type=int,
+                      help="the account's device-slot allowance")
     plan.add_argument("--expires")
     plan.add_argument("--paid-until")
     plan.add_argument("--plan")
@@ -154,7 +158,7 @@ def main(argv=None):
     token = read_token(args.admin_token_file)
 
     if args.command == "mint-code":
-        body = {"days": args.days, "plan": args.plan,
+        body = {"days": args.days, "plan": args.plan, "devices": args.devices,
                 "bytes": args.bytes if args.bytes is not None
                 else (args.gib * 1024 ** 3 if args.gib else None)}
         result = call(args.desk, "/api/admin/code", token, body)
@@ -162,9 +166,10 @@ def main(argv=None):
             print(json.dumps(result, indent=2))
         else:
             print(result["code"])
-            if any(result.get(k) for k in ("days", "bytes", "plan")):
+            if any(result.get(k) for k in ("days", "bytes", "plan", "devices")):
                 print(f"  plan payload: days={result['days']} "
-                      f"bytes={result['bytes']} plan={result['plan']}")
+                      f"bytes={result['bytes']} plan={result['plan']} "
+                      f"devices={result['devices']}")
             print(f"  {result['note']}")
     elif args.command == "accounts":
         result = call(args.desk, "/api/admin/peers", token)
@@ -181,12 +186,12 @@ def main(argv=None):
              ("devices", ["peer", "device", "status", "account", "account_plan"]))
     elif args.command == "codes":
         show(call(args.desk, "/api/admin/codes", token), args.json,
-             ("codes", ["code", "used_by", "days", "bytes", "plan"]))
+             ("codes", ["code", "used_by", "days", "bytes", "plan", "devices"]))
     elif args.command == "set-plan":
         body = account_key(args)
         for key, arg in (("bytes_cap", args.bytes_cap), ("expires", args.expires),
                          ("paid_until", args.paid_until), ("plan", args.plan),
-                         ("status", args.status)):
+                         ("status", args.status), ("device_cap", args.device_cap)):
             if arg is not None:
                 body[key] = arg
         show(call(args.desk, "/api/admin/plan", token, body), args.json)
@@ -222,7 +227,8 @@ def main(argv=None):
         else:
             seats = result["seats"]
             print(f"{seats['active']}/{seats['max']} active · "
-                  f"{seats['free']} free · {len(result['queue'])} queued")
+                  f"{seats['free']} free · {len(result['queue'])} queued · "
+                  f"{seats['peers']}/{seats['peer_max']} devices")
             for row in result["queue"]:
                 print(f"  #{row['position']} {row['label']} (since {row['created']})")
     elif args.command == "promote":

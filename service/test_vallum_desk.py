@@ -804,7 +804,8 @@ class OnDemandTests(DeskTestCase):
         code, payload = self.desk._list_queue({})
         self.assertEqual(code, 200)
         self.assertEqual(payload["seats"],
-                         {"active": 1, "max": 1, "free": 0})
+                         {"active": 1, "max": 1, "free": 0,
+                          "peers": 0, "peer_max": 253})
         self.assertEqual([r["position"] for r in payload["queue"]], [1, 2])
         self.assertEqual(payload["queue"][0]["label"], "account-2")
 
@@ -2954,6 +2955,42 @@ class VoucherTests(DeskTestCase):
         code, payload = self.desk.voucher({"token": token, "code": "not-a-code"})
         self.assertEqual(code, 403)
         self.assertIn("invite-only", payload["error"])
+
+    def test_a_voucher_grants_device_slots_additively(self):
+        """The code is the purchase: slots on the account, not a global
+        change — other accounts keep the default."""
+        token = self._token()
+        _, minted = self.desk._mint_code({"devices": 3})
+        code, applied = self.desk.voucher({"token": token, "code": minted["code"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(applied["device_cap"], self.config.device_cap + 3)
+        for n in range(self.config.device_cap + 3):
+            self.assertEqual(
+                self.desk.add_device({"token": token, "name": f"dev-{n}"})[0], 200)
+        code, payload = self.desk.add_device({"token": token, "name": "one-too-many"})
+        self.assertEqual(code, 429)
+        self.assertIn("a code grants more slots", payload["error"])
+
+    def test_a_signup_code_carries_its_device_slots_with_it(self):
+        """A sold code presented at the door grants its whole payload —
+        the account lands with the slots already attached."""
+        _, minted = self.desk._mint_code({"devices": 10, "plan": "plus"})
+        code, payload = self.desk.signup({"code": minted["code"]})
+        self.assertEqual(code, 200)
+        row = self.desk.db.execute(
+            "SELECT device_cap FROM accounts WHERE token=?",
+            (token_digest(payload["token"]),)).fetchone()
+        self.assertEqual(row["device_cap"], 10)
+
+    def test_the_global_peer_ceiling_names_the_operator(self):
+        """The /24 is the real bound: past it no voucher helps — the answer
+        sends the user to the operator, not to buy slots that cannot exist."""
+        self.config.max_peers = 1
+        token = self._token()
+        self.assertEqual(self.desk.add_device({"token": token, "name": "one"})[0], 200)
+        code, payload = self.desk.add_device({"token": token, "name": "two"})
+        self.assertEqual(code, 503)
+        self.assertIn("operator", payload["error"])
 
     def test_a_used_code_cannot_voucher_twice(self):
         _, minted = self.desk._mint_code({"days": 30})

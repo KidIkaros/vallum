@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -110,7 +110,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- shown once at signup. The operator verifies it before re-issuing a lost
     -- account number, so recovery proves ownership rather than trusting a claimed
     -- label. NULL for accounts created before the code existed.
-    recovery_code_hash TEXT
+    recovery_code_hash TEXT,
+    -- The device-slot allowance a voucher granted (v8). NULL means the desk's
+    -- own default, so a code can sell slots to one account without changing
+    -- the shape of everyone else's.
+    device_cap INTEGER
 );
 CREATE TABLE IF NOT EXISTS peers (
     id         INTEGER PRIMARY KEY,
@@ -150,7 +154,8 @@ CREATE TABLE IF NOT EXISTS codes (
     used_by  TEXT,                        -- peer name or account label once consumed
     days     INTEGER,                     -- plan payload: days granted (NULL = trial defaults)
     bytes    INTEGER,                     -- plan payload: byte cap granted
-    plan     TEXT                         -- plan payload: plan label granted
+    plan     TEXT,                        -- plan payload: plan label granted
+    devices  INTEGER                      -- plan payload: device slots granted (v8)
 );
 """
 
@@ -298,6 +303,18 @@ def _migrate_v6(conn):
         raise
 
 
+def _migrate_v7(conn):
+    """v7 → v8: device slots become an entitlement. accounts.device_cap is
+    the per-account allowance a voucher grants — NULL reads as the desk
+    default, so existing accounts change nothing. codes.devices is the
+    payload a sold code carries: payment mints the code, the code grants
+    the peers."""
+    for table, column in (("accounts", "device_cap"), ("codes", "devices")):
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -338,6 +355,8 @@ def open_database(path):
         _migrate_v5(conn)
     if version < 7:
         _migrate_v6(conn)
+    if version < 8:
+        _migrate_v7(conn)
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
@@ -588,8 +607,9 @@ class DeskConfig:
     open_signup: bool = False
     open_trial_bytes: int = 5 * 1024 * 1024 * 1024   # 5 GiB anonymous trial
     max_active_accounts: int = 200                   # the /24 holds 253
+    max_peers: int = 253                             # the tunnel /24 itself — the real ceiling, counted in devices
     signup_ip_day_limit: int = 3                     # signups per IP per day
-    device_cap: int = 5                              # devices per account
+    device_cap: int = 5                              # devices per account, the default a voucher can raise
     reservation_ttl: int = 1200                      # seconds a minted ticket reserves a slot (> the 15-min invite, so a slow join is not released mid-flight)
     operator_name: str = "vallum desk"               # the page header's brand
     install_source: str = DEFAULT_INSTALL_SOURCE     # the install.sh URL served to users
@@ -734,7 +754,8 @@ class Desk:
                     return 429, {"error": "too many signups from this address today — "
                                           "come back tomorrow or ask the operator"}
             known = (self.db.execute(
-                "SELECT used_by, days, bytes, plan FROM codes WHERE code=?", (code,)).fetchone()
+                "SELECT used_by, days, bytes, plan, devices FROM codes WHERE code=?",
+                (code,)).fetchone()
                      if code else None)
             if code:
                 if known and known["used_by"]:
@@ -748,13 +769,17 @@ class Desk:
             # frees, or activated now by a voucher. A code bypasses the cap:
             # the operator issued it knowing the space.
             pending = not code and active >= self.config.max_active_accounts
-            # A code may carry a plan payload (days/bytes/plan); a payload-less
-            # code — minted bare, or from the operator's file — means the trial.
-            if known and (known["days"] or known["bytes"] or known["plan"]):
+            # A code may carry a plan payload (days/bytes/plan/device slots);
+            # a payload-less code — minted bare, or from the operator's file —
+            # means the trial.
+            if known and (known["days"] or known["bytes"] or known["plan"]
+                          or known["devices"]):
                 expires = self._expiry_for(known["days"] or self.config.trial_days)
                 cap = known["bytes"] or self.config.trial_bytes
                 plan = known["plan"] or "trial"
+                device_slots = known["devices"]
             else:
+                device_slots = None
                 expires = self._trial_expiry()
                 cap = (0 if pending else
                        self.config.trial_bytes if code else self.config.open_trial_bytes)
@@ -778,12 +803,12 @@ class Desk:
                 cursor = self.db.execute(
                     "INSERT INTO accounts "
                     "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip,"
-                    "recovery_code_hash) "
-                    "VALUES (NULL,?,?,?,?,?,?,?,?,?,?)",
+                    "recovery_code_hash,device_cap) "
+                    "VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?)",
                     ("account", token_digest(token), origin, plan, self._now(), expires, cap,
                      "pending" if pending else "active",
                      client_ip if client_ip and client_ip != "unknown" else None,
-                     recovery_code_hash))
+                     recovery_code_hash, device_slots))
                 label = f"account-{cursor.lastrowid}"
                 self.db.execute("UPDATE accounts SET label=? WHERE id=?",
                                 (label, cursor.lastrowid))
@@ -1026,9 +1051,22 @@ class Desk:
         daemon_peers = self._daemon_peers()
         with self.lock:
             live = self._live_device_count(account, daemon_peers)
-            if live >= self.config.device_cap:
-                return 429, {"error": "device limit — an account carries at most "
-                                      f"{self.config.device_cap} devices; remove one first"}
+            # The account's own allowance first — a voucher can raise it;
+            # NULL reads as the desk default.
+            allowance = (account["device_cap"] if account["device_cap"] is not None
+                         else self.config.device_cap)
+            if live >= allowance:
+                return 429, {"error": "device limit — this account carries at most "
+                                      f"{allowance} devices; remove one, or a code "
+                                      "grants more slots"}
+            # Then the ceiling nothing can voucher past: the tunnel /24
+            # itself, counted in devices — the VPS's real load.
+            peers_total = self.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0]
+            if peers_total >= self.config.max_peers:
+                return 503, {"error": "this server has no device slots free — "
+                                      "the operator can raise the ceiling or "
+                                      "retire accounts"}
             peer = self._next_peer_name(label)
             self._insert_peer(account["id"], peer, label)
         try:
@@ -1082,7 +1120,7 @@ class Desk:
                 return 403, {"error": f"account is {account['status']} — "
                                       "only an active or queued account redeems a code"}
             known = self.db.execute(
-                "SELECT used_by, days, bytes, plan FROM codes WHERE code=?",
+                "SELECT used_by, days, bytes, plan, devices FROM codes WHERE code=?",
                 (code,)).fetchone()
             if not known:
                 if code in self.file_codes():
@@ -1091,7 +1129,7 @@ class Desk:
                 return 403, {"error": "unknown invite code — this desk is invite-only"}
             if known["used_by"]:
                 return 403, {"error": "invite code already used"}
-            if not (known["days"] or known["bytes"] or known["plan"]):
+            if not (known["days"] or known["bytes"] or known["plan"] or known["devices"]):
                 return 400, {"error": "this code carries no plan payload — "
                                       "nothing to grant (it still works for signup)"}
             updates, values = [], []
@@ -1111,6 +1149,12 @@ class Desk:
             if known["plan"]:
                 updates.append("plan=?")
                 values.append(known["plan"])
+            if known["devices"]:
+                # Slots, additive like the bytes: the sale is "N more devices",
+                # not "your allowance becomes N". NULL reads as the default.
+                updates.append("device_cap=?")
+                values.append((account["device_cap"] if account["device_cap"] is not None
+                               else self.config.device_cap) + known["devices"])
             values.append(account["id"])
             # The apply and the burn are one transaction, not two autocommits:
             # a crash between them would grant the plan while leaving the
@@ -1129,22 +1173,24 @@ class Desk:
                 self.db.execute("ROLLBACK")
                 raise
             row = self.db.execute(
-                "SELECT expires, bytes_cap, plan FROM accounts WHERE id=?",
+                "SELECT expires, bytes_cap, plan, device_cap FROM accounts WHERE id=?",
                 (account["id"],)).fetchone()
         return 200, {"peer": self._account_name(account), "applied": code,
                      "expires": row["expires"], "bytes_cap": row["bytes_cap"],
-                     "plan": row["plan"]}
+                     "plan": row["plan"], "device_cap": row["device_cap"]}
 
     def seat_state(self):
-        """(active, pending) account counts — the front page's availability
-        answer, so a visitor learns what happens to a new signup BEFORE they
-        click. Read-only and cheap; queried on every `/` render."""
+        """(active, pending, peers) — the capacity answer in both units:
+        accounts for the signup question, peers for the VPS's real load.
+        Read-only and cheap; queried on every `/` render."""
         with self.lock:
             active = self.db.execute(
                 "SELECT COUNT(*) FROM accounts WHERE status='active'").fetchone()[0]
             pending = self.db.execute(
                 "SELECT COUNT(*) FROM accounts WHERE status='pending'").fetchone()[0]
-        return active, pending
+            peers = self.db.execute(
+                "SELECT COUNT(*) FROM peers WHERE status='active'").fetchone()[0]
+        return active, pending, peers
 
     def _daemon_liveness(self):
         """The daemon's liveness map, or None when it cannot be asked.
@@ -1318,6 +1364,7 @@ class Desk:
             "peer": row["peer"], "label": row["label"], "plan": row["plan"],
             "status": row["status"], "expires": row["expires"],
             "paid_until": row["paid_until"], "bytes_cap": row["bytes_cap"],
+            "device_cap": row["device_cap"],
             # `None`, not 0, when the daemon cannot be asked: "0 GiB used" about
             # a daemon the desk could not reach is a confident answer to a
             # question nobody answered — the false statement this field's
@@ -1728,11 +1775,14 @@ class Desk:
         days = body.get("days")
         cap = body.get("bytes")
         plan = body.get("plan")
+        devices = body.get("devices")
         with self.lock:
             self.db.execute(
-                "INSERT INTO codes (code, created, days, bytes, plan) VALUES (?,?,?,?,?)",
-                (code, self._now(), days, cap, plan))
+                "INSERT INTO codes (code, created, days, bytes, plan, devices) "
+                "VALUES (?,?,?,?,?,?)",
+                (code, self._now(), days, cap, plan, devices))
         return 200, {"code": code, "days": days, "bytes": cap, "plan": plan,
+                     "devices": devices,
                      "note": "hand to one user; consumed on signup"}
 
     def _adopt_peer(self, body):
@@ -1769,6 +1819,9 @@ class Desk:
             if key in body:
                 columns.append(f"{column}=?")
                 values.append(int(body[key]) if key == "bytes_cap" else str(body[key]))
+        if "device_cap" in body:
+            columns.append("device_cap=?")
+            values.append(int(body["device_cap"]))
         if "status" in body:
             status = str(body["status"])
             if status not in ACCOUNT_STATUSES:
@@ -1862,7 +1915,7 @@ class Desk:
     def _list_codes(self, body):
         with self.lock:
             rows = self.db.execute(
-                "SELECT code, created, used_by, days, bytes, plan "
+                "SELECT code, created, used_by, days, bytes, plan, devices "
                 "FROM codes ORDER BY created").fetchall()
         return 200, {"codes": [dict(row) for row in rows]}
 
@@ -1874,10 +1927,12 @@ class Desk:
             rows = self.db.execute(
                 "SELECT label, created FROM accounts WHERE status='pending' "
                 "ORDER BY id").fetchall()
-        active, queued = self.seat_state()
+        active, queued, peers = self.seat_state()
         return 200, {"seats": {"active": active,
                                "max": self.config.max_active_accounts,
-                               "free": max(0, self.config.max_active_accounts - active)},
+                               "free": max(0, self.config.max_active_accounts - active),
+                               "peers": peers,
+                               "peer_max": self.config.max_peers},
                      "queue": [{"position": n + 1, "label": row["label"],
                                 "created": row["created"]}
                                for n, row in enumerate(rows)]}
@@ -2524,6 +2579,8 @@ def account_page(view, token, notice="", operator="vallum desk"):
 <label>code <input name="code" required></label>
 <button>Apply</button>
 </form>"""
+    slots = (f" · {view['device_cap']} device slots"
+             if view.get("device_cap") is not None else "")
     queued = view["status"] == "pending"
     waiting = (f"""<p><b>Your account is queued for space.</b> It exists —
 devices join the moment it activates. The desk promotes queued accounts
@@ -2533,7 +2590,7 @@ itself when room frees; a code activates you right now:</p>
 <p><small>{_esc(operator)}</small></p>
 <h1>{_esc(view['label'])}</h1>{banner}
 <p>Plan <b>{_esc(view['plan'])}</b> · account {_esc(view['status'])} ·
-expires {_esc(view['expires'])} · {usage}.</p>
+expires {_esc(view['expires'])} · {usage}{slots}.</p>
 {waiting}
 <h2>Devices</h2>
 <p>{_esc(conversion_sentence(view['conversion']))}.</p>
@@ -2679,7 +2736,7 @@ def make_handler(desk):
                 self._send(code, payload)
                 return
             if self.path == "/":
-                active, queued = desk.seat_state()
+                active, queued, _ = desk.seat_state()
                 self._send_html(index_page(desk.config.open_signup, desk.config.operator_name,
                                            desk.config.install_source, desk.config.repo_url,
                                            desk.config.contact,
@@ -2837,6 +2894,8 @@ def parse_args(argv=None):
                         help="byte cap for anonymous trials (default 5 GiB)")
     parser.add_argument("--max-active-accounts", type=int, default=200,
                         help="capacity ceiling: the peer table is a /24")
+    parser.add_argument("--max-peers", type=int, default=253,
+                        help="device ceiling across the desk — the tunnel /24 itself")
     parser.add_argument("--signup-ip-day-limit", type=int, default=3,
                         help="anonymous signups per IP per day (0 = unlimited)")
     parser.add_argument("--device-cap", type=int, default=5,
@@ -2894,6 +2953,7 @@ def main(argv=None):
         open_signup=args.open_signup,
         open_trial_bytes=args.open_trial_bytes,
         max_active_accounts=args.max_active_accounts,
+        max_peers=args.max_peers,
         signup_ip_day_limit=args.signup_ip_day_limit,
         device_cap=args.device_cap,
         operator_name=args.operator_name,
