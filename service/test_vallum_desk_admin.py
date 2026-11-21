@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -94,10 +95,11 @@ class AdminCliTests(unittest.TestCase):
         out = self.cli("accounts")
         self.assertIn("account-1", out)  # the label identifies the account
         self.assertIn("trial", out)
-        # The human view masks the account number — a credential must not
-        # land in scrollback or CI logs; --json carries it in full.
+        # The human view masks the stored handle — a credential must not
+        # land in scrollback or CI logs; --json carries it in full. Since
+        # v7 the stored handle is the number's digest, never the number.
         self.assertNotIn(payload["token"], out)
-        self.assertIn(payload["token"][:8], out)
+        self.assertIn(desk_module.token_digest(payload["token"])[:8], out)
 
     def test_devices_lists_each_account_device(self):
         payload = self.signup()
@@ -118,7 +120,8 @@ class AdminCliTests(unittest.TestCase):
         out = self.cli("--json", "accounts")
         listing = json.loads(out)
         self.assertEqual(listing["peers"][0]["label"], "account-1")
-        self.assertEqual(listing["peers"][0]["token"], payload["token"])
+        self.assertEqual(listing["peers"][0]["token"],
+                         desk_module.token_digest(payload["token"]))
 
     def test_set_plan_changes_the_account_row(self):
         self.signup_with_device()
@@ -184,7 +187,9 @@ class AdminCliTests(unittest.TestCase):
         payload = self.signup()
         old = payload["token"]
         out = self.cli("reset-token", "--token", old)
-        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        # The column is a digest (v7): the only place the new number exists
+        # in plaintext is the stdout it is shown on, once.
+        new = re.search(r"[0-9a-f]{32}", out).group()
         self.assertNotEqual(new, old)
         self.assertIn(new, out)  # the new number is shown once, on stdout
         self.assertEqual(self.desk.status(old)[0], 404)
@@ -192,8 +197,8 @@ class AdminCliTests(unittest.TestCase):
 
     def test_reset_token_by_peer_reaches_the_account(self):
         payload, device = self.signup_with_device()
-        self.cli("reset-token", "--peer", device["peer"])
-        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        out = self.cli("reset-token", "--peer", device["peer"])
+        new = re.search(r"[0-9a-f]{32}", out).group()
         self.assertNotEqual(new, payload["token"])
 
     def test_reset_token_by_token_file_keeps_the_number_out_of_ps(self):
@@ -201,15 +206,15 @@ class AdminCliTests(unittest.TestCase):
         number_file = os.path.join(self.tempdir.name, "account-number")
         with open(number_file, "w") as f:
             f.write(payload["token"] + "\n")
-        self.cli("reset-token", "--token-file", number_file)
-        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        out = self.cli("reset-token", "--token-file", number_file)
+        new = re.search(r"[0-9a-f]{32}", out).group()
         self.assertNotEqual(new, payload["token"])
 
     def test_reset_token_by_recovery_code_proves_ownership(self):
         payload = self.signup()
         old = payload["token"]
         out = self.cli("reset-token", "--recovery-code", payload["recovery_code"])
-        new = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        new = re.search(r"[0-9a-f]{32}", out).group()
         self.assertNotEqual(new, old)
         self.assertIn(new, out)
         self.assertEqual(self.desk.status(old)[0], 404)

@@ -14,6 +14,7 @@ import datetime
 import importlib.util
 import json
 import os
+import re
 import shlex
 import sqlite3
 import tempfile
@@ -35,6 +36,7 @@ DeskConfig = desk_module.DeskConfig
 describe_devices = desk_module.describe_devices
 DEVICE_STATES = desk_module.DEVICE_STATES
 SESSION_LIVE_SECONDS = desk_module.SESSION_LIVE_SECONDS
+token_digest = desk_module.token_digest
 
 
 class FakeDaemon(desk_module.Daemon):
@@ -228,7 +230,7 @@ class ResetTokenTests(DeskTestCase):
         self.assertEqual(status["peers"], [device["peer"]])
         row = self.desk.db.execute(
             "SELECT plan, bytes_cap, status FROM accounts WHERE token=?",
-            (payload["token"],)).fetchone()
+            (token_digest(payload["token"]),)).fetchone()
         self.assertEqual(row["plan"], "plus")
         self.assertEqual(row["bytes_cap"], 5000)
         self.assertEqual(row["status"], "active")
@@ -549,14 +551,15 @@ class DaemonCliTests(unittest.TestCase):
 class StatusTests(DeskTestCase):
 
     def test_status_reports_the_bytes_used_for_the_account_peer(self):
-        _, device = self.account_with_device()
+        account, device = self.account_with_device()
         peer = device["peer"]
         # The daemon keys its counters by peer NAME. A reader that looked them
         # up by fingerprint would report zero here — which is how a quota
         # stops firing while the expiry path keeps working.
         self.daemon._counters = {peer: 23838}
-        code, payload = self.desk.status(
-            self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"])
+        # The column holds a digest (v7): status() hashes what it is given, so
+        # the plaintext from signup is the only thing that resolves.
+        code, payload = self.desk.status(account["token"])
         self.assertEqual(code, 200)
         self.assertEqual(payload["bytes_used"], 23838)
 
@@ -578,7 +581,7 @@ class OrphanSweepTests(DeskTestCase):
         """Revoke the account row without the peer cleanup — the historical state
         the sweep has to recover from."""
         self.desk.db.execute(
-            "UPDATE accounts SET status='revoked' WHERE token=?", (token,))
+            "UPDATE accounts SET status='revoked' WHERE token=?", (token_digest(token),))
 
     def test_a_peer_under_a_revoked_account_is_marked_removed(self):
         account, _ = self.account_with_device()
@@ -634,13 +637,13 @@ class OrphanSweepTests(DeskTestCase):
 class EnforcementTests(DeskTestCase):
 
     def account_row(self, token):
-        return self.desk.db.execute("SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        return self.desk.db.execute("SELECT * FROM accounts WHERE token=?", (token_digest(token),)).fetchone()
 
     def test_an_expired_account_loses_its_peer(self):
         account, device = self.account_with_device()
         peer = device["peer"]
         self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         actions = self.desk.sweep_once()
         self.assertEqual(len(actions), 1)
         self.assertEqual(actions[0]["reason"], "expired")
@@ -666,7 +669,7 @@ class EnforcementTests(DeskTestCase):
         account, _ = self.account_with_device()
         today = desk_module.datetime.date.today().isoformat()
         self.desk.db.execute("UPDATE accounts SET expires=? WHERE token=?",
-                             (today, account["token"]))
+                             (today, token_digest(account["token"])))
         self.assertEqual(self.desk.sweep_once()[0]["reason"], "expired")
 
     def test_a_failed_removal_is_retried_instead_of_marked_revoked(self):
@@ -675,7 +678,7 @@ class EnforcementTests(DeskTestCase):
         account, device = self.account_with_device()
         peer = device["peer"]
         self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         self.daemon._refuse_remove = True
         action = self.desk.sweep_once()[0]
         self.assertIn("error", action)
@@ -691,7 +694,7 @@ class EnforcementTests(DeskTestCase):
         # row that retries it forever would never finish sweeping.
         account, device = self.account_with_device()
         self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         self.daemon.missing_peers = {device["peer"]}
         action = self.desk.sweep_once()[0]
         self.assertNotIn("error", action)
@@ -1025,10 +1028,13 @@ class ClosedModeHttpTests(WireTestCase):
         status, page = self.post("/signup", "code=friend-code-1",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
-        token = self.desk.db.execute("SELECT token FROM accounts").fetchone()["token"]
+        # The column holds a digest now — the page is the only place the
+        # number ever exists in plaintext, so read it back from there.
+        token = re.search(r"[0-9a-f]{32}", page).group()
         self.assertIn("Shown once", page)
         self.assertIn(token, page)
         self.assertIn("Add a device", page)  # the next step is named
+        self.assertEqual(self.desk.status(token)[0], 200)
 
     def test_the_account_page_renders_the_codes_plan_label(self):
         # A code carrying plan "plus" lands a plus account; the page said
@@ -1183,7 +1189,7 @@ class DaemonOutageTests(DeskTestCase):
         # past its date must still be revoked on that pass.
         token = self._token()
         self.desk.db.execute(
-            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (token,))
+            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (token_digest(token),))
         self.desk.daemon = FakeDaemon(refuse_counters=True)
         actions = self.desk.sweep_once()
         self.assertEqual([a["reason"] for a in actions], ["expired"])
@@ -1485,7 +1491,7 @@ class ReturnUsageTests(DeskTestCase):
     def _id(self, account):
         return self.desk.db.execute(
             "SELECT id FROM accounts WHERE token=?",
-            (account["token"],)).fetchone()["id"]
+            (token_digest(account["token"]),)).fetchone()["id"]
 
     def test_records_distinct_connection_days(self):
         import datetime as dt
@@ -1597,7 +1603,7 @@ class SignupAttributionTests(DeskTestCase):
         code, payload = desk.signup({}, client_ip="203.0.113.7")
         self.assertEqual(code, 200)
         row = desk.db.execute(
-            "SELECT signup_ip FROM accounts WHERE token=?", (payload["token"],)).fetchone()
+            "SELECT signup_ip FROM accounts WHERE token=?", (token_digest(payload["token"]),)).fetchone()
         self.assertEqual(row["signup_ip"], "203.0.113.7")
 
     def test_an_unknown_address_is_recorded_as_absent_not_as_the_string(self):
@@ -1608,7 +1614,7 @@ class SignupAttributionTests(DeskTestCase):
         self.addCleanup(desk.db.close)
         _, payload = desk.signup({})
         row = desk.db.execute(
-            "SELECT signup_ip FROM accounts WHERE token=?", (payload["token"],)).fetchone()
+            "SELECT signup_ip FROM accounts WHERE token=?", (token_digest(payload["token"]),)).fetchone()
         self.assertIsNone(row["signup_ip"])
 
     def test_the_limit_survives_a_restart(self):
@@ -1825,7 +1831,7 @@ class AccountPageTests(HttpTests):
     def test_the_account_page_escapes_the_label(self):
         token = self._token()
         self.desk.db.execute(
-            "UPDATE accounts SET label='<img onerror=x>' WHERE token=?", (token,))
+            "UPDATE accounts SET label='<img onerror=x>' WHERE token=?", (token_digest(token),))
         _, _, page = self.post_headers(
             "/account", f"token={token}", "application/x-www-form-urlencoded")
         self.assertNotIn("<img", page)
@@ -2055,7 +2061,8 @@ class MigrationTests(DeskTestCase):
         peer_column = [r for r in desk.db.execute("PRAGMA table_info(accounts)")
                        if r[1] == "peer"][0]
         self.assertEqual(peer_column[3], 0, "accounts.peer must accept NULL")
-        row = desk.db.execute("SELECT * FROM accounts WHERE token='tok-v2'").fetchone()
+        row = desk.db.execute("SELECT * FROM accounts WHERE token=?",
+                              (token_digest("tok-v2"),)).fetchone()
         self.assertEqual(row["peer"], "u0001-old")
         self.assertEqual(row["label"], "old-friend")
         self.assertEqual(
@@ -2080,7 +2087,8 @@ class MigrationTests(DeskTestCase):
         code, status = desk.status("tok-1")
         self.assertEqual(code, 200)
         self.assertEqual(status["peers"], ["u0001-old"])
-        desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token='tok-1'")
+        desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
+                        (token_digest("tok-1"),))
         actions = desk.sweep_once()
         # tok-2 is already expired in the fixture, so its peer is swept as an
         # orphan on the same pass — assert our account's fact, not the total.
@@ -2141,7 +2149,7 @@ class PeersRelationTests(DeskTestCase):
     def test_add_device_writes_the_peer_row(self):
         account, device = self.account_with_device()
         account_id = self.desk.db.execute(
-            "SELECT id FROM accounts WHERE token=?", (account["token"],)).fetchone()["id"]
+            "SELECT id FROM accounts WHERE token=?", (token_digest(account["token"]),)).fetchone()["id"]
         row = self.desk.db.execute(
             "SELECT * FROM peers WHERE account_id=?", (account_id,)).fetchone()
         self.assertIsNotNone(row)
@@ -2157,7 +2165,7 @@ class PeersRelationTests(DeskTestCase):
         # with no peers row. Readers must still find it.
         account, device = self.account_with_device()
         account_id = self.desk.db.execute(
-            "SELECT id FROM accounts WHERE token=?", (account["token"],)).fetchone()["id"]
+            "SELECT id FROM accounts WHERE token=?", (token_digest(account["token"]),)).fetchone()["id"]
         self.desk.db.execute("DELETE FROM peers")
         self.desk.db.execute("UPDATE accounts SET peer=? WHERE id=?",
                              (device["peer"], account_id))
@@ -2176,7 +2184,7 @@ class PeersRelationTests(DeskTestCase):
     def test_revoking_marks_the_peers_row_removed(self):
         account, device = self.account_with_device()
         self.desk.db.execute(
-            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (account["token"],))
+            "UPDATE accounts SET expires='2020-01-01' WHERE token=?", (token_digest(account["token"]),))
         self.desk.sweep_once()
         row = self.desk.db.execute(
             "SELECT status FROM peers WHERE peer=?", (device["peer"],)).fetchone()
@@ -2199,7 +2207,7 @@ class CodePlanTests(DeskTestCase):
         status, payload = self.signup(code=minted["code"])
         self.assertEqual(status, 200)
         row = self.desk.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (payload["token"],)).fetchone()
+            "SELECT * FROM accounts WHERE token=?", (token_digest(payload["token"]),)).fetchone()
         self.assertEqual(row["plan"], "plus")
         self.assertEqual(row["bytes_cap"], 5000)
         expected = (datetime.datetime.now(datetime.timezone.utc)
@@ -2211,7 +2219,7 @@ class CodePlanTests(DeskTestCase):
         status, payload = self.signup(code=minted["code"])
         self.assertEqual(status, 200)
         row = self.desk.db.execute(
-            "SELECT * FROM accounts WHERE token=?", (payload["token"],)).fetchone()
+            "SELECT * FROM accounts WHERE token=?", (token_digest(payload["token"]),)).fetchone()
         self.assertEqual(row["plan"], "trial")
         self.assertEqual(row["bytes_cap"], 1000)
 
@@ -2332,9 +2340,10 @@ class DevicesTests(DeskTestCase):
         self.assertEqual(
             self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
 
-    def test_a_failed_pinned_mint_leaves_no_orphan_row(self):
-        # The cleanup path is the same whether the invite was pinned or not:
-        # a daemon refusal deletes the reservation, so the slot is free again.
+    def test_a_failed_pinned_mint_leaves_a_tombstone(self):
+        # A daemon refusal marks the reservation removed rather than deleting
+        # it: the slot frees, the name is never reissued, and the audit trail
+        # keeps the attempt — the same treatment a ghost reservation gets.
         token = self._token()
         self.daemon._refuse = True
         code, payload = self.desk.add_device(
@@ -2342,8 +2351,8 @@ class DevicesTests(DeskTestCase):
              "public_key": "vallum1:0003:" + "ab" * 32 + ":-"})
         self.assertEqual(code, 502)
         self.assertIn("daemon refused", payload["error"])
-        self.assertEqual(
-            self.desk.db.execute("SELECT COUNT(*) FROM peers").fetchone()[0], 0)
+        rows = self.desk.db.execute("SELECT status FROM peers").fetchall()
+        self.assertEqual([r["status"] for r in rows], ["removed"])
 
     def test_an_empty_public_key_is_the_unpinned_path(self):
         # A form or UTCP template that always sends the field sends it empty
@@ -2648,7 +2657,7 @@ class RotationTests(DeskTestCase):
         # peers row; the legacy column IS the device, and it rotates too.
         _, account = self.signup()
         self.desk.db.execute("UPDATE accounts SET peer='u0001-old' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         code, payload = self.desk.rotate_device(
             {"token": account["token"], "peer": "u0001-old", "public_key": self.LINE})
         self.assertEqual(code, 200)
@@ -2704,7 +2713,7 @@ class RotationTests(DeskTestCase):
         # refuses "no peer named", and the desk reports the refusal.
         _, account = self.signup()
         self.desk.db.execute("UPDATE accounts SET peer='u0001-old' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         self.daemon.missing_peers = ["u0001-old"]
         code, payload = self.desk.rotate_device(
             {"token": account["token"], "peer": "u0001-old", "public_key": self.LINE})
@@ -2819,19 +2828,19 @@ class AdminTests(DeskTestCase):
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
             "SELECT bytes_cap FROM accounts WHERE token=?",
-            (account["token"],)).fetchone()[0], 42)
+            (token_digest(account["token"]),)).fetchone()[0], 42)
 
     def test_an_account_can_be_reinstated(self):
         # The way back after a quota fired on a mis-set cap.
         account, device = self.account_with_device()
         self.desk.db.execute("UPDATE accounts SET status='overquota' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         code, _ = self.desk.admin("/api/admin/plan", {
             "admin_token": "admin-secret", "peer": device["peer"], "status": "active"})
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
             "SELECT status FROM accounts WHERE token=?",
-            (account["token"],)).fetchone()[0], "active")
+            (token_digest(account["token"]),)).fetchone()[0], "active")
 
     def test_an_unknown_status_is_refused(self):
         _, device = self.account_with_device()
@@ -2848,7 +2857,7 @@ class AdminTests(DeskTestCase):
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
             "SELECT bytes_cap FROM accounts WHERE token=?",
-            (account["token"],)).fetchone()[0], 42)
+            (token_digest(account["token"]),)).fetchone()[0], 42)
 
     def test_a_deviceless_account_can_be_revoked_by_token(self):
         _, account = self.signup()
@@ -2857,17 +2866,20 @@ class AdminTests(DeskTestCase):
         self.assertEqual(code, 200)
         self.assertEqual(self.desk.db.execute(
             "SELECT status FROM accounts WHERE token=?",
-            (account["token"],)).fetchone()["status"], "revoked")
+            (token_digest(account["token"]),)).fetchone()["status"], "revoked")
         self.assertEqual(self.daemon.removed, [])  # nothing to remove
 
-    def test_the_accounts_listing_carries_the_account_number(self):
-        # The operator needs the number to address a device-less account;
-        # the admin API is the operator's own trust domain.
+    def test_the_accounts_listing_carries_the_account_handle(self):
+        # The listing carries the account's stored handle — since v7 that is
+        # the number's digest, a stable correlation id that is not itself a
+        # credential. To *act* on an account the operator addresses it by
+        # peer, label or recovery code — the number is never read back.
         _, account = self.signup()
         code, payload = self.desk.admin("/api/admin/peers",
                                         {"admin_token": "admin-secret"})
         self.assertEqual(code, 200)
-        self.assertEqual(payload["peers"][0]["token"], account["token"])
+        self.assertEqual(payload["peers"][0]["token"],
+                         token_digest(account["token"]))
 
     def test_adopting_an_existing_peer_registers_it(self):
         code, payload = self.desk.admin("/api/admin/adopt", {
@@ -3052,7 +3064,7 @@ class AccountOnlyTests(DeskTestCase):
         # expiry marks, and the sweep must finish the job.
         _, account = self.signup()
         self.desk.db.execute("UPDATE accounts SET expires='2020-01-01' WHERE token=?",
-                             (account["token"],))
+                             (token_digest(account["token"]),))
         actions = self.desk.sweep_once()
         self.assertEqual([a["reason"] for a in actions], ["expired"])
         self.assertNotIn("error", actions[0])

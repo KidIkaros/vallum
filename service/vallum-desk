@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # ---------------------------------------------------------------- database
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # The protocol's own reject window in seconds (`REJECT_AFTER_TIME_MS` on the
 # daemon side). Past it the session is dead by construction: a handshake older
@@ -63,6 +63,16 @@ MAX_BODY = 64 * 1024
 
 class BodyTooLarge(Exception):
     """The request's Content-Length exceeds MAX_BODY (or is unparseable)."""
+
+
+def token_digest(token):
+    """How the account number is stored: sha256, same construction as
+    recovery_code_hash. The number itself is 128 bits of CSPRNG — a bare
+    hash is the right strength, and a stolen database yields digests an
+    attacker cannot present. Every lookup hashes the presented number and
+    compares digests; the plaintext is returned once at mint/reset and
+    never read back."""
+    return hashlib.sha256(str(token).encode()).hexdigest()
 
 
 # How long a /healthz answer stays fresh. The route is unauthenticated on
@@ -84,7 +94,7 @@ CREATE TABLE IF NOT EXISTS accounts (
                                         -- signup (ADR-0047). The relation is `peers`; this column
                                         -- stays populated only for pre-migration and adopted rows.
     label      TEXT NOT NULL,             -- the account's display name
-    token      TEXT UNIQUE NOT NULL,      -- account token: status/auth
+    token      TEXT UNIQUE NOT NULL,      -- sha256 of the account number (v7); status/auth
     code       TEXT NOT NULL,             -- invite code consumed
     plan       TEXT NOT NULL DEFAULT 'trial',
     created    TEXT NOT NULL,
@@ -265,6 +275,29 @@ def _migrate_v5(conn):
                  "PRIMARY KEY (account_id, day))")
 
 
+def _migrate_v6(conn):
+    """v6 → v7: accounts.token becomes the sha256 digest of the account
+    number. The number is a bearer credential; at rest it was the one
+    plaintext secret in a file that also sits inside backups and admin
+    dumps. Plaintext numbers are 32 hex chars (token_hex(16)), digests are
+    64 — the length test makes the pass idempotent and per-row, so a crash
+    mid-update retries only what is left. One transaction, like _migrate_v2.
+    """
+    rows = conn.execute(
+        "SELECT id, token FROM accounts WHERE length(token) != 64").fetchall()
+    if not rows:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for row in rows:
+            conn.execute("UPDATE accounts SET token=? WHERE id=?",
+                         (token_digest(row["token"]), row["id"]))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def open_database(path):
     # Autocommit (isolation_level=None): every statement commits on its own, so
     # a code minted on one request thread is visible to the next one. With the
@@ -303,6 +336,8 @@ def open_database(path):
         _migrate_v4(conn)
     if version < 6:
         _migrate_v5(conn)
+    if version < 7:
+        _migrate_v6(conn)
     if version != SCHEMA_VERSION:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return conn
@@ -622,6 +657,14 @@ class Desk:
             return self.db.execute(
                 "SELECT * FROM accounts WHERE peer=?", (peer,)).fetchone()
 
+    def _account_by_token(self, token):
+        """The account a presented number names, or None. The column stores
+        digests (v7): hash what was presented, compare digests."""
+        with self.lock:
+            return self.db.execute(
+                "SELECT * FROM accounts WHERE token=?",
+                (token_digest(token),)).fetchone()
+
     def _account_for_body(self, body):
         """The account an admin request addresses: by a device peer name, or
         by the account token. A device-less account (ADR-0047) has no peer to
@@ -632,9 +675,7 @@ class Desk:
             return self._account_for_peer(peer)
         token = body.get("token")
         if token:
-            with self.lock:
-                return self.db.execute(
-                    "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            return self._account_by_token(token)
         return None
 
     @staticmethod
@@ -683,12 +724,15 @@ class Desk:
             # never typed (#27); the unknown-code refusal below is a different
             # sentence for a different mistake.
             return 403, {"error": "enter your invite code — this desk is invite-only"}
-        if not code:
-            limit = self._signup_limit_left(client_ip)
-            if limit is not None and limit <= 0:
-                return 429, {"error": "too many signups from this address today — "
-                                      "come back tomorrow or ask the operator"}
         with self.lock:
+            if not code:
+                # Check-and-count must be one serialized step: two racing
+                # signups that both read the count outside the lock would
+                # both pass and both insert — the limit would be advisory.
+                limit = self._signup_limit_left(client_ip)
+                if limit is not None and limit <= 0:
+                    return 429, {"error": "too many signups from this address today — "
+                                          "come back tomorrow or ask the operator"}
             known = (self.db.execute(
                 "SELECT used_by, days, bytes, plan FROM codes WHERE code=?", (code,)).fetchone()
                      if code else None)
@@ -732,7 +776,7 @@ class Desk:
                     "(peer,label,token,code,plan,created,expires,bytes_cap,status,signup_ip,"
                     "recovery_code_hash) "
                     "VALUES (NULL,?,?,?,?,?,?,?,?,?,?)",
-                    ("account", token, origin, plan, self._now(), expires, cap, "active",
+                    ("account", token_digest(token), origin, plan, self._now(), expires, cap, "active",
                      client_ip if client_ip and client_ip != "unknown" else None,
                      recovery_code_hash))
                 label = f"account-{cursor.lastrowid}"
@@ -963,8 +1007,7 @@ class Desk:
         # the cap (ADR-0047 §1): fetched once here, then used inside the
         # locked step to release ghost reservations and count live devices.
         with self.lock:
-            account = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            account = self._account_by_token(token)
             if not account:
                 return 404, {"error": "unknown account token"}
             if account["status"] != "active":
@@ -986,7 +1029,12 @@ class Desk:
                 ticket = self.daemon.mint_ticket(peer, public_key=public_key)
         except RuntimeError as error:
             with self.lock:
-                self.db.execute("DELETE FROM peers WHERE peer=?", (peer,))
+                # Tombstone, not delete: the row keeps the audit trail and
+                # the name is never reissued — the same treatment a ghost
+                # reservation gets. The daemon may hold partial state for
+                # this name even though it said no.
+                self.db.execute("UPDATE peers SET status='removed' WHERE peer=?",
+                                (peer,))
             return 502, {"error": f"the daemon refused the enrolment: {error}"}
         with self.lock:
             still = self.db.execute(
@@ -1017,8 +1065,7 @@ class Desk:
         if not code:
             return 400, {"error": "code is required"}
         with self.lock:
-            account = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            account = self._account_by_token(token)
             if not account:
                 return 404, {"error": "unknown account token"}
             if account["status"] != "active":
@@ -1051,13 +1098,22 @@ class Desk:
                 updates.append("plan=?")
                 values.append(known["plan"])
             values.append(account["id"])
-            self.db.execute(f"UPDATE accounts SET {', '.join(updates)} WHERE id=?",
-                            tuple(values))
-            # The burn records who consumed the code. A device-less account
-            # (ADR-0047) has no peer, so its label stands in — a NULL used_by
-            # reads as "unused" and the same code would redeem twice.
-            self.db.execute("UPDATE codes SET used_by=? WHERE code=?",
-                            (self._account_name(account), code))
+            # The apply and the burn are one transaction, not two autocommits:
+            # a crash between them would grant the plan while leaving the
+            # code unburned — the same code redeemable twice.
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute(f"UPDATE accounts SET {', '.join(updates)} WHERE id=?",
+                                tuple(values))
+                # The burn records who consumed the code. A device-less account
+                # (ADR-0047) has no peer, so its label stands in — a NULL used_by
+                # reads as "unused" and the same code would redeem twice.
+                self.db.execute("UPDATE codes SET used_by=? WHERE code=?",
+                                (self._account_name(account), code))
+                self.db.execute("COMMIT")
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
             row = self.db.execute(
                 "SELECT expires, bytes_cap, plan FROM accounts WHERE id=?",
                 (account["id"],)).fetchone()
@@ -1211,8 +1267,7 @@ class Desk:
         """The full account view the page and its JSON share: the plan row,
         the shared-pool numbers, and every device with its own status."""
         with self.lock:
-            row = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+            row = self._account_by_token(token)
             if not row:
                 return 404, {"error": "unknown account token"}
             devices = [dict(r) for r in self.db.execute(
@@ -1269,8 +1324,7 @@ class Desk:
         if not peer:
             return None, None, (400, {"error": f"peer is required — name the device to {verb}"})
         with self.lock:
-            account = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token or "",)).fetchone()
+            account = self._account_by_token(token or "")
             if not account:
                 return None, None, (404, {"error": "unknown account token"})
             if require_active and account["status"] != "active":
@@ -1442,9 +1496,7 @@ class Desk:
                 (account_id,)).fetchone()[0]
 
     def status(self, token):
-        with self.lock:
-            row = self.db.execute(
-                "SELECT * FROM accounts WHERE token=?", (token,)).fetchone()
+        row = self._account_by_token(token)
         if not row:
             return 404, {"error": "unknown account token"}
         peers = self._peers_of(row)
@@ -1645,7 +1697,7 @@ class Desk:
             cursor = self.db.execute(
                 "INSERT INTO accounts (peer,label,token,code,plan,created,expires,bytes_cap,status) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (peer, label, token, "adopted", "trial", self._now(), expires, cap, "active"))
+                (peer, label, token_digest(token), "adopted", "trial", self._now(), expires, cap, "active"))
             self._insert_peer(cursor.lastrowid, peer, label)
         return 200, {"peer": peer, "token": token, "expires": expires, "bytes_cap": cap}
 
@@ -1733,7 +1785,7 @@ class Desk:
         token = secrets.token_hex(16)
         with self.lock:
             self.db.execute("UPDATE accounts SET token=? WHERE id=?",
-                            (token, account["id"]))
+                            (token_digest(token), account["id"]))
         return 200, {"account": self._account_name(account),
                      "token": token, "status": account["status"],
                      "note": "shown once — the previous account number no longer works"}
