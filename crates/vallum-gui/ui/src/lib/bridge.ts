@@ -196,6 +196,7 @@ export interface JoinUriIntent {
   ticket: string
   account: string
   endpoint: string
+  desk: string
 }
 
 /** Take the pending vallum:// URI the app was launched with — one-shot.

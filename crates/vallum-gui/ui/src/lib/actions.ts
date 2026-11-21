@@ -62,6 +62,8 @@ export interface JoinFields {
   name: string
   /** Desk account token from a vallum://join deep link (32 hex, optional). */
   account?: string
+  /** Issuing desk's https:// origin — recorded as the account endpoint. */
+  desk?: string
 }
 
 export const joinNetwork = (fields: JoinFields) =>

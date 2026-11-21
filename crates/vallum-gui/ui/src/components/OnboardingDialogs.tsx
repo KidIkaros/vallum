@@ -414,6 +414,12 @@ export function JoinUriBridge() {
             <span className="micro">account</span>
             <span className="text-foreground">…{intent.account.slice(-8)}</span>
           </div>
+          {intent.desk !== "" && (
+            <div className="flex justify-between gap-3">
+              <span className="micro">desk</span>
+              <span className="text-foreground">{intent.desk}</span>
+            </div>
+          )}
         </div>
         <DialogFooter showCloseButton>
           <Button
@@ -428,6 +434,7 @@ export function JoinUriBridge() {
                 ssh_target: "",
                 name: "",
                 account: intent.account,
+                desk: intent.desk,
               })
                 .then((done) => {
                   toast.success(done.message)

@@ -376,13 +376,32 @@ fn join_network_at(console: &Arc<Console>, fields: &JoinFields) -> Result<Done, 
         // `vallum join` as VALLUM_ACCOUNT. Env cannot cross sudo/pkexec, and
         // argv would put the credential in ps.
         let account = fields.account.trim();
+        let desk = fields.desk.trim();
         let stdin_payload = if account.is_empty() {
             ticket.to_owned()
         } else {
             if account.len() != 32 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err("the account number is 32 hex characters".to_owned());
             }
-            format!("{ticket}\n{account}")
+            // Line 3 is the desk origin — `vallum-ops join` re-validates the
+            // charset before re-exporting it, so it is bounded here the same
+            // way (`vallum-ops`: [A-Za-z0-9.:/\[\]_-], no leading dash).
+            if !desk.is_empty()
+                && (desk.starts_with('-')
+                    || !desk.chars().all(|c| {
+                        c.is_ascii_alphanumeric()
+                            || matches!(c, '.' | ':' | '/' | '[' | ']' | '_' | '-')
+                    }))
+            {
+                return Err(
+                    "the desk endpoint has characters the ops dispatcher refuses".to_owned(),
+                );
+            }
+            if desk.is_empty() {
+                format!("{ticket}\n{account}")
+            } else {
+                format!("{ticket}\n{account}\n{desk}")
+            }
         };
         run_ops_with_stdin(&["join"], Some(&stdin_payload))?
     };

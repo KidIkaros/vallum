@@ -57,6 +57,9 @@ pub struct JoinFields {
     /// Empty on a plain ticket join; carried to `vallum join` over the same
     /// stdin channel as the ticket (env dies at the pkexec boundary).
     pub account: String,
+    /// The issuing desk's `https://` origin — stdin line 3 to `vallum-ops
+    /// join`, recorded as the account's endpoint (ADR-0046).
+    pub desk: String,
 }
 
 /// A parsed `vallum://join` deep link — what the desk's Connect button emits.
@@ -66,6 +69,8 @@ pub struct JoinUriIntent {
     pub account: String,
     /// host:port from the ticket, for the confirm dialog's "where to" line.
     pub endpoint: String,
+    /// The issuing desk's `https://` origin, when the URI carries `desk=`.
+    pub desk: String,
 }
 
 /// Parse a `vallum://join?ticket=<t>&account=<token>` URI byte-strictly —
@@ -81,6 +86,7 @@ pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
     }
     let mut ticket = "";
     let mut account = "";
+    let mut desk = "";
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
             return Err("malformed query parameter".to_owned());
@@ -88,13 +94,26 @@ pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
         match key {
             "ticket" => ticket = value,
             "account" => account = value,
+            "desk" => desk = value,
             _ => return Err(format!("unknown parameter `{key}`")),
         }
     }
     let ticket = url_decode(ticket);
     let account = url_decode(account);
+    let desk = url_decode(desk);
     if account.len() != 32 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("the account number is 32 hex characters".to_owned());
+    }
+    // The desk's own grammar: `_desk_origin` emits `https://` + Host. The
+    // charset bound is `vallum-ops`'s — the value crosses pkexec into a
+    // root shell script, so it is validated here the same way.
+    if !desk.is_empty()
+        && (!desk.starts_with("https://")
+            || !desk[8..].chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '[' | ']' | '_' | '-')
+            }))
+    {
+        return Err("the desk endpoint is not an https:// origin".to_owned());
     }
     // vallum1-join:<host>:<port>/<name>/<32-hex id>/<token>/<fp>
     let body = ticket
@@ -134,6 +153,7 @@ pub fn parse_join_uri(uri: &str) -> Result<JoinUriIntent, String> {
         ticket,
         account,
         endpoint,
+        desk,
     })
 }
 
@@ -1738,6 +1758,21 @@ public_key = "{old}"
         assert_eq!(intent.ticket, ticket);
         assert_eq!(intent.account, "f".repeat(32));
         assert_eq!(intent.endpoint, "vpn.example.com:51821");
+        assert_eq!(intent.desk, "");
+
+        // The desk's production URIs append &desk=<https origin> — the param
+        // must parse, round-trip, and be validated, not refused (ADR-0047 Q5).
+        let uri_with_desk = format!("{uri}&desk=https%3A%2F%2Fdesk.example.com");
+        let intent = parse_join_uri(&uri_with_desk).unwrap();
+        assert_eq!(intent.desk, "https://desk.example.com");
+        let uri_with_desk_port = format!("{uri}&desk=https%3A%2F%2Fdesk.example.com%3A8443");
+        let intent = parse_join_uri(&uri_with_desk_port).unwrap();
+        assert_eq!(intent.desk, "https://desk.example.com:8443");
+        assert!(parse_join_uri(&format!("{uri}&desk=http%3A%2F%2Fdesk.example.com")).is_err());
+        assert!(
+            parse_join_uri(&format!("{uri}&desk=https%3A%2F%2Fdesk.example.com%3Fevil")).is_err()
+        );
+        assert!(parse_join_uri(&format!("{uri}&desk=notaurl")).is_err());
 
         assert!(parse_join_uri("https://join?x=1").is_err());
         assert!(parse_join_uri("vallum://enroll?ticket=x&account=x").is_err());

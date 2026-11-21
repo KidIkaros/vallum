@@ -840,6 +840,15 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     if let Some(line) = &expect {
         validate_public_line(&server, line)?;
     }
+    // --seal-aad seals to the device key: no public line, nothing to seal to.
+    // Checked before minting so a refused flag combination does not leave a
+    // live, unpinned invite behind on disk.
+    if args.seal_aad.is_some() && expect.is_none() {
+        return Err(Error::Usage(
+            "--seal-aad requires the device's public line (--public-key or --public-key-file)"
+                .to_owned(),
+        ));
+    }
     // Prove a responder could answer the ticket BEFORE minting it: an invite
     // that names an unreachable endpoint or an unbindable port fails silently
     // at `vallum join`, and auto-starting a responder for it opens a port
