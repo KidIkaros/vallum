@@ -162,6 +162,55 @@ fn claim_path(path: &Path) -> io::Result<()> {
 /// directories cannot collide when one process binds more than one.
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// The dedicated control group's gid, resolved once at startup *before* the
+/// seccomp sandbox installs (#35, ADR-0048). A dropped daemon cannot look up
+/// groups (getgrnam is filtered), so the socket widening reads this instead.
+/// `None` means "no control group" → the socket stays owner-only.
+static CONTROL_GROUP_GID: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+
+/// Record the control group gid before the privilege drop / sandbox. Idempotent;
+/// the first call wins, so a re-bind cannot change the access decision mid-run.
+pub fn set_control_group(gid: Option<u32>) {
+    let _ = CONTROL_GROUP_GID.set(gid);
+}
+
+/// The access decision, pure so it can be tested without root or a real group:
+/// widen only when a control group is recorded AND the daemon is root or runs as
+/// that group. No group → never widen (fail-closed).
+fn control_widening_applies(euid_root: bool, egid: u32, control_gid: Option<u32>) -> bool {
+    match control_gid {
+        Some(gid) => euid_root || egid == gid,
+        None => false,
+    }
+}
+
+/// Publish the control socket to the dedicated `vallum` control group when this
+/// daemon is root or already runs as that group (#35, ADR-0048).
+///
+/// Best-effort and fail-closed: with no control group recorded, or a personal
+/// client dropped to its own login user, the socket stays owner-only `0600`.
+/// Only sandbox-safe calls run here: `geteuid`/`getegid` and `fchmod` are allowed
+/// after the drop; `chgrp` is attempted only when root (a root daemon installs no
+/// sandbox). A daemon already in the control group keeps that group, so the mode
+/// widening alone suffices — connecting needs the write bit, hence `0660`.
+#[cfg(target_os = "linux")]
+fn widen_to_control_group(path: &Path) {
+    let Some(gid) = CONTROL_GROUP_GID.get().copied().flatten() else {
+        return;
+    };
+    let euid = nix::unistd::geteuid();
+    if !control_widening_applies(euid.is_root(), nix::unistd::getegid().as_raw(), Some(gid)) {
+        return;
+    }
+    if euid.is_root() {
+        let _ = nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(gid)));
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o660));
+}
+
+#[cfg(not(target_os = "linux"))]
+fn widen_to_control_group(_path: &Path) {}
+
 /// Bind a Unix socket inside `dir` and give it its final mode there.
 ///
 /// `UnixListener::bind` creates the socket with `0777 & ~umask`, and a chmod
@@ -185,9 +234,20 @@ fn stage_socket(dir: &Path) -> io::Result<(UnixListener, PathBuf)> {
     let staged = dir.join("control.sock");
     let result = (|| {
         let listener = UnixListener::bind(&staged)?;
-        // The socket is the same trust boundary as the private-key file: same
-        // user only. A world-writable control socket would be a remote `set`.
+        // Owner-only first: the socket is the same trust boundary as the
+        // private-key file, and a world-writable control socket would be a
+        // remote `set`. The staging dir is 0700, so this provisional mode is
+        // never reachable by anyone else.
         fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))?;
+        // #35 (ADR-0048): a desktop console must be able to read a root-owned
+        // daemon. When this daemon is root, or runs as the dedicated `vallum`
+        // control group, publish the socket group-accessible (0660) so a console
+        // user in that group can connect. Connecting to a Unix socket needs the
+        // write bit, so group access is necessarily read+write (full uapi): the
+        // `vallum` group is the trusted-operator set, not "any local user". A
+        // personal client dropped to its login user (a different group) keeps
+        // 0600 — its console reads as the socket's owner, unchanged.
+        widen_to_control_group(&staged);
         Ok::<UnixListener, io::Error>(listener)
     })();
     match result {
@@ -225,6 +285,17 @@ fn bind_private(path: &Path) -> io::Result<UnixListener> {
             format!("`{}` has no file name to publish", path.display()),
         )
     })?;
+    // #35: a group-accessible socket needs a group-traversable runtime dir. When
+    // this daemon is root (the only identity that can chgrp a root-owned dir),
+    // put the runtime dir in the control group too. A non-root daemon relies on
+    // the installer having done this; it cannot chgrp a dir it does not own.
+    #[cfg(target_os = "linux")]
+    if parent == crate::host::paths::runtime_dir() && nix::unistd::geteuid().is_root() {
+        if let Some(gid) = CONTROL_GROUP_GID.get().copied().flatten() {
+            let _ = nix::unistd::chown(parent, None, Some(nix::unistd::Gid::from_raw(gid)));
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o770));
+        }
+    }
     let staging = parent.join(format!(
         ".{}.bind-{}-{}",
         name.to_string_lossy(),
@@ -1255,6 +1326,18 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #35 (ADR-0048): the widening decision is fail-closed — no control group
+    /// never widens; root or a daemon in the control group widens; an unrelated
+    /// login user does not. Pure, so it needs neither root nor a real group.
+    #[test]
+    fn control_widening_is_fail_closed_and_group_scoped() {
+        assert!(!control_widening_applies(true, 0, None));
+        assert!(!control_widening_applies(false, 1000, None));
+        assert!(control_widening_applies(true, 0, Some(986)));
+        assert!(control_widening_applies(false, 986, Some(986)));
+        assert!(!control_widening_applies(false, 1000, Some(986)));
     }
 
     /// The published socket carries `0600` from its first appearance, the owner

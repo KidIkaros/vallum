@@ -416,6 +416,23 @@ install_binaries() {
     run install -d -m 0755 "$BIN_DIR" "$CONFIG_DIR" "$RUNTIME_DIR" "$UNIT_DIR" "$TMPFILES_DIR"
     run install -m 0755 "$SOURCE_DIR/vallum" "$BIN_DIR/vallum"
     run install -m 0755 "$SOURCE_DIR/vallum-quick" "$BIN_DIR/vallum-quick"
+    # #35 (ADR-0048): the desktop console reads a system daemon's control socket
+    # via the dedicated `vallum` group. Create it if absent, add the invoking user
+    # so the console can see the daemon, and put the runtime dir in that group so
+    # it is traversable. Fail-soft: a host without group management keeps the
+    # owner-only socket — the daemon still runs, the console just elevates. The
+    # daemon widens the socket to 0660 only when it is root or in this group, so a
+    # personal client dropped to its login user is unaffected.
+    if command -v groupadd >/dev/null 2>&1; then
+        getent group vallum >/dev/null 2>&1 || run groupadd --system vallum
+        if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && command -v usermod >/dev/null 2>&1; then
+            run usermod -aG vallum "$SUDO_USER"
+        fi
+        if getent group vallum >/dev/null 2>&1; then
+            run chgrp vallum "$RUNTIME_DIR"
+            run chmod 0770 "$RUNTIME_DIR"
+        fi
+    fi
 }
 
 install_docs() {

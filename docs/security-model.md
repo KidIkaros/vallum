@@ -38,6 +38,13 @@ operator must guarantee. The proofs behind the claims live in
 - **Root custody** — `/etc/vallum` is 0600/root and the units run with
   bounded capabilities, but root on the host reads keys. Vallum does not
   protect the machine from its administrator.
+- **Control-socket access** — the daemon's control socket is owner-only `0600`
+  by default. Where a desktop console must read a system daemon, a dedicated
+  `vallum` group is granted access (`0660`). Connecting to a Unix socket needs
+  the write bit, so group membership grants the full control API (`get` and
+  `set`), not just reads — treat `vallum` as the trusted-operator set. A personal
+  client dropped to its login user keeps `0600`
+  ([ADR-0048](adr/0048-the-console-reads-via-the-control-group.md)).
 - **Wall clock** — replay timestamps and identity validity windows are
   clock checks. Keep NTP on; `vallum doctor` warns when it can't confirm
   synchronization. An hour of drift breaks handshakes loudly, not silently.

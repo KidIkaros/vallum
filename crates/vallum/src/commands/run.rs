@@ -193,6 +193,17 @@ pub fn run(args: &RunArgs, allow_insecure_key: bool) -> Result<(), Error> {
     let bound = socket.local_addr().unwrap_or(resolved.listen);
     let shared = Arc::new(SharedSocket::new(Arc::clone(&socket)));
 
+    // #35 (ADR-0048): resolve the control group before the sandbox installs — a
+    // dropped daemon cannot look up groups (getgrnam is filtered), so the socket
+    // widening reads this recorded gid. None when the group is absent → owner-only.
+    #[cfg(target_os = "linux")]
+    crate::control::set_control_group(
+        nix::unistd::Group::from_name("vallum")
+            .ok()
+            .flatten()
+            .map(|g| g.gid.as_raw()),
+    );
+
     // Everything privileged is done: the interface exists, the socket is bound,
     // and the key has been read. From here the daemon needs no more than the two
     // file descriptors it already holds, so it sheds what it was started with.
