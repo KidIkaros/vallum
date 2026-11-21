@@ -878,6 +878,44 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
     // The invite carries the operator's options to the responder, so a bad
     // preset name must fail here — not when the device asks for its config.
     shaping_preset(args.shaping.as_deref())?;
+
+    // An invite that cannot be answered is dead code. When this operator is
+    // root on a systemd host, the invite starts its own responder rather than
+    // printing homework — this runs before the invite is minted so a desk
+    // calling --json gets the same answerable ticket a human caller does.
+    let enroll_enabled = config.enroll.enabled;
+    let systemd = Path::new("/run/systemd/system").exists();
+    let root = nix::unistd::geteuid().is_root();
+    if root && systemd && !enroll_enabled {
+        crate::commands::server::enroll(&crate::commands::server::EnrollArgs {
+            config: args.config.clone(),
+            enable: true,
+            disable: false,
+            dry_run: false,
+        })?;
+    } else if root && systemd {
+        let active = std::process::Command::new("systemctl")
+            .args([
+                "--no-ask-password",
+                "is-active",
+                "--quiet",
+                &format!("vallum-enroll@{interface}"),
+            ])
+            .status()
+            .is_ok_and(|status| status.success());
+        if !active {
+            // Started, not enabled: an invite must be answerable, but that is
+            // not a reason to leave a second port listening at every boot.
+            let _ = std::process::Command::new("systemctl")
+                .args([
+                    "--no-ask-password",
+                    "start",
+                    &format!("vallum-enroll@{interface}"),
+                ])
+                .status();
+        }
+    }
+
     let (token, id, path) = crate::enroll::issue_invite(
         &interface,
         &args.name,
@@ -955,42 +993,6 @@ fn invite(args: &InviteArgs) -> Result<(), Error> {
                 .map_err(|error| Error::Usage(format!("json: {error}")))?
         );
         return Ok(());
-    }
-
-    // An invite that cannot be answered is dead code. When this operator is
-    // root on a systemd host, the invite starts its own responder rather than
-    // printing homework.
-    let enroll_enabled = config.enroll.enabled;
-    let systemd = Path::new("/run/systemd/system").exists();
-    let root = nix::unistd::geteuid().is_root();
-    if root && systemd && !enroll_enabled {
-        crate::commands::server::enroll(&crate::commands::server::EnrollArgs {
-            config: args.config.clone(),
-            enable: true,
-            disable: false,
-            dry_run: false,
-        })?;
-    } else if root && systemd {
-        let active = std::process::Command::new("systemctl")
-            .args([
-                "--no-ask-password",
-                "is-active",
-                "--quiet",
-                &format!("vallum-enroll@{interface}"),
-            ])
-            .status()
-            .is_ok_and(|status| status.success());
-        if !active {
-            // Started, not enabled: an invite must be answerable, but that is
-            // not a reason to leave a second port listening at every boot.
-            let _ = std::process::Command::new("systemctl")
-                .args([
-                    "--no-ask-password",
-                    "start",
-                    &format!("vallum-enroll@{interface}"),
-                ])
-                .status();
-        }
     }
 
     say!(
