@@ -926,6 +926,31 @@ class HttpTests(WireTestCase):
         origin = f"https://127.0.0.1:{self.port}"
         self.assertIn(f"&desk={quote(origin, safe='')}", page)
 
+    def test_the_connect_button_recovers_a_silent_click(self):
+        # No client installed → the vallum:// click can produce nothing
+        # visible. The page must name the recovery when the handoff never
+        # happens: a hidden hint the blur-timeout reveals.
+        status, body = self.post("/api/signup", "{}", "application/json")
+        token = json.loads(body)["token"]
+        status, page = self.post("/account/device", f"token={token}&name=laptop",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn('id="connect-fallback" hidden', page)
+        self.assertIn("Nothing opened?", page)
+        self.assertIn('"blur"', page)
+        self.assertIn("handed", page)
+
+    def test_the_open_client_button_recovers_a_silent_click(self):
+        # Same failure mode on the account handoff: no client → the
+        # vallum://account click is invisible. The recovery says the
+        # number alone is enough.
+        status, page = self.post("/signup", "",
+                                 "application/x-www-form-urlencoded")
+        self.assertEqual(status, 200)
+        self.assertIn('id="client-fallback" hidden', page)
+        self.assertIn("Nothing opened?", page)
+        self.assertIn('"blur"', page)
+
     def test_the_per_ip_limit_sees_the_visitor_behind_the_proxy(self):
         # The desk is loopback-only and fronted by Caddy. Reading
         # client_address would make every visitor 127.0.0.1 and turn the

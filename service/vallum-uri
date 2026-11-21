@@ -172,15 +172,33 @@ def _hand_to_gui(uri):
     return True
 
 
+def _notify(text):
+    """A refused click deserves to say so somewhere the clicker can see — a
+    passive desktop notification informs without stealing focus, unlike the
+    modal ask a TTY would get. Best-effort: no notifier, no complaint."""
+    notify = shutil.which("notify-send")
+    if notify is None:
+        return
+    try:
+        subprocess.Popen([notify, "Vallum", text],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        pass
+
+
 def _tty_confirm(question, out=sys.stdout, inp=sys.stdin):
     """A GUI-less desktop launch: the .desktop is Terminal=true, so the link
     arrived in a console window of our own — ask there, not in a foreign
     popup. A display with no TTY means an API-fired URI nobody can answer
-    for: refuse (None). No display at all is a script or an operator's own
+    for: refuse (None), but passively — a silent refusal looks like the
+    client crashed. No display at all is a script or an operator's own
     shell — there is no browser to drive-by from: proceed."""
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return True
     if not inp.isatty():
+        _notify("Vallum link refused: no client to confirm in and no console "
+                "to ask. Nothing was changed.")
         return None
     print(f"{question} [y/N] ", end="", file=out, flush=True)
     try:

@@ -375,9 +375,15 @@ class LaunchSurfaceTests(unittest.TestCase):
     def test_a_display_without_a_console_is_a_drive_by_refusal(self):
         import io
         self._display()
+        sent = []
+        self.addCleanup(setattr, uri_module, "_notify", uri_module._notify)
+        uri_module._notify = sent.append
         self.assertIsNone(
             uri_module._tty_confirm("anything?", out=io.StringIO(),
                                     inp=io.StringIO("y\n")))
+        # A refusal with no console must not be silent — a passive
+        # notification is the one surface the clicker still has.
+        self.assertTrue(sent)
 
     def test_the_console_ask_only_says_yes_to_y(self):
         import io

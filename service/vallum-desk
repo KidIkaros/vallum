@@ -2114,8 +2114,16 @@ def account_created_page(payload, operator="vallum desk",
         account_uri += f"&desk={quote(desk_origin, safe='')}"
     open_client = (f"""
 <p><button id="open-client">Open in Vallum client</button>
+<span id="client-fallback" hidden><br><small>Nothing opened? Install the
+client first — step 1 below — or keep the number: your account page needs
+only it.</small></span>
 <script>document.getElementById("open-client").onclick = function() {{
+  var handed = false;
+  window.addEventListener("blur", function() {{ handed = true; }}, {{once: true}});
   window.location = {json.dumps(account_uri)};
+  setTimeout(function() {{
+    if (!handed) {{ document.getElementById("client-fallback").hidden = false; }}
+  }}, 3000);
 }};</script>
 <small>Hands the account number to your client without re-typing it. Enrols
 no device — add one from your account page.</small></p>"""
@@ -2204,10 +2212,21 @@ def ticket_page(payload, operator="vallum desk",
         # is the one derivation (it carries the desk origin, ADR-0046); the
         # fallback keeps a bare payload renderable.
         uri = payload.get("connect") or connect_uri(payload["ticket"], payload["token"])
+        # A vallum:// click with no client installed produces nothing visible
+        # on some browsers — no error, no dialog. If the handoff never blurs
+        # this window, reveal the recovery path (install, or join by hand).
         connect = f"""
 <p><button id="connect">Connect this device</button></p>
+<p id="connect-fallback" hidden><small>Nothing opened? Install the client
+first — step 1 below — then click again; or join by hand with step 2's
+<code>sudo vallum join -</code>.</small></p>
 <script>document.getElementById("connect").onclick = function() {{
+  var handed = false;
+  window.addEventListener("blur", function() {{ handed = true; }}, {{once: true}});
   window.location = {json.dumps(uri)};
+  setTimeout(function() {{
+    if (!handed) {{ document.getElementById("connect-fallback").hidden = false; }}
+  }}, 3000);
 }};</script>"""
     return f"""<!doctype html><title>your join ticket — {_esc(operator)}</title>
 {DESK_STYLE}
@@ -2363,7 +2382,7 @@ expires {_esc(view['expires'])} · {usage}.</p>
 <h3>Add a device</h3>
 <form method="post" action="/account/device">
 <input type="hidden" name="token" value="{_esc(token)}">
-<label>device name <input name="name" pattern="[a-z0-9][a-z0-9-]*" required></label>
+<label>device name <input name="name" pattern="[a-z0-9][a-z0-9-]*" title="lowercase letters, digits and dashes" required></label>
 <button>Get a join ticket</button>
 </form>
 <h3>Have a code?</h3>
