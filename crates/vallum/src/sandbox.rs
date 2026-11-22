@@ -139,6 +139,12 @@ const ALLOWED: &[(&str, i64)] = {
         #[cfg(target_arch = "aarch64")]
         ("fchmodat", c::SYS_fchmodat),
         ("fchmod", c::SYS_fchmod),
+        // The control socket and its parent directory are chowned to the
+        // configured group so members reach the redacted console (control.rs).
+        #[cfg(target_arch = "x86_64")]
+        ("chown", c::SYS_chown),
+        #[cfg(target_arch = "aarch64")]
+        ("fchownat", c::SYS_fchownat),
         ("getdents64", c::SYS_getdents64),
         #[cfg(target_arch = "x86_64")]
         ("readlink", c::SYS_readlink),
