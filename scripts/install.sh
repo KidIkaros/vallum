@@ -222,7 +222,7 @@ verify_release_signature() {
     # that verifies, which is what lets a rotation cross a release boundary.
     printf '%s\n' "$RELEASE_SIGNING_PUBKEY" > "$work/allowed_signers"
     if ssh-keygen -Y verify -f "$work/allowed_signers" -n file \
-        -s "$work/SHA256SUMS.sig" -I vallum-release < "$work/SHA256SUMS" 2>/dev/null; then
+        -s "$work/SHA256SUMS.sig" -I vallum-release < "$work/SHA256SUMS" >/dev/null 2>&1; then
         echo "   ok    release signature verified (vallum-release)"
     else
         echo "refusing: SHA256SUMS.sig does not verify against allowed_signers — do not trust this download" >&2
@@ -350,7 +350,12 @@ install_from_release() {
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
-    ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    if ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - >/dev/null ); then
+        echo "   ok    tarball checksum verified"
+    else
+        echo "refusing: $target failed its SHA256SUMS check — do not trust this download" >&2
+        exit 1
+    fi
     tar -C "$work" -xzf "$work/$target"
     SOURCE_DIR="$work/vallum-$tag-$A-linux"
 }
@@ -381,7 +386,12 @@ install_package() {
     download_asset "$tag" "$target" "$work/$target"
     download_asset "$tag" "SHA256SUMS" "$work/SHA256SUMS"
     verify_release_signature "$tag" "$work"
-    ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - )
+    if ( cd "$work" && grep " $target\$" SHA256SUMS | sha256sum -c - >/dev/null ); then
+        echo "   ok    package checksum verified"
+    else
+        echo "refusing: $target failed its SHA256SUMS check — do not trust this download" >&2
+        exit 1
+    fi
     case "$PACKAGE" in
         deb) run dpkg -i "$work/$target" ;;
         rpm)
@@ -443,7 +453,8 @@ install_binaries() {
     if [ -z "${ROOT:-}" ] && command -v groupadd >/dev/null 2>&1; then
         getent group vallum >/dev/null 2>&1 || run groupadd --system vallum
         if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && command -v usermod >/dev/null 2>&1; then
-            run usermod -aG vallum "$SUDO_USER"
+            run usermod -aG vallum "$SUDO_USER" \
+                && echo "   ok    $SUDO_USER added to the vallum group (cockpit sees the daemon)"
         fi
         if getent group vallum >/dev/null 2>&1; then
             run chgrp vallum "$RUNTIME_DIR"
@@ -656,7 +667,14 @@ install_docs() {
         run mkdir -p "$(dest /etc/sudoers.d)"
         run sh -c "sed 's/@USER@/$ops_user/' '$sudoers_src' > $(dest /etc/sudoers.d)/vallum-ops"
         run chmod 440 "$(dest /etc/sudoers.d)/vallum-ops"
-        run visudo -cf "$(dest /etc/sudoers.d)/vallum-ops" || { run rm -f "$(dest /etc/sudoers.d)/vallum-ops"; echo "sudoers validation failed — ops rule not installed" >&2; }
+        # visudo's "parsed OK" is bookkeeping, not something the user asked
+        # to see — check quietly, and let the failure branch do the talking.
+        if run visudo -cf "$(dest /etc/sudoers.d)/vallum-ops" >/dev/null 2>&1; then
+            echo "   ok    passwordless ops rule installed for $ops_user"
+        else
+            run rm -f "$(dest /etc/sudoers.d)/vallum-ops"
+            echo "note: sudoers validation failed — ops rule not installed" >&2
+        fi
     elif [ -n "$ops_src" ]; then
         # A dispatcher nobody can invoke passwordless leaves the Connect
         # flow's join needing a password — say so rather than letting the
@@ -679,25 +697,25 @@ install_docs() {
     # A staged tree has no systemd to talk to.
     if [ -z "$ROOT" ]; then
     if [ -f "$UNIT_DIR/vallum-cleanup.service" ]; then
-        run systemctl enable vallum-cleanup || true
+        run systemctl enable vallum-cleanup >/dev/null 2>&1 || true
     fi
     # The desk backup timer joins the restore floor: enabling it costs nothing
     # on a host with no desk (the service is conditioned on the database
     # existing) and it is the only thing that makes a copy happen without
     # someone remembering to run a command.
     if [ -f "$UNIT_DIR/vallum-desk-backup.timer" ]; then
-        run systemctl enable --now vallum-desk-backup.timer || true
+        run systemctl enable --now vallum-desk-backup.timer >/dev/null 2>&1 || true
     fi
-    run systemctl daemon-reload || true
+    run systemctl daemon-reload >/dev/null 2>&1 || true
 
     if [ -f "$TMPFILES_DIR/vallum-tmpfiles.conf" ]; then
-        run systemd-tmpfiles --create "$TMPFILES_DIR/vallum-tmpfiles.conf" || true
+        run systemd-tmpfiles --create "$TMPFILES_DIR/vallum-tmpfiles.conf" >/dev/null 2>&1 || true
     fi
     # The metrics timer is opt-in: it only earns an `enable` when this host
     # already runs node_exporter's textfile collector, which is what it feeds.
     if [ -z "$ROOT" ] && [ -d /var/lib/node_exporter/textfile_collector ]; then
-        run systemctl daemon-reload
-        run systemctl enable --now vallum-metrics.timer
+        run systemctl daemon-reload >/dev/null 2>&1 || true
+        run systemctl enable --now vallum-metrics.timer >/dev/null 2>&1 || true
     fi
     fi
     local man
@@ -868,6 +886,7 @@ fi
 # A package's own maintainer scripts lay down and reload everything; manual
 # file installation is only for the tarball/local paths.
 if [ -z "$PACKAGE" ] && { [ "$DRY" -eq 0 ] || [ -n "$SOURCE_DIR" ]; }; then
+    say "installing"
     install_binaries
     install_docs
     # A staged tree has no systemd to reload, and the operator staging it is
@@ -900,9 +919,16 @@ for arg in "${PASSTHRU[@]:-}"; do
     esac
 done
 if [ "$INSTALL_ONLY" -eq 1 ] || [ "$substantive" -eq 0 ]; then
-    if [ "$DRY" -eq 1 ]; then say "would install, and stop here"; else say "installed"; fi
-    echo "this machine is ready. To make it a server:  sudo vallum setup --server"
-    echo "to join an existing server:                  sudo vallum setup --remote user@host"
+    if [ "$DRY" -eq 1 ]; then say "would install, and stop here"; exit 0; fi
+    ver=$(installed_version)
+    say "installed${ver:+ — vallum $ver}"
+    # Ordered by how often each goal lands here: most installs join a network
+    # somebody else runs. `setup --remote` deploys a server *onto* a remote
+    # host — naming it "join" was the lie a first-run user acted on.
+    echo "  join a network    open the invite link (vallum://…), or: sudo vallum-ops join"
+    echo "  run a server      sudo vallum setup --server"
+    echo "  check it works    vallum doctor"
+    echo "  remove it later   sudo $(basename "$0") --uninstall"
     exit 0
 fi
 
