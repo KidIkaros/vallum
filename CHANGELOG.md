@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.12.0 — 2026-11-22
+
+- **The cockpit ships (ADR-0050).** The release tarball carries `vallum-gui`, its
+  `.desktop` entry and icon, and `install.sh` lands all three; a `vallum-desktop`
+  deb serves deb-based desktops. When the GUI is installed it owns `vallum://` —
+  `vallum-uri` stays the headless fallback — and the installer writes the
+  system-level scheme default so Connect links are armed for every user, not just
+  whoever ran sudo.
+- **The product can update itself.** `vallum-ops update [tag]` fetches the pinned
+  installer from the release and lets it work — signature verify, downgrade
+  refusal — while running tunnels keep their build until the operator restarts
+  them. The dispatcher also self-updates through a release-signed channel
+  (`vallum-ops.sig` verified against the embedded signer; a broken signature is a
+  refusal, never a downgrade to weaker checks).
+- **Join and un-join are honest verbs.** `vallum-ops remove <name>` reverses a
+  join — stops the client, drops config and key, cleans the units join enabled —
+  and `vallum join` unwraps `vallum://join` URIs itself, so the desk's links work
+  everywhere the raw ticket did. The dispatcher speaks plainly now: named unknown
+  verbs, real `help`, a three-state handshake (`no answer` vs `no live session`),
+  the tunnel `mode:` line (server / full-tunnel / split), and the
+  `allow-untrusted-source` trust marker surfaced in `status`.
+- **The installer speaks with one voice.** Subprocess bookkeeping no longer leaks
+  onto the screen; the exit block names the installed version and orders the next
+  steps by goal (open the invite link, run a server, `vallum doctor`, uninstall).
+  `install.sh` ships as a release asset at `releases/latest/download/install.sh`,
+  so the installer always matches what it installs.
+- **Uninstall means all of it.** The manifest removes the GUI, the ops
+  dispatcher, its sudoers rule, the lib tools and the `vallum://` binding — the
+  mimeapps.list merge is inverted line-for-line, never the file.
+- **`vallum doctor` checks the install surface.** New checks: the dispatcher is
+  present, the sudoers rule is armed, `vallum://` resolves to a vallum handler
+  (a foreign claimant is named), and webkit is present when the GUI is.
+- **Device-pull enrolment seals the ticket (ADR-0049).** Desk tickets are sealed
+  to the device's hybrid KEM key (SDK KEM + HKDF + XChaCha20-Poly1305) — the desk
+  relays only ciphertext. Account numbers are digests at rest (schema v7), the
+  GUI confirms `vallum://account` in-client, and desk error pages name the action
+  that failed instead of blaming signup.
+
 ## 1.11.0 — 2026-11-19
 
 - **Connect buys a working tunnel.** The `vallum://join` deep-link now enrols through the
