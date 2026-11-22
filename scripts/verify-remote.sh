@@ -946,8 +946,8 @@ enrol_bundle() {
     else
         ok "import-bundle refuses a shipped-key bundle by default"
     fi
-    "$VALLUM" import-bundle "$dir/$name.vallum-bundle" --output-dir "$dir" \
-        --allow-shipped-key >/dev/null || bad "import-bundle (--allow-shipped-key)"
+    as_owner "$dir" "$VALLUM import-bundle '$dir/$name.vallum-bundle' --output-dir '$dir' \
+        --allow-shipped-key" >/dev/null || bad "import-bundle (--allow-shipped-key)"
 }
 
 enrol_ssh() {
@@ -1417,7 +1417,7 @@ PY
     if [ "$kind" = "bundle" ]; then
         say "rotation live across the network"
         local new_key="$dir/new.key" new_pub="$dir/new.pub"
-        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        as_owner "$dir" "$VALLUM keygen --output '$new_key' --suite 3 > '$new_pub'" || bad "$name: keygen for rotation"
         # The CLI reads a public-line file, not a `-` alias for stdin — see the
         # note in prove_client_host.
         rsh "$SERVER_CMD peer rotate $name --config $CONFIG --public-key-file /dev/stdin" < "$new_pub" \
@@ -1775,7 +1775,7 @@ PY
     if [ "$kind" = "bundle" ]; then
         say "rotation live across the network"
         local new_key="$dir/new.key" new_pub="$dir/new.pub"
-        "$VALLUM" keygen --output "$new_key" --suite 3 > "$new_pub" || bad "$name: keygen for rotation"
+        as_owner "$dir" "$VALLUM keygen --output '$new_key' --suite 3 > '$new_pub'" || bad "$name: keygen for rotation"
         # The CLI reads a public-line file, not a `-` alias for stdin: `-` is
         # stdin for --token only (`setup.rs read_token_arg`), and the product's
         # own convention for piped keys is the literal /dev/stdin — the same
