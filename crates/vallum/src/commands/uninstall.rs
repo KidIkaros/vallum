@@ -21,7 +21,41 @@ use crate::commands::server::systemctl;
 use crate::error::Error;
 use crate::say;
 
-const BINARIES: [&str; 2] = ["/usr/bin/vallum", "/usr/bin/vallum-quick"];
+const BINARIES: [&str; 3] = [
+    "/usr/bin/vallum",
+    "/usr/bin/vallum-quick",
+    "/usr/bin/vallum-gui",
+];
+
+/// Privileged helpers and deploy libs `install.sh` lands outside the package
+/// managers' own manifests: the ops dispatcher and its sudoers rule, the
+/// recovery tools, and the desk/URI machinery under /usr/local.
+const TOOLS: [&str; 12] = [
+    "/usr/local/sbin/vallum-ops",
+    "/usr/local/sbin/vallum-panic",
+    "/usr/local/sbin/vallum-guard-deadman",
+    "/usr/local/sbin/vallum-cleanup",
+    "/usr/local/sbin/vallum-heal-runtime-dir",
+    "/usr/local/sbin/vallum-desk-admin",
+    "/usr/local/lib/vallum/vallum-desk",
+    "/usr/local/lib/vallum/vallum-desk-admin",
+    "/usr/local/lib/vallum/vallum-desk-backup",
+    "/usr/local/lib/vallum/vallum-uri",
+    "/usr/local/lib/vallum/trial.sh",
+    "/usr/local/lib/vallum/go-full-tunnel.sh",
+];
+
+/// The scheme handlers and the cockpit icon. mimeapps.list is a merge
+/// target — removing the whole file would take other apps' defaults with
+/// it, so the uninstaller's inverse is a line removal, not a file removal.
+const DESKTOP_FILES: [&str; 3] = [
+    "/usr/share/applications/vallum-uri.desktop",
+    "/usr/share/applications/vallum-gui.desktop",
+    "/usr/share/icons/hicolor/128x128/apps/vallum-gui.png",
+];
+
+const SUDOERS: &str = "/etc/sudoers.d/vallum-ops";
+const MIMEAPPS: &str = "/usr/share/applications/mimeapps.list";
 
 /// Every unit `install.sh` and the packages ship. This list used to name seven
 /// of the twelve, so a routine uninstall left the cleanup floor, the dead-man,
@@ -185,8 +219,18 @@ pub fn uninstall(args: &UninstallArgs) -> Result<(), Error> {
         .chain(&MAN_PAGES)
         .chain(&COMPLETIONS)
         .chain(&TMPFILES)
+        .chain(&DESKTOP_FILES)
+        .chain(&TOOLS)
     {
         remove_file(dry, Path::new(path));
+    }
+    remove_file(dry, Path::new(SUDOERS));
+    unbind_scheme(dry);
+    // The dir goes only if it is empty — remove_dir (not remove_dir_all):
+    // files from another source in /usr/local/lib/vallum are not ours to
+    // take with us.
+    if !dry && std::fs::remove_dir("/usr/local/lib/vallum").is_ok() {
+        say!("   ok    remove /usr/local/lib/vallum");
     }
     step(dry, "systemctl daemon-reload", || {
         let _ = systemctl(&["daemon-reload"]);
@@ -348,6 +392,39 @@ fn orphan_plans() -> Vec<std::path::PathBuf> {
                 .exists()
         })
         .collect()
+}
+
+/// Remove the `x-scheme-handler/vallum` line install.sh merged into the
+/// system mimeapps default — the file is not ours, only the line is. If the
+/// merge leaves nothing but an empty `[Default Applications]` section (the
+/// shape a file we created from scratch ends in), the file itself goes.
+/// Per-user bindings in ~/.config/mimeapps.list belong to their users and
+/// are left alone: a stale pick there just falls back to asking.
+fn unbind_scheme(dry: bool) {
+    let path = Path::new(MIMEAPPS);
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if !content
+        .lines()
+        .any(|line| line.starts_with("x-scheme-handler/vallum="))
+    {
+        return;
+    }
+    if dry {
+        say!("   would unbind vallum:// in {}", path.display());
+        return;
+    }
+    let kept: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.starts_with("x-scheme-handler/vallum="))
+        .collect();
+    if kept.is_empty() || kept == ["[Default Applications]"] {
+        let _ = std::fs::remove_file(path);
+    } else {
+        let _ = std::fs::write(path, format!("{}\n", kept.join("\n")));
+    }
+    say!("   ok    unbind vallum:// in {}", path.display());
 }
 
 fn step(dry: bool, what: &str, action: impl Fn()) {

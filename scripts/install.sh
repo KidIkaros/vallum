@@ -786,11 +786,21 @@ uninstall() {
     done
     run systemctl disable --now vallum-metrics.timer 2>/dev/null || true
     run systemctl disable --now vallum-desk-backup.timer 2>/dev/null || true
-    run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman
+    run rm -f /usr/local/sbin/vallum-panic /usr/local/sbin/vallum-guard-deadman \
+        /usr/local/sbin/vallum-cleanup /usr/local/sbin/vallum-heal-runtime-dir \
+        /usr/local/sbin/vallum-ops /etc/sudoers.d/vallum-ops
     run rm -f /usr/local/lib/vallum/vallum-desk /usr/local/lib/vallum/vallum-desk-admin \
         /usr/local/lib/vallum/vallum-desk-backup \
-        /usr/local/lib/vallum/vallum-uri /usr/local/sbin/vallum-desk-admin \
-        /usr/share/applications/vallum-uri.desktop
+        /usr/local/lib/vallum/vallum-uri /usr/local/lib/vallum/trial.sh \
+        /usr/local/lib/vallum/go-full-tunnel.sh \
+        /usr/local/sbin/vallum-desk-admin \
+        /usr/share/applications/vallum-uri.desktop \
+        /usr/share/applications/vallum-gui.desktop \
+        /usr/share/icons/hicolor/128x128/apps/vallum-gui.png
+    # mimeapps.list is a merge target: remove our line, never the file.
+    if [ -f /usr/share/applications/mimeapps.list ]; then
+        run sed -i '/^x-scheme-handler\/vallum=/d' /usr/share/applications/mimeapps.list
+    fi
     run systemctl disable vallum-cleanup 2>/dev/null || true
     run rm -f "$UNIT_DIR/vallum-cleanup.service"
     run rm -f "$UNIT_DIR/vallum-deadman@.service" "$UNIT_DIR/vallum-deadman@.timer"
@@ -816,7 +826,7 @@ uninstall() {
     else
         echo "   kept  $CONFIG_DIR (pass --purge to remove configs and keys)"
     fi
-    run rm -f "$BIN_DIR/vallum" "$BIN_DIR/vallum-quick"
+    run rm -f "$BIN_DIR/vallum" "$BIN_DIR/vallum-quick" "$BIN_DIR/vallum-gui"
     if [ "$DRY" -eq 0 ]; then
         nft delete table inet vallum 2>/dev/null || true
         rm -f "$SYSCTL_FILE"
