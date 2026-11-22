@@ -243,6 +243,10 @@ grep -q '^client_isolation = true' "$WORK/srv.toml" || bad "the toggle did not l
     || { cat "$WORK/srv-init-iso.log" >&2; bad "re-init with isolation failed"; }
 grep -q '^client_isolation = true' "$WORK/srv.toml" \
     || bad "re-init rewrote the preserved config"
+for _ in $(seq 1 50); do
+    nft list chain inet vallum forward 2>/dev/null | grep -q 'iifname "vallum0" oifname "vallum0" drop' && break
+    sleep 0.2
+done
 nft list chain inet vallum forward 2>/dev/null | grep -q 'iifname "vallum0" oifname "vallum0" drop' \
     || { nft list table inet vallum >&2; bad "the isolation drop chain is not installed"; }
 ok "re-init converged: the drop chain is in Vallum's own table, config preserved"
@@ -262,6 +266,10 @@ say "toggle back off: the host converges to flat again"
 sed -i '/^client_isolation = true/d' "$WORK/srv.toml"
 "$BIN" server init "${INIT_ARGS[@]}" > "$WORK/srv-init-flat.log" 2>&1 \
     || { cat "$WORK/srv-init-flat.log" >&2; bad "re-init back to flat failed"; }
+for _ in $(seq 1 50); do
+    nft list chain inet vallum forward >/dev/null 2>&1 || break
+    sleep 0.2
+done
 if nft list chain inet vallum forward >/dev/null 2>&1; then
     bad "the forward chain survived the toggle back to flat"
 fi
