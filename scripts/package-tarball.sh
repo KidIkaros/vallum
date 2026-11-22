@@ -89,6 +89,18 @@ copy_one "service/vallum-desk-admin"
 copy_one "service/vallum-desk-backup"
 copy_one "service/vallum-uri"
 copy_one "packaging/vallum-uri.desktop"
+# The click surface: the cockpit binary with its UI embedded by the tauri
+# build, the .desktop that owns the vallum:// scheme when it is installed,
+# and the icon the entry references. Headless hosts simply never launch it —
+# the webkit link only matters at exec.
+copy_one "$BINDIR/vallum-gui"
+copy_one "packaging/vallum-gui.desktop"
+# The .desktop names `Icon=vallum-gui` — the icon file must land under that
+# name, so it stages renamed rather than via copy_one.
+[ -f "crates/vallum-gui/icons/128x128.png" ] \
+    || { echo "package-tarball: missing crates/vallum-gui/icons/128x128.png" >&2; exit 1; }
+cp "crates/vallum-gui/icons/128x128.png" "$STAGE/vallum-gui.png"
+copied+=("vallum-gui.png")
 # vallum-ops without its sudoers template is a dispatcher nobody can invoke
 # passwordless — the Connect flow's whole point — and without the deploy
 # scripts `full-tunnel` execs nothing. They ship flat like the dispatcher

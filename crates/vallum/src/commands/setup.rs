@@ -1269,7 +1269,9 @@ fn unwrap_join_uri(text: &str) -> Result<String, Error> {
             "ticket" => ticket = value,
             "account" => {
                 let hex_ok = value.len() == 32
-                    && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
                 if !hex_ok {
                     return Err(Error::Usage(
                         "the account number is 32 lowercase hex characters".to_owned(),
@@ -1303,12 +1305,13 @@ fn percent_decode(raw: &str) -> Result<String, Error> {
     while i < bytes.len() {
         match bytes[i] {
             b'%' => {
-                let hex = raw.get(i + 1..i + 3).ok_or_else(|| {
-                    Error::Usage("a truncated %-escape in the URI".to_owned())
-                })?;
-                out.push(u8::from_str_radix(hex, 16).map_err(|_| {
-                    Error::Usage(format!("a bad %-escape `%{hex}` in the URI"))
-                })?);
+                let hex = raw
+                    .get(i + 1..i + 3)
+                    .ok_or_else(|| Error::Usage("a truncated %-escape in the URI".to_owned()))?;
+                out.push(
+                    u8::from_str_radix(hex, 16)
+                        .map_err(|_| Error::Usage(format!("a bad %-escape `%{hex}` in the URI")))?,
+                );
                 i += 3;
             }
             b'+' => {
@@ -1888,10 +1891,7 @@ mod tests {
         let uri = "vallum://join?ticket=vallum1-join%3Ah%3A1%2Fn%2Fi%2Ff\
                    &account=0123456789abcdef0123456789abcdef\
                    &desk=https%3A%2F%2Fdesk.example.com";
-        assert_eq!(
-            unwrap_join_uri(uri).unwrap(),
-            "vallum1-join:h:1/n/i/f"
-        );
+        assert_eq!(unwrap_join_uri(uri).unwrap(), "vallum1-join:h:1/n/i/f");
         assert_eq!(
             std::env::var("VALLUM_ACCOUNT").unwrap(),
             "0123456789abcdef0123456789abcdef"

@@ -416,6 +416,21 @@ install_binaries() {
     run install -d -m 0755 "$BIN_DIR" "$CONFIG_DIR" "$RUNTIME_DIR" "$UNIT_DIR" "$TMPFILES_DIR"
     run install -m 0755 "$SOURCE_DIR/vallum" "$BIN_DIR/vallum"
     run install -m 0755 "$SOURCE_DIR/vallum-quick" "$BIN_DIR/vallum-quick"
+    # The cockpit ships in the tarball and lands beside them when present —
+    # optional, because a release can be GUI-less. It links WebKitGTK/GTK at
+    # exec: the click surface needs a desktop, so a missing libwebkit is a
+    # named warning, never a failed install (the CLI halves do not care).
+    if [ -f "$SOURCE_DIR/vallum-gui" ]; then
+        run install -m 0755 "$SOURCE_DIR/vallum-gui" "$BIN_DIR/vallum-gui"
+        # grep -c, not -q: -q exits on the first match, ldconfig dies on
+        # SIGPIPE, and pipefail reads that as "library absent" — a warning
+        # that fires precisely when the lib is present.
+        if ! ldconfig -p 2>/dev/null | grep -c 'libwebkit2gtk-4\.1\.so\.0' >/dev/null; then
+            echo "note: vallum-gui needs libwebkit2gtk-4.1 — the cockpit will" >&2
+            echo "  not launch without it (apt install libwebkit2gtk-4.1-0 on" >&2
+            echo "  Debian/Ubuntu, dnf install webkit2gtk4.1 on Fedora)." >&2
+        fi
+    fi
     # #35 (ADR-0048): the desktop console reads a system daemon's control socket
     # via the dedicated `vallum` group. Create it if absent, add the invoking user
     # so the console can see the daemon, and put the runtime dir in that group so
@@ -548,19 +563,44 @@ install_docs() {
     if [ -n "$desktop_src" ]; then
         run install -D -m 0644 "$desktop_src" \
             "$(dest /usr/share/applications/vallum-uri.desktop)"
+    fi
+    # The cockpit: its .desktop also claims x-scheme-handler/vallum — when the
+    # GUI is installed it owns the link (the in-app confirm IS the click
+    # surface); vallum-uri stays the headless handler. The icon the entry
+    # names ships flat as vallum-gui.png.
+    gui_desktop=""
+    for candidate in "$SOURCE_DIR/vallum-gui.desktop" "packaging/vallum-gui.desktop"; do
+        [ -f "$candidate" ] && { gui_desktop=$candidate; break; }
+    done
+    if [ -n "$gui_desktop" ]; then
+        run install -D -m 0644 "$gui_desktop" \
+            "$(dest /usr/share/applications/vallum-gui.desktop)"
+    fi
+    for candidate in "$SOURCE_DIR/vallum-gui.png" "crates/vallum-gui/icons/128x128.png"; do
+        [ -f "$candidate" ] && {
+            run install -D -m 0644 "$candidate" \
+                "$(dest /usr/share/icons/hicolor/128x128/apps/vallum-gui.png)"
+            break
+        }
+    done
+    if [ -n "$desktop_src" ] || [ -n "$gui_desktop" ]; then
         run update-desktop-database "$(dest /usr/share/applications)" 2>/dev/null || true
         # Scheme→handler binding is a per-user desktop setting; register it
         # for the invoking user when a session is reachable, else the
-        # MimeType entry alone still resolves on most desktops.
+        # MimeType entry alone still resolves on most desktops. The GUI
+        # handler wins when it exists — its in-app confirm is the product
+        # surface; the URI script is the console fallback.
+        handler=vallum-uri.desktop
+        [ -n "$gui_desktop" ] && handler=vallum-gui.desktop
         if [ -n "${SUDO_USER:-}" ]; then
             run su - "$SUDO_USER" -c \
-                "xdg-mime default vallum-uri.desktop x-scheme-handler/vallum" \
+                "xdg-mime default $handler x-scheme-handler/vallum" \
                 2>/dev/null || true
         else
             # Root-shell install: no invoking desktop user to bind for. Say so
             # rather than leaving Connect silently dead (validation premortem A3).
             echo "note: to enable Connect links, run this as your desktop user:" >&2
-            echo "  xdg-mime default vallum-uri.desktop x-scheme-handler/vallum" >&2
+            echo "  xdg-mime default $handler x-scheme-handler/vallum" >&2
         fi
     fi
     # The console's privileged path and the full-tunnel deploy scripts ship

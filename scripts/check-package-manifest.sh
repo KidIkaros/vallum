@@ -36,12 +36,15 @@ install_list=$(
     } | sort -u
 )
 
-# The one file a channel legitimately differs on. The sudoers rule names a
-# user, and a package cannot know who is installing it, so the installer
-# renders it while the packages print the line at install time. It is a
-# template, not a shipped file, so it is in neither list.
-EXCLUDE="vallum-ops-sudoers"
-install_list=$(printf '%s\n' "$install_list" | grep -vx "$EXCLUDE" || true)
+# Files a channel legitimately differs on. The sudoers rule names a user,
+# and a package cannot know who is installing it, so the installer renders
+# it while the packages print the line at install time — a template, not a
+# shipped file. The GUI's .desktop is the mirror image: the cockpit ships in
+# the tarball (the desktop channel) and as its own Tauri-built package, but
+# never inside the headless deb/rpm, so install.sh carries a handler the
+# packages deliberately do not.
+EXCLUDE="vallum-ops-sudoers vallum-gui.desktop"
+install_list=$(printf '%s\n' "$install_list" | grep -vxF -f <(printf '%s\n' $EXCLUDE) || true)
 
 # deb assets: "../../packaging/<file>" entries inside [package.metadata.deb].
 deb_list=$(

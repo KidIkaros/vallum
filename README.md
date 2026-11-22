@@ -39,7 +39,8 @@
 
 > **Status — alpha, built to validate the idea, not a hosted service.** The CLI, TUI and UTCP
 > enrolment path is alpha-verified end-to-end (signed release, two-host gate, clean-container
-> install). The desktop GUI is **beta** ([ADR-0039](docs/adr/0039-alpha-distribution-surface.md)).
+> install). The desktop GUI ships in the release tarball and as `vallum-desktop`
+deb, and stays **beta** ([ADR-0050](docs/adr/0050-the-cockpit-ships-in-the-alpha-tarball.md)).
 > The post-quantum primitives come from `origin-crypto-sdk`, which is **experimental and unaudited** —
 > read [SECURITY.md](SECURITY.md) before trusting this with anything that matters.
 

@@ -1,7 +1,7 @@
 # ADR-0039: The alpha ships the CLI, TUI and UTCP manual — the console stays a dev surface
 
 **Date**: 2026-11-13
-**Status**: agent default — pending operator ratification
+**Status**: superseded by [ADR-0050](0050-the-cockpit-ships-in-the-alpha-tarball.md) — the operator decided the cockpit ships
 **Deciders**: Devin (recorded under the operator's identity without operator sign-off)
 
 > **Correction (2026-11-21).** This ADR originally listed "operator + Devin"

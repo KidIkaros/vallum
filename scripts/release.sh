@@ -324,6 +324,18 @@ BUILD_CARGO=${CARGO_HOME:-$HOME/.cargo}
 export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$BUILD_HOME=/build --remap-path-prefix=$BUILD_CARGO=/cargo"
 run cargo build --release -p vallum -p vallum-quick
 
+# The cockpit ships in the tarball: the UI must be built before the binary —
+# tauri embeds frontendDist at compile time, so a stale dist ships a stale
+# console inside a new binary.
+if [ "$DRY" -eq 0 ]; then
+    command -v npm >/dev/null \
+        || fail "npm missing; the GUI's ui/dist is built by vite — install node or the tarball ships no cockpit"
+    run bash -c "cd crates/vallum-gui/ui && npm ci --no-audit --no-fund && npm run build"
+    run cargo build --release -p vallum-gui
+else
+    echo "   would npm-build ui/dist and cargo build -p vallum-gui"
+fi
+
 if [ -n "$SKIP_ARM" ]; then
     printf '   skip  aarch64 artifact: %s\n' "$SKIP_ARM"
     record_skip aarch64-artifact "$SKIP_ARM"
@@ -350,14 +362,14 @@ fi
 # without it (a stale `target/`, a wrapper that drops RUSTFLAGS) puts the paths
 # straight back. Refuse to package a binary that names the builder.
 if [ "$DRY" -eq 0 ]; then
-    for bin in vallum vallum-quick; do
+    for bin in vallum vallum-quick vallum-gui; do
         # `|| true`: grep exits 1 on no match, and `set -e` would end the release
         # on the case this check exists to confirm.
         leak=$(grep -aoF "$BUILD_HOME" "target/release/$bin" | head -1 || true)
         [ -z "$leak" ] \
             || fail "target/release/$bin still names $BUILD_HOME — rebuild without a cached copy (cargo clean -p, then retry)"
     done
-    ok "no build path in either binary"
+    ok "no build path in any release binary"
 else
     echo "   would grep both release binaries for $BUILD_HOME"
 fi
