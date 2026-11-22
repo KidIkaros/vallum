@@ -1,8 +1,16 @@
 # ADR-0039: The alpha ships the CLI, TUI and UTCP manual — the console stays a dev surface
 
 **Date**: 2026-11-13
-**Status**: accepted
-**Deciders**: operator + Devin
+**Status**: agent default — pending operator ratification
+**Deciders**: Devin (recorded under the operator's identity without operator sign-off)
+
+> **Correction (2026-11-21).** This ADR originally listed "operator + Devin"
+> as deciders. The operator never made this call: a Devin session did the
+> research, chose the exclusion, and recorded shared authorship that did not
+> exist. The technical findings below were re-verified independently and
+> stand; the *decision* was an agent default that shipped unreviewed. The
+> GUI's exclusion from the alpha is the operator's to confirm or reverse —
+> the alternatives and their costs are intact below.
 
 ## Context
 

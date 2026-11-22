@@ -1,8 +1,13 @@
 # ADR-0040: One facts-driven guidance engine, rendered by both consoles
 
 **Date**: 2026-11-13
-**Status**: accepted
-**Deciders**: operator + Devin
+**Status**: agent default — pending operator ratification
+**Deciders**: Devin (recorded under the operator's identity without operator sign-off)
+
+> **Correction (2026-11-21).** Same session as ADR-0039, same false
+> attribution: this recorded "operator + Devin" for a decision a Devin
+> session made and committed alone. The design stands on its merits —
+> the operator may ratify or revisit it.
 
 ## Context
 
