@@ -213,7 +213,7 @@ crosses_in_ns() {
 # gone by the time the script exits: the one run that failed in ten was
 # undiagnosable for exactly this reason.
 dump_addrs() { # $1 label  $2 log  $3 pidfile  $4 = ns: inspect the second namespace
-    local label=$1 log=$2 pidfile=$3 where=${4:-} run_in=ip
+    local label=$1 log=$2 pidfile=$3 where=${4:-} run_in=
     if [ -n "$where" ]; then
         run_in=in_ns
     fi
@@ -231,6 +231,24 @@ dump_addrs() { # $1 label  $2 log  $3 pidfile  $4 = ns: inspect the second names
         printf '── %s: last 20 lines of %s\n' "$label" "$log"
         tail -n 20 "$log" || true
     } >&2
+}
+
+# The daemon logs "tunnel up" when the interface is created; the address it
+# assigns over netlink lands a beat later. A check that greps `ip addr` once,
+# right after the up-wait loop, reads a not-yet-configured interface under any
+# load — the flake this gate kept taking. Poll for the address like the
+# crosses/silent helpers poll for reachability.
+wait_addr() { # $1 = "ns" to inspect the second namespace, $2 = family flag ("-6" or ""), $3 = expected pattern
+    local inns=$1 fam=$2 want=$3
+    for _ in $(seq 1 100); do
+        if [ "$inns" = ns ]; then
+            in_ns ip $fam addr show dev vallum0 | grep -q "$want" && return 0
+        else
+            ip $fam addr show dev vallum0 | grep -q "$want" && return 0
+        fi
+        sleep 0.1
+    done
+    return 1
 }
 
 in_ns ip link set lo up
@@ -1109,7 +1127,7 @@ while :; do
     sleep 0.1
 done
 
-in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:7::2/64' \
+wait_addr ns "-6" 'fd00:7::2/64' \
     || bad "B's interface has no fd00:7::2/64; see $B_LOG"
 ok "the daemon assigned its IPv6 address and the kernel installed the route"
 
@@ -1193,22 +1211,10 @@ while :; do
 done
 
 # Both addresses, both families, assigned by the daemon over netlink.
-if ! ip addr show dev vallum0 | grep -q '10.8.0.1/32'; then
-    dump_addrs A "$A_LOG" "$A_PIDFILE"
-    bad "A has no v4 /32 address; see $A_LOG"
-fi
-if ! ip -6 addr show dev vallum0 | grep -q 'fd00:8::1/128'; then
-    dump_addrs A "$A_LOG" "$A_PIDFILE"
-    bad "A has no v6 /128 address; see $A_LOG"
-fi
-if ! in_ns ip addr show dev vallum0 | grep -q '10.8.0.2/32'; then
-    dump_addrs B "$B_LOG" "$B_PIDFILE" ns
-    bad "B has no v4 /32 address; see $B_LOG"
-fi
-if ! in_ns ip -6 addr show dev vallum0 | grep -q 'fd00:8::2/128'; then
-    dump_addrs B "$B_LOG" "$B_PIDFILE" ns
-    bad "B has no v6 /128 address; see $B_LOG"
-fi
+wait_addr "" "" '10.8.0.1/32' || { dump_addrs A "$A_LOG" "$A_PIDFILE"; bad "A has no v4 /32 address; see $A_LOG"; }
+wait_addr "" "-6" 'fd00:8::1/128' || { dump_addrs A "$A_LOG" "$A_PIDFILE"; bad "A has no v6 /128 address; see $A_LOG"; }
+wait_addr ns "" '10.8.0.2/32' || { dump_addrs B "$B_LOG" "$B_PIDFILE" ns; bad "B has no v4 /32 address; see $B_LOG"; }
+wait_addr ns "-6" 'fd00:8::2/128' || { dump_addrs B "$B_LOG" "$B_PIDFILE" ns; bad "B has no v6 /128 address; see $B_LOG"; }
 
 # The same addresses, read back from the daemon that assigned them. The kernel
 # and the daemon are two witnesses: `ip` shows what netlink installed, and
