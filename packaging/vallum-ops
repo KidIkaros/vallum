@@ -17,6 +17,7 @@
 #   vallum-ops status [iface]        # units, route, handshake, resolver, public IP
 #   vallum-ops journal [N] [iface]   # last N lines from the vallum units' journals
 #   vallum-ops self-update [path]    # install a signed newer copy of this dispatcher
+#   vallum-ops update [tag]          # fetch and run the release installer
 set -uo pipefail
 
 # LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
@@ -58,6 +59,7 @@ vallum-ops — the named, audited privileged operations:
   trace [iface]           watch the tunnel's packet path
   sync                    make the host match the build under test
   self-update [path]      install a signed newer copy of this dispatcher
+  update [tag]            fetch and run the release installer (vallum, gui, units)
 EOF
 }
 
@@ -435,6 +437,34 @@ self-update)
     echo "dispatcher updated"
     exit 0
     ;;
+update)
+    # The product's update path. The dispatcher bootstraps it — install.sh
+    # from the release does the real work (signature verify, downgrade
+    # refusal, the file map it alone owns). The download rides the same
+    # GitHub TLS the original install trusted; nothing here re-derives the
+    # installer's logic, so the two can never drift apart.
+    command -v curl >/dev/null 2>&1 || {
+        echo "vallum-ops: update needs curl" >&2; exit 1; }
+    work=$(mktemp -d) || exit 1
+    url="https://github.com/KidIkaros/vallum/releases/latest/download/install.sh"
+    curl -fsSL -o "$work/install.sh" "$url" || {
+        rm -rf "$work"
+        echo "vallum-ops: could not fetch the installer ($url)" >&2
+        exit 1
+    }
+    bash "$work/install.sh" --from-release --install-only ${2:+"$2"}
+    rc=$?
+    rm -rf "$work"
+    [ "$rc" -eq 0 ] || exit "$rc"
+    # Units keep the build they started with — a surprise restart would drop
+    # live tunnels, so the choice stays with whoever owns the machine.
+    if systemctl list-units --plain --no-legend 'vallum@*.service' 2>/dev/null \
+            | grep -q .; then
+        echo "note: running tunnels still run the previous build —" >&2
+        echo "  restart when ready: vallum-ops service restart <iface>" >&2
+    fi
+    exit 0
+    ;;
 revert)
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
@@ -466,6 +496,16 @@ status)
     echo "quick:     $(systemctl is-active "vallum-quick@$stem" 2>&1)"
     echo "dead-man:  $(systemctl is-active "vallum-deadman@$stem.timer" 2>&1)"
     echo "route:     $(ip route get 1.1.1.1 2>&1 | head -1)"
+    # The mode is what the config claims, not whether a .split.bak happens to
+    # be lying around: a peer routing 0.0.0.0/0 is the full tunnel regardless
+    # of how it got there. Servers carry [enroll]; mode is a client concept.
+    if grep -q '^\[enroll\]' "$target_conf"; then
+        echo "mode:      server"
+    elif grep -q '"0\.0\.0\.0/0"' "$target_conf"; then
+        echo "mode:      full-tunnel (0.0.0.0/0 routed)"
+    else
+        echo "mode:      split"
+    fi
     echo "resolver:  $(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null || echo none)"
     # Three states, not one "none": the field only exists for a peer with a
     # live session. Absent is split by show's own honesty — with no daemon to

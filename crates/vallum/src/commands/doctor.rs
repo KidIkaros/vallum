@@ -354,6 +354,7 @@ pub fn doctor(args: &DoctorArgs, allow_insecure_key: bool) -> Result<(), Error> 
 
     checks.push(check_clock());
     checks.push(check_metrics());
+    checks.extend(check_install_surface());
 
     for tool in ["ip", "systemctl", "journalctl", "resolvconf", "nft"] {
         let found = which(tool);
@@ -1863,6 +1864,129 @@ fn check_metrics() -> Check {
             ),
         )
     }
+}
+
+/// What `install.sh` armed on this host: the privileged dispatcher, its
+/// sudoers rule, the `vallum://` scheme binding and the cockpit. A missing
+/// piece is a Warn, never a Fail — the daemon runs without it; the click
+/// path does not.
+fn check_install_surface() -> Vec<Check> {
+    let mut checks = Vec::new();
+    let ops = Path::new("/usr/local/sbin/vallum-ops");
+    checks.push(Check::new(
+        "ops",
+        if ops.exists() {
+            Status::Pass
+        } else {
+            Status::Warn
+        },
+        if ops.exists() {
+            "privileged dispatcher installed".to_owned()
+        } else {
+            "no /usr/local/sbin/vallum-ops — vallum:// joins and `vallum-ops update` \
+             have no dispatcher"
+                .to_owned()
+        },
+    ));
+    if ops.exists() {
+        let rule = Path::new("/etc/sudoers.d/vallum-ops");
+        checks.push(Check::new(
+            "ops-rule",
+            if rule.exists() {
+                Status::Pass
+            } else {
+                Status::Warn
+            },
+            if rule.exists() {
+                "passwordless ops rule armed".to_owned()
+            } else {
+                "no /etc/sudoers.d/vallum-ops — ops verbs will ask for a password".to_owned()
+            },
+        ));
+    }
+    // A Connect click resolves through the invoking desktop's pick first,
+    // then the system default install.sh wrote — either counts.
+    let handler_installed = [
+        "/usr/share/applications/vallum-gui.desktop",
+        "/usr/share/applications/vallum-uri.desktop",
+    ]
+    .iter()
+    .any(|candidate| Path::new(candidate).exists());
+    if handler_installed {
+        match scheme_handler() {
+            Ok(handler) => checks.push(Check::new(
+                "scheme",
+                Status::Pass,
+                format!("vallum:// opens with {handler}"),
+            )),
+            Err(reason) => checks.push(Check::new("scheme", Status::Warn, reason)),
+        }
+    }
+    let gui = Path::new("/usr/bin/vallum-gui");
+    if gui.exists() {
+        let webkit = ldconfig_has("libwebkit2gtk-4.1.so.0");
+        checks.push(Check::new(
+            "cockpit",
+            if webkit { Status::Pass } else { Status::Warn },
+            if webkit {
+                "vallum-gui installed, webkit runtime present".to_owned()
+            } else {
+                "vallum-gui installed but libwebkit2gtk-4.1 is missing — the cockpit \
+                 cannot launch (apt install libwebkit2gtk-4.1-0, dnf install webkit2gtk4.1)"
+                    .to_owned()
+            },
+        ));
+    }
+    checks
+}
+
+/// Which `.desktop` a `vallum://` open would reach: the invoking desktop's
+/// pick first, then the system mimeapps default. `Err` explains why nothing
+/// answers — an unbound scheme and one claimed by a foreign app are not the
+/// same failure.
+fn scheme_handler() -> Result<String, String> {
+    if let Ok(output) = std::process::Command::new("xdg-mime")
+        .args(["query", "default", "x-scheme-handler/vallum"])
+        .output()
+    {
+        let chosen = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !chosen.is_empty() {
+            return if chosen.starts_with("vallum") {
+                Ok(chosen)
+            } else {
+                Err(format!(
+                    "vallum:// opens with {chosen}, not a vallum handler — reset it: \
+                     xdg-mime default vallum-gui.desktop x-scheme-handler/vallum"
+                ))
+            };
+        }
+    }
+    let Ok(content) = std::fs::read_to_string("/usr/share/applications/mimeapps.list") else {
+        return Err(
+            "vallum:// has no default handler — Connect links do nothing \
+             (xdg-mime default vallum-gui.desktop x-scheme-handler/vallum)"
+                .to_owned(),
+        );
+    };
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("x-scheme-handler/vallum="))
+        .and_then(|handlers| handlers.split(';').next())
+        .map(str::to_owned)
+        .filter(|handler| !handler.is_empty())
+        .ok_or_else(|| {
+            "vallum:// has no default handler — Connect links do nothing \
+             (xdg-mime default vallum-gui.desktop x-scheme-handler/vallum)"
+                .to_owned()
+        })
+}
+
+fn ldconfig_has(soname: &str) -> bool {
+    std::process::Command::new("ldconfig")
+        .arg("-p")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(soname))
+        .unwrap_or(false)
 }
 
 fn check_clock() -> Check {
