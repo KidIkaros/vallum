@@ -22,7 +22,10 @@ tauri-build = { version = "2", features = [] }
 vallum = { path = "../vallum", default-features = false, features = ["qr"] }
 # Socket discovery reads the same runtime directory the daemon and TUI use.
 vallum-config = { path = "../vallum-config" }
-tauri = { version = "2", features = [] }
+# `custom-protocol` is what makes `generate_context!` expand in release
+# mode — without it the macro marks the context `dev` and embeds
+# CARGO_MANIFEST_DIR (a builder-machine path) into the binary.
+tauri = { version = "2", features = ["custom-protocol"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml_edit = "0.25"

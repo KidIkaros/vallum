@@ -1639,11 +1639,22 @@ fn main() {
             .cloned()
             .or_else(|| std::env::var("VALLUM_UI_DIR").ok())
             .unwrap_or_else(|| {
-                if std::path::Path::new("crates/vallum-gui/ui/dist").is_dir() {
-                    "crates/vallum-gui/ui/dist".to_owned()
-                } else {
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/ui/dist").to_owned()
+                // Dev fallback: search ancestors of the cwd and the
+                // executable for the crate's ui/dist. A baked-in absolute
+                // path would name the build host — the release gate greps
+                // every shipped binary for the builder's $HOME.
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                for root in std::env::current_dir().into_iter().chain(exe_dir) {
+                    for anc in root.ancestors() {
+                        let cand = anc.join("crates/vallum-gui/ui/dist");
+                        if cand.is_dir() {
+                            return cand.to_string_lossy().into_owned();
+                        }
+                    }
                 }
+                "ui/dist".to_owned()
             });
         let console = Arc::new(Console::new());
         if let Err(error) = serve::serve(port, PathBuf::from(ui), console) {
