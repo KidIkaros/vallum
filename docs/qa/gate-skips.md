@@ -19,3 +19,4 @@ than its changelog claims.
 | 2026-11-20 | ab92136 | desktop-bundle | GUI console ships at beta (ADR-0039); version tracking fixed in #33 |
 | 2026-11-22 | b5eb053 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
 | 2026-11-22 | e1f6b40 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
+| 2026-11-22 | ad97048 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
