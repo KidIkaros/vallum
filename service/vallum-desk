@@ -617,6 +617,7 @@ class DeskConfig:
     install_source: str = DEFAULT_INSTALL_SOURCE     # the install.sh URL served to users
     repo_url: str = DEFAULT_REPO_URL                 # the source/docs link served to users
     contact: str = ""                                # operator email/URL for invite requests, recovery, feedback
+    release_note: str = ""                         # optional front-page news ("v1.12.0 is out — what's new"); empty renders nothing
 
 
 # ---------------------------------------------------------------- the desk
@@ -2205,6 +2206,8 @@ def install_blurb(install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_U
 <pre>curl -fsSL -o /tmp/vallum-install.sh \\
   {_esc(install_source)}
 sudo bash /tmp/vallum-install.sh --from-release --install-only</pre>
+Already installed? <code>sudo vallum-ops update</code> verifies the release
+signature and brings you current — no reinstall needed.
 Linux + systemd; the release signature verifies itself before anything is
 installed. Source and docs: <a href="{_esc(repo_url)}">{_esc(repo_url.split("://", 1)[-1])}</a>.</p>"""
 
@@ -2229,7 +2232,7 @@ def contact_link(contact, label, subject="", body=""):
 
 def index_page(open_signup, operator="vallum desk",
                install_source=DEFAULT_INSTALL_SOURCE, repo_url=DEFAULT_REPO_URL,
-               contact="", capacity=None):
+               contact="", capacity=None, release_note=""):
     """The front door. In open mode it sells the journey — account, then
     capacity, then devices — and answers "what happens if I sign up" with the
     live seat count: room means instant activation, none means the queue."""
@@ -2262,10 +2265,12 @@ code on your account page skips any wait.</li>
                         + (f" ({queued} ahead)" if queued else "") +
                         " and the desk activates queued accounts itself as "
                         "space frees; a code activates it right away.</p>")
+    news = (f'<p><b>{_esc(release_note)}</b></p>' if release_note else "")
     return f"""<!doctype html><title>{_esc(operator)}</title>
 {DESK_STYLE}
 <h1>{_esc(operator)}</h1>
 <p>Self-service enrolment for this Vallum server. {intro}</p>
+{news}
 {journey}
 {availability}
 {install_blurb(install_source, repo_url)}
@@ -2768,7 +2773,8 @@ def make_handler(desk):
                                            desk.config.contact,
                                            capacity=(active,
                                                      desk.config.max_active_accounts,
-                                                     queued)))
+                                                     queued),
+                                           release_note=desk.config.release_note))
                 return
             if self.path == "/desk.js":
                 # Public static content — no credentials — so fronts may
@@ -2939,6 +2945,8 @@ def parse_args(argv=None):
                         help="the install.sh URL the enrolment pages point at")
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL,
                         help="the source/docs link shown on enrolment pages")
+    parser.add_argument("--release-note", default="",
+                        help="a short front-page announcement (empty renders nothing)")
     parser.add_argument("--cli", default="vallum")
     parser.add_argument("--metrics", action="store_true",
                         help="print the funnel as Prometheus text and exit")
@@ -2991,6 +2999,7 @@ def main(argv=None):
         install_source=args.install_source,
         repo_url=args.repo_url,
         contact=args.contact,
+        release_note=args.release_note,
     )
     desk = Desk(config, DaemonCli(config.config, config.cli))
     if args.metrics:
