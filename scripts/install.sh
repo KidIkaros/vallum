@@ -57,7 +57,7 @@ if [ -z "${BASH_SOURCE[0]:-}" ]; then
     echo "install.sh: refusing to run from a pipe." >&2
     echo "  A failed download piped into bash exits 0 and installs nothing." >&2
     echo "  Download it first:" >&2
-    echo "    curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh" >&2
+    echo "    curl -fsSL -o /tmp/vallum-install.sh https://github.com/KidIkaros/vallum/releases/latest/download/install.sh" >&2
     echo "    sudo bash /tmp/vallum-install.sh --install-only" >&2
     exit 1
 fi
@@ -585,22 +585,42 @@ install_docs() {
     done
     if [ -n "$desktop_src" ] || [ -n "$gui_desktop" ]; then
         run update-desktop-database "$(dest /usr/share/applications)" 2>/dev/null || true
-        # Scheme→handler binding is a per-user desktop setting; register it
-        # for the invoking user when a session is reachable, else the
-        # MimeType entry alone still resolves on most desktops. The GUI
-        # handler wins when it exists — its in-app confirm is the product
-        # surface; the URI script is the console fallback.
+        # The GUI handler wins when it exists — its in-app confirm is the
+        # product surface; the URI script is the console fallback.
         handler=vallum-uri.desktop
         [ -n "$gui_desktop" ] && handler=vallum-gui.desktop
+        # System-level default first: /usr/share/applications/mimeapps.list is
+        # the lowest-precedence layer in the spec — every per-user choice still
+        # overrides it, and it arms Connect for accounts no install shell can
+        # reach (a root-shell install otherwise leaves the Connect button dead
+        # until somebody runs xdg-mime by hand — validation premortem A3).
+        mimeapps="$(dest /usr/share/applications/mimeapps.list)"
+        entry="x-scheme-handler/vallum=$handler"
+        bind_system_default() {
+            if [ -f "$mimeapps" ] && grep -q '^x-scheme-handler/vallum=' "$mimeapps"; then
+                sed -i "s|^x-scheme-handler/vallum=.*|$entry|" "$mimeapps"
+            elif [ -f "$mimeapps" ] && grep -q '^\[Default Applications\]' "$mimeapps"; then
+                sed -i "/^\[Default Applications\]/a $entry" "$mimeapps"
+            else
+                printf '[Default Applications]\n%s\n' "$entry" >> "$mimeapps"
+            fi
+        }
+        run bind_system_default
+        # Per-user binding too when the invoking account is reachable: it wins
+        # over the system default and — just as important — it is reported, so
+        # nobody runs a redundant xdg-mime because the install stayed silent.
         if [ -n "${SUDO_USER:-}" ]; then
-            run su - "$SUDO_USER" -c \
+            if run su - "$SUDO_USER" -c \
                 "xdg-mime default $handler x-scheme-handler/vallum" \
-                2>/dev/null || true
+                2>/dev/null; then
+                echo "   ok    Connect links open with $handler for $SUDO_USER"
+            else
+                echo "note: could not bind Connect links for $SUDO_USER — the" >&2
+                echo "  system default covers them; to pick a handler, that user" >&2
+                echo "  can run: xdg-mime default $handler x-scheme-handler/vallum" >&2
+            fi
         else
-            # Root-shell install: no invoking desktop user to bind for. Say so
-            # rather than leaving Connect silently dead (validation premortem A3).
-            echo "note: to enable Connect links, run this as your desktop user:" >&2
-            echo "  xdg-mime default $handler x-scheme-handler/vallum" >&2
+            echo "   ok    Connect links default to $handler (system-wide)"
         fi
     fi
     # The console's privileged path and the full-tunnel deploy scripts ship

@@ -34,7 +34,7 @@ Both halves use one installer. From a release — the assets are public, so this
 needs nothing but `curl` (a private fork is the only case that wants `GH_TOKEN`):
 
 ```sh
-curl -fsSL -o /tmp/vallum-install.sh https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh \
+curl -fsSL -o /tmp/vallum-install.sh https://github.com/KidIkaros/vallum/releases/latest/download/install.sh \
   && sudo bash /tmp/vallum-install.sh --from-release --install-only
 ```
 

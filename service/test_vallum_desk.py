@@ -1141,13 +1141,13 @@ class ClosedModeHttpTests(WireTestCase):
         # the install source and repo link the desk always served.
         status, page = self.get("/")
         self.assertEqual(status, 200)
-        self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
+        self.assertIn("https://github.com/KidIkaros/vallum/releases/latest/download/install.sh", page)
         self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
         self.assertIn("github.com/KidIkaros/vallum</a>", page)
         status, page = self.post("/signup", "code=friend-code-1",
                                  "application/x-www-form-urlencoded")
         self.assertEqual(status, 200)
-        self.assertIn("https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh", page)
+        self.assertIn("https://github.com/KidIkaros/vallum/releases/latest/download/install.sh", page)
         self.assertIn('href="https://github.com/KidIkaros/vallum"', page)
 
     def test_the_error_page_carries_the_default_brand(self):
@@ -3167,7 +3167,7 @@ class WhiteLabelConfigTests(DeskTestCase):
     desk renders exactly what it always did."""
 
     UPSTREAM_INSTALL = ("curl -fsSL -o /tmp/vallum-install.sh "
-                        "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh"
+                        "https://github.com/KidIkaros/vallum/releases/latest/download/install.sh"
                         " && sudo bash /tmp/vallum-install.sh --from-release --install-only")
 
     def test_the_default_install_command_is_unchanged(self):
@@ -3181,13 +3181,13 @@ class WhiteLabelConfigTests(DeskTestCase):
         self.assertEqual(code, 200)
         self.assertIn("https://vpn.example.com/install.sh", payload["install"])
         self.assertNotIn("KidIkaros", payload["install"])
-        self.assertNotIn("raw.githubusercontent", payload["install"])
+        self.assertNotIn("KidIkaros/vallum/releases", payload["install"])
 
     def test_the_cli_defaults_match_the_upstream_values(self):
         args = desk_module.parse_args(["--config", "/etc/vallum/server.toml"])
         self.assertEqual(
             args.install_source,
-            "https://raw.githubusercontent.com/KidIkaros/vallum/main/scripts/install.sh")
+            "https://github.com/KidIkaros/vallum/releases/latest/download/install.sh")
         self.assertEqual(args.repo_url, "https://github.com/KidIkaros/vallum")
 
     def test_the_cli_flags_override_the_sources(self):

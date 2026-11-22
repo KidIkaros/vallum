@@ -442,6 +442,11 @@ if [ "$DRY" -eq 0 ]; then
     cargo sbom --output-format spdx_json_2_3 > "dist/vallum-$tag-sbom.spdx.json"
     ok "SBOM: dist/vallum-$tag-sbom.spdx.json (crates.io graph; the SDK is a git dependency)"
 
+    # install.sh goes out as a release asset so the desk can point at
+    # releases/latest/download/install.sh — the installer versioned to match
+    # what it installs, instead of raw main drifting ahead of the tag.
+    cp scripts/install.sh dist/install.sh
+
     say "signing"
     ( cd dist && sha256sum *.deb *.rpm *.tar.gz > SHA256SUMS )
     cp packaging/allowed_signers dist/allowed_signers

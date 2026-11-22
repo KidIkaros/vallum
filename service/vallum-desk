@@ -582,8 +582,10 @@ class DaemonCli(Daemon):
 # ride VALLUM_DESK_EXTRA_ARGS in /etc/vallum/desk.env like every other knob —
 # and nothing the desk serves then points at the upstream repo. Unset, the
 # desk renders exactly what it always did.
-DEFAULT_INSTALL_SOURCE = ("https://raw.githubusercontent.com/KidIkaros/vallum/"
-                          "main/scripts/install.sh")
+# The release-asset URL, not raw main: the installer a colleague downloads is
+# the one the release shipped, so it always matches the tarball it installs.
+DEFAULT_INSTALL_SOURCE = ("https://github.com/KidIkaros/vallum/"
+                          "releases/latest/download/install.sh")
 DEFAULT_REPO_URL = "https://github.com/KidIkaros/vallum"
 
 
