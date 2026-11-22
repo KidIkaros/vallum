@@ -89,6 +89,13 @@ copy_one "service/vallum-desk-admin"
 copy_one "service/vallum-desk-backup"
 copy_one "service/vallum-uri"
 copy_one "packaging/vallum-uri.desktop"
+# vallum-ops without its sudoers template is a dispatcher nobody can invoke
+# passwordless — the Connect flow's whole point — and without the deploy
+# scripts `full-tunnel` execs nothing. They ship flat like the dispatcher
+# itself so install.sh reads one directory.
+copy_one "packaging/vallum-ops-sudoers"
+copy_one "scripts/trial.sh"
+copy_one "scripts/go-full-tunnel.sh"
 
 # The completions are generated from the release binary and are gitignored, so
 # they are build artifacts: an empty one ships a shell that completes nothing.

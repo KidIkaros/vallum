@@ -539,8 +539,14 @@ install_docs() {
     if [ -n "$uri_source" ]; then
         run install -D -m 0755 "$uri_source" "$(dest /usr/local/lib/vallum/vallum-uri)"
     fi
-    if [ -f "packaging/vallum-uri.desktop" ]; then
-        run install -D -m 0644 "packaging/vallum-uri.desktop" \
+    # Flat in a release tarball, under packaging/ in a checkout — without the
+    # .desktop the Connect link has no scheme handler and the button is dead.
+    desktop_src=""
+    for candidate in "$SOURCE_DIR/vallum-uri.desktop" "packaging/vallum-uri.desktop"; do
+        [ -f "$candidate" ] && { desktop_src=$candidate; break; }
+    done
+    if [ -n "$desktop_src" ]; then
+        run install -D -m 0644 "$desktop_src" \
             "$(dest /usr/share/applications/vallum-uri.desktop)"
         run update-desktop-database "$(dest /usr/share/applications)" 2>/dev/null || true
         # Scheme→handler binding is a per-user desktop setting; register it
@@ -567,22 +573,42 @@ install_docs() {
     fi
     run install -d -m 0755 "$(dest /usr/local/lib/vallum)"
     for lib in trial.sh go-full-tunnel.sh; do
-        if [ -f "scripts/$lib" ]; then
+        # Flat in a release tarball, under scripts/ in a checkout.
+        if [ -f "$SOURCE_DIR/$lib" ]; then
+            run install -m 0755 "$SOURCE_DIR/$lib" "$(dest /usr/local/lib/vallum/$lib)"
+        elif [ -f "scripts/$lib" ]; then
             run install -m 0755 "scripts/$lib" "$(dest /usr/local/lib/vallum/$lib)"
         fi
     done
-    if [ -f "packaging/vallum-ops" ]; then
-        run install -m 0755 "packaging/vallum-ops" "$(dest /usr/local/sbin/vallum-ops)"
-    fi
-    if [ -f "packaging/vallum-ops-sudoers" ]; then
+    # Same two layouts for the dispatcher and its sudoers template: without
+    # both the Connect flow has no passwordless join to hand the ticket to.
+    ops_src=""
+    for candidate in "$SOURCE_DIR/vallum-ops" "packaging/vallum-ops"; do
+        [ -f "$candidate" ] && { ops_src=$candidate; break; }
+    done
+    [ -n "$ops_src" ] && run install -m 0755 "$ops_src" "$(dest /usr/local/sbin/vallum-ops)"
+    sudoers_src=""
+    for candidate in "$SOURCE_DIR/vallum-ops-sudoers" "packaging/vallum-ops-sudoers"; do
+        [ -f "$candidate" ] && { sudoers_src=$candidate; break; }
+    done
+    if [ -n "$sudoers_src" ]; then
         ops_user=${SUDO_USER:-$(id -un 2>/dev/null || echo root)}
         run mkdir -p "$(dest /etc/sudoers.d)"
-        run sh -c "sed 's/@USER@/$ops_user/' packaging/vallum-ops-sudoers > $(dest /etc/sudoers.d)/vallum-ops"
+        run sh -c "sed 's/@USER@/$ops_user/' '$sudoers_src' > $(dest /etc/sudoers.d)/vallum-ops"
         run chmod 440 "$(dest /etc/sudoers.d)/vallum-ops"
         run visudo -cf "$(dest /etc/sudoers.d)/vallum-ops" || { run rm -f "$(dest /etc/sudoers.d)/vallum-ops"; echo "sudoers validation failed — ops rule not installed" >&2; }
+    elif [ -n "$ops_src" ]; then
+        # A dispatcher nobody can invoke passwordless leaves the Connect
+        # flow's join needing a password — say so rather than letting the
+        # fallback look like a broken install.
+        echo "note: vallum-ops installed without its NOPASSWD rule (this release" >&2
+        echo "  ships no sudoers template). To enable the passwordless ops path:" >&2
+        echo "  echo 'YOUR_USER ALL=(root) NOPASSWD: /usr/local/sbin/vallum-ops' | sudo tee /etc/sudoers.d/vallum-ops" >&2
     fi
     for unit in vallum-deadman@.service vallum-deadman@.timer; do
-        if [ -f "packaging/$unit" ]; then
+        if [ -f "$SOURCE_DIR/$unit" ]; then
+            run install -D -m 0644 "$SOURCE_DIR/$unit" "$UNIT_DIR/$unit"
+        elif [ -f "packaging/$unit" ]; then
             run install -D -m 0644 "packaging/$unit" "$UNIT_DIR/$unit"
         fi
     done
