@@ -21,3 +21,4 @@ than its changelog claims.
 | 2026-11-22 | e1f6b40 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
 | 2026-11-22 | ad97048 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
 | 2026-11-22 | 9e3b808 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
+| 2026-11-22 | f4d64a5 | accept-verdicts | accept-verdicts and desktop-bundle are release-internal records from the prior cut; this run re-verifies every signed verdict and rebuilds the desktop bundle itself |
