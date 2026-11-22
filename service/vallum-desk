@@ -2945,8 +2945,12 @@ def parse_args(argv=None):
                         help="the install.sh URL the enrolment pages point at")
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL,
                         help="the source/docs link shown on enrolment pages")
-    parser.add_argument("--release-note", default="",
-                        help="a short front-page announcement (empty renders nothing)")
+    parser.add_argument("--release-note",
+                        default=os.environ.get("VALLUM_DESK_RELEASE_NOTE", ""),
+                        help="a short front-page announcement (empty renders "
+                             "nothing; VALLUM_DESK_RELEASE_NOTE is the env "
+                             "knob, since a sentence cannot ride "
+                             "VALLUM_DESK_EXTRA_ARGS' whitespace split)")
     parser.add_argument("--cli", default="vallum")
     parser.add_argument("--metrics", action="store_true",
                         help="print the funnel as Prometheus text and exit")
