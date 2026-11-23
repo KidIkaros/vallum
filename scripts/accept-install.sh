@@ -131,11 +131,18 @@ esac
 say "does the tunnel carry (ICMP to the server's tunnel address)"
 # 51820 is UDP: a /dev/tcp probe there fails by construction and reads as a
 # dead tunnel. Ping the tunnel address, which the client's on-link prefix
-# routes into the interface.
-PING=$(docker exec "$NAME" bash -c "ping -c3 -W3 $TUNNEL_IP 2>&1 | tail -2")
-echo "$PING" | sed 's/^/   /'
+# routes into the interface. The first probe can land before the tunnel's
+# own ARP/neighbour setup settles — and docker's captured output once raced
+# the grep — so retry a few times and match the whole reply, not tail -2.
+PING=""
+for try in 1 2 3 4; do
+    PING=$(docker exec "$NAME" ping -c3 -W3 "$TUNNEL_IP" 2>&1)
+    grep -q '0% packet loss' <<<"$PING" && break
+    [ "$try" -lt 4 ] && sleep 2
+done
+echo "$PING" | tail -2 | sed 's/^/   /'
 ASSERTIONS=$((ASSERTIONS + 1))
-echo "$PING" | grep -q ' 0% packet loss' || FAILED="${FAILED:+$FAILED; }the tunnel did not carry (no 0% packet loss)"
+grep -q '0% packet loss' <<<"$PING" || FAILED="${FAILED:+$FAILED; }the tunnel did not carry (no 0% packet loss)"
 
 say "the server's view of this device"
 ssh "$VPS" "sudo -n /usr/bin/vallum show --control $CONTROL_SOCK 2>/dev/null | grep -A3 '$PEER' | head -6"
