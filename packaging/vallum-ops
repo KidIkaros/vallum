@@ -18,6 +18,7 @@
 #   vallum-ops journal [N] [iface]   # last N lines from the vallum units' journals
 #   vallum-ops self-update [path]    # install a signed newer copy of this dispatcher
 #   vallum-ops update [tag]          # fetch and run the release installer
+#   vallum-ops update --check        # read-only: installed vs latest release
 set -uo pipefail
 
 # LIB is where install.sh ships the deploy scripts; REPO exists only on a dev
@@ -60,7 +61,24 @@ vallum-ops — the named, audited privileged operations:
   sync                    make the host match the build under test
   self-update [path]      install a signed newer copy of this dispatcher
   update [tag]            fetch and run the release installer (vallum, gui, units)
+  update --check          read-only: installed vs latest release, nothing fetched
 EOF
+}
+
+# The dispatcher drives the installed vallum; a binary older than the verb it
+# is asked to run fails mid-operation — a join that cannot unwrap, a teardown
+# flag that does not exist. Refuse up front and name the fix (#40).
+require_vallum() {
+    need=$1
+    [ -x "$VALLUM_BIN" ] || {
+        echo "vallum-ops: $VALLUM_BIN is not installed" >&2; exit 1; }
+    have=$("$VALLUM_BIN" --version 2>/dev/null | awk '{print $2}')
+    if [ -z "$have" ] || \
+        [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+        echo "vallum-ops: $VALLUM_BIN is ${have:-unreadable}; this verb needs >= $need" >&2
+        echo "  update the client first: sudo vallum-ops update" >&2
+        exit 1
+    fi
 }
 
 require_iface() {
@@ -163,6 +181,7 @@ join)
     # dispatcher only, no SETENV), and argv would put the credential in ps.
     # `vallum join` seals them into [account] (ADR-0046, #32) — an env-only
     # endpoint never crossed sudo.
+    require_vallum 1.12.0
     IFS= read -r join_ticket
     IFS= read -r join_account || join_account=""
     IFS= read -r join_desk || join_desk=""
@@ -193,6 +212,7 @@ remove)
         echo "  enrolled clients; a server's teardown is 'vallum server teardown'." >&2
         exit 2
     fi
+    require_vallum 1.12.0
     exec "$VALLUM_BIN" client teardown --config "$target_conf" --purge
     ;;
 setup-remote)
@@ -211,6 +231,7 @@ setup-remote)
     # even a connect() that waits out the kernel's full retry window.
     export VALLUM_SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10"
     export SSH_ASKPASS=/bin/false SSH_ASKPASS_REQUIRE=force
+    require_vallum 1.6.0
     if [ -n "$name" ]; then
         require_iface "$name"
         exec timeout 120 /usr/bin/vallum setup --remote "$remote" --name "$name"
@@ -242,6 +263,7 @@ setup-server)
         esac
         args+=(--endpoint "$endpoint")
     fi
+    require_vallum 1.6.0
     exec /usr/bin/vallum "${args[@]}"
     ;;
 invite)
@@ -257,8 +279,10 @@ invite)
     esac
     target_conf=$(conf_or_fail "$req_iface") || exit 1
     if [ -n "$pinned" ]; then
+        require_vallum 1.12.0
         exec /usr/bin/vallum peer invite "$peer_name" --ttl "$ttl" --config "$target_conf" --public-key "$pinned"
     else
+        require_vallum 1.6.0
         exec /usr/bin/vallum peer invite "$peer_name" --ttl "$ttl" --config "$target_conf"
     fi
     ;;
@@ -267,6 +291,7 @@ enroll-off)
     req_iface=${2:-$IFACE}
     require_iface "$req_iface"
     target_conf=$(conf_or_fail "$req_iface") || exit 1
+    require_vallum 1.6.0
     exec /usr/bin/vallum server enroll --disable --config "$target_conf"
     ;;
 service)
@@ -445,6 +470,32 @@ update)
     # installer's logic, so the two can never drift apart.
     command -v curl >/dev/null 2>&1 || {
         echo "vallum-ops: update needs curl" >&2; exit 1; }
+    if [ "${2:-}" = "--check" ]; then
+        # Read-only: installed vs latest, no fetch of the payload, nothing
+        # installed. Mirrors install.sh's probes — an API answer first, gh
+        # only for a private-repo caller whose session can see it.
+        installed=$(vallum --version 2>/dev/null | awk '{print $2}')
+        latest=$(curl -fsSL "https://api.github.com/repos/KidIkaros/vallum/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        if [ -z "$latest" ] && command -v gh >/dev/null 2>&1; then
+            latest=$(gh release view --repo KidIkaros/vallum --json tagName -q .tagName 2>/dev/null)
+        fi
+        [ -n "$latest" ] || {
+            echo "vallum-ops: could not resolve the latest release" >&2; exit 1; }
+        echo "installed: ${installed:-none}"
+        echo "latest:    ${latest#v}"
+        if [ -z "$installed" ]; then
+            echo "vallum is not installed — install it: sudo vallum-ops update"
+            exit 1
+        fi
+        if [ "$installed" != "${latest#v}" ]; then
+            echo "update available: $installed -> ${latest#v}"
+            echo "apply it with: sudo vallum-ops update"
+            exit 0
+        fi
+        echo "current."
+        exit 0
+    fi
     work=$(mktemp -d) || exit 1
     url="https://github.com/KidIkaros/vallum/releases/latest/download/install.sh"
     curl -fsSL -o "$work/install.sh" "$url" || {
@@ -512,6 +563,7 @@ status)
     # ask it prints the configured device plus a "no daemon connected" note.
     # The note rides stderr, so a second call captures it: output alone never
     # proves the daemon answered.
+    require_vallum 1.6.0
     show_out=$($VALLUM_BIN show --config "$target_conf" 2>/dev/null)
     show_err=$($VALLUM_BIN show --config "$target_conf" 2>&1 >/dev/null)
     hs=$(grep -m1 last_handshake_time_sec <<<"$show_out" || true)
