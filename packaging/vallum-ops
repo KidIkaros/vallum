@@ -206,7 +206,44 @@ remove)
     # "remove this account" affordance has nothing else to call.
     iface=${2:-}
     require_iface "$iface"
-    target_conf=$(conf_or_fail "$iface") || exit 1
+    # Resolve the named config directly: resolve_conf's last-resort fallback
+    # would point at an unrelated config, and conf_or_fail's refusal makes a
+    # second remove read as an error when it should be a no-op.
+    if [ -f "/etc/vallum/${iface}.toml" ]; then
+        target_conf="/etc/vallum/${iface}.toml"
+    elif [ -f "/etc/vallum/${iface#vallum-}.toml" ]; then
+        target_conf="/etc/vallum/${iface#vallum-}.toml"
+    else
+        target_conf=""
+    fi
+    if [ -z "$target_conf" ]; then
+        # Idempotent: the config is already gone. Clean no-op unless teardown
+        # left debris — enabled units or stray files under either stem.
+        stem=${iface#vallum-}
+        left=0
+        ls "/etc/vallum/$stem."* "/etc/vallum/vallum-$stem."* >/dev/null 2>&1 && left=1
+        for cand in "$stem" "vallum-$stem"; do
+            systemctl list-unit-files --plain --no-legend "vallum*@$cand*" 2>/dev/null \
+                | grep -q . && left=1
+            systemctl list-units --plain --no-legend --all "vallum*@$cand*" 2>/dev/null \
+                | grep -q . && left=1
+        done
+        if [ "$left" -eq 0 ]; then
+            echo "remove: '$iface' is already gone — nothing to do."
+            exit 0
+        fi
+        for cand in "$stem" "vallum-$stem"; do
+            for unit in "vallum@$cand" "vallum-quick@$cand" \
+                        "vallum-quick-watch@$cand" "vallum-guard@$cand"; do
+                systemctl disable --now "$unit" 2>/dev/null || true
+                systemctl reset-failed "$unit" 2>/dev/null || true
+            done
+        done
+        rm -f "/etc/vallum/$stem.toml" "/etc/vallum/$stem.key" \
+              "/etc/vallum/vallum-$stem.toml" "/etc/vallum/vallum-$stem.key"
+        echo "remove: cleaned leftover state for '$iface'."
+        exit 0
+    fi
     if grep -q '^\[enroll\]' "$target_conf" 2>/dev/null; then
         echo "vallum-ops: '$target_conf' is a server config — remove is for" >&2
         echo "  enrolled clients; a server's teardown is 'vallum server teardown'." >&2
