@@ -487,7 +487,10 @@ self-update)
         if ssh-keygen -Y verify -f "$anchor" -n file -I vallum-release \
                 -s "$sig" < "$src" 2>/dev/null; then
             rm -f "$anchor"
-            install -m 755 "$src" /usr/local/sbin/vallum-ops
+            install -m 755 "$src" /usr/local/sbin/vallum-ops || {
+                echo "vallum-ops: install failed — dispatcher unchanged" >&2
+                exit 1
+            }
             echo "dispatcher updated (release-signed)"
             exit 0
         fi
@@ -496,7 +499,10 @@ self-update)
         exit 1
     fi
     require_trusted_source "$src"
-    install -m 755 "$src" /usr/local/sbin/vallum-ops
+    install -m 755 "$src" /usr/local/sbin/vallum-ops || {
+        echo "vallum-ops: install failed — dispatcher unchanged" >&2
+        exit 1
+    }
     echo "dispatcher updated"
     exit 0
     ;;
