@@ -83,10 +83,11 @@ require_vallum() {
 
 require_iface() {
     case "${1:-}" in
+        "") echo "vallum-ops: missing argument — 'vallum-ops <verb> <name>' needs one" >&2; exit 2 ;;
         # A leading dash survives the charset check but lands in argv — a
         # `peer_name` of `--config` would eat the following flag for whoever
         # the verb execs. Names are names, not options.
-        ""|*[!A-Za-z0-9._-]*|-*)
+        *[!A-Za-z0-9._-]*|-*)
             echo "vallum-ops: invalid interface name '${1:-}'" >&2
             exit 2
             ;;
@@ -533,6 +534,12 @@ update)
         echo "current."
         exit 0
     fi
+    # Only a tag or nothing may reach the installer — a stray flag would
+    # otherwise cost the download before install.sh itself refuses.
+    case "${2:-}" in
+        ""|v*.*.*) ;;
+        *) echo "vallum-ops: update takes a release tag (vX.Y.Z) or --check" >&2; exit 2 ;;
+    esac
     work=$(mktemp -d) || exit 1
     url="https://github.com/KidIkaros/vallum/releases/latest/download/install.sh"
     curl -fsSL -o "$work/install.sh" "$url" || {
